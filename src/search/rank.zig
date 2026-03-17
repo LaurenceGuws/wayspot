@@ -231,14 +231,14 @@ test "files route includes file and directory candidates" {
 test "theme route prefers action entries over wallpaper files" {
     const candidates = [_]types.Candidate{
         .init(.file, "wallpaper.png", "Wallpaper file in ayu", "/tmp/wallpaper.png"),
-        .init(.action, "Set Wallpaper: wallpaper.png", "ayu (wallpaper.png)", "cmd:set"),
+        .init(.action, "Ayu", "Theme", "theme-apply:ayu"),
     };
 
     const query = query_mod.parse(", ");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(usize, 1), ranked.len);
     try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
 }
 

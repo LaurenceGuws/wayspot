@@ -1,10 +1,13 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
 pub const Command = enum {
     ping,
     summon,
     hide,
     toggle,
+    slideshow_toggle,
+    slideshow_status,
     version,
     shell_health,
     wm_event_stats,
@@ -169,7 +172,7 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
 
     const request = try std.fmt.allocPrint(allocator, "{{\"v\":1,\"cmd\":\"{s}\"}}", .{@tagName(cmd)});
     defer allocator.free(request);
-    _ = try std.posix.write(fd, request);
+    try writeAll(fd, request);
     std.posix.shutdown(fd, .send) catch |err| {
         std.log.debug("ipc client shutdown(send) failed route={s} err={s}", .{ @tagName(cmd), @errorName(err) });
     };
@@ -344,17 +347,18 @@ fn serverMain(server: *Server) void {
 }
 
 fn handleClient(server: *Server, client_fd: std.posix.socket_t) void {
-    var buf: [4096]u8 = undefined;
-    const n = std.posix.read(client_fd, &buf) catch {
+    const request_bytes = readRequestAlloc(server.allocator, client_fd) catch {
         writeResponse(server.allocator, client_fd, "invalid_request", false, "read_error", "Failed to read request");
         return;
     };
-    if (n == 0) {
+    defer server.allocator.free(request_bytes);
+
+    if (request_bytes.len == 0) {
         writeResponse(server.allocator, client_fd, "invalid_request", false, "bad_request", "Empty request");
         return;
     }
 
-    var parsed = std.json.parseFromSlice(Request, server.allocator, buf[0..n], .{}) catch {
+    var parsed = std.json.parseFromSlice(Request, server.allocator, request_bytes, .{}) catch {
         writeResponse(server.allocator, client_fd, "invalid_request", false, "bad_request", "Invalid JSON");
         return;
     };
@@ -372,7 +376,7 @@ fn handleClient(server: *Server, client_fd: std.posix.socket_t) void {
 
     switch (cmd) {
         .ping => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "pong"),
-        .version => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "dev"),
+        .version => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", build_options.app_version),
         .shell_health => {
             const query = server.query_handler orelse {
                 writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "No query handler");
@@ -445,16 +449,43 @@ fn writeResponse(
             .{ endpoint, output.items.len, max_response_bytes },
         );
         const error_payload = "{\"ok\":false,\"code\":\"response_too_large\",\"message\":\"response exceeded ipc limit\"}";
-        _ = std.posix.write(fd, error_payload) catch |err| {
+        writeAll(fd, error_payload) catch |err| {
             std.log.warn("ipc response write failed cmd={s} err={s}", .{ endpoint, @errorName(err) });
             return;
         };
         return;
     }
-    _ = std.posix.write(fd, output.items) catch |err| {
+    writeAll(fd, output.items) catch |err| {
         std.log.warn("ipc response write failed cmd={s} err={s}", .{ endpoint, @errorName(err) });
         return;
     };
+}
+
+fn readRequestAlloc(allocator: std.mem.Allocator, fd: std.posix.socket_t) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) break;
+        if (out.items.len + n > max_response_bytes) return error.MessageTooLong;
+        try out.appendSlice(allocator, buf[0..n]);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn writeAll(fd: std.posix.socket_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const n = try std.posix.write(fd, bytes[offset..]);
+        if (n == 0) return error.WriteFailed;
+        offset += n;
+    }
 }
 
 fn connectWithRetryTimeout(fd: std.posix.socket_t, sockaddr: *const std.posix.sockaddr, socklen: std.posix.socklen_t, timeout_ms: u64) !bool {
@@ -477,7 +508,7 @@ fn connectWithRetryTimeout(fd: std.posix.socket_t, sockaddr: *const std.posix.so
 
 test "bindListener replaces stale occupied path and binds socket" {
     const allocator = std.testing.allocator;
-    const pid = std.posix.getpid();
+    const pid = std.c.getpid();
     const path = try std.fmt.allocPrint(allocator, "/tmp/wayspot-stale-{d}.sock", .{pid});
     defer allocator.free(path);
     std.posix.unlink(path) catch |err| {
@@ -499,7 +530,7 @@ test "bindListener replaces stale occupied path and binds socket" {
 
 test "bindListener sets user-only socket permissions" {
     const allocator = std.testing.allocator;
-    const pid = std.posix.getpid();
+    const pid = std.c.getpid();
     const path = try std.fmt.allocPrint(allocator, "/tmp/wayspot-mode-{d}.sock", .{pid});
     defer allocator.free(path);
     std.posix.unlink(path) catch |err| {
@@ -514,4 +545,34 @@ test "bindListener sets user-only socket permissions" {
 
     const stat = try std.posix.fstatat(std.posix.AT.FDCWD, path, 0);
     try std.testing.expectEqual(@as(u32, 0o600), stat.mode & 0o777);
+}
+
+test "writeAll writes full payload across stream socket" {
+    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    const payload = "abcdefghijklmnopqrstuvwxyz0123456789";
+    try writeAll(fds[0], payload);
+    std.posix.shutdown(fds[0], .send) catch {};
+
+    const received = try readRequestAlloc(std.testing.allocator, fds[1]);
+    defer std.testing.allocator.free(received);
+
+    try std.testing.expectEqualStrings(payload, received);
+}
+
+test "readRequestAlloc reads fragmented request until eof" {
+    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    try writeAll(fds[0], "{\"v\":1,");
+    try writeAll(fds[0], "\"cmd\":\"ping\"}");
+    std.posix.shutdown(fds[0], .send) catch {};
+
+    const request = try readRequestAlloc(std.testing.allocator, fds[1]);
+    defer std.testing.allocator.free(request);
+
+    try std.testing.expectEqualStrings("{\"v\":1,\"cmd\":\"ping\"}", request);
 }

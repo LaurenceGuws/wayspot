@@ -26,16 +26,16 @@ const Hints = struct {
     }
 };
 
-pub fn runSlideshow(allocator: std.mem.Allocator, backend: wm.Backend, options: SlideshowOptions) !void {
+pub fn runSlideshow(allocator: std.mem.Allocator, hypr_backend: *wm.HyprlandBackend, options: SlideshowOptions) !void {
     while (true) {
-        try applyRandomWallpapers(allocator, backend, options.hyprpaper_config_path, options.wallpapers_root);
+        try applyRandomWallpapers(allocator, hypr_backend, options.hyprpaper_config_path, options.wallpapers_root);
         if (options.run_once) return;
         std.Thread.sleep(options.interval_seconds * std.time.ns_per_s);
     }
 }
 
-pub fn setWallpaper(allocator: std.mem.Allocator, backend: wm.Backend, config_path: []const u8, image_path: []const u8, target: MonitorTarget) !void {
-    var outputs = try backend.listOutputs(allocator);
+pub fn setWallpaper(allocator: std.mem.Allocator, hypr_backend: *wm.HyprlandBackend, config_path: []const u8, image_path: []const u8, target: MonitorTarget) !void {
+    var outputs = try hypr_backend.backend().listOutputs(allocator);
     defer outputs.deinit(allocator);
 
     const existing = readExistingAssignments(allocator, config_path) catch try allocator.alloc(Assignment, 0);
@@ -76,11 +76,11 @@ pub fn setWallpaper(allocator: std.mem.Allocator, backend: wm.Backend, config_pa
     try restartHyprpaper(allocator);
 }
 
-pub fn applyRandomWallpapers(allocator: std.mem.Allocator, backend: wm.Backend, config_path: []const u8, wallpapers_root: []const u8) !void {
+pub fn applyRandomWallpapers(allocator: std.mem.Allocator, hypr_backend: *wm.HyprlandBackend, config_path: []const u8, wallpapers_root: []const u8) !void {
     var hints = try readHints(allocator, config_path);
     defer hints.deinit(allocator);
 
-    var outputs = try backend.listOutputs(allocator);
+    var outputs = try hypr_backend.backend().listOutputs(allocator);
     defer outputs.deinit(allocator);
 
     const existing = readExistingAssignments(allocator, config_path) catch try allocator.alloc(Assignment, 0);

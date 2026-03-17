@@ -48,7 +48,7 @@ pub fn main() !void {
 
     if (hasArg(args, "--set-theme")) {
         const theme_name = argValueAfterFlag(args, "--set-theme") orelse std.process.exit(2);
-        try wayspot.tools.theme_state.setCurrentTheme(allocator, theme_name);
+        try wayspot.tools.theme_apply.applyTheme(allocator, theme_name);
         return;
     }
 
@@ -59,19 +59,8 @@ pub fn main() !void {
     }
 
     if (hasArg(args, "--toggle-wallpaper-slideshow")) {
-        const home = std.posix.getenv("HOME") orelse ".";
-        const default_wallpapers = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
-        defer allocator.free(default_wallpapers);
-        const default_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
-        defer allocator.free(default_config);
-        const exe_path = try std.fs.selfExePathAlloc(allocator);
-        defer allocator.free(exe_path);
-        _ = try wayspot.tools.slideshow_control.toggle(
-            allocator,
-            exe_path,
-            argValueAfterFlag(args, "--config") orelse default_config,
-            argValueAfterFlag(args, "--source") orelse default_wallpapers,
-        );
+        const toggled = try wayspot.tools.slideshow_control.toggleViaDaemon(allocator);
+        if (toggled == null) std.process.exit(10);
         return;
     }
 
@@ -83,7 +72,7 @@ pub fn main() !void {
         defer allocator.free(default_config);
 
         var hypr_backend = wayspot.wm.HyprlandBackend{};
-        try wayspot.tools.wallpaper_runtime.runSlideshow(allocator, hypr_backend.backend(), .{
+        try wayspot.tools.wallpaper_runtime.runSlideshow(allocator, &hypr_backend, .{
             .hyprpaper_config_path = argValueAfterFlag(args, "--config") orelse default_config,
             .wallpapers_root = argValueAfterFlag(args, "--source") orelse default_wallpapers,
             .interval_seconds = parseU64Arg(args, "--interval-seconds") orelse 600,
@@ -108,7 +97,7 @@ pub fn main() !void {
             .focused;
         try wayspot.tools.wallpaper_runtime.setWallpaper(
             allocator,
-            hypr_backend.backend(),
+            &hypr_backend,
             argValueAfterFlag(args, "--config") orelse default_config,
             image_path,
             target,
@@ -286,7 +275,7 @@ fn printCtlUsage() !void {
     const out = &stdout_writer.interface;
     try out.print(
         \\Usage: wayspot --ctl <command>
-        \\Commands: ping, summon, hide, toggle, version, shell_health, wm_event_stats
+        \\Commands: ping, summon, hide, toggle, slideshow_toggle, slideshow_status, version, shell_health, wm_event_stats
         \\
     , .{});
     try out.flush();
@@ -549,6 +538,8 @@ fn parseControlCommand(value: []const u8) ?wayspot.ipc.control.Command {
     if (std.mem.eql(u8, value, "summon")) return .summon;
     if (std.mem.eql(u8, value, "hide")) return .hide;
     if (std.mem.eql(u8, value, "toggle")) return .toggle;
+    if (std.mem.eql(u8, value, "slideshow_toggle")) return .slideshow_toggle;
+    if (std.mem.eql(u8, value, "slideshow_status")) return .slideshow_status;
     if (std.mem.eql(u8, value, "version")) return .version;
     if (std.mem.eql(u8, value, "shell_health")) return .shell_health;
     if (std.mem.eql(u8, value, "wm_event_stats")) return .wm_event_stats;

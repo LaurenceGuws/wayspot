@@ -64,6 +64,8 @@ wayspot --ctl wm_event_stats
 ```bash
 wayspot --apply-theme ayu
 wayspot --toggle-wallpaper-slideshow
+wayspot --ctl slideshow_toggle
+wayspot --ctl slideshow_status
 wayspot --wallpaper-slideshow
 wayspot --set-wallpaper /path/to/file.png
 wayspot --sort-wallpapers --dry-run --verbose
@@ -75,4 +77,3 @@ wayspot --sort-wallpapers --dry-run --verbose
   the installed `wayspot` binary, not only `zig-out/bin/wayspot`.
 - If behavior differs between repo changes and session behavior, verify which
   binary Hyprland is launching.
-

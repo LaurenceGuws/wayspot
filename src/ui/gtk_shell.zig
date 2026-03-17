@@ -20,6 +20,7 @@ const gtk_shell_notifications = @import("gtk/shell_notifications.zig");
 const gtk_shell_notifications_popup = @import("gtk/shell_notifications_popup.zig");
 const gtk_shell_controller = @import("gtk/shell_controller.zig");
 const gtk_shell_startup = @import("gtk/shell_startup.zig");
+const slideshow_control = @import("../tools/slideshow_control.zig");
 const SurfaceMode = @import("surfaces/mod.zig").SurfaceMode;
 const PlacementPolicy = @import("placement/mod.zig").RuntimePolicy;
 const NotificationPolicy = @import("placement/mod.zig").NotificationPolicy;
@@ -70,9 +71,24 @@ pub const Shell = struct {
         var event_bus = shell_mod.EventBus.init(allocator);
         defer event_bus.deinit();
         var health_store = gtk_shell_control.HealthStore{};
+        const home = std.posix.getenv("HOME") orelse ".";
+        const slideshow_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
+        defer allocator.free(slideshow_config);
+        const slideshow_source = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
+        defer allocator.free(slideshow_source);
+        const exe_path = try std.fs.selfExePathAlloc(allocator);
+        defer allocator.free(exe_path);
+        var slideshow_state = try slideshow_control.State.init(
+            allocator,
+            exe_path,
+            slideshow_config,
+            slideshow_source,
+        );
+        defer slideshow_state.deinit();
         var control_ctx = gtk_shell_control.ControlContext{
             .event_bus = &event_bus,
             .health_store = &health_store,
+            .slideshow_state = &slideshow_state,
         };
 
         var control_server: ?ipc_control.Server = null;

@@ -11,6 +11,7 @@ pub const notifications = @import("notifications/mod.zig");
 pub const shell = @import("shell/mod.zig");
 pub const tools = struct {
     pub const theme_apply = @import("tools/theme_apply.zig");
+    pub const theme_catalog = @import("tools/theme_catalog.zig");
     pub const theme_registry = @import("tools/theme_registry.zig");
     pub const theme_state = @import("tools/theme_state.zig");
     pub const slideshow_control = @import("tools/slideshow_control.zig");

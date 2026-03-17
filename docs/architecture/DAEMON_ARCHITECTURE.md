@@ -21,6 +21,8 @@ It is responsible for:
 - keeping shell modules alive
 - optionally bridging WM events into cache refresh
 - keeping history, telemetry, and provider state in-process
+- answering bounded request/response control-plane calls over a Unix stream socket
+- owning resident slideshow lifecycle when wallpaper slideshow control is used
 
 ## Why
 
@@ -74,6 +76,7 @@ It should own a concern when that concern needs one or more of:
 - long-lived module health
 - background refresh
 - single-writer runtime ownership
+- resident child-process lifecycle tied to shell behavior
 
 It should not own:
 
@@ -107,6 +110,7 @@ everything".
 ## Rules
 
 - The control plane is daemon authority, not widget authority.
+- Control-plane transport must obey stream-socket semantics, not single-read or single-write assumptions.
 - Resident runtime state should be assembled once and reused.
 - One-shot tools should not silently create partial daemon state.
 - New module work should integrate through shell/module and IPC boundaries,

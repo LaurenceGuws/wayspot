@@ -14,6 +14,7 @@
 - Keep modules small and single-purpose.
 - Avoid hidden coupling between UI widgets and provider/query contracts.
 - Prefer typed actions over literal shell commands when the action belongs to the app.
+- Do not route app execution through generic `cmd:`-style action payloads.
 - Prefer config-backed state over transient env hacks.
 - Do not expose runtime capabilities in a provider unless the runtime can actually fulfill them.
 - Update docs when subsystem behavior changes.

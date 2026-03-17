@@ -63,14 +63,16 @@ Use one of:
 Owns:
 
 - mapping candidate actions into runnable commands
-- distinguishing typed actions from literal shell commands
+- distinguishing typed actions from provider-owned execution specs
 - telemetry labels and failure behavior
 
 Primary file:
 
 - `src/ui/common/dispatch.zig`
 
-If the action belongs to the app, prefer a typed action id over a raw `cmd:`.
+If the action belongs to the app, prefer a typed action id over a literal shell
+command payload. Runtime shell execution should be resolved from a provider-owned
+action spec, not smuggled through candidate action text.
 
 ## Recommended Pattern For New Routes
 
@@ -95,4 +97,3 @@ The theme route is a good example of the correct pattern now:
 - dispatch resolves `theme-apply:*` into `wayspot --apply-theme <name>`
 
 This prevents generic action candidates from leaking into the theme route.
-

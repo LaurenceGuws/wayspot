@@ -2,11 +2,15 @@ const std = @import("std");
 const providers_mod = @import("../../providers/mod.zig");
 const search = @import("../../search/mod.zig");
 const runtime_tools = @import("../../config/runtime_tools.zig");
+const wm = @import("../../wm/mod.zig");
 pub const kinds = @import("kinds.zig");
+
+pub const NativeExecuteFn = *const fn (allocator: std.mem.Allocator, action: []const u8) anyerror!void;
 
 pub const CommandPlan = struct {
     command: ?[]const u8 = null,
     owned_command: ?[]u8 = null,
+    native_execute: ?NativeExecuteFn = null,
     telemetry_kind: []const u8 = "",
     telemetry_ok_detail: []const u8 = "",
     error_message: []const u8 = "",
@@ -102,17 +106,6 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
                     .close_on_success = true,
                 };
             }
-            if (std.mem.startsWith(u8, action, "cmd:")) {
-                const cmd = action["cmd:".len..];
-                return .{
-                    .command = cmd,
-                    .telemetry_kind = "action",
-                    .telemetry_ok_detail = "literal-command",
-                    .error_message = "Action failed to launch",
-                    .close_on_success = true,
-                    .detach_command = true,
-                };
-            }
             if (std.mem.startsWith(u8, action, "pkg-install:") or
                 std.mem.startsWith(u8, action, "pkg-update:") or
                 std.mem.startsWith(u8, action, "pkg-remove:"))
@@ -168,19 +161,22 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
                     .detach_command = true,
                 };
             }
-            const cmd = providers_mod.resolveActionCommand(action) orelse {
+            const spec = providers_mod.resolveActionSpec(action) orelse {
                 return .{
                     .telemetry_kind = "action",
                     .error_message = "Action failed: unknown action",
                     .unknown_action = true,
                 };
             };
+            const cmd = try providers_mod.resolveExecutionCommand(allocator, spec.execution);
             return .{
                 .command = cmd,
+                .owned_command = cmd,
                 .telemetry_kind = "action",
-                .telemetry_ok_detail = cmd,
+                .telemetry_ok_detail = action,
                 .error_message = "Action failed to launch",
                 .close_on_success = true,
+                .detach_command = true,
             };
         },
         .dir_option => {
@@ -215,29 +211,19 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
             };
         },
         .window => {
-            const target = try std.fmt.allocPrint(allocator, "address:{s}", .{action});
-            defer allocator.free(target);
-            const target_q = try shellSingleQuote(allocator, target);
-            defer allocator.free(target_q);
-            const cmd = try std.fmt.allocPrint(allocator, "hyprctl dispatch focuswindow {s}", .{target_q});
             return .{
-                .command = cmd,
-                .owned_command = cmd,
+                .native_execute = executeFocusWindow,
                 .telemetry_kind = "window",
-                .telemetry_ok_detail = cmd,
+                .telemetry_ok_detail = action,
                 .error_message = "Window focus failed",
                 .close_on_success = true,
             };
         },
         .workspace => {
-            const target_q = try shellSingleQuote(allocator, action);
-            defer allocator.free(target_q);
-            const cmd = try std.fmt.allocPrint(allocator, "hyprctl dispatch workspace {s}", .{target_q});
             return .{
-                .command = cmd,
-                .owned_command = cmd,
+                .native_execute = executeSwitchWorkspace,
                 .telemetry_kind = "workspace",
-                .telemetry_ok_detail = cmd,
+                .telemetry_ok_detail = action,
                 .error_message = "Workspace switch failed",
                 .close_on_success = true,
             };
@@ -349,6 +335,16 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
     return .{};
 }
 
+fn executeFocusWindow(allocator: std.mem.Allocator, action: []const u8) !void {
+    var backend_impl = wm.HyprlandBackend{};
+    return backend_impl.backend().focusWindow(allocator, action);
+}
+
+fn executeSwitchWorkspace(allocator: std.mem.Allocator, action: []const u8) !void {
+    var backend_impl = wm.HyprlandBackend{};
+    return backend_impl.backend().switchWorkspace(allocator, action);
+}
+
 fn shellSingleQuote(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
@@ -373,6 +369,15 @@ test "theme apply action resolves to current wayspot binary command" {
     try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "ayu") != null);
 }
 
+test "literal cmd action escape hatch is rejected" {
+    var plan = try planCommandKind(std.testing.allocator, .action, "cmd:echo hacked");
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(plan.command == null);
+    try std.testing.expect(plan.unknown_action);
+    try std.testing.expectEqualStrings("Action failed: unknown action", plan.error_message);
+}
+
 fn buildClipboardCopyCommand(allocator: std.mem.Allocator, value_q: []const u8) ![]u8 {
     const clip_cmd = runtime_tools.clipboardTool().command();
     return std.fmt.allocPrint(
@@ -382,37 +387,28 @@ fn buildClipboardCopyCommand(allocator: std.mem.Allocator, value_q: []const u8) 
     );
 }
 
-test "window focus command shell-quotes metacharacters in address" {
+test "window focus resolves to native wm execution" {
     var plan = try planCommandKind(std.testing.allocator, .window, "0xabc;touch /tmp/pwn $(id)");
     defer plan.deinit(std.testing.allocator);
 
-    try std.testing.expect(plan.command != null);
-    try std.testing.expectEqualStrings(
-        "hyprctl dispatch focuswindow 'address:0xabc;touch /tmp/pwn $(id)'",
-        plan.command.?,
-    );
+    try std.testing.expect(plan.native_execute != null);
+    try std.testing.expectEqualStrings("0xabc;touch /tmp/pwn $(id)", plan.telemetry_ok_detail);
 }
 
-test "window focus command escapes apostrophes in address" {
+test "window focus keeps raw identifier for backend execution" {
     var plan = try planCommandKind(std.testing.allocator, .window, "win'42");
     defer plan.deinit(std.testing.allocator);
 
-    try std.testing.expect(plan.command != null);
-    try std.testing.expectEqualStrings(
-        "hyprctl dispatch focuswindow 'address:win'\\''42'",
-        plan.command.?,
-    );
+    try std.testing.expect(plan.native_execute != null);
+    try std.testing.expectEqualStrings("win'42", plan.telemetry_ok_detail);
 }
 
-test "workspace switch command shell-quotes workspace token" {
+test "workspace switch resolves to native wm execution" {
     var plan = try planCommandKind(std.testing.allocator, .workspace, "name with 'quote'");
     defer plan.deinit(std.testing.allocator);
 
-    try std.testing.expect(plan.command != null);
-    try std.testing.expectEqualStrings(
-        "hyprctl dispatch workspace 'name with '\\''quote'\\'''",
-        plan.command.?,
-    );
+    try std.testing.expect(plan.native_execute != null);
+    try std.testing.expectEqualStrings("name with 'quote'", plan.telemetry_ok_detail);
 }
 
 test "calculator hint copy command builds clipboard shell command" {

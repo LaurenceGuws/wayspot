@@ -42,6 +42,11 @@ Shutdown rules:
 
 Transport: UTF-8 JSON, one request per connection, one response, then close.
 
+Stream semantics:
+- server reads request bytes until client EOF before parsing JSON
+- client reads response bytes until server EOF before parsing JSON
+- both sides must handle partial reads and partial writes correctly
+
 Request schema:
 ```json
 {
@@ -71,7 +76,7 @@ Error response example:
 ## Command Semantics
 
 1. `ping`: health probe.
-2. `version`: returns daemon version in `message`.
+2. `version`: returns the build-owned daemon version string in `message`.
 3. `summon`: show/focus launcher window.
 4. `hide`: hide launcher window.
 5. `toggle`: toggle visible/hidden state.

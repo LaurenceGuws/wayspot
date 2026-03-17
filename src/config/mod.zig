@@ -94,6 +94,15 @@ pub const EditorTool = enum {
 };
 
 pub const Settings = struct {
+    pub const ThemePolicy = struct {
+        current: []u8 = &.{},
+
+        pub fn deinit(self: *ThemePolicy, allocator: std.mem.Allocator) void {
+            if (self.current.len > 0) allocator.free(self.current);
+            self.* = .{};
+        }
+    };
+
     pub const UiPolicy = struct {
         show_nerd_stats: bool = true,
     };
@@ -111,6 +120,7 @@ pub const Settings = struct {
         editor_tool: EditorTool = .xdg_open,
     };
 
+    theme: ThemePolicy = .{},
     surface_mode: ?@import("../ui/surfaces/mod.zig").SurfaceMode = null,
     placement_policy: @import("../ui/placement/mod.zig").RuntimePolicy = .{},
     ui: UiPolicy = .{},
@@ -135,6 +145,7 @@ pub const Settings = struct {
     }
 
     pub fn deinit(self: *Settings, allocator: std.mem.Allocator) void {
+        self.theme.deinit(allocator);
         if (self.launcher_monitor_name) |name| allocator.free(name);
         if (self.notifications_monitor_name) |name| allocator.free(name);
         self.* = .{};
@@ -155,4 +166,8 @@ pub fn loadStrict(allocator: std.mem.Allocator) !Settings {
 
 pub fn consumeLastLoadIssue(allocator: std.mem.Allocator) ?[]u8 {
     return impl.consumeLastLoadIssue(allocator);
+}
+
+pub fn save(allocator: std.mem.Allocator, settings: Settings) !void {
+    return impl.save(allocator, settings);
 }

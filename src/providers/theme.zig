@@ -1,6 +1,6 @@
 const std = @import("std");
 const search = @import("../search/mod.zig");
-const theme_apply = @import("../tools/theme_apply.zig");
+const theme_catalog = @import("../tools/theme_catalog.zig");
 const theme_state = @import("../tools/theme_state.zig");
 
 pub const ThemeProvider = struct {
@@ -8,7 +8,6 @@ pub const ThemeProvider = struct {
     owned_strings_previous: std.ArrayListUnmanaged([]u8) = .{},
     had_runtime_failure: bool = false,
     get_theme_fn: *const fn (allocator: std.mem.Allocator) anyerror!?[]u8 = theme_state.getCurrentTheme,
-    self_exe_path_fn: *const fn (allocator: std.mem.Allocator) anyerror![]u8 = std.fs.selfExePathAlloc,
     pub fn deinit(self: *ThemeProvider, allocator: std.mem.Allocator) void {
         self.freeOwnedStrings(allocator, &self.owned_strings_current);
         self.freeOwnedStrings(allocator, &self.owned_strings_previous);
@@ -39,14 +38,7 @@ pub const ThemeProvider = struct {
         };
         defer if (current_theme_owned) |value| allocator.free(value);
 
-        const exe_path = self.self_exe_path_fn(allocator) catch |err| {
-            self.had_runtime_failure = true;
-            std.log.warn("theme provider self exe lookup failed: {s}", .{@errorName(err)});
-            return;
-        };
-        defer allocator.free(exe_path);
-
-        try self.appendThemeFamilies(allocator, out, exe_path, current_theme_owned);
+        try self.appendThemeFamilies(allocator, out, current_theme_owned);
     }
 
     fn health(context: *anyopaque) search.ProviderHealth {
@@ -59,16 +51,15 @@ pub const ThemeProvider = struct {
         self: *ThemeProvider,
         allocator: std.mem.Allocator,
         out: *search.CandidateList,
-        exe_path: []const u8,
         current_theme_owned: ?[]u8,
     ) !void {
-        inline for (theme_apply.supported_themes) |theme_name| {
+        inline for (theme_catalog.supported_themes) |theme_name| {
             const title = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "{s}", .{theme_name}));
             const subtitle = if (current_theme_owned != null and std.mem.eql(u8, current_theme_owned.?, theme_name))
                 "Current theme"
             else
                 "Enter applies";
-            const cmd = try self.buildSetThemeCommand(allocator, exe_path, theme_name);
+            const cmd = try self.buildSetThemeCommand(allocator, theme_name);
             const kept_cmd = try self.keepOwnedString(allocator, cmd);
             try out.append(allocator, search.Candidate.initWithIcon(
                 .action,
@@ -80,9 +71,8 @@ pub const ThemeProvider = struct {
         }
     }
 
-    fn buildSetThemeCommand(self: *ThemeProvider, allocator: std.mem.Allocator, exe_path: []const u8, theme_name: []const u8) ![]u8 {
+    fn buildSetThemeCommand(self: *ThemeProvider, allocator: std.mem.Allocator, theme_name: []const u8) ![]u8 {
         _ = self;
-        _ = exe_path;
         return std.fmt.allocPrint(allocator, "theme-apply:{s}", .{theme_name});
     }
 

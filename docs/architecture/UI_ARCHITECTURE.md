@@ -57,6 +57,10 @@ The GTK implementation is organized as:
   [src/ui/gtk/default_loadout.zig](/home/home/personal/wayspot/src/ui/gtk/default_loadout.zig),
   [src/ui/gtk/help_panel.zig](/home/home/personal/wayspot/src/ui/gtk/help_panel.zig)
 
+Default loadout rendering is a UI concern, but default loadout selection policy is
+owned by `SearchService`. GTK should render rows returned by runtime, not assemble
+its own merged suggestion set.
+
 ## When
 
 UI files should own work when the behavior is about:
@@ -92,6 +96,7 @@ Primary folders:
 ## Rules
 
 - GTK widgets should consume runtime outputs, not create hidden app state.
+- GTK widgets should not own suggestion-merging or history-weighting policy.
 - Route affordances belong in the query UX layer, not inside providers.
 - UI defaults and help must reflect actual runtime behavior, not aspirations.
 - Headless/stub paths should remain valid for diagnostics and test builds.

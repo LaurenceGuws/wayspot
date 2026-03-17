@@ -28,14 +28,24 @@ instead of hardcoding Hyprland shell scripts everywhere.
 Current consumers include:
 
 - windows/workspaces providers
+- window/workspace action execution
 - output diagnostics
-- wallpaper runtime
+- wallpaper runtime output discovery
 - WM event refresh bridge
 
 ## When
 
 If a feature needs window/workspace/output data or focused monitor semantics,
 grow the backend contract here first.
+
+That includes action execution. UI/common code should not construct
+compositor-specific window/workspace commands directly.
+
+Wallpaper note:
+
+- window/workspace actions now route through backend methods
+- wallpaper runtime is not yet a generic backend capability
+- current wallpaper execution is explicit Hyprland/Hyprpaper runtime ownership
 
 ## Where
 

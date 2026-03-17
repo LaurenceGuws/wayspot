@@ -14,6 +14,7 @@ const query_metrics_access = @import("search_service/query_metrics_access.zig");
 const query_refresh_gate = @import("search_service/query_refresh_gate.zig");
 const query_engine = @import("search_service/query_engine.zig");
 const refresh_worker = @import("search_service/refresh_worker.zig");
+const default_loadout = @import("search_service/default_loadout.zig");
 
 pub const SearchService = struct {
     pub const QueryFlagsSnapshot = query_metrics_access.QueryFlagsSnapshot;
@@ -170,6 +171,10 @@ pub const SearchService = struct {
         self.query_mu.unlock();
         query_metrics_access.setElapsed(&self.query_mu, &self.last_query_elapsed_ns, sw.elapsedNs());
         return ranked;
+    }
+
+    pub fn defaultLoadout(self: *SearchService, allocator: std.mem.Allocator) ![]search.ScoredCandidate {
+        return default_loadout.collect(self, allocator);
     }
 
     fn searchDynamicRoute(self: *SearchService, allocator: std.mem.Allocator, query: search.Query) ![]search.ScoredCandidate {

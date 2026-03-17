@@ -29,7 +29,7 @@ forces a reorder.
 
 ### 1. Typed Theme Config Ownership
 
-Status: `todo`
+Status: `done`
 Priority: `highest`
 
 Problem:
@@ -53,10 +53,12 @@ Acceptance:
 
 Notes:
 - This is the root fix for multiple later theme/runtime issues.
+- Completed on 2026-03-17 by adding typed theme config ownership, Lua parsing,
+  canonical config save, and config-backed `theme_state`.
 
 ### 2. Remove Runtime Mutation Of External Dotfiles Repo
 
-Status: `todo`
+Status: `done`
 Priority: `highest`
 
 Problem:
@@ -76,9 +78,14 @@ Acceptance:
 Dependency:
 - Prefer doing this after item 1 so config ownership is clear first.
 
+Notes:
+- Completed on 2026-03-17 by removing repo-path writes from `theme_apply` and
+  keeping theme application scoped to runtime-owned state and live runtime
+  files.
+
 ### 3. Move WM Actions Behind WM Backend Contracts
 
-Status: `todo`
+Status: `done`
 Priority: `highest`
 
 Problem:
@@ -101,9 +108,14 @@ Acceptance:
   - explicitly documented as Hyprland-only runtime code with no fake generic API.
 - UI/common no longer needs compositor-specific command construction.
 
+Notes:
+- 2026-03-17: window/workspace execution moved behind WM backend methods.
+- 2026-03-17: wallpaper runtime was made explicit Hyprland/Hyprpaper runtime
+  ownership instead of pretending to be backend-generic.
+
 ### 4. Move Default Loadout Policy Out Of GTK
 
-Status: `todo`
+Status: `done`
 Priority: `high`
 
 Problem:
@@ -121,9 +133,14 @@ Acceptance:
 - No repo-specific `zide` bias remains in UI code.
 - GTK consumes a runtime contract for suggested/default rows.
 
+Notes:
+- Completed on 2026-03-17 by moving default-loadout assembly and history-based
+  weighting into `SearchService.defaultLoadout(...)` and removing GTK-owned
+  `zide` bias and local reranking logic.
+
 ### 5. Strengthen Action Contracts
 
-Status: `todo`
+Status: `done`
 Priority: `high`
 
 Problem:
@@ -142,9 +159,14 @@ Acceptance:
   documented.
 - Provider/action docs match the actual action model.
 
+Notes:
+- Completed on 2026-03-17 by removing the generic `cmd:` dispatch escape hatch,
+  making provider actions resolve through provider-owned execution specs, and
+  aligning the action docs with the stricter contract.
+
 ### 6. Fix Control-Plane Protocol Correctness
 
-Status: `todo`
+Status: `done`
 Priority: `high`
 
 Problem:
@@ -163,9 +185,14 @@ Acceptance:
 - `version` returns meaningful daemon version data or the spec is revised.
 - Tests cover the corrected behavior.
 
+Notes:
+- Completed on 2026-03-17 by switching request parsing to read-until-EOF,
+  switching response emission to write-all semantics, and returning the
+  build-owned app version string for `version`.
+
 ### 7. Remove Split Theme Authorities
 
-Status: `todo`
+Status: `done`
 Priority: `high`
 
 Problem:
@@ -186,9 +213,14 @@ Acceptance:
 Dependency:
 - Best handled after item 1.
 
+Notes:
+- Completed on 2026-03-17 by introducing a shared supported-theme catalog,
+  making both theme persistence and runtime apply validate through it, and
+  turning `--set-theme` into a compatibility alias for `--apply-theme`.
+
 ### 8. Replace Slideshow Process Scraping With Owned Runtime Control
 
-Status: `todo`
+Status: `done`
 Priority: `medium`
 
 Problem:
@@ -206,6 +238,11 @@ Acceptance:
   interface.
 - No broad process-name matching remains.
 - Toggling cannot accidentally kill unrelated processes.
+
+Notes:
+- Completed on 2026-03-17 by moving slideshow toggle/status under daemon IPC
+  control and replacing `pgrep`/`kill` scraping with resident-owned child
+  process state.
 
 ### 9. Fix Wallpaper Runtime Memory Ownership
 

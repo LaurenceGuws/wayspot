@@ -1,55 +1,85 @@
 const std = @import("std");
+const ipc_control = @import("../ipc/control.zig");
 
-pub fn toggle(allocator: std.mem.Allocator, exe_path: []const u8, config_path: []const u8, source_dir: []const u8) !bool {
-    var running = try findRunningPids(allocator);
-    defer {
-        for (running.items) |pid| allocator.free(pid);
-        running.deinit(allocator);
+pub const State = struct {
+    allocator: std.mem.Allocator,
+    exe_path: []u8,
+    config_path: []u8,
+    source_dir: []u8,
+    child: ?std.process.Child = null,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        exe_path: []const u8,
+        config_path: []const u8,
+        source_dir: []const u8,
+    ) !State {
+        return .{
+            .allocator = allocator,
+            .exe_path = try allocator.dupe(u8, exe_path),
+            .config_path = try allocator.dupe(u8, config_path),
+            .source_dir = try allocator.dupe(u8, source_dir),
+        };
     }
 
-    if (running.items.len > 0) {
-        for (running.items) |pid| {
-            _ = try std.process.Child.run(.{
-                .allocator = allocator,
-                .argv = &.{ "kill", pid },
-                .max_output_bytes = 0,
-            });
+    pub fn deinit(self: *State) void {
+        self.stop() catch {};
+        self.allocator.free(self.exe_path);
+        self.allocator.free(self.config_path);
+        self.allocator.free(self.source_dir);
+    }
+
+    pub fn toggle(self: *State) !bool {
+        if (self.isRunning()) {
+            try self.stop();
+            return false;
         }
-        return false;
+        try self.start();
+        return true;
     }
 
-    var child = std.process.Child.init(&.{ exe_path, "--wallpaper-slideshow", "--config", config_path, "--source", source_dir }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-    return true;
-}
+    pub fn isRunning(self: *State) bool {
+        return self.child != null;
+    }
 
-fn findRunningPids(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "pgrep", "-f", "wayspot.*--wallpaper-slideshow" },
-        .max_output_bytes = 16 * 1024,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return std.ArrayList([]u8).empty,
+    pub fn start(self: *State) !void {
+        if (self.child != null) return;
+
+        var child = std.process.Child.init(
+            &.{ self.exe_path, "--wallpaper-slideshow", "--config", self.config_path, "--source", self.source_dir },
+            self.allocator,
+        );
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+        self.child = child;
+    }
+
+    pub fn stop(self: *State) !void {
+        if (self.child == null) return;
+
+        var child = self.child.?;
+        _ = child.kill() catch {};
+        _ = child.wait() catch {};
+        self.child = null;
+    }
+};
+
+pub fn toggleViaDaemon(allocator: std.mem.Allocator) !?bool {
+    const response = ipc_control.executeCommand(allocator, .slideshow_toggle) catch |err| switch (err) {
+        error.FileNotFound,
+        error.ConnectTimeout,
+        error.ConnectionRefused,
+        error.NoSocketSupport => return null,
         else => return err,
     };
-    defer allocator.free(result.stderr);
-    defer allocator.free(result.stdout);
-
-    var out = std.ArrayList([]u8).empty;
-    errdefer {
-        for (out.items) |item| allocator.free(item);
-        out.deinit(allocator);
+    defer {
+        allocator.free(response.code);
+        allocator.free(response.message);
     }
-    if (result.term != .Exited or result.term.Exited != 0) return out;
-
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-        try out.append(allocator, try allocator.dupe(u8, trimmed));
-    }
-    return out;
+    if (!response.ok or !std.mem.eql(u8, response.code, "ok")) return error.ToggleRejected;
+    if (std.mem.eql(u8, response.message, "started")) return true;
+    if (std.mem.eql(u8, response.message, "stopped")) return false;
+    return error.BadResponse;
 }

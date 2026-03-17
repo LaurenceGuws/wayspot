@@ -40,6 +40,16 @@ pub fn consumeLastLoadIssue(allocator: std.mem.Allocator) ?[]u8 {
     return allocator.dupe(u8, msg) catch null;
 }
 
+pub fn save(allocator: std.mem.Allocator, settings: config.Settings) !void {
+    const path = try default_lua.resolvePath(allocator);
+    defer allocator.free(path);
+    _ = try default_lua.ensureDefaultConfigAtPath(path);
+
+    const rendered = try renderSettingsAlloc(allocator, settings);
+    defer allocator.free(rendered);
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = rendered });
+}
+
 pub fn load(allocator: std.mem.Allocator) config.Settings {
     clearLastIssue();
     return loadStrict(allocator) catch |err| {
@@ -120,6 +130,12 @@ pub fn loadStrict(allocator: std.mem.Allocator) !config.Settings {
 fn parseSettingsFromTop(lua: *c.lua_State, allocator: std.mem.Allocator, initial: config.Settings) config.Settings {
     var out = initial;
 
+    _ = c.lua_getfield(lua, -1, "theme");
+    if (c.lua_istable(lua, -1)) {
+        out.theme = parseThemeTable(lua, allocator, -1, out.theme);
+    }
+    c.lua_pop(lua, 1);
+
     _ = c.lua_getfield(lua, -1, "surface_mode");
     if (c.lua_type(lua, -1) == c.LUA_TSTRING) {
         if (readLuaString(lua, -1)) |raw| {
@@ -157,6 +173,27 @@ fn parseSettingsFromTop(lua: *c.lua_State, allocator: std.mem.Allocator, initial
     }
     c.lua_pop(lua, 1);
 
+    return out;
+}
+
+fn parseThemeTable(
+    lua: *c.lua_State,
+    allocator: std.mem.Allocator,
+    idx: c_int,
+    initial: config.Settings.ThemePolicy,
+) config.Settings.ThemePolicy {
+    var out = initial;
+    _ = c.lua_getfield(lua, idx, "current");
+    if (c.lua_type(lua, -1) == c.LUA_TSTRING) {
+        if (readLuaString(lua, -1)) |raw| {
+            const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+            if (trimmed.len > 0) {
+                out.deinit(allocator);
+                out.current = allocator.dupe(u8, trimmed) catch out.current;
+            }
+        }
+    }
+    c.lua_pop(lua, 1);
     return out;
 }
 
@@ -440,6 +477,210 @@ fn parseEditorTool(raw: []const u8) ?config.EditorTool {
     if (std.ascii.eqlIgnoreCase(raw, "subl")) return .subl;
     if (std.ascii.eqlIgnoreCase(raw, "xdg-open") or std.ascii.eqlIgnoreCase(raw, "xdg_open")) return .xdg_open;
     return null;
+}
+
+fn renderSettingsAlloc(allocator: std.mem.Allocator, settings: config.Settings) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    const writer = out.writer(allocator);
+
+    try writer.writeAll("return {\n");
+    try writer.print("  theme = {{\n    current = \"{s}\",\n  }},\n", .{themeName(settings)});
+    if (settings.surface_mode) |mode| {
+        try writer.print("  surface_mode = \"{s}\",\n", .{surfaceModeName(mode)});
+    } else {
+        try writer.writeAll("  surface_mode = nil,\n");
+    }
+    try writer.writeAll("  placement = {\n");
+    try renderLauncherPolicy(writer, settings.placement_policy.launcher);
+    try renderNotificationPolicy(writer, settings.placement_policy.notifications);
+    try writer.writeAll("  },\n");
+    try writer.print(
+        "  notifications = {{\n    actions = {{\n      show_close_button = {s},\n      show_dbus_actions = {s},\n    }},\n  }},\n",
+        .{ boolName(settings.notification_actions.show_close_button), boolName(settings.notification_actions.show_dbus_actions) },
+    );
+    try writer.print(
+        "  ui = {{\n    show_nerd_stats = {s},\n  }},\n",
+        .{boolName(settings.ui.show_nerd_stats)},
+    );
+    try writer.print(
+        "  tools = {{\n    package_manager = \"{s}\",\n    terminal = \"{s}\",\n    grep_include_hidden = {s},\n    clipboard_tool = \"{s}\",\n    editor_tool = \"{s}\",\n  }},\n",
+        .{
+            packageManagerName(settings.tools.package_manager),
+            terminalToolName(settings.tools.terminal),
+            boolName(settings.tools.grep_include_hidden),
+            clipboardToolName(settings.tools.clipboard_tool),
+            editorToolName(settings.tools.editor_tool),
+        },
+    );
+    try writer.writeAll("}\n");
+    return out.toOwnedSlice(allocator);
+}
+
+fn renderLauncherPolicy(writer: anytype, policy: placement.LauncherPolicy) !void {
+    try writer.writeAll("    launcher = {\n");
+    try renderWindowPolicy(writer, policy.window);
+    try writer.print(
+        "      width_percent = {d},\n      height_percent = {d},\n      min_width_percent = {d},\n      min_height_percent = {d},\n      min_width_px = {d},\n      min_height_px = {d},\n      max_width_px = {d},\n      max_height_px = {d},\n",
+        .{
+            policy.width_percent,
+            policy.height_percent,
+            policy.min_width_percent,
+            policy.min_height_percent,
+            policy.min_width_px,
+            policy.min_height_px,
+            policy.max_width_px,
+            policy.max_height_px,
+        },
+    );
+    try writer.writeAll("    },\n");
+}
+
+fn renderNotificationPolicy(writer: anytype, policy: placement.NotificationPolicy) !void {
+    try writer.writeAll("    notifications = {\n");
+    try renderWindowPolicy(writer, policy.window);
+    try writer.print(
+        "      width_percent = {d},\n      height_percent = {d},\n      min_width_px = {d},\n      min_height_px = {d},\n      max_width_px = {d},\n      max_height_px = {d},\n",
+        .{
+            policy.width_percent,
+            policy.height_percent,
+            policy.min_width_px,
+            policy.min_height_px,
+            policy.max_width_px,
+            policy.max_height_px,
+        },
+    );
+    try writer.writeAll("    },\n");
+}
+
+fn renderWindowPolicy(writer: anytype, policy: placement.WindowPolicy) !void {
+    try writer.print("      anchor = \"{s}\",\n", .{anchorName(policy.anchor)});
+    try writer.print("      monitor_policy = \"{s}\",\n", .{monitorPolicyName(policy.monitor.policy)});
+    if (policy.monitor.output_name) |name| {
+        try writer.print("      monitor_name = \"{s}\",\n", .{name});
+    }
+    try writer.print(
+        "      margins = {{ top = {d}, right = {d}, bottom = {d}, left = {d} }},\n",
+        .{ policy.margins.top, policy.margins.right, policy.margins.bottom, policy.margins.left },
+    );
+}
+
+fn themeName(settings: config.Settings) []const u8 {
+    return if (settings.theme.current.len > 0) settings.theme.current else "ayu";
+}
+
+fn boolName(value: bool) []const u8 {
+    return if (value) "true" else "false";
+}
+
+fn surfaceModeName(mode: SurfaceMode) []const u8 {
+    return switch (mode) {
+        .toplevel => "toplevel",
+        .layer_shell => "layer-shell",
+    };
+}
+
+fn anchorName(anchor: placement.Anchor) []const u8 {
+    return switch (anchor) {
+        .center => "center",
+        .top_left => "top_left",
+        .top_center => "top_center",
+        .top_right => "top_right",
+        .bottom_left => "bottom_left",
+        .bottom_center => "bottom_center",
+        .bottom_right => "bottom_right",
+    };
+}
+
+fn monitorPolicyName(policy: wm_adapter.MonitorPolicy) []const u8 {
+    return switch (policy) {
+        .focused => "focused",
+        .primary => "primary",
+        .by_name => "by_name",
+    };
+}
+
+fn packageManagerName(value: config.PackageManager) []const u8 {
+    return switch (value) {
+        .yay => "yay",
+        .pacman => "pacman",
+    };
+}
+
+fn terminalToolName(value: config.TerminalTool) []const u8 {
+    return switch (value) {
+        .kitty => "kitty",
+        .zide_terminal => "zide-terminal",
+        .alacritty => "alacritty",
+        .footclient => "footclient",
+        .foot => "foot",
+        .wezterm => "wezterm",
+        .gnome_terminal => "gnome-terminal",
+        .konsole => "konsole",
+        .xfce4_terminal => "xfce4-terminal",
+        .tilix => "tilix",
+        .xterm => "xterm",
+    };
+}
+
+fn clipboardToolName(value: config.ClipboardTool) []const u8 {
+    return switch (value) {
+        .wl_copy => "wl-copy",
+        .xclip => "xclip",
+    };
+}
+
+fn editorToolName(value: config.EditorTool) []const u8 {
+    return switch (value) {
+        .nvim => "nvim",
+        .vim => "vim",
+        .vi => "vi",
+        .helix => "helix",
+        .hx => "hx",
+        .kak => "kak",
+        .nano => "nano",
+        .code => "code",
+        .codium => "codium",
+        .code_insiders => "code-insiders",
+        .subl => "subl",
+        .xdg_open => "xdg-open",
+    };
+}
+
+test "loadStrict parses theme current field" {
+    const dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+
+    const cfg_path = try dir.dir.realpathAlloc(std.testing.allocator, "config.lua");
+    defer std.testing.allocator.free(cfg_path);
+    try dir.dir.writeFile(.{
+        .sub_path = "config.lua",
+        .data =
+            \\return {
+            \\  theme = {
+            \\    current = "nordic",
+            \\  },
+            \\}
+        ,
+    });
+
+    try std.posix.setenv("WAYSPOT_CONFIG_LUA", cfg_path, true);
+    defer std.posix.unsetenv("WAYSPOT_CONFIG_LUA");
+
+    var settings = try loadStrict(std.testing.allocator);
+    defer settings.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("nordic", settings.theme.current);
+}
+
+test "save renders canonical settings with theme" {
+    var settings = config.Settings{};
+    defer settings.deinit(std.testing.allocator);
+    settings.theme.current = try std.testing.allocator.dupe(u8, "mocha");
+
+    const rendered = try renderSettingsAlloc(std.testing.allocator, settings);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "theme = {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "current = \"mocha\"") != null);
 }
 
 fn readLuaString(lua: *c.lua_State, idx: c_int) ?[]const u8 {

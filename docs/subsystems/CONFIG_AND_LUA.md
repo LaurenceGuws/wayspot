@@ -29,14 +29,15 @@ files and keeps runtime settings explicit and inspectable.
 
 Current config fields include:
 
+- theme
 - surface mode
 - placement policy
 - notification UI policy
 - general UI toggles
 - tool choices
 
-Theme state is also persisted through the config-oriented theme state path, not
-through ad hoc env files.
+Theme state is part of the typed config model and is saved through the config
+subsystem, not through ad hoc env files or raw file rewriting helpers.
 
 ## When
 

@@ -1,3 +1,4 @@
+const std = @import("std");
 const dispatch = @import("dispatch.zig");
 const UiKind = dispatch.kinds.UiKind;
 
@@ -28,6 +29,23 @@ pub fn executePlan(
             .telemetry_kind = if (plan.telemetry_kind.len > 0) plan.telemetry_kind else kind_tag,
             .telemetry_detail = "unknown-action",
             .error_message = plan.error_message,
+        };
+    }
+    if (plan.native_execute) |native_execute| {
+        const action = plan.telemetry_ok_detail;
+        native_execute(std.heap.page_allocator, action) catch {
+            return .{
+                .status = .failed,
+                .telemetry_kind = if (plan.telemetry_kind.len > 0) plan.telemetry_kind else kind_tag,
+                .telemetry_detail = "native-execute-failed",
+                .error_message = if (plan.error_message.len > 0) plan.error_message else "Command failed",
+            };
+        };
+        return .{
+            .status = .ok,
+            .telemetry_kind = if (plan.telemetry_kind.len > 0) plan.telemetry_kind else kind_tag,
+            .telemetry_detail = if (plan.telemetry_ok_detail.len > 0) plan.telemetry_ok_detail else kind_tag,
+            .close_on_success = plan.close_on_success,
         };
     }
     const cmd = plan.command orelse return .{};

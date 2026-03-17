@@ -302,7 +302,7 @@ fn populateHelpMainMenu(ui_state: *HelpUiState) void {
     appendHelpItemWithDetails(ui_state.content, "%", "Files", &files_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "&", "Grep matches", &grep_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "+", "Packages", &packages_options, null, ui_state);
-    appendHelpPrefixItem(ui_state.content, ",", "Themes first, then use / subcommands like wallpapers or sort", ui_state);
+    appendHelpPrefixItem(ui_state.content, ",", "Themes", ui_state);
     appendHelpItemWithDetails(ui_state.content, "^", "Icons", &icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "*", "Nerd Icons", &nerd_icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, ":", "Emoji", &emoji_options, null, ui_state);

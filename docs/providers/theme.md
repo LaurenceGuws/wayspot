@@ -20,6 +20,8 @@ instead of a generic action hack.
   [src/providers/theme.zig](/home/home/personal/wayspot/src/providers/theme.zig)
 - state read:
   [src/tools/theme_state.zig](/home/home/personal/wayspot/src/tools/theme_state.zig)
+- supported-theme authority:
+  [src/tools/theme_catalog.zig](/home/home/personal/wayspot/src/tools/theme_catalog.zig)
 - apply path:
   [src/tools/theme_apply.zig](/home/home/personal/wayspot/src/tools/theme_apply.zig)
 
@@ -29,6 +31,17 @@ The provider:
 - emits only supported, switchable themes
 - emits namespaced `theme-apply:<theme>` actions
 - does not expose generic fallback actions in the theme route
+
+Theme authority rule:
+
+- persisted theme state and applyable theme state use the same supported-theme
+  catalog
+- selecting a theme from the provider is an apply operation, not a
+  persist-without-apply operation
+- `--set-theme` is only a compatibility alias for `--apply-theme`
+
+Theme application is expected to target runtime-owned state and live runtime
+files, not a separate dotfiles repo checkout.
 
 ## When
 

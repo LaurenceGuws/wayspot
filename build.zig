@@ -19,9 +19,11 @@ pub fn build(b: *std.Build) void {
     const enable_headless = b.option(bool, "enable_headless", "Build headless-only binary (disable GTK/layer-shell)") orelse false;
     const enable_gtk = !enable_headless;
     const enable_layer_shell = !enable_headless;
+    const app_version = b.option([]const u8, "app_version", "Wayspot application version string") orelse "0.1.3-dev";
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_gtk", enable_gtk);
     build_options.addOption(bool, "enable_layer_shell", enable_layer_shell);
+    build_options.addOption([]const u8, "app_version", app_version);
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`

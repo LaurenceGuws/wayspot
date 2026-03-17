@@ -25,6 +25,7 @@ and shell runtime behavior composable instead of implicitly coupled.
 - config loading
 - async refresh
 - cache ownership
+- backend-routed native execution for app-owned runtime actions
 
 4. Shell runtime tools
 - theme apply
@@ -65,6 +66,8 @@ Shell runtime tools:
 WM layer:
 - compositor-specific behavior belongs here or in runtime tools built on it
 - UI and providers should not encode Hyprland-specific assumptions directly
+- window/workspace action execution should be routed through backend methods, not
+  assembled as compositor command strings in UI/common
 
 ## Provider Contract Notes
 
@@ -77,4 +80,3 @@ For new providers/routes:
 
 If a route needs strict isolation, do not depend on broad candidate kinds alone.
 Use a dedicated action namespace or equivalent typed contract.
-

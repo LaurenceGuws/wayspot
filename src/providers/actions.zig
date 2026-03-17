@@ -9,12 +9,17 @@ const Dependency = union(enum) {
     home_relative_path: []const u8,
 };
 
+pub const ActionExecution = union(enum) {
+    shell_command: []const u8,
+    home_relative_shell_command: []const u8,
+};
+
 pub const ActionSpec = struct {
     title: []const u8,
     subtitle: []const u8,
     action: []const u8,
     icon: []const u8,
-    command: []const u8,
+    execution: ActionExecution,
     dependency: Dependency,
     confirm: bool = false,
     help: []const u8 = "",
@@ -26,7 +31,7 @@ pub const action_specs = [_]ActionSpec{
         .subtitle = "System",
         .action = "settings",
         .icon = "preferences-system-symbolic",
-        .command = "wlrlui",
+        .execution = .{ .shell_command = "wlrlui" },
         .dependency = .{ .command = "wlrlui" },
         .help = "Open the application launcher settings panel (requires `wlrlui`).",
     },
@@ -35,7 +40,7 @@ pub const action_specs = [_]ActionSpec{
         .subtitle = "Session",
         .action = "power",
         .icon = "system-shutdown-symbolic",
-        .command = "wlogout",
+        .execution = .{ .shell_command = "wlogout" },
         .dependency = .{ .command = "wlogout" },
         .confirm = false,
         .help = "Open the session power/logout menu via `wlogout`.",
@@ -45,7 +50,7 @@ pub const action_specs = [_]ActionSpec{
         .subtitle = "System",
         .action = "restart-waybar",
         .icon = "view-refresh-symbolic",
-        .command = "waybar --reload",
+        .execution = .{ .shell_command = "waybar --reload" },
         .dependency = .{ .command = "waybar" },
         .help = "Reload the Waybar configuration (`waybar --reload`).",
     },
@@ -54,7 +59,7 @@ pub const action_specs = [_]ActionSpec{
         .subtitle = "System",
         .action = "notifications",
         .icon = "preferences-system-notifications-symbolic",
-        .command = "$HOME/.config/waybar/scripts/swaync-control.sh toggle",
+        .execution = .{ .home_relative_shell_command = ".config/waybar/scripts/swaync-control.sh toggle" },
         .dependency = .{ .home_relative_path = ".config/waybar/scripts/swaync-control.sh" },
         .help = "Toggle the SwayNC notifications panel.",
     },
@@ -113,9 +118,9 @@ pub const ActionsProvider = struct {
     }
 };
 
-pub fn resolveActionCommand(action: []const u8) ?[]const u8 {
+pub fn resolveActionSpec(action: []const u8) ?ActionSpec {
     for (action_specs) |spec| {
-        if (std.mem.eql(u8, action, spec.action)) return spec.command;
+        if (std.mem.eql(u8, action, spec.action)) return spec;
     }
     return null;
 }
@@ -135,14 +140,37 @@ pub fn executeAction(
     action: []const u8,
     runner: *const fn (command: []const u8) anyerror!void,
 ) !void {
-    // `action` is an internal action id; `runner` executes the mapped command string.
-    const command = resolveActionCommand(action) orelse return error.UnknownAction;
+    // `action` is an internal action id; `runner` executes the resolved runtime command.
+    const spec = resolveActionSpec(action) orelse return error.UnknownAction;
+    const allocator = std.heap.page_allocator;
+    const command = try resolveExecutionCommand(allocator, spec.execution);
+    defer allocator.free(command);
     try runner(command);
+}
+
+pub fn resolveExecutionCommand(allocator: std.mem.Allocator, execution: ActionExecution) ![]u8 {
+    return switch (execution) {
+        .shell_command => |command| allocator.dupe(u8, command),
+        .home_relative_shell_command => |relative| resolveHomeRelativeCommand(allocator, relative),
+    };
 }
 
 fn pathExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
+}
+
+fn resolveHomeRelativeCommand(allocator: std.mem.Allocator, relative_command: []const u8) ![]u8 {
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+
+    const split_idx = std.mem.indexOfScalar(u8, relative_command, ' ');
+    const relative_path = if (split_idx) |idx| relative_command[0..idx] else relative_command;
+    const tail = if (split_idx) |idx| relative_command[idx..] else "";
+    const path = try std.fs.path.join(allocator, &.{ home, relative_path });
+    defer allocator.free(path);
+
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ path, tail });
 }
 
 test "actions provider collects available action candidates only" {
@@ -210,14 +238,17 @@ test "actions provider health reflects dependency availability" {
 test "execute action resolves command mapping" {
     const Runner = struct {
         fn run(command: []const u8) !void {
-            test_command_capture = command;
+            test_command_capture = try std.testing.allocator.dupe(u8, command);
         }
     };
 
+    if (test_command_capture) |buf| std.testing.allocator.free(buf);
     test_command_capture = null;
     try executeAction("restart-waybar", Runner.run);
     try std.testing.expect(test_command_capture != null);
     try std.testing.expectEqualStrings("waybar --reload", test_command_capture.?);
+    std.testing.allocator.free(test_command_capture.?);
+    test_command_capture = null;
 }
 
 test "execute action returns runner errors for failed commands" {
@@ -233,4 +264,23 @@ test "execute action returns runner errors for failed commands" {
 test "power action has no confirmation gating" {
     try std.testing.expect(!requiresConfirmation("power"));
     try std.testing.expect(!requiresConfirmation("settings"));
+}
+
+test "resolve execution command expands home-relative actions" {
+    const old_home = std.process.getEnvVarOwned(std.testing.allocator, "HOME") catch null;
+    defer if (old_home) |value| std.testing.allocator.free(value);
+
+    try std.posix.setenv("HOME", "/tmp/wayspot-home", true);
+    defer {
+        if (old_home) |value| {
+            std.posix.setenv("HOME", value, true) catch {};
+        }
+    }
+
+    const command = try resolveExecutionCommand(std.testing.allocator, .{
+        .home_relative_shell_command = ".config/waybar/scripts/swaync-control.sh toggle",
+    });
+    defer std.testing.allocator.free(command);
+
+    try std.testing.expectEqualStrings("/tmp/wayspot-home/.config/waybar/scripts/swaync-control.sh toggle", command);
 }

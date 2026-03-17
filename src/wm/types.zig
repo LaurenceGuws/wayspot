@@ -111,6 +111,8 @@ pub const Backend = struct {
         list_windows: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!WindowSnapshot,
         list_workspaces: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!WorkspaceSnapshot,
         list_outputs: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!OutputSnapshot = defaultListOutputs,
+        focus_window: *const fn (context: *anyopaque, allocator: std.mem.Allocator, window_id: []const u8) anyerror!void = defaultFocusWindow,
+        switch_workspace: *const fn (context: *anyopaque, allocator: std.mem.Allocator, workspace_id: []const u8) anyerror!void = defaultSwitchWorkspace,
         health: *const fn (context: *anyopaque) Health,
         capabilities: *const fn (context: *anyopaque) Capability,
         subscribe_events: *const fn (
@@ -138,8 +140,16 @@ pub const Backend = struct {
         return self.vtable.list_outputs(self.context, allocator);
     }
 
+    pub fn focusWindow(self: Backend, allocator: std.mem.Allocator, window_id: []const u8) !void {
+        return self.vtable.focus_window(self.context, allocator, window_id);
+    }
+
     pub fn listWorkspaces(self: Backend, allocator: std.mem.Allocator) !WorkspaceSnapshot {
         return self.vtable.list_workspaces(self.context, allocator);
+    }
+
+    pub fn switchWorkspace(self: Backend, allocator: std.mem.Allocator, workspace_id: []const u8) !void {
+        return self.vtable.switch_workspace(self.context, allocator, workspace_id);
     }
 
     pub fn capabilities(self: Backend) Capability {
@@ -175,6 +185,14 @@ fn defaultSubscribeEvents(
 
 fn defaultListOutputs(_: *anyopaque, allocator: std.mem.Allocator) anyerror!OutputSnapshot {
     _ = allocator;
+    return error.Unsupported;
+}
+
+fn defaultFocusWindow(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {
+    return error.Unsupported;
+}
+
+fn defaultSwitchWorkspace(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {
     return error.Unsupported;
 }
 
@@ -216,4 +234,6 @@ test "backend event subscription defaults to unsupported/null" {
     try std.testing.expect(!backend.supportsEventStream());
     const sub = try backend.subscribeEvents(std.testing.allocator, &fake_ctx, testEventHandler);
     try std.testing.expect(sub == null);
+    try std.testing.expectError(error.Unsupported, backend.focusWindow(std.testing.allocator, "0xabc"));
+    try std.testing.expectError(error.Unsupported, backend.switchWorkspace(std.testing.allocator, "1"));
 }

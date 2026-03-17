@@ -19,4 +19,5 @@ pub const resolveBookmarkUrl = @import("web.zig").resolveBookmarkUrl;
 pub const WindowsProvider = @import("windows.zig").WindowsProvider;
 pub const executeAction = @import("actions.zig").executeAction;
 pub const requiresConfirmation = @import("actions.zig").requiresConfirmation;
-pub const resolveActionCommand = @import("actions.zig").resolveActionCommand;
+pub const resolveActionSpec = @import("actions.zig").resolveActionSpec;
+pub const resolveExecutionCommand = @import("actions.zig").resolveExecutionCommand;

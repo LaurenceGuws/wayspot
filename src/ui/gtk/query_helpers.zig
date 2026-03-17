@@ -60,7 +60,7 @@ pub fn routeHintForQuery(query_trimmed: []const u8) ?[]const u8 {
         '#' => "Windows route active: type window title/class after #",
         '!' => "Workspaces route active: type workspace name/id after !",
         '~' => "Recent dirs route active: zoxide terminal locations after ~",
-        ',' => "Theme route active: list themes after , and use / for theme subcommands",
+        ',' => "Theme route active: list and apply supported themes after ,",
         '%' => "Files route active: find files and folders after %",
         '&' => "Grep route active: type text to search after &",
         '+' => "Packages route active: search yay/pacman packages after +",

@@ -3,6 +3,7 @@ const gtk_types = @import("types.zig");
 const ipc_control = @import("../../ipc/control.zig");
 const shell_mod = @import("../../shell/mod.zig");
 const wm_mod = @import("../../wm/mod.zig");
+const slideshow_control = @import("../../tools/slideshow_control.zig");
 
 const c = gtk_types.c;
 const GFALSE = gtk_types.GFALSE;
@@ -10,6 +11,7 @@ const GFALSE = gtk_types.GFALSE;
 pub const ControlContext = struct {
     event_bus: *shell_mod.EventBus,
     health_store: *HealthStore,
+    slideshow_state: *slideshow_control.State,
 };
 
 pub const HealthStore = struct {
@@ -64,6 +66,15 @@ const ControlInvokePayload = struct {
 
 fn onControlCommand(command: ipc_control.Command, user_data: *anyopaque) ipc_control.HandlerResult {
     const control_ctx: *ControlContext = @ptrCast(@alignCast(user_data));
+    switch (command) {
+        .slideshow_toggle => {
+            const started = control_ctx.slideshow_state.toggle() catch {
+                return .{ .ok = false, .code = "rejected", .message = "Failed to toggle slideshow" };
+            };
+            return .{ .ok = true, .code = "ok", .message = if (started) "started" else "stopped" };
+        },
+        else => {},
+    }
     const payload: *ControlInvokePayload = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(ControlInvokePayload))));
     payload.* = .{ .event_bus = control_ctx.event_bus, .command = command };
     if (c.g_idle_add(onControlInvokeIdle, payload) == 0) {
@@ -78,6 +89,7 @@ fn onControlQuery(allocator: std.mem.Allocator, command: ipc_control.Command, us
     return switch (command) {
         .shell_health => try control_ctx.health_store.snapshotAlloc(allocator),
         .wm_event_stats => try wm_mod.event_stats.snapshotAlloc(allocator),
+        .slideshow_status => try allocator.dupe(u8, if (control_ctx.slideshow_state.isRunning()) "running" else "stopped"),
         else => null,
     };
 }

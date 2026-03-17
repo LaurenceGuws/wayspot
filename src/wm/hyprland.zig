@@ -29,6 +29,8 @@ pub const HyprlandBackend = struct {
                 .list_windows = listWindows,
                 .list_workspaces = listWorkspaces,
                 .list_outputs = listOutputs,
+                .focus_window = focusWindow,
+                .switch_workspace = switchWorkspace,
                 .health = health,
                 .capabilities = capabilities,
                 .subscribe_events = subscribeEvents,
@@ -163,6 +165,28 @@ pub const HyprlandBackend = struct {
         };
         self.had_runtime_failure = false;
         return snapshot;
+    }
+
+    fn focusWindow(context: *anyopaque, allocator: std.mem.Allocator, window_id: []const u8) !void {
+        const self: *HyprlandBackend = @ptrCast(@alignCast(context));
+        if (!self.has_tools_fn()) return error.ToolsUnavailable;
+        const target = try std.fmt.allocPrint(allocator, "address:{s}", .{window_id});
+        defer allocator.free(target);
+        runHyprctlDispatch(allocator, "focuswindow", target) catch |err| {
+            self.had_runtime_failure = true;
+            return err;
+        };
+        self.had_runtime_failure = false;
+    }
+
+    fn switchWorkspace(context: *anyopaque, allocator: std.mem.Allocator, workspace_id: []const u8) !void {
+        const self: *HyprlandBackend = @ptrCast(@alignCast(context));
+        if (!self.has_tools_fn()) return error.ToolsUnavailable;
+        runHyprctlDispatch(allocator, "workspace", workspace_id) catch |err| {
+            self.had_runtime_failure = true;
+            return err;
+        };
+        self.had_runtime_failure = false;
     }
 
     fn subscribeEvents(
@@ -351,6 +375,17 @@ fn listMonitorsJsonWithSystemTools(allocator: std.mem.Allocator) ![]u8 {
         return error.OutputQueryFailed;
     }
     return result.stdout;
+}
+
+fn runHyprctlDispatch(allocator: std.mem.Allocator, subcommand: []const u8, argument: []const u8) !void {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "hyprctl", "dispatch", subcommand, argument },
+        .max_output_bytes = 64 * 1024,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) return error.DispatchFailed;
 }
 
 fn parseClientsJson(allocator: std.mem.Allocator, root: std.json.Value) !wm.WindowSnapshot {

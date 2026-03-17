@@ -296,6 +296,47 @@ test "queryFlagsSnapshot surfaces provider runtime failure from cached snapshot 
     try std.testing.expect(flags.last_query_had_provider_runtime_failure);
 }
 
+test "default loadout is owned by search service and includes routed defaults" {
+    const Fake = struct {
+        fn collect(context: *anyopaque, allocator: std.mem.Allocator, out: *search.CandidateList) !void {
+            _ = context;
+            try out.append(allocator, search.Candidate.init(.app, "Firefox", "Browser", "firefox"));
+            try out.append(allocator, search.Candidate.init(.dir, "src", "/tmp/src", "/tmp/src"));
+            try out.append(allocator, search.Candidate.init(.action, "Ayu", "Theme", "theme-apply:ayu"));
+            try out.append(allocator, search.Candidate.init(.action, "Settings", "System", "settings"));
+        }
+
+        fn health(context: *anyopaque) search.ProviderHealth {
+            _ = context;
+            return .ready;
+        }
+    };
+
+    var dummy: u8 = 0;
+    const source = [_]search.Provider{
+        .{
+            .name = "fake",
+            .context = &dummy,
+            .vtable = &.{ .collect = Fake.collect, .health = Fake.health },
+        },
+    };
+
+    const registry = providers.ProviderRegistry.init(&source);
+    var service = SearchService.init(registry);
+    defer service.deinit(std.testing.allocator);
+
+    try service.recordSelection(std.testing.allocator, "theme-apply:ayu");
+    try service.recordSelection(std.testing.allocator, "theme-apply:ayu");
+
+    const rows = try service.defaultLoadout(std.testing.allocator);
+    defer std.testing.allocator.free(rows);
+
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqualStrings("Ayu", rows[0].candidate.title);
+    try std.testing.expectEqualStrings("Firefox", rows[1].candidate.title);
+    try std.testing.expectEqualStrings("src", rows[2].candidate.title);
+}
+
 test "history load and save roundtrip" {
     const Fake = struct {
         fn collect(context: *anyopaque, allocator: std.mem.Allocator, out: *search.CandidateList) !void {

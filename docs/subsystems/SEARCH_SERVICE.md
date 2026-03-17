@@ -32,12 +32,14 @@ Major responsibilities:
 - cached static search snapshots
 - dynamic route execution
 - history weighting
+- default-loadout assembly for startup/suggested rows
 - async refresh and WM-triggered refresh
 
 ## When
 
 Any change to search semantics, ranking, provider assembly, history weighting,
-or route dispatch should land here or in `src/search/`, not in GTK widgets.
+route dispatch, or default-loadout suggestion policy should land here or in
+`src/search/`, not in GTK widgets.
 
 ## Where
 
