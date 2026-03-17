@@ -20,6 +20,7 @@ pub fn appendModuleFilterMenu(list: *c.GtkListBox, allocator: std.mem.Allocator)
     appendModuleFilterRow(list, allocator, "Files + Folders", "Find paths with fd", "%", "%", .file);
     appendModuleFilterRow(list, allocator, "Code Search", "Search file contents with rg", "&", "&", .grep);
     appendModuleFilterRow(list, allocator, "Packages", "Search installable packages", "+", "+", .action);
+    appendModuleFilterRow(list, allocator, "Theme", "List themes and theme subcommands", ",", ",", .action);
     appendModuleFilterRow(list, allocator, "Icons", "Search icon files in installed themes", "^", "^", .file);
     appendModuleFilterRow(list, allocator, "Nerd Icons", "Search Nerd Font glyph names", "*", "*", .hint);
     appendModuleFilterRow(list, allocator, "Emoji", "Search emoji names and symbols", ":", ":", .hint);

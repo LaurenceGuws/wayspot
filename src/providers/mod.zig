@@ -2,6 +2,7 @@ pub const AppsProvider = @import("apps.zig").AppsProvider;
 pub const invalidateAppsCache = @import("apps.zig").invalidateDefaultCache;
 pub const ActionsProvider = @import("actions.zig").ActionsProvider;
 pub const DirsProvider = @import("dirs.zig").DirsProvider;
+pub const ThemeProvider = @import("theme.zig").ThemeProvider;
 pub const calc = @import("calc.zig");
 pub const WorkspacesProvider = @import("workspaces.zig").WorkspacesProvider;
 pub const CollectReport = @import("registry.zig").CollectReport;

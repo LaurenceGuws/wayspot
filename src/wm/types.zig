@@ -6,6 +6,7 @@ pub const Capability = struct {
     focus_window: bool = false,
     switch_workspace: bool = false,
     event_stream: bool = false,
+    outputs: bool = false,
 };
 
 pub const Health = enum {
@@ -62,6 +63,28 @@ pub const WorkspaceSnapshot = struct {
     }
 };
 
+pub const OutputInfo = struct {
+    name: []u8,
+    width: i32,
+    height: i32,
+    focused: bool,
+
+    pub fn deinit(self: *OutputInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        self.* = undefined;
+    }
+};
+
+pub const OutputSnapshot = struct {
+    items: []OutputInfo,
+
+    pub fn deinit(self: *OutputSnapshot, allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        allocator.free(self.items);
+        self.* = .{ .items = &.{} };
+    }
+};
+
 pub const EventKind = enum {
     windows_changed,
     workspaces_changed,
@@ -87,6 +110,7 @@ pub const Backend = struct {
     pub const VTable = struct {
         list_windows: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!WindowSnapshot,
         list_workspaces: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!WorkspaceSnapshot,
+        list_outputs: *const fn (context: *anyopaque, allocator: std.mem.Allocator) anyerror!OutputSnapshot = defaultListOutputs,
         health: *const fn (context: *anyopaque) Health,
         capabilities: *const fn (context: *anyopaque) Capability,
         subscribe_events: *const fn (
@@ -108,6 +132,10 @@ pub const Backend = struct {
 
     pub fn health(self: Backend) Health {
         return self.vtable.health(self.context);
+    }
+
+    pub fn listOutputs(self: Backend, allocator: std.mem.Allocator) !OutputSnapshot {
+        return self.vtable.list_outputs(self.context, allocator);
     }
 
     pub fn listWorkspaces(self: Backend, allocator: std.mem.Allocator) !WorkspaceSnapshot {
@@ -143,6 +171,11 @@ fn defaultSubscribeEvents(
     _: EventHandler,
 ) anyerror!?EventSubscription {
     return null;
+}
+
+fn defaultListOutputs(_: *anyopaque, allocator: std.mem.Allocator) anyerror!OutputSnapshot {
+    _ = allocator;
+    return error.Unsupported;
 }
 
 fn defaultUnsubscribeEvents(_: *anyopaque, _: std.mem.Allocator, _: EventSubscription) void {}

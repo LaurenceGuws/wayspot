@@ -7,6 +7,115 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (hasArg(args, "--sort-wallpapers")) {
+        if (hasArg(args, "--help")) {
+            try wayspot.tools.wallpaper_sorter.printUsage();
+            return;
+        }
+
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_dir = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
+        defer allocator.free(default_dir);
+
+        const source_dir = argValueAfterFlag(args, "--source") orelse default_dir;
+        const dest_dir = argValueAfterFlag(args, "--dest") orelse default_dir;
+
+        try wayspot.tools.wallpaper_sorter.run(allocator, .{
+            .source_dir = source_dir,
+            .dest_dir = dest_dir,
+            .dry_run = hasArg(args, "--dry-run"),
+            .mode = if (hasArg(args, "--move")) .move else .copy,
+            .verbose = hasArg(args, "--verbose"),
+        });
+        return;
+    }
+
+    if (hasArg(args, "--list-nvim-themes")) {
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_lazy_root = try std.fs.path.join(allocator, &.{ home, ".local", "share", "nvim", "lazy" });
+        defer allocator.free(default_lazy_root);
+        try wayspot.tools.theme_registry.printDiscoveredNvimThemes(
+            allocator,
+            argValueAfterFlag(args, "--source") orelse default_lazy_root,
+        );
+        return;
+    }
+
+    if (hasArg(args, "--list-theme-families")) {
+        try wayspot.tools.theme_registry.printFamilies();
+        return;
+    }
+
+    if (hasArg(args, "--set-theme")) {
+        const theme_name = argValueAfterFlag(args, "--set-theme") orelse std.process.exit(2);
+        try wayspot.tools.theme_state.setCurrentTheme(allocator, theme_name);
+        return;
+    }
+
+    if (hasArg(args, "--apply-theme")) {
+        const theme_name = argValueAfterFlag(args, "--apply-theme") orelse std.process.exit(2);
+        try wayspot.tools.theme_apply.applyTheme(allocator, theme_name);
+        return;
+    }
+
+    if (hasArg(args, "--toggle-wallpaper-slideshow")) {
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_wallpapers = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
+        defer allocator.free(default_wallpapers);
+        const default_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
+        defer allocator.free(default_config);
+        const exe_path = try std.fs.selfExePathAlloc(allocator);
+        defer allocator.free(exe_path);
+        _ = try wayspot.tools.slideshow_control.toggle(
+            allocator,
+            exe_path,
+            argValueAfterFlag(args, "--config") orelse default_config,
+            argValueAfterFlag(args, "--source") orelse default_wallpapers,
+        );
+        return;
+    }
+
+    if (hasArg(args, "--wallpaper-slideshow")) {
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_wallpapers = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
+        defer allocator.free(default_wallpapers);
+        const default_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
+        defer allocator.free(default_config);
+
+        var hypr_backend = wayspot.wm.HyprlandBackend{};
+        try wayspot.tools.wallpaper_runtime.runSlideshow(allocator, hypr_backend.backend(), .{
+            .hyprpaper_config_path = argValueAfterFlag(args, "--config") orelse default_config,
+            .wallpapers_root = argValueAfterFlag(args, "--source") orelse default_wallpapers,
+            .interval_seconds = parseU64Arg(args, "--interval-seconds") orelse 600,
+            .run_once = hasArg(args, "--once"),
+        });
+        return;
+    }
+
+    if (hasArg(args, "--set-wallpaper")) {
+        const image_path = argValueAfterFlag(args, "--set-wallpaper") orelse {
+            std.process.exit(2);
+        };
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
+        defer allocator.free(default_config);
+        var hypr_backend = wayspot.wm.HyprlandBackend{};
+        const target: wayspot.tools.wallpaper_runtime.MonitorTarget = if (hasArg(args, "--all-monitors"))
+            .all
+        else if (argValueAfterFlag(args, "--monitor")) |monitor_name|
+            .{ .named = monitor_name }
+        else
+            .focused;
+        try wayspot.tools.wallpaper_runtime.setWallpaper(
+            allocator,
+            hypr_backend.backend(),
+            argValueAfterFlag(args, "--config") orelse default_config,
+            image_path,
+            target,
+        );
+        return;
+    }
+
     const state = wayspot.app.bootstrap();
     const logger = wayspot.app.Logger.init(.info);
     logger.info("wayspot starting (mode={s})", .{@tagName(state.mode)});
@@ -291,7 +400,8 @@ const Runtime = struct {
     windows: wayspot.providers.WindowsProvider = .{},
     workspaces: wayspot.providers.WorkspacesProvider = .{},
     dirs: wayspot.providers.DirsProvider = .{},
-    provider_list: [5]wayspot.search.Provider,
+    theme: wayspot.providers.ThemeProvider = .{},
+    provider_list: [6]wayspot.search.Provider,
     service: wayspot.app.SearchService,
     telemetry: wayspot.app.TelemetrySink,
     wm_event_bridge: WmEventBridge = .{},
@@ -302,6 +412,7 @@ const Runtime = struct {
         self.windows.deinit(allocator);
         self.workspaces.deinit(allocator);
         self.dirs.deinit(allocator);
+        self.theme.deinit(allocator);
         self.service.deinit(allocator);
         allocator.free(self.app_cache_path);
         allocator.free(self.history_path);
@@ -315,6 +426,7 @@ const Runtime = struct {
             self.windows.provider(),
             self.workspaces.provider(),
             self.dirs.provider(),
+            self.theme.provider(),
         };
         const registry = wayspot.providers.ProviderRegistry.init(&self.provider_list);
         self.service = wayspot.app.SearchService.initWithHistoryPath(registry, self.history_path);
@@ -375,6 +487,7 @@ fn setupRuntime(allocator: std.mem.Allocator) !Runtime {
         .windows = .{},
         .workspaces = .{},
         .dirs = .{},
+        .theme = .{},
         .provider_list = undefined,
         .service = undefined,
         .telemetry = undefined,
@@ -386,6 +499,7 @@ fn setupRuntime(allocator: std.mem.Allocator) !Runtime {
         runtime.windows.provider(),
         runtime.workspaces.provider(),
         runtime.dirs.provider(),
+        runtime.theme.provider(),
     };
 
     const registry = wayspot.providers.ProviderRegistry.init(&runtime.provider_list);
@@ -423,6 +537,11 @@ fn argValueAfterFlag(args: []const []const u8, flag: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, args[i], flag)) return args[i + 1];
     }
     return null;
+}
+
+fn parseU64Arg(args: []const []const u8, flag: []const u8) ?u64 {
+    const raw = argValueAfterFlag(args, flag) orelse return null;
+    return std.fmt.parseInt(u64, raw, 10) catch null;
 }
 
 fn parseControlCommand(value: []const u8) ?wayspot.ipc.control.Command {

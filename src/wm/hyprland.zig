@@ -28,6 +28,7 @@ pub const HyprlandBackend = struct {
             .vtable = &.{
                 .list_windows = listWindows,
                 .list_workspaces = listWorkspaces,
+                .list_outputs = listOutputs,
                 .health = health,
                 .capabilities = capabilities,
                 .subscribe_events = subscribeEvents,
@@ -135,7 +136,33 @@ pub const HyprlandBackend = struct {
             .focus_window = true,
             .switch_workspace = true,
             .event_stream = true,
+            .outputs = true,
         };
+    }
+
+    fn listOutputs(context: *anyopaque, allocator: std.mem.Allocator) !wm.OutputSnapshot {
+        const self: *HyprlandBackend = @ptrCast(@alignCast(context));
+        if (!self.has_tools_fn()) return error.ToolsUnavailable;
+
+        const json_bytes = listMonitorsJsonWithSystemTools(allocator) catch |err| {
+            self.had_runtime_failure = true;
+            std.log.warn("hyprland wm list outputs failed: {s}", .{@errorName(err)});
+            return err;
+        };
+        defer allocator.free(json_bytes);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch |err| {
+            self.had_runtime_failure = true;
+            return err;
+        };
+        defer parsed.deinit();
+
+        const snapshot = parseOutputsJson(allocator, parsed.value) catch |err| {
+            self.had_runtime_failure = true;
+            return err;
+        };
+        self.had_runtime_failure = false;
+        return snapshot;
     }
 
     fn subscribeEvents(
@@ -312,6 +339,20 @@ fn listWorkspacesJsonWithSystemTools(allocator: std.mem.Allocator) ![]u8 {
     return result.stdout;
 }
 
+fn listMonitorsJsonWithSystemTools(allocator: std.mem.Allocator) ![]u8 {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "hyprctl", "monitors", "-j" },
+        .max_output_bytes = 4 * 1024 * 1024,
+    });
+    defer allocator.free(result.stderr);
+    if (result.term != .Exited or result.term.Exited != 0) {
+        allocator.free(result.stdout);
+        return error.OutputQueryFailed;
+    }
+    return result.stdout;
+}
+
 fn parseClientsJson(allocator: std.mem.Allocator, root: std.json.Value) !wm.WindowSnapshot {
     if (root != .array) return error.InvalidJson;
 
@@ -358,6 +399,25 @@ fn parseWorkspacesJson(allocator: std.mem.Allocator, root: std.json.Value) !wm.W
     }
 
     std.mem.sort(wm.WorkspaceInfo, out.items, {}, lessWorkspaceById);
+    return .{ .items = try out.toOwnedSlice(allocator) };
+}
+
+fn parseOutputsJson(allocator: std.mem.Allocator, root: std.json.Value) !wm.OutputSnapshot {
+    if (root != .array) return error.InvalidJson;
+
+    var out = std.ArrayList(wm.OutputInfo).empty;
+    defer out.deinit(allocator);
+
+    for (root.array.items) |monitor| {
+        const parsed = parseMonitorObject(monitor) orelse continue;
+        try out.append(allocator, .{
+            .name = try allocator.dupe(u8, parsed.name),
+            .width = parsed.width,
+            .height = parsed.height,
+            .focused = parsed.focused,
+        });
+    }
+
     return .{ .items = try out.toOwnedSlice(allocator) };
 }
 
@@ -478,6 +538,13 @@ const ParsedWorkspace = struct {
     window_count: u32,
 };
 
+const ParsedMonitor = struct {
+    name: []const u8,
+    width: i32,
+    height: i32,
+    focused: bool,
+};
+
 fn parseWorkspaceObject(value: std.json.Value) ?ParsedWorkspace {
     if (value != .object) return null;
     const obj = value.object;
@@ -519,6 +586,49 @@ fn parseWorkspaceObject(value: std.json.Value) ?ParsedWorkspace {
         .name = name,
         .monitor_name = monitor_name,
         .window_count = window_count,
+    };
+}
+
+fn parseMonitorObject(value: std.json.Value) ?ParsedMonitor {
+    if (value != .object) return null;
+    const obj = value.object;
+
+    const name = if (obj.get("name")) |v|
+        switch (v) {
+            .string => |s| s,
+            else => "",
+        }
+    else
+        "";
+    if (name.len == 0) return null;
+
+    const width: i32 = blk: {
+        const val = obj.get("width") orelse break :blk 0;
+        break :blk switch (val) {
+            .integer => |v| std.math.cast(i32, v) orelse 0,
+            else => 0,
+        };
+    };
+    const height: i32 = blk: {
+        const val = obj.get("height") orelse break :blk 0;
+        break :blk switch (val) {
+            .integer => |v| std.math.cast(i32, v) orelse 0,
+            else => 0,
+        };
+    };
+    const focused = if (obj.get("focused")) |v|
+        switch (v) {
+            .bool => |b| b,
+            else => false,
+        }
+    else
+        false;
+
+    return .{
+        .name = name,
+        .width = width,
+        .height = height,
+        .focused = focused,
     };
 }
 
@@ -624,6 +734,24 @@ test "annotateWorkspaceWindowTitlePreviews groups client titles by workspace" {
 
     try std.testing.expectEqualStrings("Terminal, Editor, Docs (+1)", snapshot.items[0].window_titles_preview.?);
     try std.testing.expectEqualStrings("Browser", snapshot.items[1].window_titles_preview.?);
+}
+
+test "parseOutputsJson extracts focused monitor" {
+    const json =
+        \\[
+        \\  {"name":"HDMI-A-1","width":3840,"height":2160,"focused":false},
+        \\  {"name":"DP-1","width":1920,"height":1080,"focused":true}
+        \\]
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    var snapshot = try parseOutputsJson(std.testing.allocator, parsed.value);
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), snapshot.items.len);
+    try std.testing.expectEqualStrings("DP-1", snapshot.items[1].name);
+    try std.testing.expect(snapshot.items[1].focused);
 }
 
 test "parseEventKind maps hyprland socket2 events to wm event kinds" {

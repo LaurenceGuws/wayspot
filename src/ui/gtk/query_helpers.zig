@@ -10,7 +10,7 @@ pub fn searchDebounceMsForQuery(query_trimmed: []const u8) c.guint {
         if (term_len == 0) return 220;
         return 800;
     }
-    if (query_len >= 1 and (query_trimmed[0] == '%' or query_trimmed[0] == '&' or query_trimmed[0] == '+' or query_trimmed[0] == '^' or query_trimmed[0] == '*' or query_trimmed[0] == ':')) {
+    if (query_len >= 1 and (query_trimmed[0] == ',' or query_trimmed[0] == '%' or query_trimmed[0] == '&' or query_trimmed[0] == '+' or query_trimmed[0] == '^' or query_trimmed[0] == '*' or query_trimmed[0] == ':')) {
         const term_len = if (query_len > 1) std.mem.trim(u8, query_trimmed[1..], " \t\r\n").len else 0;
         if (term_len <= 1) return 300;
         if (term_len <= 3) return 220;
@@ -28,6 +28,7 @@ pub fn routeIconForLeadingPrefix(query: []const u8) ?[]const u8 {
         '#' => "window-new-symbolic",
         '!' => "view-grid-symbolic",
         '~' => "folder-symbolic",
+        ',' => "preferences-desktop-wallpaper-symbolic",
         '%' => "text-x-generic-symbolic",
         '&' => "edit-find-symbolic",
         '+' => "system-software-install-symbolic",
@@ -47,7 +48,7 @@ pub fn shouldAsyncRouteQuery(query_trimmed: []const u8) bool {
     if (query_trimmed.len < 2) return false;
     const route = query_trimmed[0];
     return switch (route) {
-        '%', '&', '+', '^', '*', ':', '$', '=', '?' => std.mem.trim(u8, query_trimmed[1..], " \t\r\n").len > 0,
+        ',', '%', '&', '+', '^', '*', ':', '$', '=', '?' => std.mem.trim(u8, query_trimmed[1..], " \t\r\n").len > 0,
         else => false,
     };
 }
@@ -59,6 +60,7 @@ pub fn routeHintForQuery(query_trimmed: []const u8) ?[]const u8 {
         '#' => "Windows route active: type window title/class after #",
         '!' => "Workspaces route active: type workspace name/id after !",
         '~' => "Recent dirs route active: zoxide terminal locations after ~",
+        ',' => "Theme route active: list themes after , and use / for theme subcommands",
         '%' => "Files route active: find files and folders after %",
         '&' => "Grep route active: type text to search after &",
         '+' => "Packages route active: search yay/pacman packages after +",
@@ -78,7 +80,7 @@ pub fn highlightTokenForQuery(query_trimmed: []const u8) []const u8 {
     if (token.len == 0) return "";
     if (token.len > 1) {
         token = switch (token[0]) {
-            '@', '#', '!', '~', '%', '&', '+', '^', '*', ':', '$', '>', '=', '?' => std.mem.trim(u8, token[1..], " \t\r\n"),
+            '@', '#', '!', '~', ',', '%', '&', '+', '^', '*', ':', '$', '>', '=', '?' => std.mem.trim(u8, token[1..], " \t\r\n"),
             else => token,
         };
     }
@@ -144,6 +146,7 @@ test "highlightedMarkup escapes without highlighting when token missing" {
 
 test "route query prefixes with heavy backends should be async" {
     try std.testing.expect(shouldAsyncRouteQuery("% files"));
+    try std.testing.expect(shouldAsyncRouteQuery(", ayu"));
     try std.testing.expect(shouldAsyncRouteQuery("& needle"));
     try std.testing.expect(shouldAsyncRouteQuery("+ ripgrep"));
     try std.testing.expect(shouldAsyncRouteQuery("^ arch"));
@@ -156,6 +159,7 @@ test "route query prefixes with heavy backends should be async" {
 
 test "route query prefixes without term should stay sync for hint rendering" {
     try std.testing.expect(!shouldAsyncRouteQuery("%"));
+    try std.testing.expect(!shouldAsyncRouteQuery(","));
     try std.testing.expect(!shouldAsyncRouteQuery("$"));
     try std.testing.expect(shouldAsyncRouteQuery("*"));
     try std.testing.expect(shouldAsyncRouteQuery(":"));

@@ -29,8 +29,8 @@ pub fn rankCandidatesWithHistory(
 
     for (candidates) |candidate| {
         if (!matchesRoute(query.route, candidate.kind)) continue;
-        const score = try candidateScore(allocator, needle, candidate, recent_actions);
-        if (score <= 0 and needle.len > 0) continue;
+        const score = try candidateScore(allocator, query.route, needle, candidate, recent_actions);
+        if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
     }
 
@@ -65,6 +65,7 @@ fn matchesRoute(route: query_mod.Route, kind: types.CandidateKind) bool {
         .windows => kind == .window,
         .workspaces => kind == .workspace,
         .dirs => kind == .dir,
+        .theme => kind == .action,
         .files => kind == .file or kind == .dir,
         .grep => kind == .grep,
         .packages => kind == .action or kind == .hint,
@@ -78,11 +79,13 @@ fn matchesRoute(route: query_mod.Route, kind: types.CandidateKind) bool {
 
 fn candidateScore(
     allocator: std.mem.Allocator,
+    route: query_mod.Route,
     needle: []const u8,
     candidate: types.Candidate,
     recent_actions: []const []const u8,
 ) !i32 {
-    var score: i32 = baseWeight(candidate.kind);
+    if (route == .theme and !std.mem.startsWith(u8, candidate.action, "theme-apply:")) return 0;
+    var score: i32 = baseWeight(route, candidate.kind);
     if (needle.len == 0) {
         score += recencyBoost(candidate.action, recent_actions);
         return score;
@@ -142,7 +145,13 @@ fn recencyBoost(action: []const u8, recent_actions: []const []const u8) i32 {
     return 0;
 }
 
-fn baseWeight(kind: types.CandidateKind) i32 {
+fn baseWeight(route: query_mod.Route, kind: types.CandidateKind) i32 {
+    if (route == .theme) {
+        return switch (kind) {
+            .action => 110,
+            else => 0,
+        };
+    }
     return switch (kind) {
         .app => 100,
         .window => 90,
@@ -217,6 +226,20 @@ test "files route includes file and directory candidates" {
     try std.testing.expectEqual(@as(usize, 2), ranked.len);
     try std.testing.expectEqual(types.CandidateKind.dir, ranked[0].candidate.kind);
     try std.testing.expectEqual(types.CandidateKind.file, ranked[1].candidate.kind);
+}
+
+test "theme route prefers action entries over wallpaper files" {
+    const candidates = [_]types.Candidate{
+        .init(.file, "wallpaper.png", "Wallpaper file in ayu", "/tmp/wallpaper.png"),
+        .init(.action, "Set Wallpaper: wallpaper.png", "ayu (wallpaper.png)", "cmd:set"),
+    };
+
+    const query = query_mod.parse(", ");
+    const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
+    defer std.testing.allocator.free(ranked);
+
+    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
 }
 
 test "recency history boosts repeated action candidates" {

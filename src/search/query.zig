@@ -6,6 +6,7 @@ pub const Route = enum {
     windows,
     workspaces,
     dirs,
+    theme,
     files,
     grep,
     packages,
@@ -41,6 +42,7 @@ pub fn parse(raw_query: []const u8) Query {
         '#' => .{ .raw = raw, .route = .windows, .term = rest },
         '!' => .{ .raw = raw, .route = .workspaces, .term = rest },
         '~' => .{ .raw = raw, .route = .dirs, .term = rest },
+        ',' => .{ .raw = raw, .route = .theme, .term = rest },
         '%' => .{ .raw = raw, .route = .files, .term = rest },
         '&' => .{ .raw = raw, .route = .grep, .term = rest },
         '+' => .{ .raw = raw, .route = .packages, .term = rest },
@@ -97,6 +99,12 @@ test "parse workspaces route correctly" {
     const q = parse("! 3");
     try std.testing.expectEqual(Route.workspaces, q.route);
     try std.testing.expectEqualStrings("3", q.term);
+}
+
+test "parse theme route correctly" {
+    const q = parse(", ayu");
+    try std.testing.expectEqual(Route.theme, q.route);
+    try std.testing.expectEqualStrings("ayu", q.term);
 }
 
 test "parse notifications route correctly" {

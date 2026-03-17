@@ -9,6 +9,14 @@ pub const wm = @import("wm/mod.zig");
 pub const ipc = @import("ipc/mod.zig");
 pub const notifications = @import("notifications/mod.zig");
 pub const shell = @import("shell/mod.zig");
+pub const tools = struct {
+    pub const theme_apply = @import("tools/theme_apply.zig");
+    pub const theme_registry = @import("tools/theme_registry.zig");
+    pub const theme_state = @import("tools/theme_state.zig");
+    pub const slideshow_control = @import("tools/slideshow_control.zig");
+    pub const wallpaper_sorter = @import("tools/wallpaper_sorter.zig");
+    pub const wallpaper_runtime = @import("tools/wallpaper_runtime.zig");
+};
 
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you

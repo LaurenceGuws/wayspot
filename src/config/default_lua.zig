@@ -40,6 +40,9 @@ pub fn ensureDefaultConfigAtPath(path: []const u8) !bool {
 
 pub const template =
     \\return {
+    \\  theme = {
+    \\    current = "ayu",
+    \\  },
     \\  surface_mode = "layer-shell", -- toplevel | layer-shell
     \\  placement = {
     \\    launcher = {

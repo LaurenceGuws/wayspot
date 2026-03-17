@@ -77,6 +77,42 @@ pub fn planCommand(allocator: std.mem.Allocator, kind: []const u8, action: []con
 pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action: []const u8) !CommandPlan {
     switch (kind) {
         .action => {
+            if (std.mem.startsWith(u8, action, "theme-apply:")) {
+                const theme = action["theme-apply:".len..];
+                if (theme.len == 0) {
+                    return .{
+                        .telemetry_kind = "theme",
+                        .error_message = "Theme apply failed: invalid theme",
+                        .unknown_action = true,
+                    };
+                }
+                const exe_path = try std.fs.selfExePathAlloc(allocator);
+                defer allocator.free(exe_path);
+                const exe_q = try shellSingleQuote(allocator, exe_path);
+                defer allocator.free(exe_q);
+                const theme_q = try shellSingleQuote(allocator, theme);
+                defer allocator.free(theme_q);
+                const cmd = try std.fmt.allocPrint(allocator, "{s} --apply-theme {s}", .{ exe_q, theme_q });
+                return .{
+                    .command = cmd,
+                    .owned_command = cmd,
+                    .telemetry_kind = "theme",
+                    .telemetry_ok_detail = theme,
+                    .error_message = "Theme apply failed",
+                    .close_on_success = true,
+                };
+            }
+            if (std.mem.startsWith(u8, action, "cmd:")) {
+                const cmd = action["cmd:".len..];
+                return .{
+                    .command = cmd,
+                    .telemetry_kind = "action",
+                    .telemetry_ok_detail = "literal-command",
+                    .error_message = "Action failed to launch",
+                    .close_on_success = true,
+                    .detach_command = true,
+                };
+            }
             if (std.mem.startsWith(u8, action, "pkg-install:") or
                 std.mem.startsWith(u8, action, "pkg-update:") or
                 std.mem.startsWith(u8, action, "pkg-remove:"))
@@ -326,6 +362,15 @@ fn shellSingleQuote(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     }
     try out.append(allocator, '\'');
     return out.toOwnedSlice(allocator);
+}
+
+test "theme apply action resolves to current wayspot binary command" {
+    var plan = try planCommandKind(std.testing.allocator, .action, "theme-apply:ayu");
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(plan.command != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "--apply-theme") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "ayu") != null);
 }
 
 fn buildClipboardCopyCommand(allocator: std.mem.Allocator, value_q: []const u8) ![]u8 {

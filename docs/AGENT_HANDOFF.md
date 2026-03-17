@@ -1,17 +1,23 @@
 # Agent Handoff
 
-## Current Work
-- UI preview remains generic: pager-first rendering, grep hit highlighting, directory view toggles.
-- Popup/info readability still needs polish.
-- Keep docs and todos concise and accurate.
+## Current Baseline
 
-## Done
-- Generic preview abstraction replaced structured preview fields.
-- Runtime config loading is always enabled.
-- Docs were reduced to workflow + design standards + todo tracking.
+- GTK daemon summon/hide/toggle flow is the primary launcher lifecycle.
+- Provider-driven search is the current launcher model.
+- Lua config is the active runtime state authority.
+- WM integration currently targets Hyprland through `src/wm/`.
+- Theme and wallpaper runtime paths now exist, but still need architectural cleanup.
+
+## Current Constraints
+
+- Keep changes aligned with `docs/architecture/APP_LAYERING.md`.
+- Keep shell/runtime behavior routed through app subsystems, not temporary shell glue.
+- Keep route/provider behavior deterministic and narrow.
+- Update the owning architecture doc when behavior changes materially.
 
 ## Next
-1. Pick one `in_progress` item from `workstreams/ui_todo.yaml` or `workstreams/control_plane_todo.yaml`.
-2. Land a narrow code slice.
-3. Update the matching todo item.
-4. Commit on user healthy feedback.
+
+1. Clean up theme/wallpaper integration against the documented subsystem boundaries.
+2. Remove remaining hacked-on behavior that bypasses config, action planning, or WM/runtime ownership.
+3. Keep workstream notes and architecture docs aligned as each cleanup slice lands.
+

@@ -34,6 +34,12 @@ pub fn render(ctx: *UiContext, allocator: std.mem.Allocator, hot_render_rows: us
     };
     defer allocator.free(dirs);
 
+    const theme = ctx.service.searchQuery(allocator, ", ") catch {
+        renderUnavailable(ctx);
+        return;
+    };
+    defer allocator.free(theme);
+
     var history: []const []const u8 = &.{};
     var history_owned = false;
     if (ctx.service.historySnapshotNewestFirstOwned(allocator)) |snapshot| {
@@ -46,6 +52,7 @@ pub fn render(ctx: *UiContext, allocator: std.mem.Allocator, hot_render_rows: us
     defer merged.deinit(allocator);
 
     appendScoredRows(&merged, allocator, apps, history);
+    appendScoredRows(&merged, allocator, theme, history);
 
     var zide_dirs_added: usize = 0;
     for (dirs) |row| {

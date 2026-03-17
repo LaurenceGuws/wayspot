@@ -1,10 +1,10 @@
 # Maintainer: Your Name <you@example.com>
 pkgname=wayspot-git
-pkgver=0.1.0.r0.g0000000
+pkgver=0.1.0.r500.gbb659a5
 pkgrel=1
 pkgdesc="Spotlight-style launcher UI for Hyprland"
 arch=('x86_64')
-url="https://example.local/wayspot"
+url="https://github.com/LaurenceGuws/wayspot"
 license=('MIT')
 depends=('glibc')
 makedepends=('zig' 'git')

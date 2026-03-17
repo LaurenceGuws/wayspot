@@ -263,7 +263,7 @@ fn appendHelpItem(box: *c.GtkWidget, key_text: []const u8, description_text: []c
 }
 
 fn appendHelpPrefixItem(box: *c.GtkWidget, key_text: []const u8, description_text: []const u8, ui_state: *HelpUiState) void {
-    const insert_text: ?[]const u8 = if (std.mem.eql(u8, key_text, "@")) "@ " else if (std.mem.eql(u8, key_text, "#")) "# " else if (std.mem.eql(u8, key_text, "!")) "! " else if (std.mem.eql(u8, key_text, "~")) "~ " else if (std.mem.eql(u8, key_text, "+")) "+ " else if (std.mem.eql(u8, key_text, "$")) "$ " else if (std.mem.eql(u8, key_text, ">")) "> " else if (std.mem.eql(u8, key_text, "=")) "= " else if (std.mem.eql(u8, key_text, "?")) "? " else null;
+    const insert_text: ?[]const u8 = if (std.mem.eql(u8, key_text, "@")) "@ " else if (std.mem.eql(u8, key_text, "#")) "# " else if (std.mem.eql(u8, key_text, "!")) "! " else if (std.mem.eql(u8, key_text, "~")) "~ " else if (std.mem.eql(u8, key_text, ",")) ", " else if (std.mem.eql(u8, key_text, "+")) "+ " else if (std.mem.eql(u8, key_text, "$")) "$ " else if (std.mem.eql(u8, key_text, ">")) "> " else if (std.mem.eql(u8, key_text, "=")) "= " else if (std.mem.eql(u8, key_text, "?")) "? " else null;
     appendHelpItemWithDetails(box, key_text, description_text, null, insert_text, ui_state);
 }
 
@@ -302,6 +302,7 @@ fn populateHelpMainMenu(ui_state: *HelpUiState) void {
     appendHelpItemWithDetails(ui_state.content, "%", "Files", &files_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "&", "Grep matches", &grep_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "+", "Packages", &packages_options, null, ui_state);
+    appendHelpPrefixItem(ui_state.content, ",", "Themes first, then use / subcommands like wallpapers or sort", ui_state);
     appendHelpItemWithDetails(ui_state.content, "^", "Icons", &icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "*", "Nerd Icons", &nerd_icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, ":", "Emoji", &emoji_options, null, ui_state);
