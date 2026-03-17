@@ -53,27 +53,57 @@ pub const ThemeProvider = struct {
         out: *search.CandidateList,
         current_theme_owned: ?[]u8,
     ) !void {
-        inline for (theme_catalog.supported_themes) |theme_name| {
+        const available = try theme_catalog.discoverAvailableThemes(allocator);
+        defer {
+            for (available) |item| allocator.free(item);
+            allocator.free(available);
+        }
+
+        for (available) |theme_name| {
             const title = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "{s}", .{theme_name}));
             const subtitle = if (current_theme_owned != null and std.mem.eql(u8, current_theme_owned.?, theme_name))
                 "Current theme"
             else
                 "Enter applies";
-            const cmd = try self.buildSetThemeCommand(allocator, theme_name);
-            const kept_cmd = try self.keepOwnedString(allocator, cmd);
+            const apply_action = try self.buildThemeAction(allocator, "theme-apply", theme_name);
+            const kept_apply_action = try self.keepOwnedString(allocator, apply_action);
             try out.append(allocator, search.Candidate.initWithIcon(
                 .action,
                 title,
                 subtitle,
-                kept_cmd,
+                kept_apply_action,
                 "preferences-desktop-theme-symbolic",
+            ));
+
+            const wallpapers_title = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "{s} / wallpapers", .{theme_name}));
+            const wallpapers_subtitle = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "Open wallpapers for {s}", .{theme_name}));
+            const wallpapers_action = try self.buildThemeAction(allocator, "theme-open-dir", theme_name);
+            const kept_wallpapers_action = try self.keepOwnedString(allocator, wallpapers_action);
+            try out.append(allocator, search.Candidate.initWithIcon(
+                .action,
+                wallpapers_title,
+                wallpapers_subtitle,
+                kept_wallpapers_action,
+                "folder-pictures-symbolic",
+            ));
+
+            const slideshow_title = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "{s} / slideshow", .{theme_name}));
+            const slideshow_subtitle = try self.keepOwnedString(allocator, try std.fmt.allocPrint(allocator, "Apply {s}, then toggle slideshow", .{theme_name}));
+            const slideshow_action = try self.buildThemeAction(allocator, "theme-slideshow-toggle", theme_name);
+            const kept_slideshow_action = try self.keepOwnedString(allocator, slideshow_action);
+            try out.append(allocator, search.Candidate.initWithIcon(
+                .action,
+                slideshow_title,
+                slideshow_subtitle,
+                kept_slideshow_action,
+                "preferences-desktop-wallpaper-symbolic",
             ));
         }
     }
 
-    fn buildSetThemeCommand(self: *ThemeProvider, allocator: std.mem.Allocator, theme_name: []const u8) ![]u8 {
+    fn buildThemeAction(self: *ThemeProvider, allocator: std.mem.Allocator, namespace: []const u8, theme_name: []const u8) ![]u8 {
         _ = self;
-        return std.fmt.allocPrint(allocator, "theme-apply:{s}", .{theme_name});
+        return std.fmt.allocPrint(allocator, "{s}:{s}", .{ namespace, theme_name });
     }
 
     fn keepOwnedString(self: *ThemeProvider, allocator: std.mem.Allocator, value: []u8) ![]const u8 {

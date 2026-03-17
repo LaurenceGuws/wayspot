@@ -30,6 +30,7 @@ pub const State = struct {
     }
 
     pub fn toggle(self: *State) !bool {
+        self.reconcile();
         if (self.isRunning()) {
             try self.stop();
             return false;
@@ -39,10 +40,12 @@ pub const State = struct {
     }
 
     pub fn isRunning(self: *State) bool {
+        self.reconcile();
         return self.child != null;
     }
 
     pub fn start(self: *State) !void {
+        self.reconcile();
         if (self.child != null) return;
 
         var child = std.process.Child.init(
@@ -57,11 +60,22 @@ pub const State = struct {
     }
 
     pub fn stop(self: *State) !void {
+        self.reconcile();
         if (self.child == null) return;
 
         var child = self.child.?;
         _ = child.kill() catch {};
         _ = child.wait() catch {};
+        self.child = null;
+    }
+
+    fn reconcile(self: *State) void {
+        if (self.child == null) return;
+
+        const pid = self.child.?.id;
+        const result = std.posix.waitpid(pid, std.posix.W.NOHANG);
+        if (result.pid == 0) return;
+
         self.child = null;
     }
 };
@@ -79,7 +93,41 @@ pub fn toggleViaDaemon(allocator: std.mem.Allocator) !?bool {
         allocator.free(response.message);
     }
     if (!response.ok or !std.mem.eql(u8, response.code, "ok")) return error.ToggleRejected;
-    if (std.mem.eql(u8, response.message, "started")) return true;
-    if (std.mem.eql(u8, response.message, "stopped")) return false;
+    if (std.mem.eql(u8, response.message, "started")) {
+        showStatusNotification(allocator, true);
+        return true;
+    }
+    if (std.mem.eql(u8, response.message, "stopped")) {
+        showStatusNotification(allocator, false);
+        return false;
+    }
     return error.BadResponse;
+}
+
+pub fn startViaDaemon(allocator: std.mem.Allocator) !?void {
+    const response = ipc_control.executeCommand(allocator, .slideshow_start) catch |err| switch (err) {
+        error.FileNotFound,
+        error.ConnectTimeout,
+        error.ConnectionRefused,
+        error.NoSocketSupport => return null,
+        else => return err,
+    };
+    defer {
+        allocator.free(response.code);
+        allocator.free(response.message);
+    }
+    if (!response.ok or !std.mem.eql(u8, response.code, "ok")) return error.StartRejected;
+    showStatusNotification(allocator, true);
+}
+
+fn showStatusNotification(allocator: std.mem.Allocator, started: bool) void {
+    const title = "Wallpaper slideshow";
+    const body = if (started) "Started" else "Stopped";
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "notify-send", "-u", "low", "-t", "1200", title, body },
+        .max_output_bytes = 0,
+    }) catch return;
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
 }

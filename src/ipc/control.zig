@@ -6,6 +6,7 @@ pub const Command = enum {
     summon,
     hide,
     toggle,
+    slideshow_start,
     slideshow_toggle,
     slideshow_status,
     version,

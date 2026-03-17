@@ -16,6 +16,7 @@ cd "$ROOT_DIR"
 : "${RERUN_BUILD_FLAGS:=-Doptimize=ReleaseFast}"
 : "${RERUN_DAEMON_ARGS:=--ui-daemon}"
 : "${RERUN_BIN:=./zig-out/bin/wayspot}"
+: "${RERUN_INSTALL_BIN:=$HOME/.local/bin/wayspot}"
 : "${RERUN_LOG:=$HOME/.local/state/wayspot/daemon.log}"
 : "${RERUN_KILL_TARGET:=true}"
 
@@ -30,6 +31,13 @@ mkdir -p "$(dirname "$RERUN_LOG")"
 echo "[re-run] building: zig build ${build_flags[*]}"
 zig build "${build_flags[@]}"
 
+if [[ -n "$RERUN_INSTALL_BIN" ]]; then
+    echo "[re-run] syncing binary: $RERUN_BIN -> $RERUN_INSTALL_BIN"
+    mkdir -p "$(dirname "$RERUN_INSTALL_BIN")"
+    cp "$RERUN_BIN" "$RERUN_INSTALL_BIN"
+    chmod +x "$RERUN_INSTALL_BIN"
+fi
+
 if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
     echo "[re-run] stopping existing daemon variants (--ui-daemon)"
     mapfile -t matched_pids < <(
@@ -41,6 +49,19 @@ if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
         echo "[re-run] killing: ${matched_pids[*]}"
     fi
     for pid in "${matched_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+
+    echo "[re-run] stopping existing slideshow variants (--wallpaper-slideshow)"
+    mapfile -t slideshow_pids < <(
+        pgrep -a -f 'wayspot.*(--wallpaper-slideshow)' | awk '{print $1}' || true
+    )
+    if ((${#slideshow_pids[@]} == 0)); then
+        echo "[re-run] no existing slideshow found"
+    else
+        echo "[re-run] killing slideshow: ${slideshow_pids[*]}"
+    fi
+    for pid in "${slideshow_pids[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
 else

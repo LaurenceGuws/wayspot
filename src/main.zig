@@ -46,6 +46,11 @@ pub fn main() !void {
         return;
     }
 
+    if (hasArg(args, "--list-available-themes")) {
+        try wayspot.tools.theme_catalog.printAvailableThemes(allocator);
+        return;
+    }
+
     if (hasArg(args, "--set-theme")) {
         const theme_name = argValueAfterFlag(args, "--set-theme") orelse std.process.exit(2);
         try wayspot.tools.theme_apply.applyTheme(allocator, theme_name);
@@ -61,6 +66,29 @@ pub fn main() !void {
     if (hasArg(args, "--toggle-wallpaper-slideshow")) {
         const toggled = try wayspot.tools.slideshow_control.toggleViaDaemon(allocator);
         if (toggled == null) std.process.exit(10);
+        return;
+    }
+
+    if (hasArg(args, "--start-wallpaper-slideshow")) {
+        const started = try wayspot.tools.slideshow_control.startViaDaemon(allocator);
+        if (started == null) std.process.exit(10);
+        return;
+    }
+
+    if (hasArg(args, "--next-wallpaper")) {
+        const home = std.posix.getenv("HOME") orelse ".";
+        const default_wallpapers = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
+        defer allocator.free(default_wallpapers);
+        const default_config = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
+        defer allocator.free(default_config);
+
+        var hypr_backend = wayspot.wm.HyprlandBackend{};
+        try wayspot.tools.wallpaper_runtime.applyRandomWallpapers(
+            allocator,
+            &hypr_backend,
+            argValueAfterFlag(args, "--config") orelse default_config,
+            argValueAfterFlag(args, "--source") orelse default_wallpapers,
+        );
         return;
     }
 
@@ -275,7 +303,7 @@ fn printCtlUsage() !void {
     const out = &stdout_writer.interface;
     try out.print(
         \\Usage: wayspot --ctl <command>
-        \\Commands: ping, summon, hide, toggle, slideshow_toggle, slideshow_status, version, shell_health, wm_event_stats
+        \\Commands: ping, summon, hide, toggle, slideshow_start, slideshow_toggle, slideshow_status, version, shell_health, wm_event_stats
         \\
     , .{});
     try out.flush();
@@ -538,6 +566,7 @@ fn parseControlCommand(value: []const u8) ?wayspot.ipc.control.Command {
     if (std.mem.eql(u8, value, "summon")) return .summon;
     if (std.mem.eql(u8, value, "hide")) return .hide;
     if (std.mem.eql(u8, value, "toggle")) return .toggle;
+    if (std.mem.eql(u8, value, "slideshow_start")) return .slideshow_start;
     if (std.mem.eql(u8, value, "slideshow_toggle")) return .slideshow_toggle;
     if (std.mem.eql(u8, value, "slideshow_status")) return .slideshow_status;
     if (std.mem.eql(u8, value, "version")) return .version;

@@ -28,17 +28,26 @@ instead of a generic action hack.
 The provider:
 
 - reads current theme from Lua-backed theme state
-- emits only supported, switchable themes
+- discovers switchable themes at runtime from live wallpaper and theme assets
 - emits namespaced `theme-apply:<theme>` actions
 - does not expose generic fallback actions in the theme route
 
 Theme authority rule:
 
-- persisted theme state and applyable theme state use the same supported-theme
-  catalog
+- persisted theme state and applyable theme state use the same canonical alias
+  map and runtime capability checks
 - selecting a theme from the provider is an apply operation, not a
   persist-without-apply operation
 - `--set-theme` is only a compatibility alias for `--apply-theme`
+
+Correctness guard:
+
+- a theme is only listed if it has a wallpaper directory with at least one image
+- it must also have a live Waybar theme file in `~/.config/waybar/themes`
+- and a live Hypr theme file in `~/.config/hypr/modules`
+
+This keeps provider refresh meaningful: syncing new live assets and refreshing
+providers is enough to expose a new theme without restarting into a new binary.
 
 Theme application is expected to target runtime-owned state and live runtime
 files, not a separate dotfiles repo checkout.

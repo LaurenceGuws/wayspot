@@ -84,7 +84,7 @@ fn candidateScore(
     candidate: types.Candidate,
     recent_actions: []const []const u8,
 ) !i32 {
-    if (route == .theme and !std.mem.startsWith(u8, candidate.action, "theme-apply:")) return 0;
+    if (route == .theme and !isThemeAction(candidate.action, needle)) return 0;
     var score: i32 = baseWeight(route, candidate.kind);
     if (needle.len == 0) {
         score += recencyBoost(candidate.action, recent_actions);
@@ -109,6 +109,14 @@ fn candidateScore(
     score += shortQueryBias(needle.len, candidate.kind);
     score += recencyBoost(candidate.action, recent_actions);
     return score;
+}
+
+fn isThemeAction(action: []const u8, needle: []const u8) bool {
+    if (std.mem.startsWith(u8, action, "theme-apply:")) return true;
+    if (needle.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, needle, '/') == null) return false;
+    return std.mem.startsWith(u8, action, "theme-open-dir:") or
+        std.mem.startsWith(u8, action, "theme-slideshow-toggle:");
 }
 
 fn lowerAsciiLossyAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

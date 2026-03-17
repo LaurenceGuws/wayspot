@@ -106,6 +106,54 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
                     .close_on_success = true,
                 };
             }
+            if (std.mem.startsWith(u8, action, "theme-open-dir:")) {
+                const theme = action["theme-open-dir:".len..];
+                const home = try std.process.getEnvVarOwned(allocator, "HOME");
+                defer allocator.free(home);
+                const theme_dir = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers", theme });
+                defer allocator.free(theme_dir);
+                const dir_q = try shellSingleQuote(allocator, theme_dir);
+                defer allocator.free(dir_q);
+                const cmd = try std.fmt.allocPrint(allocator, "xdg-open {s}", .{dir_q});
+                return .{
+                    .command = cmd,
+                    .owned_command = cmd,
+                    .telemetry_kind = "theme",
+                    .telemetry_ok_detail = theme,
+                    .error_message = "Theme wallpapers failed to open",
+                    .close_on_success = true,
+                    .detach_command = true,
+                };
+            }
+            if (std.mem.startsWith(u8, action, "theme-slideshow-toggle:")) {
+                const theme = action["theme-slideshow-toggle:".len..];
+                if (theme.len == 0) {
+                    return .{
+                        .telemetry_kind = "theme",
+                        .error_message = "Theme slideshow failed: invalid theme",
+                        .unknown_action = true,
+                    };
+                }
+                const exe_path = try std.fs.selfExePathAlloc(allocator);
+                defer allocator.free(exe_path);
+                const exe_q = try shellSingleQuote(allocator, exe_path);
+                defer allocator.free(exe_q);
+                const theme_q = try shellSingleQuote(allocator, theme);
+                defer allocator.free(theme_q);
+                const cmd = try std.fmt.allocPrint(
+                    allocator,
+                    "sh -lc '{s} --apply-theme {s} && {s} --toggle-wallpaper-slideshow'",
+                    .{ exe_q, theme_q, exe_q },
+                );
+                return .{
+                    .command = cmd,
+                    .owned_command = cmd,
+                    .telemetry_kind = "theme",
+                    .telemetry_ok_detail = theme,
+                    .error_message = "Theme slideshow toggle failed",
+                    .close_on_success = true,
+                };
+            }
             if (std.mem.startsWith(u8, action, "pkg-install:") or
                 std.mem.startsWith(u8, action, "pkg-update:") or
                 std.mem.startsWith(u8, action, "pkg-remove:"))
@@ -367,6 +415,15 @@ test "theme apply action resolves to current wayspot binary command" {
     try std.testing.expect(plan.command != null);
     try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "--apply-theme") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "ayu") != null);
+}
+
+test "theme wallpaper dir action resolves to xdg-open" {
+    var plan = try planCommandKind(std.testing.allocator, .action, "theme-open-dir:ayu");
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(plan.command != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "xdg-open") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.command.?, "/Pictures/wallpapers/ayu") != null);
 }
 
 test "literal cmd action escape hatch is rejected" {

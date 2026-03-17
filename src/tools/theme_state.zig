@@ -6,7 +6,8 @@ pub fn getCurrentTheme(allocator: std.mem.Allocator) !?[]u8 {
     var settings = config.load(allocator);
     defer settings.deinit(allocator);
     if (settings.theme.current.len == 0) return null;
-    return try allocator.dupe(u8, settings.theme.current);
+    const canonical = theme_catalog.canonicalThemeName(settings.theme.current) orelse settings.theme.current;
+    return try allocator.dupe(u8, canonical);
 }
 
 pub fn setCurrentTheme(allocator: std.mem.Allocator, theme: []const u8) !void {

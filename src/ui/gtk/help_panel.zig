@@ -70,6 +70,13 @@ const emoji_options = [_][]const u8{
     "Source file: /usr/share/i18n/locales/translit_emojis",
 };
 
+const theme_options = [_][]const u8{
+    "Theme route: , <theme>",
+    "Enter on a theme applies it immediately.",
+    "Subcommands: , ayu/ wallpapers or , ayu/ slideshow",
+    "Wallpaper subcommand opens ~/Pictures/wallpapers/<theme>.",
+};
+
 pub fn build(entry: *c.GtkWidget) ?struct {
     button: *c.GtkWidget,
     panel_row: *c.GtkWidget,
@@ -302,7 +309,7 @@ fn populateHelpMainMenu(ui_state: *HelpUiState) void {
     appendHelpItemWithDetails(ui_state.content, "%", "Files", &files_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "&", "Grep matches", &grep_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "+", "Packages", &packages_options, null, ui_state);
-    appendHelpPrefixItem(ui_state.content, ",", "Themes", ui_state);
+    appendHelpItemWithDetails(ui_state.content, ",", "Themes", &theme_options, ", ", ui_state);
     appendHelpItemWithDetails(ui_state.content, "^", "Icons", &icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, "*", "Nerd Icons", &nerd_icons_options, null, ui_state);
     appendHelpItemWithDetails(ui_state.content, ":", "Emoji", &emoji_options, null, ui_state);

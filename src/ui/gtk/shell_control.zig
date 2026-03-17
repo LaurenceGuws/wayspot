@@ -67,6 +67,12 @@ const ControlInvokePayload = struct {
 fn onControlCommand(command: ipc_control.Command, user_data: *anyopaque) ipc_control.HandlerResult {
     const control_ctx: *ControlContext = @ptrCast(@alignCast(user_data));
     switch (command) {
+        .slideshow_start => {
+            control_ctx.slideshow_state.start() catch {
+                return .{ .ok = false, .code = "rejected", .message = "Failed to start slideshow" };
+            };
+            return .{ .ok = true, .code = "ok", .message = "started" };
+        },
         .slideshow_toggle => {
             const started = control_ctx.slideshow_state.toggle() catch {
                 return .{ .ok = false, .code = "rejected", .message = "Failed to toggle slideshow" };
