@@ -140,6 +140,12 @@ Use these as the real entrypoints:
 - [Architecture: Control Plane](docs/architecture/WA1_CONTROL_PLANE_SPEC.md)
 - [Architecture: Engineering](docs/architecture/ENGINEERING.md)
 
+Local docs explorer:
+
+```bash
+./scripts/open_docs_browser.sh
+```
+
 ## Dev Loop
 
 ```bash

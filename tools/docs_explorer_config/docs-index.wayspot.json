@@ -1,0 +1,16 @@
+[
+  "README.md",
+  "docs/AGENT_HANDOFF.md",
+  "docs/INDEX.md",
+  "docs/WORKFLOW.md",
+  "docs/architecture/APP_LAYERING.md",
+  "docs/architecture/APP_SHELL_SPLIT.md",
+  "docs/architecture/BOOTSTRAP.md",
+  "docs/architecture/CONFIG.md",
+  "docs/architecture/DAEMON_ARCHITECTURE.md",
+  "docs/architecture/DE_SHELL_VISION.md",
+  "docs/architecture/ENGINEERING.md",
+  "docs/architecture/PROVIDERS_AND_ROUTES.md",
+  "docs/architecture/UI_ARCHITECTURE.md",
+  "workstreams/code_review_todo.yaml"
+]
