@@ -18,19 +18,19 @@ Zig runtime paths rather than scattered shell scripts.
 ## How
 
 - theme state:
-  [src/tools/theme_state.zig](/home/home/personal/wayspot/src/tools/theme_state.zig)
+  [src/tools/theme_state.zig](../../src/tools/theme_state.zig)
 - supported theme catalog:
-  [src/tools/theme_catalog.zig](/home/home/personal/wayspot/src/tools/theme_catalog.zig)
+  [src/tools/theme_catalog.zig](../../src/tools/theme_catalog.zig)
 - theme apply:
-  [src/tools/theme_apply.zig](/home/home/personal/wayspot/src/tools/theme_apply.zig)
+  [src/tools/theme_apply.zig](../../src/tools/theme_apply.zig)
 - wallpaper runtime:
-  [src/tools/wallpaper_runtime.zig](/home/home/personal/wayspot/src/tools/wallpaper_runtime.zig)
+  [src/tools/wallpaper_runtime.zig](../../src/tools/wallpaper_runtime.zig)
 - slideshow control:
-  [src/tools/slideshow_control.zig](/home/home/personal/wayspot/src/tools/slideshow_control.zig)
+  [src/tools/slideshow_control.zig](../../src/tools/slideshow_control.zig)
 - wallpaper sorting:
-  [src/tools/wallpaper_sorter.zig](/home/home/personal/wayspot/src/tools/wallpaper_sorter.zig)
+  [src/tools/wallpaper_sorter.zig](../../src/tools/wallpaper_sorter.zig)
 - theme registry/families:
-  [src/tools/theme_registry.zig](/home/home/personal/wayspot/src/tools/theme_registry.zig)
+  [src/tools/theme_registry.zig](../../src/tools/theme_registry.zig)
 
 ## When
 
@@ -53,7 +53,7 @@ Current scope note:
 
 ## Where
 
-- [src/tools/](/home/home/personal/wayspot/src/tools)
+- [src/tools/](../../src/tools)
 
 ## Ownership Rule
 

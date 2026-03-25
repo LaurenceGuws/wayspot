@@ -19,15 +19,15 @@ ad hoc prints.
 ## How
 
 - logger:
-  [src/app/logger.zig](/home/home/personal/wayspot/src/app/logger.zig)
+  [src/app/logger.zig](../../src/app/logger.zig)
 - stopwatch/metrics:
-  [src/app/metrics.zig](/home/home/personal/wayspot/src/app/metrics.zig)
+  [src/app/metrics.zig](../../src/app/metrics.zig)
 - telemetry sink:
-  [src/app/telemetry.zig](/home/home/personal/wayspot/src/app/telemetry.zig)
+  [src/app/telemetry.zig](../../src/app/telemetry.zig)
 - provider health snapshot:
-  [src/providers/registry.zig](/home/home/personal/wayspot/src/providers/registry.zig)
+  [src/providers/registry.zig](../../src/providers/registry.zig)
 - shell health:
-  [src/shell/health.zig](/home/home/personal/wayspot/src/shell/health.zig)
+  [src/shell/health.zig](../../src/shell/health.zig)
 
 ## When
 
@@ -40,6 +40,6 @@ Use this subsystem when adding:
 
 ## Where
 
-- [src/app/](/home/home/personal/wayspot/src/app)
-- [src/providers/registry.zig](/home/home/personal/wayspot/src/providers/registry.zig)
-- [src/shell/health.zig](/home/home/personal/wayspot/src/shell/health.zig)
+- [src/app/](../../src/app)
+- [src/providers/registry.zig](../../src/providers/registry.zig)
+- [src/shell/health.zig](../../src/shell/health.zig)

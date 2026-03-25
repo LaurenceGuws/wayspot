@@ -18,9 +18,9 @@ requiring D-Bus or spawning fresh UI processes.
 ## How
 
 - implementation:
-  [src/ipc/control.zig](/home/home/personal/wayspot/src/ipc/control.zig)
+  [src/ipc/control.zig](../../src/ipc/control.zig)
 - protocol spec:
-  [WA1_CONTROL_PLANE_SPEC.md](/home/home/personal/wayspot/docs/architecture/WA1_CONTROL_PLANE_SPEC.md)
+  [WA1_CONTROL_PLANE_SPEC.md](../architecture/WA1_CONTROL_PLANE_SPEC.md)
 
 Current commands:
 
@@ -39,4 +39,4 @@ daemon.
 
 ## Where
 
-- [src/ipc/](/home/home/personal/wayspot/src/ipc)
+- [src/ipc/](../../src/ipc)

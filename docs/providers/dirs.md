@@ -17,9 +17,9 @@ tooling and health model.
 ## How
 
 - implementation:
-  [src/providers/dirs.zig](/home/home/personal/wayspot/src/providers/dirs.zig)
+  [src/providers/dirs.zig](../../src/providers/dirs.zig)
 - tool checks:
-  [src/providers/tool_check.zig](/home/home/personal/wayspot/src/providers/tool_check.zig)
+  [src/providers/tool_check.zig](../../src/providers/tool_check.zig)
 
 The provider tracks runtime failure and tool availability separately from other
 providers.
@@ -31,4 +31,4 @@ navigation flows.
 
 ## Where
 
-- [src/providers/dirs.zig](/home/home/personal/wayspot/src/providers/dirs.zig)
+- [src/providers/dirs.zig](../../src/providers/dirs.zig)

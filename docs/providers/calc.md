@@ -17,7 +17,7 @@ provider.
 ## How
 
 - implementation:
-  [src/providers/calc.zig](/home/home/personal/wayspot/src/providers/calc.zig)
+  [src/providers/calc.zig](../../src/providers/calc.zig)
 
 It currently supports:
 
@@ -32,4 +32,4 @@ Use this subsystem for route-scoped expression evaluation only.
 
 ## Where
 
-- [src/providers/calc.zig](/home/home/personal/wayspot/src/providers/calc.zig)
+- [src/providers/calc.zig](../../src/providers/calc.zig)

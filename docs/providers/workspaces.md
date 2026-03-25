@@ -17,9 +17,9 @@ abstraction pattern as windows.
 ## How
 
 - implementation:
-  [src/providers/workspaces.zig](/home/home/personal/wayspot/src/providers/workspaces.zig)
+  [src/providers/workspaces.zig](../../src/providers/workspaces.zig)
 - backend contract:
-  [src/wm/types.zig](/home/home/personal/wayspot/src/wm/types.zig)
+  [src/wm/types.zig](../../src/wm/types.zig)
 
 The provider maintains a snapshot, formats workspace subtitles with monitor and
 window preview data, and emits `.workspace` candidates.
@@ -31,4 +31,4 @@ presentation in the launcher.
 
 ## Where
 
-- [src/providers/workspaces.zig](/home/home/personal/wayspot/src/providers/workspaces.zig)
+- [src/providers/workspaces.zig](../../src/providers/workspaces.zig)

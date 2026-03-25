@@ -18,12 +18,12 @@ outside of the launcher widget tree.
 ## How
 
 - module exports:
-  [src/notifications/mod.zig](/home/home/personal/wayspot/src/notifications/mod.zig)
+  [src/notifications/mod.zig](../../src/notifications/mod.zig)
 - state/runtime/dbus files:
-  [src/notifications/](/home/home/personal/wayspot/src/notifications)
+  [src/notifications/](../../src/notifications)
 - GTK integration:
-  [src/ui/gtk/shell_notifications.zig](/home/home/personal/wayspot/src/ui/gtk/shell_notifications.zig),
-  [src/ui/gtk/shell_notifications_popup.zig](/home/home/personal/wayspot/src/ui/gtk/shell_notifications_popup.zig)
+  [src/ui/gtk/shell_notifications.zig](../../src/ui/gtk/shell_notifications.zig),
+  [src/ui/gtk/shell_notifications_popup.zig](../../src/ui/gtk/shell_notifications_popup.zig)
 
 ## When
 
@@ -32,4 +32,4 @@ should be changed here rather than being bolted into launcher search code.
 
 ## Where
 
-- [src/notifications/](/home/home/personal/wayspot/src/notifications)
+- [src/notifications/](../../src/notifications)

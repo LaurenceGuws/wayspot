@@ -18,15 +18,15 @@ logic.
 ## How
 
 - UI entrypoint:
-  [src/ui/mod.zig](/home/home/personal/wayspot/src/ui/mod.zig)
+  [src/ui/mod.zig](../../src/ui/mod.zig)
 - GTK shell composition:
-  [src/ui/gtk_shell.zig](/home/home/personal/wayspot/src/ui/gtk_shell.zig)
+  [src/ui/gtk_shell.zig](../../src/ui/gtk_shell.zig)
 - GTK implementation tree:
-  [src/ui/gtk/](/home/home/personal/wayspot/src/ui/gtk)
+  [src/ui/gtk/](../../src/ui/gtk)
 - placement:
-  [src/ui/placement/](/home/home/personal/wayspot/src/ui/placement)
+  [src/ui/placement/](../../src/ui/placement)
 - headless helpers:
-  [src/ui/headless/](/home/home/personal/wayspot/src/ui/headless)
+  [src/ui/headless/](../../src/ui/headless)
 
 ## When
 
@@ -35,4 +35,4 @@ placement adapters, and shell lifecycle from the surface point of view.
 
 ## Where
 
-- [src/ui/](/home/home/personal/wayspot/src/ui)
+- [src/ui/](../../src/ui)

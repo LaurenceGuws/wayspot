@@ -28,7 +28,7 @@ The UI layer exists to keep:
 
 ## How
 
-UI selection happens in [src/ui/mod.zig](/home/home/personal/wayspot/src/ui/mod.zig):
+UI selection happens in [src/ui/mod.zig](../../src/ui/mod.zig):
 
 - GTK shell when compiled with GTK
 - stub shell otherwise
@@ -36,26 +36,26 @@ UI selection happens in [src/ui/mod.zig](/home/home/personal/wayspot/src/ui/mod.
 The GTK implementation is organized as:
 
 - shell composition:
-  [src/ui/gtk_shell.zig](/home/home/personal/wayspot/src/ui/gtk_shell.zig)
+  [src/ui/gtk_shell.zig](../../src/ui/gtk_shell.zig)
 - bootstrap/layout:
-  [src/ui/gtk/bootstrap.zig](/home/home/personal/wayspot/src/ui/gtk/bootstrap.zig),
-  [src/ui/gtk/bootstrap_layout.zig](/home/home/personal/wayspot/src/ui/gtk/bootstrap_layout.zig)
+  [src/ui/gtk/bootstrap.zig](../../src/ui/gtk/bootstrap.zig),
+  [src/ui/gtk/bootstrap_layout.zig](../../src/ui/gtk/bootstrap_layout.zig)
 - controller/search orchestration:
-  [src/ui/gtk/controller.zig](/home/home/personal/wayspot/src/ui/gtk/controller.zig),
-  [src/ui/gtk/shell_controller.zig](/home/home/personal/wayspot/src/ui/gtk/shell_controller.zig),
-  [src/ui/gtk/async_search.zig](/home/home/personal/wayspot/src/ui/gtk/async_search.zig)
+  [src/ui/gtk/controller.zig](../../src/ui/gtk/controller.zig),
+  [src/ui/gtk/shell_controller.zig](../../src/ui/gtk/shell_controller.zig),
+  [src/ui/gtk/async_search.zig](../../src/ui/gtk/async_search.zig)
 - lifecycle/control glue:
-  [src/ui/gtk/shell_control.zig](/home/home/personal/wayspot/src/ui/gtk/shell_control.zig),
-  [src/ui/gtk/shell_lifecycle.zig](/home/home/personal/wayspot/src/ui/gtk/shell_lifecycle.zig),
-  [src/ui/gtk/shell_actions.zig](/home/home/personal/wayspot/src/ui/gtk/shell_actions.zig)
+  [src/ui/gtk/shell_control.zig](../../src/ui/gtk/shell_control.zig),
+  [src/ui/gtk/shell_lifecycle.zig](../../src/ui/gtk/shell_lifecycle.zig),
+  [src/ui/gtk/shell_actions.zig](../../src/ui/gtk/shell_actions.zig)
 - rendering helpers:
-  [src/ui/gtk/render.zig](/home/home/personal/wayspot/src/ui/gtk/render.zig),
-  [src/ui/gtk/results_flow.zig](/home/home/personal/wayspot/src/ui/gtk/results_flow.zig),
-  [src/ui/gtk/preview.zig](/home/home/personal/wayspot/src/ui/gtk/preview.zig)
+  [src/ui/gtk/render.zig](../../src/ui/gtk/render.zig),
+  [src/ui/gtk/results_flow.zig](../../src/ui/gtk/results_flow.zig),
+  [src/ui/gtk/preview.zig](../../src/ui/gtk/preview.zig)
 - route/query UX:
-  [src/ui/gtk/query_helpers.zig](/home/home/personal/wayspot/src/ui/gtk/query_helpers.zig),
-  [src/ui/gtk/default_loadout.zig](/home/home/personal/wayspot/src/ui/gtk/default_loadout.zig),
-  [src/ui/gtk/help_panel.zig](/home/home/personal/wayspot/src/ui/gtk/help_panel.zig)
+  [src/ui/gtk/query_helpers.zig](../../src/ui/gtk/query_helpers.zig),
+  [src/ui/gtk/default_loadout.zig](../../src/ui/gtk/default_loadout.zig),
+  [src/ui/gtk/help_panel.zig](../../src/ui/gtk/help_panel.zig)
 
 Default loadout rendering is a UI concern, but default loadout selection policy is
 owned by `SearchService`. GTK should render rows returned by runtime, not assemble
@@ -83,15 +83,15 @@ They should not own:
 Primary folders:
 
 - top-level UI abstraction:
-  [src/ui/](/home/home/personal/wayspot/src/ui)
+  [src/ui/](../../src/ui)
 - GTK implementation:
-  [src/ui/gtk/](/home/home/personal/wayspot/src/ui/gtk)
+  [src/ui/gtk/](../../src/ui/gtk)
 - placement:
-  [src/ui/placement/](/home/home/personal/wayspot/src/ui/placement)
+  [src/ui/placement/](../../src/ui/placement)
 - surface mode contracts:
-  [src/ui/surfaces/](/home/home/personal/wayspot/src/ui/surfaces)
+  [src/ui/surfaces/](../../src/ui/surfaces)
 - headless support:
-  [src/ui/headless/](/home/home/personal/wayspot/src/ui/headless)
+  [src/ui/headless/](../../src/ui/headless)
 
 ## Rules
 

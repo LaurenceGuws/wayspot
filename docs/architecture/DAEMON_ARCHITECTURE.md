@@ -37,7 +37,7 @@ startup cost each time. A resident process allows:
 ## How
 
 Runtime assembly currently happens in
-[src/main.zig](/home/home/personal/wayspot/src/main.zig):
+[src/main.zig](../../src/main.zig):
 
 1. parse CLI mode
 2. load Lua config and runtime tool overrides
@@ -50,20 +50,20 @@ Runtime assembly currently happens in
 The resident runtime currently owns:
 
 - providers:
-  [ActionsProvider](/home/home/personal/wayspot/src/providers/actions.zig),
-  [AppsProvider](/home/home/personal/wayspot/src/providers/apps.zig),
-  [WindowsProvider](/home/home/personal/wayspot/src/providers/windows.zig),
-  [WorkspacesProvider](/home/home/personal/wayspot/src/providers/workspaces.zig),
-  [DirsProvider](/home/home/personal/wayspot/src/providers/dirs.zig),
-  [ThemeProvider](/home/home/personal/wayspot/src/providers/theme.zig)
+  [ActionsProvider](../../src/providers/actions.zig),
+  [AppsProvider](../../src/providers/apps.zig),
+  [WindowsProvider](../../src/providers/windows.zig),
+  [WorkspacesProvider](../../src/providers/workspaces.zig),
+  [DirsProvider](../../src/providers/dirs.zig),
+  [ThemeProvider](../../src/providers/theme.zig)
 - search/runtime service:
-  [SearchService](/home/home/personal/wayspot/src/app/search_service.zig)
+  [SearchService](../../src/app/search_service.zig)
 - telemetry:
-  [telemetry.zig](/home/home/personal/wayspot/src/app/telemetry.zig)
+  [telemetry.zig](../../src/app/telemetry.zig)
 - module/event plumbing:
-  [src/shell/mod.zig](/home/home/personal/wayspot/src/shell/mod.zig)
+  [src/shell/mod.zig](../../src/shell/mod.zig)
 - control server:
-  [src/ipc/control.zig](/home/home/personal/wayspot/src/ipc/control.zig)
+  [src/ipc/control.zig](../../src/ipc/control.zig)
 
 ## When
 
@@ -89,16 +89,16 @@ It should not own:
 Key files:
 
 - runtime assembly:
-  [src/main.zig](/home/home/personal/wayspot/src/main.zig)
+  [src/main.zig](../../src/main.zig)
 - search/runtime core:
-  [src/app/search_service.zig](/home/home/personal/wayspot/src/app/search_service.zig)
+  [src/app/search_service.zig](../../src/app/search_service.zig)
 - control socket:
-  [src/ipc/control.zig](/home/home/personal/wayspot/src/ipc/control.zig)
+  [src/ipc/control.zig](../../src/ipc/control.zig)
 - shell registry and event bus:
-  [src/shell/registry.zig](/home/home/personal/wayspot/src/shell/registry.zig),
-  [src/shell/event_bus.zig](/home/home/personal/wayspot/src/shell/event_bus.zig)
+  [src/shell/registry.zig](../../src/shell/registry.zig),
+  [src/shell/event_bus.zig](../../src/shell/event_bus.zig)
 - GTK shell bootstrap:
-  [src/ui/gtk_shell.zig](/home/home/personal/wayspot/src/ui/gtk_shell.zig)
+  [src/ui/gtk_shell.zig](../../src/ui/gtk_shell.zig)
 
 ## Current Shape
 

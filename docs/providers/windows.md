@@ -17,11 +17,11 @@ health/capability awareness.
 ## How
 
 - implementation:
-  [src/providers/windows.zig](/home/home/personal/wayspot/src/providers/windows.zig)
+  [src/providers/windows.zig](../../src/providers/windows.zig)
 - backend contract:
-  [src/wm/types.zig](/home/home/personal/wayspot/src/wm/types.zig)
+  [src/wm/types.zig](../../src/wm/types.zig)
 - current backend:
-  [src/wm/hyprland.zig](/home/home/personal/wayspot/src/wm/hyprland.zig)
+  [src/wm/hyprland.zig](../../src/wm/hyprland.zig)
 
 The provider maintains a snapshot protected by a mutex and refreshes from the WM
 backend on demand.
@@ -33,4 +33,4 @@ adding backend-specific hacks here.
 
 ## Where
 
-- [src/providers/windows.zig](/home/home/personal/wayspot/src/providers/windows.zig)
+- [src/providers/windows.zig](../../src/providers/windows.zig)

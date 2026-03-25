@@ -17,15 +17,15 @@ files and keeps runtime settings explicit and inspectable.
 ## How
 
 - config model:
-  [src/config/mod.zig](/home/home/personal/wayspot/src/config/mod.zig)
+  [src/config/mod.zig](../../src/config/mod.zig)
 - Lua load/bootstrap:
-  [src/config/lua_config.zig](/home/home/personal/wayspot/src/config/lua_config.zig)
+  [src/config/lua_config.zig](../../src/config/lua_config.zig)
 - default config generation:
-  [src/config/default_lua.zig](/home/home/personal/wayspot/src/config/default_lua.zig)
+  [src/config/default_lua.zig](../../src/config/default_lua.zig)
 - runtime tool overrides:
-  [src/config/runtime_tools.zig](/home/home/personal/wayspot/src/config/runtime_tools.zig)
+  [src/config/runtime_tools.zig](../../src/config/runtime_tools.zig)
 - issue surfacing:
-  [src/config/issue_notice.zig](/home/home/personal/wayspot/src/config/issue_notice.zig)
+  [src/config/issue_notice.zig](../../src/config/issue_notice.zig)
 
 Current config fields include:
 
@@ -46,4 +46,4 @@ be user-editable.
 
 ## Where
 
-- [src/config/](/home/home/personal/wayspot/src/config)
+- [src/config/](../../src/config)

@@ -37,7 +37,7 @@ fresh process on every summon:
 
 ### App shell
 
-The app shell lives primarily in [src/main.zig](/home/home/personal/wayspot/src/main.zig).
+The app shell lives primarily in [src/main.zig](../../src/main.zig).
 It is responsible for:
 
 - parsing CLI mode
@@ -58,13 +58,13 @@ program:
 ### UI
 
 The UI is an implementation selected by build options in
-[src/ui/mod.zig](/home/home/personal/wayspot/src/ui/mod.zig):
+[src/ui/mod.zig](../../src/ui/mod.zig):
 
 - GTK shell when `enable_gtk=true`
 - stub shell for headless/test-oriented builds
 
 The GTK shell composes launcher, notifications, control server integration, and
-module startup in [src/ui/gtk_shell.zig](/home/home/personal/wayspot/src/ui/gtk_shell.zig).
+module startup in [src/ui/gtk_shell.zig](../../src/ui/gtk_shell.zig).
 
 ## When
 
@@ -78,12 +78,12 @@ Use this split when deciding where new functionality belongs:
 
 Primary ownership points:
 
-- app shell: [src/main.zig](/home/home/personal/wayspot/src/main.zig)
-- app state/bootstrap: [src/app/bootstrap.zig](/home/home/personal/wayspot/src/app/bootstrap.zig)
-- UI abstraction: [src/ui/mod.zig](/home/home/personal/wayspot/src/ui/mod.zig)
-- GTK runtime shell: [src/ui/gtk_shell.zig](/home/home/personal/wayspot/src/ui/gtk_shell.zig)
-- shell modules/event bus: [src/shell/mod.zig](/home/home/personal/wayspot/src/shell/mod.zig)
-- local control plane: [src/ipc/control.zig](/home/home/personal/wayspot/src/ipc/control.zig)
+- app shell: [src/main.zig](../../src/main.zig)
+- app state/bootstrap: [src/app/bootstrap.zig](../../src/app/bootstrap.zig)
+- UI abstraction: [src/ui/mod.zig](../../src/ui/mod.zig)
+- GTK runtime shell: [src/ui/gtk_shell.zig](../../src/ui/gtk_shell.zig)
+- shell modules/event bus: [src/shell/mod.zig](../../src/shell/mod.zig)
+- local control plane: [src/ipc/control.zig](../../src/ipc/control.zig)
 
 ## Rules
 

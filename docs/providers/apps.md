@@ -17,7 +17,7 @@ cache is stale or missing.
 ## How
 
 - implementation:
-  [src/providers/apps.zig](/home/home/personal/wayspot/src/providers/apps.zig)
+  [src/providers/apps.zig](../../src/providers/apps.zig)
 - cached source:
   `~/.cache/waybar/wofi-app-launcher.tsv`
 - fallback:
@@ -33,4 +33,4 @@ a generic file or package search provider.
 
 ## Where
 
-- [src/providers/apps.zig](/home/home/personal/wayspot/src/providers/apps.zig)
+- [src/providers/apps.zig](../../src/providers/apps.zig)

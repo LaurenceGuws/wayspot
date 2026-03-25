@@ -17,13 +17,13 @@ instead of hardcoding Hyprland shell scripts everywhere.
 ## How
 
 - backend contracts:
-  [src/wm/types.zig](/home/home/personal/wayspot/src/wm/types.zig)
+  [src/wm/types.zig](../../src/wm/types.zig)
 - adapter exports:
-  [src/wm/mod.zig](/home/home/personal/wayspot/src/wm/mod.zig)
+  [src/wm/mod.zig](../../src/wm/mod.zig)
 - Hyprland backend:
-  [src/wm/hyprland.zig](/home/home/personal/wayspot/src/wm/hyprland.zig)
+  [src/wm/hyprland.zig](../../src/wm/hyprland.zig)
 - event refresh stats:
-  [src/wm/event_stats.zig](/home/home/personal/wayspot/src/wm/event_stats.zig)
+  [src/wm/event_stats.zig](../../src/wm/event_stats.zig)
 
 Current consumers include:
 
@@ -49,4 +49,4 @@ Wallpaper note:
 
 ## Where
 
-- [src/wm/](/home/home/personal/wayspot/src/wm)
+- [src/wm/](../../src/wm)

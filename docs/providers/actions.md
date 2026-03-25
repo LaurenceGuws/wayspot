@@ -18,7 +18,7 @@ them into UI widgets.
 ## How
 
 - implementation:
-  [src/providers/actions.zig](/home/home/personal/wayspot/src/providers/actions.zig)
+  [src/providers/actions.zig](../../src/providers/actions.zig)
 - static action table:
   `action_specs`
 - dependency gating:
@@ -34,4 +34,4 @@ depend on query-time external data collection.
 
 ## Where
 
-- [src/providers/actions.zig](/home/home/personal/wayspot/src/providers/actions.zig)
+- [src/providers/actions.zig](../../src/providers/actions.zig)

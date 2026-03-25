@@ -17,12 +17,12 @@ not fit the normal static provider registry model.
 ## How
 
 - implementation:
-  [src/providers/web.zig](/home/home/personal/wayspot/src/providers/web.zig)
+  [src/providers/web.zig](../../src/providers/web.zig)
 - bookmark support:
-  [src/providers/web_bookmarks.zig](/home/home/personal/wayspot/src/providers/web_bookmarks.zig)
+  [src/providers/web_bookmarks.zig](../../src/providers/web_bookmarks.zig)
 - favicon/cache support:
-  [src/providers/web_favicons.zig](/home/home/personal/wayspot/src/providers/web_favicons.zig),
-  [src/providers/web_support.zig](/home/home/personal/wayspot/src/providers/web_support.zig)
+  [src/providers/web_favicons.zig](../../src/providers/web_favicons.zig),
+  [src/providers/web_support.zig](../../src/providers/web_support.zig)
 
 Current capabilities include:
 
@@ -38,4 +38,4 @@ blended provider.
 
 ## Where
 
-- [src/providers/web.zig](/home/home/personal/wayspot/src/providers/web.zig)
+- [src/providers/web.zig](../../src/providers/web.zig)

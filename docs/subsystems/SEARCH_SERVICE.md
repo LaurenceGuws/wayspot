@@ -19,11 +19,11 @@ assemble or filter heterogeneous data sources.
 ## How
 
 - main service:
-  [src/app/search_service.zig](/home/home/personal/wayspot/src/app/search_service.zig)
+  [src/app/search_service.zig](../../src/app/search_service.zig)
 - query engine pieces:
-  [src/app/search_service/](/home/home/personal/wayspot/src/app/search_service)
+  [src/app/search_service/](../../src/app/search_service)
 - search contracts:
-  [src/search/](/home/home/personal/wayspot/src/search)
+  [src/search/](../../src/search)
 
 Major responsibilities:
 
@@ -43,5 +43,5 @@ route dispatch, or default-loadout suggestion policy should land here or in
 
 ## Where
 
-- [src/app/search_service.zig](/home/home/personal/wayspot/src/app/search_service.zig)
-- [src/search/mod.zig](/home/home/personal/wayspot/src/search/mod.zig)
+- [src/app/search_service.zig](../../src/app/search_service.zig)
+- [src/search/mod.zig](../../src/search/mod.zig)

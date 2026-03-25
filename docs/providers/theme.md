@@ -17,13 +17,13 @@ instead of a generic action hack.
 ## How
 
 - implementation:
-  [src/providers/theme.zig](/home/home/personal/wayspot/src/providers/theme.zig)
+  [src/providers/theme.zig](../../src/providers/theme.zig)
 - state read:
-  [src/tools/theme_state.zig](/home/home/personal/wayspot/src/tools/theme_state.zig)
+  [src/tools/theme_state.zig](../../src/tools/theme_state.zig)
 - supported-theme authority:
-  [src/tools/theme_catalog.zig](/home/home/personal/wayspot/src/tools/theme_catalog.zig)
+  [src/tools/theme_catalog.zig](../../src/tools/theme_catalog.zig)
 - apply path:
-  [src/tools/theme_apply.zig](/home/home/personal/wayspot/src/tools/theme_apply.zig)
+  [src/tools/theme_apply.zig](../../src/tools/theme_apply.zig)
 
 The provider:
 
@@ -60,4 +60,4 @@ default search.
 
 ## Where
 
-- [src/providers/theme.zig](/home/home/personal/wayspot/src/providers/theme.zig)
+- [src/providers/theme.zig](../../src/providers/theme.zig)

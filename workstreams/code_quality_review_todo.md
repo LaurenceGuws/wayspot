@@ -38,12 +38,12 @@ Problem:
 - Theme persistence currently bypasses config parsing entirely.
 
 Files:
-- [src/config/mod.zig](/home/home/personal/wayspot/src/config/mod.zig)
-- [src/config/lua_config.zig](/home/home/personal/wayspot/src/config/lua_config.zig)
-- [src/config/default_lua.zig](/home/home/personal/wayspot/src/config/default_lua.zig)
-- [src/tools/theme_state.zig](/home/home/personal/wayspot/src/tools/theme_state.zig)
-- [docs/architecture/CONFIG.md](/home/home/personal/wayspot/docs/architecture/CONFIG.md)
-- [docs/subsystems/CONFIG_AND_LUA.md](/home/home/personal/wayspot/docs/subsystems/CONFIG_AND_LUA.md)
+- [src/config/mod.zig](../src/config/mod.zig)
+- [src/config/lua_config.zig](../src/config/lua_config.zig)
+- [src/config/default_lua.zig](../src/config/default_lua.zig)
+- [src/tools/theme_state.zig](../src/tools/theme_state.zig)
+- [docs/architecture/CONFIG.md](../docs/architecture/CONFIG.md)
+- [docs/subsystems/CONFIG_AND_LUA.md](../docs/subsystems/CONFIG_AND_LUA.md)
 
 Acceptance:
 - `Settings` has a typed theme section or equivalent first-class field.
@@ -66,9 +66,9 @@ Problem:
 - That is environment-specific and violates subsystem ownership.
 
 Files:
-- [src/tools/theme_apply.zig](/home/home/personal/wayspot/src/tools/theme_apply.zig)
-- [docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md](/home/home/personal/wayspot/docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md)
-- [docs/architecture/APP_LAYERING.md](/home/home/personal/wayspot/docs/architecture/APP_LAYERING.md)
+- [src/tools/theme_apply.zig](../src/tools/theme_apply.zig)
+- [docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md](../docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md)
+- [docs/architecture/APP_LAYERING.md](../docs/architecture/APP_LAYERING.md)
 
 Acceptance:
 - Runtime theme apply only mutates runtime-owned state/config.
@@ -94,11 +94,11 @@ Problem:
   behavior outside the backend contract.
 
 Files:
-- [src/ui/common/dispatch.zig](/home/home/personal/wayspot/src/ui/common/dispatch.zig)
-- [src/wm/types.zig](/home/home/personal/wayspot/src/wm/types.zig)
-- [src/wm/hyprland.zig](/home/home/personal/wayspot/src/wm/hyprland.zig)
-- [src/tools/wallpaper_runtime.zig](/home/home/personal/wayspot/src/tools/wallpaper_runtime.zig)
-- [docs/subsystems/WM_INTEGRATION.md](/home/home/personal/wayspot/docs/subsystems/WM_INTEGRATION.md)
+- [src/ui/common/dispatch.zig](../src/ui/common/dispatch.zig)
+- [src/wm/types.zig](../src/wm/types.zig)
+- [src/wm/hyprland.zig](../src/wm/hyprland.zig)
+- [src/tools/wallpaper_runtime.zig](../src/tools/wallpaper_runtime.zig)
+- [docs/subsystems/WM_INTEGRATION.md](../docs/subsystems/WM_INTEGRATION.md)
 
 Acceptance:
 - Window/workspace actions route through WM backend methods, not shell command
@@ -123,10 +123,10 @@ Problem:
   and contains repo-specific `zide` bias.
 
 Files:
-- [src/ui/gtk/default_loadout.zig](/home/home/personal/wayspot/src/ui/gtk/default_loadout.zig)
-- [src/app/search_service.zig](/home/home/personal/wayspot/src/app/search_service.zig)
-- [docs/architecture/UI_ARCHITECTURE.md](/home/home/personal/wayspot/docs/architecture/UI_ARCHITECTURE.md)
-- [docs/subsystems/SEARCH_SERVICE.md](/home/home/personal/wayspot/docs/subsystems/SEARCH_SERVICE.md)
+- [src/ui/gtk/default_loadout.zig](../src/ui/gtk/default_loadout.zig)
+- [src/app/search_service.zig](../src/app/search_service.zig)
+- [docs/architecture/UI_ARCHITECTURE.md](../docs/architecture/UI_ARCHITECTURE.md)
+- [docs/subsystems/SEARCH_SERVICE.md](../docs/subsystems/SEARCH_SERVICE.md)
 
 Acceptance:
 - Default-loadout policy is owned by app/search/runtime, not GTK.
@@ -148,10 +148,10 @@ Problem:
 - `cmd:` remains as a weak literal escape hatch.
 
 Files:
-- [src/providers/actions.zig](/home/home/personal/wayspot/src/providers/actions.zig)
-- [src/ui/common/dispatch.zig](/home/home/personal/wayspot/src/ui/common/dispatch.zig)
-- [docs/architecture/PROVIDERS_AND_ROUTES.md](/home/home/personal/wayspot/docs/architecture/PROVIDERS_AND_ROUTES.md)
-- [docs/DESIGN_AND_STANDARDS.md](/home/home/personal/wayspot/docs/DESIGN_AND_STANDARDS.md)
+- [src/providers/actions.zig](../src/providers/actions.zig)
+- [src/ui/common/dispatch.zig](../src/ui/common/dispatch.zig)
+- [docs/architecture/PROVIDERS_AND_ROUTES.md](../docs/architecture/PROVIDERS_AND_ROUTES.md)
+- [docs/DESIGN_AND_STANDARDS.md](../docs/DESIGN_AND_STANDARDS.md)
 
 Acceptance:
 - App-native behavior uses typed actions.
@@ -175,9 +175,9 @@ Problem:
 - `version` does not satisfy its documented contract.
 
 Files:
-- [src/ipc/control.zig](/home/home/personal/wayspot/src/ipc/control.zig)
-- [docs/architecture/WA1_CONTROL_PLANE_SPEC.md](/home/home/personal/wayspot/docs/architecture/WA1_CONTROL_PLANE_SPEC.md)
-- [docs/architecture/DAEMON_ARCHITECTURE.md](/home/home/personal/wayspot/docs/architecture/DAEMON_ARCHITECTURE.md)
+- [src/ipc/control.zig](../src/ipc/control.zig)
+- [docs/architecture/WA1_CONTROL_PLANE_SPEC.md](../docs/architecture/WA1_CONTROL_PLANE_SPEC.md)
+- [docs/architecture/DAEMON_ARCHITECTURE.md](../docs/architecture/DAEMON_ARCHITECTURE.md)
 
 Acceptance:
 - Request handling tolerates stream fragmentation correctly.
@@ -200,10 +200,10 @@ Problem:
 - `--set-theme` and `--apply-theme` currently represent different authorities.
 
 Files:
-- [src/tools/theme_state.zig](/home/home/personal/wayspot/src/tools/theme_state.zig)
-- [src/tools/theme_apply.zig](/home/home/personal/wayspot/src/tools/theme_apply.zig)
-- [src/main.zig](/home/home/personal/wayspot/src/main.zig)
-- [docs/providers/theme.md](/home/home/personal/wayspot/docs/providers/theme.md)
+- [src/tools/theme_state.zig](../src/tools/theme_state.zig)
+- [src/tools/theme_apply.zig](../src/tools/theme_apply.zig)
+- [src/main.zig](../src/main.zig)
+- [docs/providers/theme.md](../docs/providers/theme.md)
 
 Acceptance:
 - Persisted theme state and applyable theme state are the same authority.
@@ -228,10 +228,10 @@ Problem:
 - That bypasses the app’s own control/runtime ownership model.
 
 Files:
-- [src/tools/slideshow_control.zig](/home/home/personal/wayspot/src/tools/slideshow_control.zig)
-- [src/main.zig](/home/home/personal/wayspot/src/main.zig)
-- [docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md](/home/home/personal/wayspot/docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md)
-- [docs/architecture/DAEMON_ARCHITECTURE.md](/home/home/personal/wayspot/docs/architecture/DAEMON_ARCHITECTURE.md)
+- [src/tools/slideshow_control.zig](../src/tools/slideshow_control.zig)
+- [src/main.zig](../src/main.zig)
+- [docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md](../docs/subsystems/THEME_AND_WALLPAPER_RUNTIME.md)
+- [docs/architecture/DAEMON_ARCHITECTURE.md](../docs/architecture/DAEMON_ARCHITECTURE.md)
 
 Acceptance:
 - Slideshow lifecycle is tracked through owned runtime state or a proper control
@@ -253,8 +253,8 @@ Problem:
 - `setWallpaper` leaks owned `Assignment` entries.
 
 Files:
-- [src/tools/wallpaper_runtime.zig](/home/home/personal/wayspot/src/tools/wallpaper_runtime.zig)
-- [docs/architecture/ENGINEERING.md](/home/home/personal/wayspot/docs/architecture/ENGINEERING.md)
+- [src/tools/wallpaper_runtime.zig](../src/tools/wallpaper_runtime.zig)
+- [docs/architecture/ENGINEERING.md](../docs/architecture/ENGINEERING.md)
 
 Acceptance:
 - All owned assignment buffers are released on every path.
@@ -269,7 +269,7 @@ Problem:
 - The theme-route regression test is stale and currently failing.
 
 Files:
-- [src/search/rank.zig](/home/home/personal/wayspot/src/search/rank.zig)
+- [src/search/rank.zig](../src/search/rank.zig)
 
 Acceptance:
 - Route tests reflect actual intended theme-route behavior.
@@ -285,10 +285,10 @@ Problem:
 - UI hints still advertise theme subcommands that do not exist.
 
 Files:
-- [src/ui/gtk/query_helpers.zig](/home/home/personal/wayspot/src/ui/gtk/query_helpers.zig)
-- [src/ui/gtk/widgets.zig](/home/home/personal/wayspot/src/ui/gtk/widgets.zig)
-- [src/providers/theme.zig](/home/home/personal/wayspot/src/providers/theme.zig)
-- [docs/providers/theme.md](/home/home/personal/wayspot/docs/providers/theme.md)
+- [src/ui/gtk/query_helpers.zig](../src/ui/gtk/query_helpers.zig)
+- [src/ui/gtk/widgets.zig](../src/ui/gtk/widgets.zig)
+- [src/providers/theme.zig](../src/providers/theme.zig)
+- [docs/providers/theme.md](../docs/providers/theme.md)
 
 Acceptance:
 - UI labels and hint text match actual runtime/provider behavior.
@@ -304,7 +304,7 @@ Problem:
   though it no longer uses it.
 
 Files:
-- [src/providers/theme.zig](/home/home/personal/wayspot/src/providers/theme.zig)
+- [src/providers/theme.zig](../src/providers/theme.zig)
 
 Acceptance:
 - Provider collect path contains only data needed to emit its typed candidates.
@@ -319,7 +319,7 @@ Problem:
 - Public library surface still contains scaffold text and dummy sample code.
 
 Files:
-- [src/root.zig](/home/home/personal/wayspot/src/root.zig)
+- [src/root.zig](../src/root.zig)
 
 Acceptance:
 - No scaffold-facing text remains in exported runtime code.

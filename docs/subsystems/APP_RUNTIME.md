@@ -23,7 +23,7 @@ It keeps one binary usable as:
 
 Primary entrypoint:
 
-- [src/main.zig](/home/home/personal/wayspot/src/main.zig)
+- [src/main.zig](../../src/main.zig)
 
 It selects between:
 
@@ -46,6 +46,6 @@ Use this layer for:
 
 ## Where
 
-- [src/main.zig](/home/home/personal/wayspot/src/main.zig)
-- [src/app/bootstrap.zig](/home/home/personal/wayspot/src/app/bootstrap.zig)
-- [src/app/state.zig](/home/home/personal/wayspot/src/app/state.zig)
+- [src/main.zig](../../src/main.zig)
+- [src/app/bootstrap.zig](../../src/app/bootstrap.zig)
+- [src/app/state.zig](../../src/app/state.zig)
