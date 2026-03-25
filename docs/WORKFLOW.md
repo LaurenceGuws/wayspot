@@ -34,6 +34,9 @@ repository.
 - `README.md`
   Public overview, quick start, and major command entrypoints.
 
+- `scripts/open_docs_browser.sh`
+  Local launcher for the standalone docs explorer against this repo's docs surface.
+
 - `docs/`
   Workflow, navigation, and contributor/operator guidance.
 

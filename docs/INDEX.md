@@ -56,6 +56,8 @@ project landing page.
 - `docs/WORKFLOW.md` — work loop and documentation rules.
 - `docs/AGENT_HANDOFF.md` — current active focus.
 - `workstreams/` — active work queues and cleanup items.
+- `scripts/open_docs_browser.sh` — local standalone docs-explorer launcher for this repo.
+- `tools/docs_browser/` — wayspot-owned explorer config and docs index.
 
 ## Ownership Rules
 

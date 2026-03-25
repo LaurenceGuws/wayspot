@@ -146,6 +146,8 @@ Local docs explorer:
 ./scripts/open_docs_browser.sh
 ```
 
+Project-owned docs browser config lives under `tools/docs_browser/`.
+
 ## Dev Loop
 
 ```bash
