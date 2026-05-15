@@ -7,8 +7,7 @@ Canonical: yes
 
 ## What
 
-Provides static shell action rows such as settings, power menu, restart waybar,
-and notifications panel.
+Provides static shell action rows such as settings and power menu.
 
 ## Why
 
@@ -25,7 +24,7 @@ them into UI widgets.
   command existence or home-relative path checks
 
 It emits `.action` candidates whose `action` field is an internal action id such
-as `restart-waybar`.
+as `settings`.
 
 ## When
 

@@ -43,8 +43,7 @@ Theme authority rule:
 Correctness guard:
 
 - a theme is only listed if it has a wallpaper directory with at least one image
-- it must also have a live Waybar theme file in `~/.config/waybar/themes`
-- and a live Hypr theme file in `~/.config/hypr/modules`
+- it must have a live Hypr theme file in `~/.config/hypr/modules`
 
 This keeps provider refresh meaningful: syncing new live assets and refreshing
 providers is enough to expose a new theme without restarting into a new binary.

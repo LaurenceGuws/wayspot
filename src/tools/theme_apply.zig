@@ -12,34 +12,25 @@ pub fn applyTheme(allocator: std.mem.Allocator, requested_theme: []const u8) !vo
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
-    const waybar_content = try std.fmt.allocPrint(allocator,
-        "/* Switch this import to swap the active Waybar theme. */\n@import url(\"./{s}.css\");\n",
-        .{family},
-    );
-    defer allocator.free(waybar_content);
     const hypr_content = try std.fmt.allocPrint(allocator,
-        "## Switch this source to swap the active Hyprland theme.\nsource = ~/.config/hypr/modules/hypr_theme_{s}.conf\n",
+        "-- Change this require line to swap the active theme.\nreturn require(\"modules.hypr_theme_{s}\")\n",
         .{family},
     );
     defer allocator.free(hypr_content);
 
-    const live_waybar_current = try std.fs.path.join(allocator, &.{ home, ".config", "waybar", "themes", "current.css" });
-    defer allocator.free(live_waybar_current);
-    const live_hypr_current = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "modules", "hypr_theme_current.conf" });
+    const live_hypr_current = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "modules", "hypr_theme_current.lua" });
     defer allocator.free(live_hypr_current);
     const live_hyprpaper = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "hyprpaper.conf" });
     defer allocator.free(live_hyprpaper);
     const wallpapers_root = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
     defer allocator.free(wallpapers_root);
 
-    try writeFileEnsuringParents(live_waybar_current, waybar_content);
     try writeFileEnsuringParents(live_hypr_current, hypr_content);
     try updateHyprpaperTheme(allocator, live_hyprpaper, family);
 
     _ = try runBestEffort(allocator, &.{ "hyprctl", "reload" });
     var hypr_backend = wm.HyprlandBackend{};
     try wallpaper_runtime.applyRandomWallpapers(allocator, &hypr_backend, live_hyprpaper, wallpapers_root);
-    try restartWaybar(allocator);
 }
 
 fn updateHyprpaperTheme(allocator: std.mem.Allocator, config_path: []const u8, theme_name: []const u8) !void {
@@ -96,21 +87,4 @@ fn runBestEffort(allocator: std.mem.Allocator, argv: []const []const u8) !bool {
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     return result.term == .Exited and result.term.Exited == 0;
-}
-
-fn spawnDetached(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return err,
-    };
-}
-
-fn restartWaybar(allocator: std.mem.Allocator) !void {
-    _ = try runBestEffort(allocator, &.{ "pkill", "-x", "waybar" });
-    std.Thread.sleep(150 * std.time.ns_per_ms);
-    try spawnDetached(allocator, &.{ "waybar" });
 }

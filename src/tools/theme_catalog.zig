@@ -31,8 +31,6 @@ pub fn discoverAvailableThemes(allocator: std.mem.Allocator) ![][]u8 {
 
     const wallpapers_root = try std.fs.path.join(allocator, &.{ home, "Pictures", "wallpapers" });
     defer allocator.free(wallpapers_root);
-    const waybar_root = try std.fs.path.join(allocator, &.{ home, ".config", "waybar", "themes" });
-    defer allocator.free(waybar_root);
     const hypr_root = try std.fs.path.join(allocator, &.{ home, ".config", "hypr", "modules" });
     defer allocator.free(hypr_root);
 
@@ -49,7 +47,7 @@ pub fn discoverAvailableThemes(allocator: std.mem.Allocator) ![][]u8 {
     while (try iter.next()) |entry| {
         if (entry.kind != .directory) continue;
         const family = canonicalThemeName(entry.name) orelse continue;
-        if (!themeAssetsExist(allocator, waybar_root, hypr_root, family)) continue;
+        if (!themeAssetsExist(allocator, hypr_root, family)) continue;
         const theme_wallpaper_dir = try std.fs.path.join(allocator, &.{ wallpapers_root, entry.name });
         defer allocator.free(theme_wallpaper_dir);
         if (!dirHasImages(allocator, theme_wallpaper_dir)) continue;
@@ -90,16 +88,12 @@ pub fn printAvailableThemes(allocator: std.mem.Allocator) !void {
     try out.flush();
 }
 
-fn themeAssetsExist(allocator: std.mem.Allocator, waybar_root: []const u8, hypr_root: []const u8, family: []const u8) bool {
-    const waybar_name = std.fmt.allocPrint(allocator, "{s}.css", .{family}) catch return false;
-    defer allocator.free(waybar_name);
-    const waybar_file = std.fs.path.join(allocator, &.{ waybar_root, waybar_name }) catch return false;
-    defer allocator.free(waybar_file);
-    const hypr_name = std.fmt.allocPrint(allocator, "hypr_theme_{s}.conf", .{family}) catch return false;
+fn themeAssetsExist(allocator: std.mem.Allocator, hypr_root: []const u8, family: []const u8) bool {
+    const hypr_name = std.fmt.allocPrint(allocator, "hypr_theme_{s}.lua", .{family}) catch return false;
     defer allocator.free(hypr_name);
     const hypr_file = std.fs.path.join(allocator, &.{ hypr_root, hypr_name }) catch return false;
     defer allocator.free(hypr_file);
-    return pathExists(waybar_file) and pathExists(hypr_file);
+    return pathExists(hypr_file);
 }
 
 fn dirHasImages(allocator: std.mem.Allocator, dir_path: []const u8) bool {

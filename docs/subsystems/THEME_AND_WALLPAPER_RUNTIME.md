@@ -37,7 +37,7 @@ Zig runtime paths rather than scattered shell scripts.
 Use this subsystem for:
 
 - selecting and persisting a theme
-- applying a theme to Hyprland/Waybar runtime files
+- applying a theme to Hyprland runtime files
 - setting wallpaper on focused or all outputs
 - slideshow lifecycle
 - wallpaper library classification by theme family

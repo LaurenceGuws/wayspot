@@ -45,24 +45,6 @@ pub const action_specs = [_]ActionSpec{
         .confirm = false,
         .help = "Open the session power/logout menu via `wlogout`.",
     },
-    .{
-        .title = "Restart Waybar",
-        .subtitle = "System",
-        .action = "restart-waybar",
-        .icon = "view-refresh-symbolic",
-        .execution = .{ .shell_command = "waybar --reload" },
-        .dependency = .{ .command = "waybar" },
-        .help = "Reload the Waybar configuration (`waybar --reload`).",
-    },
-    .{
-        .title = "Notifications panel",
-        .subtitle = "System",
-        .action = "notifications",
-        .icon = "preferences-system-notifications-symbolic",
-        .execution = .{ .home_relative_shell_command = ".config/waybar/scripts/swaync-control.sh toggle" },
-        .dependency = .{ .home_relative_path = ".config/waybar/scripts/swaync-control.sh" },
-        .help = "Toggle the SwayNC notifications panel.",
-    },
 };
 
 pub const ActionsProvider = struct {
@@ -180,7 +162,8 @@ test "actions provider collects available action candidates only" {
         }
 
         fn pathExists(path: []const u8) bool {
-            return std.mem.endsWith(u8, path, ".config/waybar/scripts/swaync-control.sh");
+            _ = path;
+            return false;
         }
     };
 
@@ -194,12 +177,10 @@ test "actions provider collects available action candidates only" {
     const provider = provider_impl.provider();
 
     try provider.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(usize, 3), list.items.len);
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqual(search.CandidateKind.action, list.items[0].kind);
     try std.testing.expectEqualStrings("settings", list.items[0].action);
     try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].icon);
-    try std.testing.expectEqualStrings("restart-waybar", list.items[1].action);
-    try std.testing.expectEqualStrings("notifications", list.items[2].action);
 }
 
 test "actions provider health reflects dependency availability" {
@@ -214,7 +195,7 @@ test "actions provider health reflects dependency availability" {
     };
     const FakePartial = struct {
         fn commandExists(name: []const u8) bool {
-            return std.mem.eql(u8, name, "waybar");
+            return std.mem.eql(u8, name, "wlrlui");
         }
 
         fn pathExists(_: []const u8) bool {
@@ -244,9 +225,9 @@ test "execute action resolves command mapping" {
 
     if (test_command_capture) |buf| std.testing.allocator.free(buf);
     test_command_capture = null;
-    try executeAction("restart-waybar", Runner.run);
+    try executeAction("settings", Runner.run);
     try std.testing.expect(test_command_capture != null);
-    try std.testing.expectEqualStrings("waybar --reload", test_command_capture.?);
+    try std.testing.expectEqualStrings("wlrlui", test_command_capture.?);
     std.testing.allocator.free(test_command_capture.?);
     test_command_capture = null;
 }
@@ -264,23 +245,4 @@ test "execute action returns runner errors for failed commands" {
 test "power action has no confirmation gating" {
     try std.testing.expect(!requiresConfirmation("power"));
     try std.testing.expect(!requiresConfirmation("settings"));
-}
-
-test "resolve execution command expands home-relative actions" {
-    const old_home = std.process.getEnvVarOwned(std.testing.allocator, "HOME") catch null;
-    defer if (old_home) |value| std.testing.allocator.free(value);
-
-    try std.posix.setenv("HOME", "/tmp/wayspot-home", true);
-    defer {
-        if (old_home) |value| {
-            std.posix.setenv("HOME", value, true) catch {};
-        }
-    }
-
-    const command = try resolveExecutionCommand(std.testing.allocator, .{
-        .home_relative_shell_command = ".config/waybar/scripts/swaync-control.sh toggle",
-    });
-    defer std.testing.allocator.free(command);
-
-    try std.testing.expectEqualStrings("/tmp/wayspot-home/.config/waybar/scripts/swaync-control.sh toggle", command);
 }

@@ -267,7 +267,7 @@ test "recency history boosts repeated action candidates" {
 test "short blended query prefers actions over broad app matches" {
     const candidates = [_]types.Candidate{
         .init(.app, "Redis Desktop Manager", "Database GUI", "redis-desktop"),
-        .init(.action, "Restart Waybar", "Session", "waybar-restart"),
+        .init(.action, "Settings", "System", "settings"),
     };
 
     const query = query_mod.parse("re");
@@ -276,7 +276,7 @@ test "short blended query prefers actions over broad app matches" {
 
     try std.testing.expectEqual(@as(usize, 2), ranked.len);
     try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
-    try std.testing.expectEqualStrings("Restart Waybar", ranked[0].candidate.title);
+    try std.testing.expectEqualStrings("Settings", ranked[0].candidate.title);
 }
 
 test "rankCandidates propagates canonicalization alloc failure" {
