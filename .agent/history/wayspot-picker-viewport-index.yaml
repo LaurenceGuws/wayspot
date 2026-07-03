@@ -1,4 +1,4 @@
-status: indexing_in_progress
+status: implemented_automated_gates_passed_manual_smoke_pending
 purpose: >
   Define the exact Wayspot picker viewport sprint before implementation.
   This planning artifact is production memory: it must name the files,
@@ -573,9 +573,55 @@ indexing_task:
     indexing task.
 
 approval_gate:
-  implementation_allowed: false
+  implementation_allowed: true
+  accepted_by: coordinating_agent
   implementation_requires:
     - required_output is filled with exact files, symbols, comments, and tests
     - reference_pressure lessons are cited as local source patterns
     - non-goals remain explicit
     - the user or coordinating agent accepts the completed index
+
+execution_receipts:
+  commits:
+    - id: 5c7f54c
+      message: Add picker viewport owner
+      slice: 01_pure_viewport_owner
+    - id: 124c74a
+      message: Centralize picker result layout
+      slice: 02_layout_single_owner
+    - id: 0027031
+      message: Adopt viewport for picker selection
+      slice: 03_shell_viewport_adoption
+    - id: bd3148d
+      message: Wire picker viewport input
+      slice: 04_input_and_resize_wiring
+  automated:
+    - command: zigup run 0.16.0 build test --summary all
+      result: pass
+    - command: git diff --check
+      result: pass
+    - command: rg stale picker scope scans
+      result: pass_no_hits
+    - command: rg banned Zig pattern scans
+      result: pass_no_hits
+    - command: rg picker_viewport purity scan
+      result: pass_no_hits
+  smoke:
+    startup:
+      command: RERUN_INSTALL_BIN=/tmp/wayspot-smoke timeout 20s ./re-run.sh
+      result: picker_started_and_waited_for_input_until_timeout
+      note: >
+        The default install path was not overwritten because the notification
+        daemon was running from /home/home/.local/bin/wayspot.
+    manual_interaction:
+      result: pending_human_receipts
+      required_checks:
+        - wheel down scrolls beyond the first visible page when more results exist.
+        - wheel up clamps at the first result without underflow.
+        - pointer hover selects only rows under the pointer.
+        - pointer in chrome, gaps, and scrollbar does not launch.
+        - left click on a visible row launches that exact row and exits once.
+        - keyboard up/down after scroll keeps the selected row visible.
+        - resizing shorter reduces visible rows and clamps offset/selection.
+        - resizing taller increases visible rows without invalid blank indexes.
+        - passive scrollbar appears only when total rows exceed visible rows.
