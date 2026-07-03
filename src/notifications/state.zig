@@ -1,4 +1,18 @@
+//! Notification state owns the bounded D-Bus notification id store.
+
 const std = @import("std");
+
+const max_notifications: u32 = 256;
+const max_app_name_bytes: u32 = 256;
+const max_summary_bytes: u32 = 512;
+const max_body_bytes: u32 = 4096;
+
+comptime {
+    std.debug.assert(max_notifications > 0);
+    std.debug.assert(max_app_name_bytes > 0);
+    std.debug.assert(max_summary_bytes > 0);
+    std.debug.assert(max_body_bytes > 0);
+}
 
 pub const NotifyRequest = struct {
     app_name: []const u8,
@@ -46,6 +60,7 @@ pub const Store = struct {
             try self.replace(req.replaces_id, req);
             return req.replaces_id;
         }
+        if (self.len() >= max_notifications) return error.NotificationStoreFull;
 
         const id = try self.allocateId();
         try self.map.put(id, try duplicateNotification(self.allocator, req));
@@ -68,7 +83,7 @@ pub const Store = struct {
         var attempts: u32 = 0;
         var id = self.next_id;
 
-        while (attempts <= std.math.maxInt(u32)) : (attempts += 1) {
+        while (attempts < max_notifications) : (attempts += 1) {
             if (id == 0) id = 1;
             if (!self.map.contains(id)) {
                 self.next_id = id +% 1;
@@ -84,12 +99,19 @@ pub const Store = struct {
 
 fn duplicateNotification(allocator: std.mem.Allocator, req: NotifyRequest) !Notification {
     return .{
-        .app_name = try allocator.dupe(u8, req.app_name),
-        .summary = try allocator.dupe(u8, req.summary),
-        .body = try allocator.dupe(u8, req.body),
+        .app_name = try duplicateBounded(allocator, req.app_name, max_app_name_bytes),
+        .summary = try duplicateBounded(allocator, req.summary, max_summary_bytes),
+        .body = try duplicateBounded(allocator, req.body, max_body_bytes),
         .expire_timeout = req.expire_timeout,
         .has_actions = req.has_actions,
     };
+}
+
+fn duplicateBounded(allocator: std.mem.Allocator, text: []const u8, max_bytes: u32) ![]u8 {
+    const out_len = @min(text.len, max_bytes);
+    const out = try allocator.dupe(u8, text[0..out_len]);
+    if (text.len > out_len and out_len > 0) out[out_len - 1] = '~';
+    return out;
 }
 
 fn freeNotification(allocator: std.mem.Allocator, notification: Notification) void {
@@ -148,4 +170,41 @@ test "store notify replaces existing id" {
     try std.testing.expectEqualStrings("body-2", entry.body);
     try std.testing.expectEqual(@as(i32, 5000), entry.expire_timeout);
     try std.testing.expect(entry.has_actions);
+}
+
+test "store refuses more than retained notification bound" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    var id: u32 = 0;
+    while (id < max_notifications) : (id += 1) {
+        const stored = try store.notify(.{
+            .app_name = "app",
+            .summary = "summary",
+            .body = "body",
+        });
+        try std.testing.expectEqual(id + 1, stored);
+    }
+
+    try std.testing.expectError(error.NotificationStoreFull, store.notify(.{
+        .app_name = "app",
+        .summary = "summary",
+        .body = "body",
+    }));
+}
+
+test "store bounds retained body bytes" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    const body = [_]u8{'x'} ** (max_body_bytes + 1);
+    const id = try store.notify(.{
+        .app_name = "app",
+        .summary = "summary",
+        .body = &body,
+    });
+
+    const entry = store.map.get(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, max_body_bytes), @as(u32, @intCast(entry.body.len)));
+    try std.testing.expectEqual(@as(u8, '~'), entry.body[entry.body.len - 1]);
 }

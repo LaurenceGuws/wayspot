@@ -1,6 +1,20 @@
+//! Notification runtime owns the bounded in-process rows shown by the shell.
+
 const std = @import("std");
 
 const max_entries: u32 = 256;
+const max_app_name_bytes: u32 = 256;
+const max_app_icon_bytes: u32 = 256;
+const max_summary_bytes: u32 = 512;
+const max_body_bytes: u32 = 4096;
+
+comptime {
+    std.debug.assert(max_entries > 0);
+    std.debug.assert(max_app_name_bytes > 0);
+    std.debug.assert(max_app_icon_bytes > 0);
+    std.debug.assert(max_summary_bytes > 0);
+    std.debug.assert(max_body_bytes > 0);
+}
 
 const Entry = struct {
     id: u32,
@@ -80,10 +94,10 @@ pub fn recordNotify(
         allocator.free(row.app_icon);
         allocator.free(row.summary);
         allocator.free(row.body);
-        row.app_name = try allocator.dupe(u8, app_name);
-        row.app_icon = try allocator.dupe(u8, app_icon);
-        row.summary = try allocator.dupe(u8, summary);
-        row.body = try allocator.dupe(u8, body);
+        row.app_name = try duplicateBounded(allocator, app_name, max_app_name_bytes);
+        row.app_icon = try duplicateBounded(allocator, app_icon, max_app_icon_bytes);
+        row.summary = try duplicateBounded(allocator, summary, max_summary_bytes);
+        row.body = try duplicateBounded(allocator, body, max_body_bytes);
         row.urgency = urgency;
         row.transient = transient;
         row.active = true;
@@ -94,10 +108,10 @@ pub fn recordNotify(
 
     try runtime.entries.append(allocator, .{
         .id = id,
-        .app_name = try allocator.dupe(u8, app_name),
-        .app_icon = try allocator.dupe(u8, app_icon),
-        .summary = try allocator.dupe(u8, summary),
-        .body = try allocator.dupe(u8, body),
+        .app_name = try duplicateBounded(allocator, app_name, max_app_name_bytes),
+        .app_icon = try duplicateBounded(allocator, app_icon, max_app_icon_bytes),
+        .summary = try duplicateBounded(allocator, summary, max_summary_bytes),
+        .body = try duplicateBounded(allocator, body, max_body_bytes),
         .urgency = urgency,
         .transient = transient,
         .active = true,
@@ -131,22 +145,21 @@ pub fn closeById(id: u32) bool {
 pub fn closeAllActive() u32 {
     runtime.mu.lock();
     const close_fn = runtime.close_fn;
-    var ids = std.ArrayList(u32).empty;
-    defer ids.deinit(std.heap.page_allocator);
+    var ids: [max_entries]u32 = undefined;
+    var id_count: u32 = 0;
     if (close_fn != null) {
         for (runtime.entries.items) |entry| {
             if (!entry.active) continue;
-            ids.append(std.heap.page_allocator, entry.id) catch |err| {
-                std.log.warn("notifications close-all id buffer append failed: {s}", .{@errorName(err)});
-                break;
-            };
+            std.debug.assert(id_count < max_entries);
+            ids[id_count] = entry.id;
+            id_count += 1;
         }
     }
     runtime.mu.unlock();
 
     if (close_fn == null) return 0;
     var closed: u32 = 0;
-    for (ids.items) |id| {
+    for (ids[0..id_count]) |id| {
         if (close_fn.?(id)) closed += 1;
     }
     return closed;
@@ -165,10 +178,10 @@ pub fn snapshot(allocator: std.mem.Allocator) ![]Snapshot {
     for (runtime.entries.items, 0..) |entry, idx| {
         out[idx] = .{
             .id = entry.id,
-            .app_name = try allocator.dupe(u8, entry.app_name),
-            .app_icon = try allocator.dupe(u8, entry.app_icon),
-            .summary = try allocator.dupe(u8, entry.summary),
-            .body = try allocator.dupe(u8, entry.body),
+            .app_name = try duplicateBounded(allocator, entry.app_name, max_app_name_bytes),
+            .app_icon = try duplicateBounded(allocator, entry.app_icon, max_app_icon_bytes),
+            .summary = try duplicateBounded(allocator, entry.summary, max_summary_bytes),
+            .body = try duplicateBounded(allocator, entry.body, max_body_bytes),
             .urgency = entry.urgency,
             .transient = entry.transient,
             .active = entry.active,
@@ -190,6 +203,13 @@ fn findIndexLocked(id: u32) ?u32 {
         if (row.id == id) return @intCast(idx);
     }
     return null;
+}
+
+fn duplicateBounded(allocator: std.mem.Allocator, text: []const u8, max_bytes: u32) ![]u8 {
+    const out_len = @min(text.len, max_bytes);
+    const out = try allocator.dupe(u8, text[0..out_len]);
+    if (text.len > out_len and out_len > 0) out[out_len - 1] = '~';
+    return out;
 }
 
 fn freeEntry(allocator: std.mem.Allocator, row: Entry) void {
@@ -222,4 +242,18 @@ test "recordNotify and snapshot preserve latest state" {
     try std.testing.expectEqualStrings("app2", rows[0].app_name);
     try std.testing.expectEqualStrings("app2-icon", rows[0].app_icon);
     try std.testing.expect(rows[0].active);
+}
+
+test "recordNotify bounds retained body bytes" {
+    const allocator = std.testing.allocator;
+    resetForTest(allocator);
+    defer resetForTest(allocator);
+
+    const body = [_]u8{'x'} ** (max_body_bytes + 1);
+    try recordNotify(allocator, 9, "app", "icon", "summary", &body, 1, false);
+
+    const rows = try snapshot(allocator);
+    defer freeSnapshot(allocator, rows);
+    try std.testing.expectEqual(@as(u32, max_body_bytes), @as(u32, @intCast(rows[0].body.len)));
+    try std.testing.expectEqual(@as(u8, '~'), rows[0].body[rows[0].body.len - 1]);
 }

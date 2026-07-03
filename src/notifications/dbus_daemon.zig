@@ -16,6 +16,11 @@ const server_name: [*:0]const u8 = "wayspot";
 const server_vendor: [*:0]const u8 = "wayspot";
 const server_version: [*:0]const u8 = "0.1.3-dev";
 const server_spec_version: [*:0]const u8 = "1.3";
+const max_action_pairs: u32 = 8;
+
+comptime {
+    std.debug.assert(max_action_pairs > 0);
+}
 
 const introspection_xml: [*:0]const u8 =
     \\<node>
@@ -447,7 +452,8 @@ fn parseActions(allocator: std.mem.Allocator, actions_variant: *c.GVariant) ![]D
     if (child_count < 2) return &.{};
 
     const pair_count = child_count / 2;
-    var actions = try allocator.alloc(Daemon.Action, @intCast(pair_count));
+    const admitted_pairs = @min(pair_count, max_action_pairs);
+    var actions = try allocator.alloc(Daemon.Action, @intCast(admitted_pairs));
     errdefer allocator.free(actions);
 
     var out_idx: u32 = 0;
