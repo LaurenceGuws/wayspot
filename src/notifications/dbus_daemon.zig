@@ -118,6 +118,14 @@ extern fn g_variant_lookup(value: *GVariant, key: [*:0]const u8, format_string: 
 extern fn g_main_loop_new(context: ?*opaque {}, is_running: gboolean) ?*GMainLoop;
 extern fn g_main_loop_run(loop: *GMainLoop) void;
 extern fn g_main_loop_unref(loop: *GMainLoop) void;
+extern fn g_timeout_add_full(
+    priority: c_int,
+    interval: guint,
+    function: *const fn (?*anyopaque) callconv(.c) gboolean,
+    data: ?*anyopaque,
+    notify: ?*const fn (?*anyopaque) callconv(.c) void,
+) guint;
+extern fn g_source_remove(tag: guint) gboolean;
 
 pub fn run(allocator: std.mem.Allocator) !void {
     var daemon = try Daemon.init(allocator);
@@ -139,9 +147,17 @@ const server_vendor: [*:0]const u8 = "wayspot";
 const server_version: [*:0]const u8 = "0.1.3-dev";
 const server_spec_version: [*:0]const u8 = "1.3";
 const max_action_pairs: u32 = 8;
+const close_reason_expired: u32 = 1;
+const close_reason_closed: u32 = 3;
+const default_expire_timeout_ms: u32 = 4200;
+const max_expire_timeout_ms: u32 = 60000;
+const glib_priority_default: c_int = 0;
+const glib_source_remove: gboolean = 0;
 
 comptime {
     std.debug.assert(max_action_pairs > 0);
+    std.debug.assert(default_expire_timeout_ms > 0);
+    std.debug.assert(max_expire_timeout_ms >= default_expire_timeout_ms);
 }
 
 const introspection_xml: [*:0]const u8 =
@@ -223,6 +239,7 @@ pub const Daemon = struct {
 
     allocator: std.mem.Allocator,
     state: notifications_state.Store,
+    timers: std.AutoHashMap(u32, guint),
     owner_id: guint = 0,
     registration_id: guint = 0,
     node_info: ?*GDBusNodeInfo = null,
@@ -239,6 +256,7 @@ pub const Daemon = struct {
         return .{
             .allocator = allocator,
             .state = notifications_state.Store.init(allocator),
+            .timers = std.AutoHashMap(u32, guint).init(allocator),
             .node_info = node,
         };
     }
@@ -276,6 +294,8 @@ pub const Daemon = struct {
             g_dbus_node_info_unref(node);
             self.node_info = null;
         }
+        self.clearTimers();
+        self.timers.deinit();
         self.state.deinit();
     }
 
@@ -289,6 +309,7 @@ pub const Daemon = struct {
 
     pub fn closeWithReason(self: *Daemon, id: u32, reason: u32) bool {
         if (!self.state.close(id)) return false;
+        self.cancelTimer(id);
         notifications_runtime.recordClosed(id, reason);
         emitNotificationClosed(self, id, reason);
         if (self.hooks.on_closed) |on_closed| {
@@ -298,6 +319,46 @@ pub const Daemon = struct {
             });
         }
         return true;
+    }
+
+    fn replaceTimer(self: *Daemon, id: u32, expire_timeout: i32, urgency: u8) !void {
+        self.cancelTimer(id);
+        const timeout_ms = daemonExpireTimeoutMs(expire_timeout, urgency) orelse return;
+        const context = try self.allocator.create(TimeoutContext);
+        context.* = .{ .daemon = self, .id = id };
+        const source_id = g_timeout_add_full(
+            glib_priority_default,
+            timeout_ms,
+            onNotificationExpired,
+            context,
+            freeTimeoutContext,
+        );
+        if (source_id == 0) {
+            self.allocator.destroy(context);
+            return error.NotificationTimerFailed;
+        }
+        self.timers.put(id, source_id) catch |err| {
+            const source_removed = g_source_remove(source_id);
+            if (source_removed == 0) log.debug("notification timer cleanup missed id={d}", .{id});
+            return err;
+        };
+    }
+
+    fn cancelTimer(self: *Daemon, id: u32) void {
+        const removed = self.timers.fetchRemove(id) orelse return;
+        const source_removed = g_source_remove(removed.value);
+        if (source_removed == 0) log.debug("notification timer already removed id={d}", .{id});
+    }
+
+    fn clearTimers(self: *Daemon) void {
+        var iter = self.timers.iterator();
+        while (iter.next()) |entry| {
+            const source_removed = g_source_remove(entry.value_ptr.*);
+            if (source_removed == 0) {
+                log.debug("notification timer already removed id={d}", .{entry.key_ptr.*});
+            }
+        }
+        self.timers.clearRetainingCapacity();
     }
 
     pub fn emitActionInvoked(self: *Daemon, id: u32, action_key: []const u8) void {
@@ -316,6 +377,28 @@ pub const Daemon = struct {
         if (emitted == 0) log.warn("ActionInvoked signal failed id={d}", .{id});
     }
 };
+
+const TimeoutContext = struct {
+    daemon: *Daemon,
+    id: u32,
+};
+
+fn onNotificationExpired(user_data: ?*anyopaque) callconv(.c) gboolean {
+    const raw = user_data orelse return glib_source_remove;
+    const context: *TimeoutContext = @ptrCast(@alignCast(raw));
+    const removed = context.daemon.timers.fetchRemove(context.id);
+    if (removed != null) {
+        const closed = context.daemon.closeWithReason(context.id, close_reason_expired);
+        if (!closed) log.debug("notification expiry ignored inactive id={d}", .{context.id});
+    }
+    return glib_source_remove;
+}
+
+fn freeTimeoutContext(user_data: ?*anyopaque) callconv(.c) void {
+    const raw = user_data orelse return;
+    const context: *TimeoutContext = @ptrCast(@alignCast(raw));
+    context.daemon.allocator.destroy(context);
+}
 
 fn onBusAcquired(connection: ?*GDBusConnection, _: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
     if (connection == null or user_data == null) return;
@@ -399,12 +482,10 @@ fn onMethodCall(
 
 fn handleGetCapabilities(invocation: *GDBusMethodInvocation) void {
     var capabilities = [_]?[*:0]const u8{
-        "actions",
         "body",
-        "body-markup",
         null,
     };
-    const caps = g_variant_new_strv(@ptrCast(&capabilities[0]), 3);
+    const caps = g_variant_new_strv(@ptrCast(&capabilities[0]), 1);
     var tuple_items = [_]?*GVariant{caps};
     g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(@ptrCast(&tuple_items[0]), 1));
 }
@@ -473,6 +554,16 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
             invocation,
             "org.freedesktop.DBus.Error.NoMemory",
             "Unable to persist notification",
+        );
+        return;
+    };
+    self.replaceTimer(id, expire_timeout, parsed_hints.urgency) catch {
+        const removed_after_timer_failure = self.state.close(id);
+        if (!removed_after_timer_failure) log.debug("timer failure cleanup missed id={d}", .{id});
+        g_dbus_method_invocation_return_dbus_error(
+            invocation,
+            "org.freedesktop.DBus.Error.NoMemory",
+            "Unable to schedule notification expiry",
         );
         return;
     };
@@ -545,8 +636,15 @@ fn handleCloseNotification(self: *Daemon, parameters: ?*GVariant, invocation: *G
     defer g_variant_unref(id_variant);
     const notification_id = g_variant_get_uint32(id_variant.?);
 
-    const closed = self.closeWithReason(notification_id, 3);
-    if (!closed) log.debug("CloseNotification ignored unknown id={d}", .{notification_id});
+    const closed = self.closeWithReason(notification_id, close_reason_closed);
+    if (!closed) {
+        g_dbus_method_invocation_return_dbus_error(
+            invocation,
+            "org.freedesktop.Notifications.InvalidId",
+            "Unknown notification id",
+        );
+        return;
+    }
 
     g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
 }
@@ -571,6 +669,14 @@ fn returnInvalidArgs(invocation: *GDBusMethodInvocation, message: [*:0]const u8)
         "org.freedesktop.DBus.Error.InvalidArgs",
         message,
     );
+}
+
+fn daemonExpireTimeoutMs(expire_timeout: i32, urgency: u8) ?guint {
+    if (urgency == 2) return null;
+    if (expire_timeout == 0) return null;
+    if (expire_timeout < 0) return default_expire_timeout_ms;
+    const requested: u32 = @intCast(expire_timeout);
+    return @min(requested, max_expire_timeout_ms);
 }
 
 const ParsedHints = struct {
@@ -631,4 +737,12 @@ fn logGError(context: []const u8, gerr: ?*GError) void {
         return;
     }
     log.err("{s}", .{context});
+}
+
+test "daemon expiry timeout follows notification spec sentinel values" {
+    try std.testing.expectEqual(default_expire_timeout_ms, daemonExpireTimeoutMs(-1, 1).?);
+    try std.testing.expectEqual(@as(?guint, null), daemonExpireTimeoutMs(0, 1));
+    try std.testing.expectEqual(@as(?guint, null), daemonExpireTimeoutMs(5000, 2));
+    try std.testing.expectEqual(@as(guint, 1), daemonExpireTimeoutMs(1, 1).?);
+    try std.testing.expectEqual(max_expire_timeout_ms, daemonExpireTimeoutMs(@intCast(max_expire_timeout_ms + 1), 1));
 }
