@@ -501,6 +501,17 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
     ) catch |err| {
         std.log.warn("notifications runtime record failed id={d} err={s}", .{ id, @errorName(err) });
     };
+    log.info(
+        "notify id={d} app=\"{s}\" summary=\"{s}\" urgency={d} actions={d} replaced={}",
+        .{
+            id,
+            std.mem.span(app_name),
+            std.mem.span(summary),
+            parsed_hints.urgency,
+            @as(u32, @intCast(action_pairs.len)),
+            replaced and id == replaces_id,
+        },
+    );
 
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
 }
