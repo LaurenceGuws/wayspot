@@ -30,10 +30,8 @@ pub const Shell = struct {
     pub fn run(
         allocator: std.mem.Allocator,
         service: *app.SearchService,
-        telemetry: *app.TelemetrySink,
         options: RunOptions,
     ) !void {
-        if (telemetry.path.len == 0) return error.TelemetryPathMissing;
         var shell = try SdlShell.init(allocator, service, options);
         var shutdown_signal = try ShutdownSignal.init();
         defer shell.deinit();

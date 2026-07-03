@@ -2,7 +2,6 @@ const std = @import("std");
 const wayspot = @import("wayspot");
 
 pub fn main(init: std.process.Init) !void {
-    const startup_sw = wayspot.app.Stopwatch.start();
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const home = init.minimal.environ.getPosix("HOME") orelse ".";
@@ -72,8 +71,7 @@ pub fn main(init: std.process.Init) !void {
             std.log.err("failed to save history: {s}", .{@errorName(err)});
         };
 
-        std.log.info("runtime ready in {d:.2} ms", .{startup_sw.elapsedMs()});
-        try wayspot.ui.Shell.run(allocator, &runtime.service, &runtime.telemetry, .{
+        try wayspot.ui.Shell.run(allocator, &runtime.service, .{
             .resident_mode = resident_mode,
             .start_hidden = start_hidden,
             .surface_mode = cfg.surface_mode,
@@ -85,26 +83,22 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    std.log.info("startup ready in {d:.2} ms", .{startup_sw.elapsedMs()});
     try wayspot.bufferedPrint();
 }
 
 const Runtime = struct {
     app_cache_path: []u8,
     history_path: []u8,
-    telemetry_path: []u8,
     actions: wayspot.providers.ActionsProvider = .{},
     apps: wayspot.providers.AppsProvider,
     provider_list: [2]wayspot.providers.Provider,
     service: wayspot.app.SearchService,
-    telemetry: wayspot.app.TelemetrySink,
 
     fn deinit(self: *Runtime, allocator: std.mem.Allocator) void {
         self.apps.deinit(allocator);
         self.service.deinit(allocator);
         allocator.free(self.app_cache_path);
         allocator.free(self.history_path);
-        allocator.free(self.telemetry_path);
     }
 
     fn wireProviders(self: *Runtime) void {
@@ -123,21 +117,14 @@ fn setupRuntime(allocator: std.mem.Allocator, home: []const u8) !Runtime {
     errdefer allocator.free(app_cache);
     const history_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/wayspot/history.log", .{home});
     errdefer allocator.free(history_path);
-    const telemetry_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/wayspot/telemetry.log", .{home});
-    errdefer allocator.free(telemetry_path);
 
-    var runtime = Runtime{
+    return .{
         .app_cache_path = app_cache,
         .history_path = history_path,
-        .telemetry_path = telemetry_path,
         .apps = wayspot.providers.AppsProvider.init(app_cache),
         .provider_list = undefined,
         .service = undefined,
-        .telemetry = undefined,
     };
-
-    runtime.telemetry = wayspot.app.TelemetrySink.init(telemetry_path);
-    return runtime;
 }
 
 fn isCommandOk(allocator: std.mem.Allocator, cmd: wayspot.ipc.control.Command) bool {
