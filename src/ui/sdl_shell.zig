@@ -17,8 +17,8 @@ pub const Shell = struct {
         service: *app.SearchService,
     ) !void {
         var shell = try SdlShell.init(allocator, service);
-        var shutdown_signal = try ShutdownSignal.init();
         defer shell.deinit();
+        var shutdown_signal = try ShutdownSignal.init();
         try shell.startShutdownSignal(&shutdown_signal);
         try shell.loop();
     }
@@ -30,13 +30,19 @@ const base_window_width: i32 = 760;
 const base_window_height: i32 = 420;
 const row_height: f32 = 44;
 const row_gap: f32 = 6;
-const no_wake_timeout_ms: i32 = 1000;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 const max_title_bytes = 160;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
+const LaunchRunError = error{
+    CommandFailed,
+    ForkFailed,
+    WaitFailed,
+    WaitInterruptedTooOften,
+};
+const LaunchRunner = *const fn ([*:0]const u8) LaunchRunError!void;
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
@@ -243,6 +249,10 @@ const SdlShell = struct {
         errdefer text.deinit();
         const text_input_started = c.SDL_StartTextInput(window);
         if (!text_input_started) return error.SdlTextInputFailed;
+        errdefer {
+            const stopped_text_input = c.SDL_StopTextInput(window);
+            if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
+        }
         const wake_event_type = c.SDL_RegisterEvents(1);
         if (wake_event_type == 0) return error.SdlWakeUnavailable;
 
@@ -295,9 +305,8 @@ const SdlShell = struct {
             if (self.shutdown_after_launch) break;
 
             var event: c.SDL_Event = undefined;
-            if (c.SDL_WaitEventTimeout(&event, no_wake_timeout_ms)) {
-                running = try self.handleEvent(&event);
-            }
+            if (!c.SDL_WaitEvent(&event)) return error.SdlEventWaitFailed;
+            running = try self.handleEvent(&event);
             while (c.SDL_PollEvent(&event)) {
                 if (!try self.handleEvent(&event)) {
                     running = false;
@@ -391,9 +400,7 @@ const SdlShell = struct {
     }
 
     fn drainPendingLaunch(self: *SdlShell) !void {
-        if (!self.launch_queue.hasQueued()) return;
-        try runDetachedCommand(self.launch_queue.commandZ());
-        self.launch_queue.clear();
+        try drainLaunchQueue(&self.launch_queue, runDetachedCommand);
     }
 
     fn activeResult(self: *SdlShell) ?@import("../search/mod.zig").ScoredCandidate {
@@ -616,7 +623,13 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
     };
 }
 
-fn runDetachedCommand(command: [*:0]const u8) !void {
+fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) LaunchRunError!void {
+    if (!queue.hasQueued()) return;
+    defer queue.clear();
+    try runner(queue.commandZ());
+}
+
+fn runDetachedCommand(command: [*:0]const u8) LaunchRunError!void {
     const wrapper_pid = try launchFork();
     if (wrapper_pid == 0) {
         launchWrapperChild(command);
@@ -667,13 +680,13 @@ fn launchRedirectStdio() bool {
     return true;
 }
 
-fn launchFork() !std.c.pid_t {
+fn launchFork() LaunchRunError!std.c.pid_t {
     const pid = std.c.fork();
     if (pid == -1) return error.ForkFailed;
     return pid;
 }
 
-fn launchWait(pid: std.c.pid_t) !void {
+fn launchWait(pid: std.c.pid_t) LaunchRunError!void {
     var status: i32 = 0;
     var interrupts: u32 = 0;
     while (interrupts < max_launch_wait_interrupts) {
@@ -694,4 +707,27 @@ fn launchWait(pid: std.c.pid_t) !void {
     const status_bits: u32 = @bitCast(status);
     if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
     if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
+}
+
+fn launchRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+}
+
+fn launchRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+    return error.CommandFailed;
+}
+
+test "launch queue clears after successful drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try drainLaunchQueue(&queue, launchRunnerOkForTest);
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "launch queue clears after failed drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try std.testing.expectError(error.CommandFailed, drainLaunchQueue(&queue, launchRunnerFailForTest));
+    try std.testing.expect(!queue.hasQueued());
 }
