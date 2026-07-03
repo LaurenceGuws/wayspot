@@ -1,4 +1,4 @@
-//! SDL shell owns one bounded picker lifecycle from CLI summon to cleanup.
+//! SDL shell owns one bounded picker lifecycle from CLI entry to cleanup.
 //!
 //! Approved happy path: create one SDL window, search app/action candidates,
 //! launch one detached command when selected, and release every owned resource.
@@ -6,6 +6,7 @@
 const std = @import("std");
 const app = @import("../app/mod.zig");
 const common_dispatch = @import("common/dispatch.zig");
+const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 
 const c = @import("sdl_c");
@@ -25,6 +26,8 @@ pub const Shell = struct {
 
 const max_results = 8;
 const max_command_bytes = 4096;
+const base_window_width: i32 = 760;
+const base_window_height: i32 = 420;
 const row_height: f32 = 44;
 const row_gap: f32 = 6;
 const no_wake_timeout_ms: i32 = 1000;
@@ -209,6 +212,8 @@ const SdlShell = struct {
     service: *app.SearchService,
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
+    text: sdl_text.TextEngine,
+    config: surface_config.SurfaceConfig,
     shutdown_signal: ?*ShutdownSignal = null,
     wake_event_type: u32 = 0,
     query: std.ArrayList(u8) = .empty,
@@ -220,18 +225,22 @@ const SdlShell = struct {
     shutdown_after_launch: bool = false,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
+        const config = try surface_config.load(allocator);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         errdefer c.SDL_Quit();
 
+        const window_size = config.scaledDimensions(base_window_width, base_window_height);
         const window = c.SDL_CreateWindow(
             "Wayspot",
-            760,
-            420,
+            @intCast(window_size.width),
+            @intCast(window_size.height),
             c.SDL_WINDOW_HIDDEN | c.SDL_WINDOW_RESIZABLE,
         ) orelse return error.SdlWindowFailed;
         errdefer c.SDL_DestroyWindow(window);
         const renderer = c.SDL_CreateRenderer(window, null) orelse return error.SdlRendererFailed;
         errdefer c.SDL_DestroyRenderer(renderer);
+        var text = try sdl_text.TextEngine.init(allocator);
+        errdefer text.deinit();
         const text_input_started = c.SDL_StartTextInput(window);
         if (!text_input_started) return error.SdlTextInputFailed;
         const wake_event_type = c.SDL_RegisterEvents(1);
@@ -242,8 +251,11 @@ const SdlShell = struct {
             .service = service,
             .window = window,
             .renderer = renderer,
+            .text = text,
+            .config = config,
             .wake_event_type = wake_event_type,
         };
+        try self.applySurfaceScale();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
@@ -265,6 +277,7 @@ const SdlShell = struct {
         self.query.deinit(self.allocator);
         const stopped_text_input = c.SDL_StopTextInput(self.window);
         if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
+        self.text.deinit();
         c.SDL_DestroyRenderer(self.renderer);
         c.SDL_DestroyWindow(self.window);
         c.SDL_Quit();
@@ -320,6 +333,13 @@ const SdlShell = struct {
                 try self.refreshResults();
             },
             c.SDL_EVENT_KEY_DOWN => {
+                if (surface_config.zoomAction(event.key.key, event.key.mod)) |zoom_action| {
+                    self.config.applyZoomAction(zoom_action);
+                    try self.applySurfaceScale();
+                    try self.config.save(self.allocator);
+                    self.dirty = true;
+                    return true;
+                }
                 switch (event.key.key) {
                     c.SDLK_ESCAPE => {
                         return false;
@@ -401,6 +421,9 @@ const SdlShell = struct {
     }
 
     fn render(self: *SdlShell) !void {
+        const scale = self.config.scale();
+        const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
+        if (!scaled) return error.SdlRenderFailed;
         const background_color = c.SDL_SetRenderDrawColor(self.renderer, 18, 18, 22, 255);
         const cleared = c.SDL_RenderClear(self.renderer);
         if (!background_color or !cleared) return error.SdlRenderFailed;
@@ -413,13 +436,15 @@ const SdlShell = struct {
     }
 
     fn drawChrome(self: *SdlShell) !void {
-        try sdl_text.draw(self.renderer, 24, 18, "Wayspot", .{
+        try self.text.draw(self.renderer, 24, 18, "Wayspot", .{
             .color = .{ .r = 210, .g = 226, .b = 245 },
             .max_bytes = 64,
+            .font_size_px = 20,
         });
-        try sdl_text.draw(self.renderer, 24, 38, self.query.items, .{
+        try self.text.draw(self.renderer, 24, 40, self.query.items, .{
             .color = .{ .r = 168, .g = 185, .b = 204 },
             .max_bytes = 84,
+            .font_size_px = 17,
         });
 
         const query_rect = c.SDL_FRect{ .x = 20, .y = 58, .w = 720, .h = 1 };
@@ -447,31 +472,35 @@ const SdlShell = struct {
             const filled = c.SDL_RenderFillRect(self.renderer, &rect);
             if (!row_color or !filled) return error.SdlRenderFailed;
 
-            try sdl_text.draw(self.renderer, 34, y, result.title, .{
+            try self.text.draw(self.renderer, 34, y, result.title, .{
                 .color = if (selected)
                     .{ .r = 246, .g = 248, .b = 252 }
                 else
                     .{ .r = 216, .g = 222, .b = 230 },
                 .max_bytes = 72,
+                .font_size_px = 17,
             });
-            try sdl_text.draw(self.renderer, 34, y + 18, result.subtitle, .{
+            try self.text.draw(self.renderer, 34, y + 20, result.subtitle, .{
                 .color = if (selected)
                     .{ .r = 186, .g = 202, .b = 224 }
                 else
                     .{ .r = 140, .g = 152, .b = 166 },
                 .max_bytes = 82,
+                .font_size_px = 14,
             });
-            try sdl_text.draw(self.renderer, 662, y, common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
+            try self.text.draw(self.renderer, 662, y, common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
                 .color = .{ .r = 128, .g = 182, .b = 160 },
                 .max_bytes = 12,
+                .font_size_px = 14,
             });
             y += row_height + row_gap;
         }
 
         if (visible == 0) {
-            try sdl_text.draw(self.renderer, 34, y, "No results", .{
+            try self.text.draw(self.renderer, 34, y, "No results", .{
                 .color = .{ .r = 190, .g = 198, .b = 208 },
                 .max_bytes = 32,
+                .font_size_px = 17,
             });
         }
 
@@ -483,6 +512,15 @@ const SdlShell = struct {
             self.allocator.free(self.results);
             self.results = &.{};
         }
+    }
+
+    fn applySurfaceScale(self: *SdlShell) !void {
+        const size = self.config.scaledDimensions(base_window_width, base_window_height);
+        const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
+        if (!resized) return error.SdlResizeFailed;
+        const scale = self.config.scale();
+        const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
+        if (!scaled) return error.SdlScaleFailed;
     }
 };
 

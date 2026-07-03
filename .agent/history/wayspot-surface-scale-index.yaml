@@ -16,7 +16,7 @@ objective:
   - share one bounded zoom setting between SDL picker and SDL notification banner
   - allow zoom in, zoom out, and reset while a surface is active
   - persist the zoom setting for the current desktop session
-  - make actual glyph size scalable by replacing SDL debug text with a pragmatic text path
+  - make actual glyph size scalable with a pragmatic Howl-derived text path
 
 non_goals:
   - no GTK
@@ -29,11 +29,13 @@ non_goals:
 
 current_facts:
   text_owner: src/ui/sdl_text.zig
-  text_renderer: SDL_RenderDebugText
-  debug_text_limits:
-    - no font family control
-    - no font size control
-    - non ASCII bytes render as question marks
+  text_renderer: per-surface TextEngine using system FreeType, HarfBuzz, and SDL textures
+  text_limits:
+    - max_text_bytes: 512
+    - max_codepoints: 256
+    - max_glyphs: 384
+    - max_texture_width: 1200
+    - max_texture_height: 180
   picker_owner: src/ui/sdl_shell.zig
   banner_owner: src/ui/sdl_banner.zig
   hypr_owner: /home/home/personal/bash_engine/dots/hypr/modules/wayspot.lua
@@ -66,8 +68,9 @@ approved_owner_shape:
       - apply scale to banner dimensions and layout
       - keep banner process lifecycle bounded
     src/ui/sdl_text.zig:
-      - keep existing debug path until replacement slice
-      - then own a real scalable text API with explicit font size input
+      - own UTF-8 admission, HarfBuzz shaping, FreeType alpha rasterization, and SDL texture upload
+      - expose explicit per-call font size input
+      - clean up font and shaping resources with the owning surface
     /home/home/personal/bash_engine/dots/hypr/modules/wayspot.lua:
       - keep comments aligned with base banner dimensions and scale behavior
 
@@ -98,7 +101,7 @@ implementation_order:
   - id: 03_banner_wiring
     result: banner scales window and layout and still appears on focused monitor right corner
   - id: 04_scalable_text
-    result: sdl_text exposes real font size control copied from Howl internals or stops with a source-backed rejection
+    result: sdl_text exposes real font size control copied from Howl's shaping and rasterizing internals
 
 tests:
   unit:
@@ -116,12 +119,11 @@ tests:
     - hyprctl clients -j confirms banner class, size, monitor, and right corner
 
 hygiene_gates:
-  - rg -n "anytype|anyopaque|usize|_ =" src
+  - run the AGENTS banned-pattern scan against src
   - run the AGENTS banned-vocabulary scan against src and .agent/history
 
 stop_conditions:
   - Howl text internals require a large renderer import instead of a tiny copied subset
-  - SDL debug text prevents meaningful glyph scaling after layout scale is wired
   - zoom persistence introduces unbounded parsing or hidden background state
   - picker launch lifecycle regresses
   - notification daemon blocks on banner display

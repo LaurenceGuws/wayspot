@@ -4,6 +4,7 @@
 //! SDL objects, Hyprland placement command, and bounded display timeout.
 
 const std = @import("std");
+const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 
 const c = @import("sdl_c");
@@ -12,8 +13,8 @@ const log = std.log.scoped(.notification_banner);
 
 const window_title = "Wayspot Notification";
 const app_id = "wayspot-notification";
-const window_width: c_int = 460;
-const window_height: c_int = 118;
+const base_window_width: i32 = 460;
+const base_window_height: i32 = 118;
 const banner_margin: i32 = 12;
 const default_timeout_ms: u32 = 4200;
 const min_timeout_ms: u32 = 1200;
@@ -66,34 +67,46 @@ fn bannerChild(request: Request) noreturn {
 }
 
 fn show(request: Request) !void {
+    var config = try surface_config.load(std.heap.c_allocator);
     const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, app_id);
     if (!hint_set) log.debug("SDL app id hint rejected", .{});
 
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
     defer c.SDL_Quit();
 
+    const window_size = config.scaledDimensions(base_window_width, base_window_height);
     const window = c.SDL_CreateWindow(
         window_title,
-        window_width,
-        window_height,
+        @intCast(window_size.width),
+        @intCast(window_size.height),
         c.SDL_WINDOW_HIDDEN | c.SDL_WINDOW_BORDERLESS | c.SDL_WINDOW_ALWAYS_ON_TOP,
     ) orelse return error.SdlWindowFailed;
     defer c.SDL_DestroyWindow(window);
 
     const renderer = c.SDL_CreateRenderer(window, null) orelse return error.SdlRendererFailed;
     defer c.SDL_DestroyRenderer(renderer);
+    var text = try sdl_text.TextEngine.init(std.heap.c_allocator);
+    defer text.deinit();
 
     const shown = c.SDL_ShowWindow(window);
     const raised = c.SDL_RaiseWindow(window);
     if (!shown or !raised) return error.SdlShowFailed;
 
-    try render(renderer, request);
+    try render(renderer, &text, request, &config);
 
-    placeTopLeftFocusedMonitor();
-    try eventLoop(boundedTimeout(request.expire_timeout));
+    placeOnFocusedMonitor();
+    try eventLoop(boundedTimeout(request.expire_timeout), window, renderer, &text, request, &config);
 }
 
-fn render(renderer: *c.SDL_Renderer, request: Request) !void {
+fn render(
+    renderer: *c.SDL_Renderer,
+    text: *sdl_text.TextEngine,
+    request: Request,
+    config: *const surface_config.SurfaceConfig,
+) !void {
+    const scale = config.scale();
+    const scaled = c.SDL_SetRenderScale(renderer, scale, scale);
+    if (!scaled) return error.SdlRenderFailed;
     const background = switch (request.urgency) {
         2 => sdl_text.Rgba8{ .r = 70, .g = 22, .b = 26 },
         0 => sdl_text.Rgba8{ .r = 20, .g = 24, .b = 27 },
@@ -103,29 +116,39 @@ fn render(renderer: *c.SDL_Renderer, request: Request) !void {
     const cleared = c.SDL_RenderClear(renderer);
     if (!background_set or !cleared) return error.SdlRenderFailed;
 
-    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = 4, .h = @floatFromInt(window_height) };
+    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = 4, .h = @floatFromInt(base_window_height) };
     const accent_color = c.SDL_SetRenderDrawColor(renderer, 105, 184, 150, 255);
     const accent_drawn = c.SDL_RenderFillRect(renderer, &accent);
     if (!accent_color or !accent_drawn) return error.SdlRenderFailed;
 
-    try sdl_text.draw(renderer, 18, 14, request.app_name, .{
+    try text.draw(renderer, 18, 14, request.app_name, .{
         .color = .{ .r = 150, .g = 166, .b = 184 },
         .max_bytes = max_app_bytes,
+        .font_size_px = 13,
     });
-    try sdl_text.draw(renderer, 18, 36, request.summary, .{
+    try text.draw(renderer, 18, 36, request.summary, .{
         .color = .{ .r = 238, .g = 242, .b = 247 },
         .max_bytes = max_summary_bytes,
+        .font_size_px = 18,
     });
-    try sdl_text.draw(renderer, 18, 64, request.body, .{
+    try text.draw(renderer, 18, 66, request.body, .{
         .color = .{ .r = 188, .g = 198, .b = 210 },
         .max_bytes = max_body_bytes,
+        .font_size_px = 15,
     });
 
     const presented = c.SDL_RenderPresent(renderer);
     if (!presented) return error.SdlRenderFailed;
 }
 
-fn eventLoop(timeout_ms: u32) !void {
+fn eventLoop(
+    timeout_ms: u32,
+    window: *c.SDL_Window,
+    renderer: *c.SDL_Renderer,
+    text: *sdl_text.TextEngine,
+    request: Request,
+    config: *surface_config.SurfaceConfig,
+) !void {
     const start = monotonicMs();
     while (elapsedMs(start) < timeout_ms) {
         var event: c.SDL_Event = undefined;
@@ -138,11 +161,34 @@ fn eventLoop(timeout_ms: u32) !void {
             c.SDL_EVENT_MOUSE_BUTTON_DOWN,
             => return,
             c.SDL_EVENT_KEY_DOWN => {
+                if (surface_config.zoomAction(event.key.key, event.key.mod)) |zoom_action| {
+                    config.applyZoomAction(zoom_action);
+                    try applySurfaceScale(window, renderer, config);
+                    try config.save(std.heap.c_allocator);
+                    try render(renderer, text, request, config);
+                    placeOnFocusedMonitor();
+                    continue;
+                }
                 if (event.key.key == c.SDLK_ESCAPE) return;
             },
             else => {},
         }
     }
+}
+
+fn applySurfaceScale(
+    window: *c.SDL_Window,
+    renderer: *c.SDL_Renderer,
+    config: *const surface_config.SurfaceConfig,
+) !void {
+    const size = config.scaledDimensions(base_window_width, base_window_height);
+    const resized = c.SDL_SetWindowSize(window, @intCast(size.width), @intCast(size.height));
+    if (!resized) return error.SdlResizeFailed;
+    const synced = c.SDL_SyncWindow(window);
+    if (!synced) return error.SdlResizeFailed;
+    const scale = config.scale();
+    const scaled = c.SDL_SetRenderScale(renderer, scale, scale);
+    if (!scaled) return error.SdlScaleFailed;
 }
 
 fn elapsedMs(start: u64) u32 {
@@ -160,7 +206,7 @@ fn monotonicMs() u64 {
     return seconds_ms + nanos_ms;
 }
 
-fn placeTopLeftFocusedMonitor() void {
+fn placeOnFocusedMonitor() void {
     runPlacementCommand() catch |err| {
         log.debug("hypr placement command failed err={s}", .{@errorName(err)});
     };

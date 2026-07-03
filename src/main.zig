@@ -12,24 +12,28 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (hasArg(args, "--ui")) {
-        if (!wayspot.ui.sdl_enabled) {
-            std.log.err("UI mode requires SDL build", .{});
-            std.process.exit(2);
-        }
-
-        var runtime = try setupRuntime(allocator, home);
-        runtime.wireProviders();
-        defer runtime.deinit(allocator);
-        try runtime.service.loadHistory(allocator);
-        defer runtime.service.saveHistory(allocator) catch |err| {
-            std.log.err("failed to save history: {s}", .{@errorName(err)});
-        };
-
-        try wayspot.ui.Shell.run(allocator, &runtime.service);
+        try runUi(allocator, home);
         return;
     }
 
     try wayspot.bufferedPrint();
+}
+
+fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
+    if (!wayspot.ui.sdl_enabled) {
+        std.log.err("UI mode requires SDL build", .{});
+        std.process.exit(2);
+    }
+
+    var runtime = try setupRuntime(allocator, home);
+    runtime.wireProviders();
+    defer runtime.deinit(allocator);
+    try runtime.service.loadHistory(allocator);
+    defer runtime.service.saveHistory(allocator) catch |err| {
+        std.log.err("failed to save history: {s}", .{@errorName(err)});
+    };
+
+    try wayspot.ui.Shell.run(allocator, &runtime.service);
 }
 
 const Runtime = struct {

@@ -32,6 +32,8 @@ pub fn build(b: *std.Build) void {
     mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
+    mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
+    mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -47,6 +49,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
+    exe_mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
+    exe_mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
     const exe = b.addExecutable(.{
         .name = "wayspot",
         .root_module = exe_mod,
