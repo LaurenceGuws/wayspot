@@ -114,6 +114,7 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.stop_flag.store(true, .seq_cst);
+        wakeListener(self.socket_path);
         osClose(self.listener_fd);
         if (self.thread) |thread| {
             thread.join();
@@ -311,7 +312,7 @@ fn isSocketLive(socket_path: []const u8) bool {
 }
 
 fn serverMain(server: *Server) void {
-    // serverMain stops only when Server.deinit closes the listener and sets stop_flag.
+    // serverMain stops when Server.deinit sets stop_flag and wakes the listener.
     while (!server.stop_flag.load(.seq_cst)) {
         const client_fd = osAccept(server.listener_fd, std.posix.SOCK.CLOEXEC) catch |err| {
             switch (err) {
@@ -327,9 +328,29 @@ fn serverMain(server: *Server) void {
                 },
             }
         };
+        if (server.stop_flag.load(.seq_cst)) {
+            osClose(client_fd);
+            break;
+        }
         handleClient(server, client_fd);
         osClose(client_fd);
     }
+}
+
+fn wakeListener(socket_path: []const u8) void {
+    const fd = osSocket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch |err| {
+        std.log.debug("ipc listener wake socket failed err={s}", .{@errorName(err)});
+        return;
+    };
+    defer osClose(fd);
+    const addr = unixAddress(socket_path) catch |err| {
+        std.log.debug("ipc listener wake address failed err={s}", .{@errorName(err)});
+        return;
+    };
+    osConnect(fd, @ptrCast(&addr.addr), addr.len) catch |err| {
+        std.log.debug("ipc listener wake connect failed err={s}", .{@errorName(err)});
+        return;
+    };
 }
 
 fn handleClient(server: *Server, client_fd: std.posix.fd_t) void {
