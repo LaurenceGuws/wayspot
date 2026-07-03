@@ -46,40 +46,46 @@ const max_command_bytes = 4096;
 const row_height: f32 = 44;
 const row_gap: f32 = 6;
 const no_wake_timeout_ms: i32 = 1000;
+const launch_child_fail_code: i32 = 127;
 
 comptime {
     std.debug.assert(max_results > 0);
     std.debug.assert(max_command_bytes > 0);
 }
 
-const PendingLaunch = struct {
-    command_buf: [max_command_bytes]u8 = undefined,
+/// LaunchQueue owns one detached command intent between picker activation and controlled drain.
+const LaunchQueue = struct {
+    command_buf: [max_command_bytes + 1]u8 = undefined,
     command_len: u32 = 0,
-    detach: bool = false,
-    active: bool = false,
+    state: enum { idle, queued } = .idle,
 
-    fn set(self: *PendingLaunch, command_bytes: []const u8, detach: bool) !void {
+    fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
         if (command_bytes.len == 0) return error.EmptyCommand;
         if (command_bytes.len > max_command_bytes) return error.CommandTooLong;
-        std.debug.assert(!self.active);
+        std.debug.assert(self.state == .idle);
         @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
+        self.command_buf[command_bytes.len] = 0;
         self.command_len = @intCast(command_bytes.len);
-        self.detach = detach;
-        self.active = true;
+        self.state = .queued;
     }
 
-    fn clear(self: *PendingLaunch) void {
-        std.debug.assert(self.active);
+    fn clear(self: *LaunchQueue) void {
+        std.debug.assert(self.state == .queued);
+        self.command_buf[0] = 0;
         self.command_len = 0;
-        self.detach = false;
-        self.active = false;
+        self.state = .idle;
     }
 
-    fn bytes(self: *PendingLaunch) []const u8 {
-        std.debug.assert(self.active);
+    fn hasQueued(self: *const LaunchQueue) bool {
+        return self.state == .queued;
+    }
+
+    fn commandZ(self: *LaunchQueue) [*:0]const u8 {
+        std.debug.assert(self.state == .queued);
         std.debug.assert(self.command_len > 0);
         std.debug.assert(self.command_len <= max_command_bytes);
-        return self.command_buf[0..self.command_len];
+        std.debug.assert(self.command_buf[self.command_len] == 0);
+        return self.command_buf[0..self.command_len :0].ptr;
     }
 };
 
@@ -97,7 +103,7 @@ const SdlShell = struct {
     results: []@import("../search/mod.zig").ScoredCandidate = &.{},
     selected: u32 = 0,
     dirty: bool = true,
-    pending_launch: PendingLaunch = .{},
+    launch_queue: LaunchQueue = .{},
     shutdown_after_launch: bool = false,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService, options: Shell.RunOptions) !SdlShell {
@@ -273,28 +279,23 @@ const SdlShell = struct {
 
     fn queueSelectedLaunch(self: *SdlShell) !void {
         if (self.results.len == 0) return;
-        if (self.pending_launch.active) return error.LaunchAlreadyPending;
+        if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
         const candidate = self.results[@intCast(self.selected)].candidate;
         var plan = try common_dispatch.planCommandKind(self.allocator, uiKind(candidate.kind), candidate.action);
         defer plan.deinit(self.allocator);
+        if (!plan.detach_command) return error.LaunchMustDetach;
         if (common_dispatch.shouldRecordCandidate(candidate.kind)) {
             try self.service.recordSelection(self.allocator, candidate.action);
         }
-        try self.pending_launch.set(plan.command, plan.detach_command);
+        try self.launch_queue.queue(plan.command);
         self.hide();
         self.shutdown_after_launch = !self.resident_mode;
     }
 
     fn drainPendingLaunch(self: *SdlShell) !void {
-        if (!self.pending_launch.active) return;
-        const command = self.pending_launch.bytes();
-        const detach = self.pending_launch.detach;
-        if (detach) {
-            try runDetachedCommand(command);
-        } else {
-            try runCommand(command);
-        }
-        self.pending_launch.clear();
+        if (!self.launch_queue.hasQueued()) return;
+        try runDetachedCommand(self.launch_queue.commandZ());
+        self.launch_queue.clear();
     }
 
     fn activeResult(self: *SdlShell) ?@import("../search/mod.zig").ScoredCandidate {
@@ -423,25 +424,78 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
     };
 }
 
-fn runCommand(command: []const u8) !void {
-    var child = try std.process.spawn(std.Options.debug_io, .{
-        .argv = &.{ "sh", "-lc", command },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    });
-    const term = try child.wait(std.Options.debug_io);
-    if (term != .exited or term.exited != 0) return error.CommandFailed;
+fn runDetachedCommand(command: [*:0]const u8) !void {
+    const wrapper_pid = try launchFork();
+    if (wrapper_pid == 0) {
+        launchWrapperChild(command);
+    }
+    try launchWait(wrapper_pid);
 }
 
-fn runDetachedCommand(command: []const u8) !void {
-    const detach_script = "nohup sh -lc \"$1\" >/dev/null 2>&1 </dev/null &";
-    var child = try std.process.spawn(std.Options.debug_io, .{
-        .argv = &.{ "sh", "-lc", detach_script, "_", command },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    });
-    const term = try child.wait(std.Options.debug_io);
-    if (term != .exited or term.exited != 0) return error.CommandFailed;
+fn launchWrapperChild(command: [*:0]const u8) noreturn {
+    const stdio_ok = launchRedirectStdio();
+    if (!stdio_ok) std.c._exit(launch_child_fail_code);
+
+    const session_id = std.c.setsid();
+    if (session_id == -1) std.c._exit(launch_child_fail_code);
+
+    const app_pid = launchFork() catch std.c._exit(launch_child_fail_code);
+    if (app_pid == 0) launchExecShell(command);
+
+    std.c._exit(0);
+}
+
+fn launchExecShell(command: [*:0]const u8) noreturn {
+    const shell_path = "/bin/sh";
+    const shell_name = "sh";
+    const shell_arg = "-lc";
+    const argv: [4:null]?[*:0]const u8 = .{
+        shell_name,
+        shell_arg,
+        command,
+        null,
+    };
+    const exec_rc = std.c.execve(shell_path, &argv, std.c.environ);
+    if (exec_rc == -1) std.c._exit(launch_child_fail_code);
+    std.c._exit(launch_child_fail_code);
+}
+
+fn launchRedirectStdio() bool {
+    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = false });
+    if (dev_null == -1) return false;
+
+    const stdin_rc = std.c.dup2(dev_null, 0);
+    const stdout_rc = std.c.dup2(dev_null, 1);
+    const stderr_rc = std.c.dup2(dev_null, 2);
+    const close_rc = std.c.close(dev_null);
+    if (stdin_rc == -1) return false;
+    if (stdout_rc == -1) return false;
+    if (stderr_rc == -1) return false;
+    if (close_rc == -1) return false;
+    return true;
+}
+
+fn launchFork() !std.c.pid_t {
+    const pid = std.c.fork();
+    if (pid == -1) return error.ForkFailed;
+    return pid;
+}
+
+fn launchWait(pid: std.c.pid_t) !void {
+    var status: i32 = 0;
+    while (true) {
+        const waited = std.c.waitpid(pid, &status, 0);
+        if (waited == pid) break;
+        if (waited == -1) {
+            const errno = std.c._errno().*;
+            if (errno == @intFromEnum(std.c.E.INTR)) {
+                continue;
+            }
+            return error.WaitFailed;
+        }
+        return error.WaitFailed;
+    }
+    const status_bits: u32 = @bitCast(status);
+    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
+    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
 }
