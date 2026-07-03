@@ -265,8 +265,6 @@ const SdlShell = struct {
             .config = config,
             .wake_event_type = wake_event_type,
         };
-        const viewport_resized = self.viewport.resize(max_visible_result_rows);
-        std.debug.assert(viewport_resized);
         try self.applySurfaceScale();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
@@ -338,10 +336,34 @@ const SdlShell = struct {
             c.SDL_EVENT_WINDOW_DESTROYED,
             => return false,
             c.SDL_EVENT_WINDOW_CLOSE_REQUESTED => return false,
+            c.SDL_EVENT_WINDOW_RESIZED,
+            c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+            => {
+                try self.updateViewportForWindow();
+            },
             c.SDL_EVENT_TEXT_INPUT => {
                 const text = std.mem.span(event.text.text);
                 try self.query.appendSlice(self.allocator, text);
                 try self.refreshResults();
+            },
+            c.SDL_EVENT_MOUSE_WHEEL => {
+                const wheel_y = event.wheel.integer_y;
+                const scroll_delta = if (wheel_y == std.math.minInt(i32)) std.math.maxInt(i32) else -wheel_y;
+                if (wheel_y != 0 and self.viewport.scrollLines(scroll_delta)) self.dirty = true;
+            },
+            c.SDL_EVENT_MOUSE_MOTION => {
+                if (self.visibleRowAtPoint(event.motion.x, event.motion.y)) |visible_row| {
+                    if (self.viewport.selectVisibleRow(visible_row)) self.dirty = true;
+                }
+            },
+            c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
+                if (event.button.button == c.SDL_BUTTON_LEFT) {
+                    if (self.visibleRowAtPoint(event.button.x, event.button.y)) |visible_row| {
+                        if (self.viewport.resultAtVisibleRow(visible_row)) |result_index| {
+                            try self.queueLaunchAtResult(result_index);
+                        }
+                    }
+                }
             },
             c.SDL_EVENT_KEY_DOWN => {
                 if (surface_config.zoomAction(event.key.key, event.key.mod)) |zoom_action| {
@@ -448,6 +470,38 @@ const SdlShell = struct {
         if (!presented) return error.SdlRenderFailed;
     }
 
+    fn currentResultLayout(self: *const SdlShell) picker_viewport.ResultLayout {
+        return picker_viewport.ResultLayout.default(self.viewport.visibleRange().count);
+    }
+
+    fn visibleRowAtPoint(self: *const SdlShell, x: f32, y: f32) ?u32 {
+        const scale = self.config.scale();
+        std.debug.assert(scale > 0);
+        return self.currentResultLayout().visibleRowAtPoint(x / scale, y / scale);
+    }
+
+    fn updateViewportForWindow(self: *SdlShell) !void {
+        var width: i32 = 0;
+        var height: i32 = 0;
+        const size_read = c.SDL_GetWindowSize(self.window, &width, &height);
+        if (!size_read) return error.SdlResizeFailed;
+        const window_height = @max(height, 1);
+
+        const scale = self.config.scale();
+        std.debug.assert(scale > 0);
+        const base_height = @as(f32, @floatFromInt(window_height)) / scale;
+        const available_height = @max(0, base_height - picker_viewport.default_result_list_top);
+        const visible_rows = @min(
+            max_visible_result_rows,
+            picker_viewport.visibleRowsForHeight(
+                available_height,
+                picker_viewport.default_result_row_height,
+                picker_viewport.default_result_row_gap,
+            ),
+        );
+        if (self.viewport.resize(visible_rows)) self.dirty = true;
+    }
+
     fn drawChrome(self: *SdlShell) !void {
         try self.text.draw(self.renderer, 24, 18, "Wayspot", .{
             .color = .{ .r = 210, .g = 226, .b = 245 },
@@ -468,7 +522,7 @@ const SdlShell = struct {
 
     fn drawResults(self: *SdlShell) !void {
         const range = self.viewport.visibleRange();
-        const layout = picker_viewport.ResultLayout.default(range.count);
+        const layout = self.currentResultLayout();
         const selected_result = self.viewport.selected();
         var i: u32 = 0;
         while (i < range.count) : (i += 1) {
@@ -524,7 +578,7 @@ const SdlShell = struct {
     }
 
     fn drawScrollbar(self: *SdlShell) !void {
-        const layout = picker_viewport.ResultLayout.default(self.viewport.visibleRange().count);
+        const layout = self.currentResultLayout();
         const scrollbar = layout.scrollbar(&self.viewport);
         if (!scrollbar.needed) return;
 
@@ -563,6 +617,7 @@ const SdlShell = struct {
         const scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
         if (!scaled) return error.SdlScaleFailed;
+        try self.updateViewportForWindow();
     }
 };
 
