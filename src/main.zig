@@ -61,8 +61,6 @@ pub fn main(init: std.process.Init) !void {
             }
             return;
         }
-        if (!resident_mode and hasArg(args, "--ui") and isCommandOk(allocator, .summon)) return;
-
         var runtime = try setupRuntime(allocator, home);
         runtime.wireProviders();
         defer runtime.deinit(allocator);

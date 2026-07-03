@@ -1,27 +1,23 @@
 # wayspot
 
-A Wayland shell daemon and launcher built in Zig.
+A Wayland launcher built in Zig.
 
-`wayspot` is not just a one-shot app launcher anymore. The current shape is a
-long-lived shell process with:
+`wayspot` is currently a bounded CLI-summoned SDL picker with:
 
-- a warm GTK launcher (`--ui-daemon`, `--ui-resident`)
-- a local control plane (`--ctl ...`)
-- provider-driven search and route handling
-- Lua runtime config
-- compositor-aware WM integration through `src/wm/`
-- shell-facing theme and wallpaper runtime paths
+- one picker lifecycle per summon
+- app/action search
+- detached command launch
+- optional resident IPC for future evidence work
+- minimal notification daemon scope
 
 ## What It Is
 
 Current emphasis:
 
-- Wayland-first launcher and shell surfaces
-- deterministic daemon summon/hide/toggle behavior
-- provider/ranking pipeline instead of ad hoc menu assembly
-- Lua-configured runtime behavior
-- explicit WM integration boundaries
-- Zig-owned shell runtime paths for theme and wallpaper behavior
+- CLI-driven SDL launcher
+- deterministic create/show/input/launch/cleanup behavior
+- provider/ranking pipeline for app and action candidates
+- minimal runtime surface with no GTK dependency
 
 ## Quick Start
 
@@ -31,16 +27,10 @@ Build:
 zig build
 ```
 
-Run the warm daemon:
+Run the picker:
 
 ```bash
-wayspot --ui-daemon
-```
-
-Summon from another shell:
-
-```bash
-wayspot --ctl summon
+wayspot --ui
 ```
 
 If you are working in this repo, use:
@@ -67,8 +57,6 @@ wayspot --ctl summon
 wayspot --ctl hide
 wayspot --ctl toggle
 wayspot --ctl version
-wayspot --ctl shell_health
-wayspot --ctl wm_event_stats
 ```
 
 Config/runtime:

@@ -11,8 +11,9 @@
 - Use `dev_references/` for local source-backed docs before browsing. It contains Zig 0.16 release notes, SDL wiki markdown, captured Hyprland docs, TigerBeetle, and foot references with provenance in `dev_references/manifests/SOURCES.md`.
 
 ## Wayspot Scope
-- Wayspot is a resident app launcher plus a minimal freedesktop notification daemon.
-- Keep the core path small: initialize SDL once, keep one picker window resident, load app/action candidates, accept IPC summon/hide/toggle, and render typed notification rows.
+- Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop notification daemon.
+- Keep the core path small: initialize SDL for one bounded picker lifecycle, load app/action candidates, launch the selected command, clean up once, and render typed notification rows.
+- Treat resident IPC as optional future evidence work. It must not be required for the Super+Space happy path.
 - GTK, shell modules, open provider registries, broad WM abstractions, web/window/workspace providers, and runtime scripting VMs are out of scope.
 
 ## Code Rules
