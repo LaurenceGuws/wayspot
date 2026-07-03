@@ -29,7 +29,6 @@ const placement_command: [:0]const u8 =
     \\if [ -n "$mon" ]; then
     \\  hyprctl dispatch "hl.dsp.window.move({ monitor = \"$mon\", window = \"title:^Wayspot Notification$\" })" >/dev/null 2>&1
     \\fi
-    \\hyprctl dispatch 'hl.dsp.window.move({ x = 12, y = 12, window = "title:^Wayspot Notification$" })' >/dev/null 2>&1
 ;
 
 pub const Request = struct {
