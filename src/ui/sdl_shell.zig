@@ -51,6 +51,7 @@ const no_wake_timeout_ms: i32 = 1000;
 const resident_shutdown_check_ms: i32 = 250;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
+const max_title_bytes = 160;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
@@ -61,6 +62,7 @@ comptime {
     std.debug.assert(max_command_bytes > 0);
     std.debug.assert(resident_shutdown_check_ms > 0);
     std.debug.assert(max_launch_wait_interrupts > 0);
+    std.debug.assert(max_title_bytes > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
 }
@@ -240,6 +242,7 @@ const SdlShell = struct {
     selected: u32 = 0,
     dirty: bool = true,
     launch_queue: LaunchQueue = .{},
+    title_buf: [max_title_bytes:0]u8 = undefined,
     shutdown_after_launch: bool = false,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService, options: Shell.RunOptions) !SdlShell {
@@ -462,20 +465,20 @@ const SdlShell = struct {
 
     fn setTitle(self: *SdlShell) !void {
         const result = self.activeResult();
-        const title = try self.titleZ(if (result) |item| item.candidate.title else "no results");
-        defer self.allocator.free(title);
+        const title = self.titleZ(if (result) |item| item.candidate.title else "no results");
         const title_set = c.SDL_SetWindowTitle(self.window, title.ptr);
         if (!title_set) return error.SdlRenderFailed;
     }
 
-    fn titleZ(self: *SdlShell, top: []const u8) ![:0]u8 {
+    fn titleZ(self: *SdlShell, top: []const u8) [:0]u8 {
         std.debug.assert(top.len > 0);
-        return std.fmt.allocPrintSentinel(
-            self.allocator,
-            "Wayspot | {s} | {s}",
-            .{ self.query.items, top },
-            0,
-        );
+        var out_len: u32 = 0;
+        out_len = writeTitlePart(&self.title_buf, out_len, "Wayspot | ");
+        out_len = writeTitlePart(&self.title_buf, out_len, self.query.items);
+        out_len = writeTitlePart(&self.title_buf, out_len, " | ");
+        out_len = writeTitlePart(&self.title_buf, out_len, top);
+        self.title_buf[out_len] = 0;
+        return self.title_buf[0..out_len :0];
     }
 
     fn render(self: *SdlShell) !void {
@@ -491,11 +494,11 @@ const SdlShell = struct {
     }
 
     fn drawChrome(self: *SdlShell) !void {
-        try sdl_text.draw(self.allocator, self.renderer, 24, 18, "Wayspot", .{
+        try sdl_text.draw(self.renderer, 24, 18, "Wayspot", .{
             .color = .{ .r = 210, .g = 226, .b = 245 },
             .max_bytes = 64,
         });
-        try sdl_text.draw(self.allocator, self.renderer, 24, 38, self.query.items, .{
+        try sdl_text.draw(self.renderer, 24, 38, self.query.items, .{
             .color = .{ .r = 168, .g = 185, .b = 204 },
             .max_bytes = 84,
         });
@@ -525,21 +528,21 @@ const SdlShell = struct {
             const filled = c.SDL_RenderFillRect(self.renderer, &rect);
             if (!row_color or !filled) return error.SdlRenderFailed;
 
-            try sdl_text.draw(self.allocator, self.renderer, 34, y, result.title, .{
+            try sdl_text.draw(self.renderer, 34, y, result.title, .{
                 .color = if (selected)
                     .{ .r = 246, .g = 248, .b = 252 }
                 else
                     .{ .r = 216, .g = 222, .b = 230 },
                 .max_bytes = 72,
             });
-            try sdl_text.draw(self.allocator, self.renderer, 34, y + 18, result.subtitle, .{
+            try sdl_text.draw(self.renderer, 34, y + 18, result.subtitle, .{
                 .color = if (selected)
                     .{ .r = 186, .g = 202, .b = 224 }
                 else
                     .{ .r = 140, .g = 152, .b = 166 },
                 .max_bytes = 82,
             });
-            try sdl_text.draw(self.allocator, self.renderer, 662, y, common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
+            try sdl_text.draw(self.renderer, 662, y, common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
                 .color = .{ .r = 128, .g = 182, .b = 160 },
                 .max_bytes = 12,
             });
@@ -547,7 +550,7 @@ const SdlShell = struct {
         }
 
         if (visible == 0) {
-            try sdl_text.draw(self.allocator, self.renderer, 34, y, "No results", .{
+            try sdl_text.draw(self.renderer, 34, y, "No results", .{
                 .color = .{ .r = 190, .g = 198, .b = 208 },
                 .max_bytes = 32,
             });
@@ -578,6 +581,26 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
         .notification => .notification,
         .hint => .hint,
     };
+}
+
+fn writeTitlePart(buffer: *[max_title_bytes:0]u8, start_len: u32, text: []const u8) u32 {
+    std.debug.assert(start_len < max_title_bytes);
+    var out_len = start_len;
+    var truncated = false;
+    for (text) |byte| {
+        if (out_len + 1 >= max_title_bytes) {
+            truncated = true;
+            break;
+        }
+        buffer[out_len] = switch (byte) {
+            0...31 => ' ',
+            127...255 => '?',
+            else => byte,
+        };
+        out_len += 1;
+    }
+    if (truncated and out_len > start_len) buffer[out_len - 1] = '~';
+    return out_len;
 }
 
 fn osEventFd() !std.posix.fd_t {

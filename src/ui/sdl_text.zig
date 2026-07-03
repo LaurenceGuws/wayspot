@@ -8,6 +8,8 @@
 const std = @import("std");
 const c = @import("sdl_c");
 
+const max_debug_text_bytes = 256;
+
 pub const Rgba8 = struct {
     r: u8,
     g: u8,
@@ -22,7 +24,6 @@ pub const TextStyle = struct {
 
 /// draw writes one bounded ASCII-safe debug-text run using SDL's built-in font.
 pub fn draw(
-    allocator: std.mem.Allocator,
     renderer: *c.SDL_Renderer,
     x: f32,
     y: f32,
@@ -32,29 +33,37 @@ pub fn draw(
     const color_set = c.SDL_SetRenderDrawColor(renderer, style.color.r, style.color.g, style.color.b, style.color.a);
     if (!color_set) return error.SdlTextColorFailed;
 
-    const z = try asciiDebugTextZ(allocator, text, style.max_bytes);
-    defer allocator.free(z);
+    var text_buf: [max_debug_text_bytes:0]u8 = undefined;
+    const z = asciiDebugTextZ(&text_buf, text, style.max_bytes);
     const rendered = c.SDL_RenderDebugText(renderer, x, y, z.ptr);
     if (!rendered) return error.SdlTextRenderFailed;
 }
 
-fn asciiDebugTextZ(allocator: std.mem.Allocator, text: []const u8, max_bytes: u32) ![:0]u8 {
-    const out_len = @min(text.len, max_bytes);
-    var out = try allocator.allocSentinel(u8, out_len, 0);
+fn asciiDebugTextZ(buffer: *[max_debug_text_bytes:0]u8, text: []const u8, max_bytes: u32) [:0]u8 {
+    const bounded_max = @min(max_bytes, max_debug_text_bytes);
+    const out_len = @min(text.len, bounded_max);
     for (text[0..out_len], 0..) |byte, index| {
-        out[index] = switch (byte) {
+        buffer[index] = switch (byte) {
             0...31 => ' ',
             127...255 => '?',
             else => byte,
         };
     }
-    if (text.len > out_len and out_len > 0) out[out_len - 1] = '~';
-    return out;
+    if (text.len > out_len and out_len > 0) buffer[out_len - 1] = '~';
+    buffer[out_len] = 0;
+    return buffer[0..out_len :0];
 }
 
 test "asciiDebugTextZ bounds and sanitizes debug text" {
-    const text = try asciiDebugTextZ(std.testing.allocator, "ab\ncd\xffef", 6);
-    defer std.testing.allocator.free(text);
+    var buffer: [max_debug_text_bytes:0]u8 = undefined;
+    const text = asciiDebugTextZ(&buffer, "ab\ncd\xffef", 6);
 
     try std.testing.expectEqualStrings("ab cd~", text);
+}
+
+test "asciiDebugTextZ clamps caller max to internal buffer" {
+    var buffer: [max_debug_text_bytes:0]u8 = undefined;
+    const text = asciiDebugTextZ(&buffer, "abcdef", max_debug_text_bytes + 10);
+
+    try std.testing.expectEqualStrings("abcdef", text);
 }
