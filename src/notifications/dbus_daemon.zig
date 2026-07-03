@@ -1,6 +1,7 @@
 const std = @import("std");
 const notifications_state = @import("state.zig");
 const notifications_runtime = @import("runtime.zig");
+const sdl_banner = @import("../ui/sdl_banner.zig");
 
 const log = std.log.scoped(.notifications);
 
@@ -121,6 +122,7 @@ extern fn g_main_loop_unref(loop: *GMainLoop) void;
 pub fn run(allocator: std.mem.Allocator) !void {
     var daemon = try Daemon.init(allocator);
     defer daemon.deinit();
+    daemon.setHooks(.{ .on_notify = onNotifyBanner });
     try daemon.start();
 
     const loop = g_main_loop_new(null, 0) orelse return error.NotificationsMainLoopFailed;
@@ -514,6 +516,18 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
     );
 
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
+}
+
+fn onNotifyBanner(event: Daemon.NotifyEvent) void {
+    sdl_banner.spawn(.{
+        .app_name = event.app_name,
+        .summary = event.summary,
+        .body = event.body,
+        .expire_timeout = event.expire_timeout,
+        .urgency = event.urgency,
+    }) catch |err| {
+        log.warn("notification banner spawn failed id={d} err={s}", .{ event.id, @errorName(err) });
+    };
 }
 
 fn handleCloseNotification(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
