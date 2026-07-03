@@ -4,6 +4,16 @@ const std = @import("std");
 
 pub const max_visible_rows: u32 = 64;
 pub const min_scrollbar_thumb_height: f32 = 12;
+pub const default_result_list_top: f32 = 66;
+pub const default_result_row_x: f32 = 20;
+pub const default_result_row_width: f32 = 720;
+pub const default_result_row_height: f32 = 44;
+pub const default_result_row_gap: f32 = 6;
+pub const default_result_title_x: f32 = 34;
+pub const default_result_text_top_inset: f32 = 6;
+pub const default_result_subtitle_offset: f32 = 20;
+pub const default_result_status_x: f32 = 662;
+pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 394 };
 
 /// VisibleRange names the absolute result rows that may be rendered for the current frame.
 pub const VisibleRange = struct {
@@ -58,15 +68,42 @@ pub const ResultLayout = struct {
     row_width: f32,
     row_height: f32,
     row_gap: f32,
+    title_x: f32,
+    text_top_inset: f32,
+    subtitle_offset: f32,
     status_x: f32,
     scrollbar_track: Rect,
     visible_rows: u32,
+
+    pub fn default(visible_rows: u32) ResultLayout {
+        return .{
+            .result_top = default_result_list_top,
+            .row_x = default_result_row_x,
+            .row_width = default_result_row_width,
+            .row_height = default_result_row_height,
+            .row_gap = default_result_row_gap,
+            .title_x = default_result_title_x,
+            .text_top_inset = default_result_text_top_inset,
+            .subtitle_offset = default_result_subtitle_offset,
+            .status_x = default_result_status_x,
+            .scrollbar_track = default_scrollbar_track,
+            .visible_rows = @max(1, @min(visible_rows, max_visible_rows)),
+        };
+    }
 
     pub fn rowRect(self: ResultLayout, visible_row: u32) Rect {
         std.debug.assert(visible_row < self.visible_rows);
         const row_step = self.row_height + self.row_gap;
         const y = self.result_top + row_step * @as(f32, @floatFromInt(visible_row));
         return .{ .x = self.row_x, .y = y, .w = self.row_width, .h = self.row_height };
+    }
+
+    pub fn titleY(self: ResultLayout, visible_row: u32) f32 {
+        return self.rowRect(visible_row).y + self.text_top_inset;
+    }
+
+    pub fn subtitleY(self: ResultLayout, visible_row: u32) f32 {
+        return self.titleY(visible_row) + self.subtitle_offset;
     }
 
     pub fn visibleRowAtPoint(self: ResultLayout, x: f32, y: f32) ?u32 {
@@ -404,8 +441,8 @@ test "resize recalculates visible range without invalid state" {
     try testing.expectEqual(@as(?u32, 9), viewport.selected());
     try testing.expectEqual(@as(u32, 8), viewport.scroll_offset);
 
-    try testing.expectEqual(@as(u32, 1), visibleRowsForHeight(0, 44, 6));
-    try testing.expectEqual(@as(u32, 3), visibleRowsForHeight(144, 44, 6));
+    try testing.expectEqual(@as(u32, 1), visibleRowsForHeight(0, default_result_row_height, default_result_row_gap));
+    try testing.expectEqual(@as(u32, 3), visibleRowsForHeight(144, default_result_row_height, default_result_row_gap));
 }
 
 test "passive scrollbar thumb is bounded" {
@@ -437,6 +474,9 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
         .row_width = 720,
         .row_height = 44,
         .row_gap = 6,
+        .title_x = 34,
+        .text_top_inset = 6,
+        .subtitle_offset = 20,
         .status_x = 662,
         .scrollbar_track = .{ .x = 746, .y = 72, .w = 4, .h = 194 },
         .visible_rows = 4,
@@ -447,4 +487,18 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
     try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(746, 80));
     try testing.expectEqual(@as(?u32, 0), layout.visibleRowAtPoint(30, 80));
     try testing.expectEqual(@as(?u32, 2), layout.visibleRowAtPoint(30, 178));
+}
+
+test "default result layout preserves shell row geometry" {
+    const testing = std.testing;
+    const layout = ResultLayout.default(8);
+    const first_row = layout.rowRect(0);
+    const second_row = layout.rowRect(1);
+
+    try testing.expectEqual(Rect{ .x = 20, .y = 66, .w = 720, .h = 44 }, first_row);
+    try testing.expectEqual(@as(f32, 72), layout.titleY(0));
+    try testing.expectEqual(@as(f32, 92), layout.subtitleY(0));
+    try testing.expectEqual(@as(f32, 116), second_row.y);
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 112));
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 122));
 }

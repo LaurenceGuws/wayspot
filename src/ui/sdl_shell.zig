@@ -6,6 +6,7 @@
 const std = @import("std");
 const app = @import("../app/mod.zig");
 const common_dispatch = @import("common/dispatch.zig");
+const picker_viewport = @import("picker_viewport.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 
@@ -28,8 +29,6 @@ const max_results = 8;
 const max_command_bytes = 4096;
 const base_window_width: i32 = 760;
 const base_window_height: i32 = 420;
-const row_height: f32 = 44;
-const row_gap: f32 = 6;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 const max_title_bytes = 160;
@@ -462,12 +461,13 @@ const SdlShell = struct {
 
     fn drawResults(self: *SdlShell) !void {
         const visible = @min(self.results.len, max_results);
-        var y: f32 = 72;
+        const layout = picker_viewport.ResultLayout.default(@intCast(visible));
         var i: u32 = 0;
         while (i < visible) : (i += 1) {
             const result = self.results[i].candidate;
             const selected = i == self.selected;
             const shade: u8 = if (selected) 64 else 31;
+            const row_rect = layout.rowRect(i);
             const row_color = c.SDL_SetRenderDrawColor(
                 self.renderer,
                 shade,
@@ -475,11 +475,11 @@ const SdlShell = struct {
                 if (selected) 82 else 38,
                 255,
             );
-            const rect = c.SDL_FRect{ .x = 20, .y = y - 6, .w = 720, .h = row_height };
+            const rect = c.SDL_FRect{ .x = row_rect.x, .y = row_rect.y, .w = row_rect.w, .h = row_rect.h };
             const filled = c.SDL_RenderFillRect(self.renderer, &rect);
             if (!row_color or !filled) return error.SdlRenderFailed;
 
-            try self.text.draw(self.renderer, 34, y, result.title, .{
+            try self.text.draw(self.renderer, layout.title_x, layout.titleY(i), result.title, .{
                 .color = if (selected)
                     .{ .r = 246, .g = 248, .b = 252 }
                 else
@@ -487,7 +487,7 @@ const SdlShell = struct {
                 .max_bytes = 72,
                 .font_size_px = 17,
             });
-            try self.text.draw(self.renderer, 34, y + 20, result.subtitle, .{
+            try self.text.draw(self.renderer, layout.title_x, layout.subtitleY(i), result.subtitle, .{
                 .color = if (selected)
                     .{ .r = 186, .g = 202, .b = 224 }
                 else
@@ -495,16 +495,15 @@ const SdlShell = struct {
                 .max_bytes = 82,
                 .font_size_px = 14,
             });
-            try self.text.draw(self.renderer, 662, y, common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
+            try self.text.draw(self.renderer, layout.status_x, layout.titleY(i), common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
                 .color = .{ .r = 128, .g = 182, .b = 160 },
                 .max_bytes = 12,
                 .font_size_px = 14,
             });
-            y += row_height + row_gap;
         }
 
         if (visible == 0) {
-            try self.text.draw(self.renderer, 34, y, "No results", .{
+            try self.text.draw(self.renderer, layout.title_x, layout.titleY(0), "No results", .{
                 .color = .{ .r = 190, .g = 198, .b = 208 },
                 .max_bytes = 32,
                 .font_size_px = 17,
