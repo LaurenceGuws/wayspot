@@ -50,9 +50,3 @@ pub const Candidate = struct {
 };
 
 pub const CandidateList = std.ArrayList(Candidate);
-
-pub const ProviderHealth = enum {
-    ready,
-    degraded,
-    unavailable,
-};

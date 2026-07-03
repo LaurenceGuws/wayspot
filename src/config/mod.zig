@@ -65,7 +65,13 @@ pub const Settings = struct {
 
     /// defaults returns the single source of runtime defaults for the current shell.
     pub fn defaults() Settings {
-        return .{};
+        return .{
+            .surface_mode = .toplevel,
+            .placement_policy = .{},
+            .ui = .{},
+            .notifications = .{},
+            .tools = .{},
+        };
     }
 };
 

@@ -23,8 +23,6 @@ pub const ActionSpec = struct {
     icon: []const u8,
     execution: ActionExecution,
     dependency: Dependency,
-    confirm: bool = false,
-    help: []const u8 = "",
 };
 
 pub const action_specs = [_]ActionSpec{
@@ -35,7 +33,6 @@ pub const action_specs = [_]ActionSpec{
         .icon = "preferences-system-symbolic",
         .execution = .{ .shell_command = "wlrlui" },
         .dependency = .{ .command = "wlrlui" },
-        .help = "Open the application launcher settings panel (requires `wlrlui`).",
     },
     .{
         .title = "Power menu",
@@ -44,8 +41,6 @@ pub const action_specs = [_]ActionSpec{
         .icon = "system-shutdown-symbolic",
         .execution = .{ .shell_command = "wlogout" },
         .dependency = .{ .command = "wlogout" },
-        .confirm = false,
-        .help = "Open the session power/logout menu via `wlogout`.",
     },
 };
 
@@ -72,17 +67,6 @@ pub const ActionsProvider = struct {
                 ),
             );
         }
-    }
-
-    /// health reports whether the configured action commands are available.
-    pub fn health(self: *ActionsProvider) search.ProviderHealth {
-        var available_count: u32 = 0;
-        for (action_specs) |spec| {
-            if (self.actionAvailable(spec)) available_count += 1;
-        }
-        if (available_count == 0) return .unavailable;
-        if (available_count < action_specs.len) return .degraded;
-        return .ready;
     }
 
     fn actionAvailable(self: *ActionsProvider, spec: ActionSpec) bool {
@@ -112,13 +96,6 @@ pub fn resolveActionSpec(action: []const u8) ?ActionSpec {
 
 pub fn allSpecs() []const ActionSpec {
     return action_specs[0..];
-}
-
-pub fn requiresConfirmation(action: []const u8) bool {
-    for (action_specs) |spec| {
-        if (std.mem.eql(u8, action, spec.action)) return spec.confirm;
-    }
-    return false;
 }
 
 pub fn executeAction(
@@ -186,39 +163,6 @@ test "actions provider collects available action candidates only" {
     try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].icon);
 }
 
-test "actions provider health reflects dependency availability" {
-    const FakeAllMissing = struct {
-        fn commandExists(_: []const u8) bool {
-            return false;
-        }
-
-        fn pathExists(_: []const u8) bool {
-            return false;
-        }
-    };
-    const FakePartial = struct {
-        fn commandExists(name: []const u8) bool {
-            return std.mem.eql(u8, name, "wlrlui");
-        }
-
-        fn pathExists(_: []const u8) bool {
-            return false;
-        }
-    };
-
-    var none_provider_impl = ActionsProvider{
-        .command_exists_fn = FakeAllMissing.commandExists,
-        .path_exists_fn = FakeAllMissing.pathExists,
-    };
-    try std.testing.expectEqual(search.ProviderHealth.unavailable, none_provider_impl.health());
-
-    var partial_provider_impl = ActionsProvider{
-        .command_exists_fn = FakePartial.commandExists,
-        .path_exists_fn = FakePartial.pathExists,
-    };
-    try std.testing.expectEqual(search.ProviderHealth.degraded, partial_provider_impl.health());
-}
-
 test "execute action resolves command mapping" {
     const Runner = struct {
         fn run(command: []const u8) !void {
@@ -243,9 +187,4 @@ test "execute action returns runner errors for failed commands" {
     };
 
     try std.testing.expectError(error.CommandFailed, executeAction("settings", Runner.run));
-}
-
-test "power action has no confirmation gating" {
-    try std.testing.expect(!requiresConfirmation("power"));
-    try std.testing.expect(!requiresConfirmation("settings"));
 }

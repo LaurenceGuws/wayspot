@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
             allocator.free(response.message);
         }
         if (response.ok and std.mem.eql(u8, response.code, "ok")) {
-            if (response.message.len > 0 and (cmd == .version or cmd == .shell_health)) {
+            if (response.message.len > 0 and cmd == .version) {
                 try printLine(response.message);
             }
             std.process.exit(0);
@@ -41,22 +41,6 @@ pub fn main(init: std.process.Init) !void {
     if (hasArg(args, "--print-config")) {
         const cfg = wayspot.config.load();
         try printResolvedConfig(cfg);
-        return;
-    }
-
-    if (hasArg(args, "--print-outputs")) {
-        try wayspot.ui.Diagnostics.printOutputs(allocator);
-        return;
-    }
-
-    if (hasArg(args, "--print-shell-health")) {
-        const live = wayspot.ipc.control.queryCommandMessage(allocator, .shell_health) catch null;
-        if (live) |message| {
-            defer allocator.free(message);
-            try printLine(message);
-        } else {
-            try wayspot.ui.Diagnostics.printShellHealth(allocator);
-        }
         return;
     }
 
@@ -171,7 +155,7 @@ fn printCtlUsage() !void {
     const out = &stdout_writer.interface;
     try out.print(
         \\Usage: wayspot --ctl <command>
-        \\Commands: ping, summon, hide, toggle, version, shell_health
+        \\Commands: ping, summon, hide, toggle, version
         \\
     , .{});
     try out.flush();
@@ -208,7 +192,6 @@ fn parseControlCommand(value: []const u8) ?wayspot.ipc.control.Command {
     if (std.mem.eql(u8, value, "hide")) return .hide;
     if (std.mem.eql(u8, value, "toggle")) return .toggle;
     if (std.mem.eql(u8, value, "version")) return .version;
-    if (std.mem.eql(u8, value, "shell_health")) return .shell_health;
     return null;
 }
 

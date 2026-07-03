@@ -10,7 +10,6 @@ pub const SearchService = struct {
     history: std.ArrayListUnmanaged([]u8) = .empty,
     max_history: u32 = 32,
     last_query_elapsed_ns: u64 = 0,
-    last_query_had_provider_runtime_failure: bool = false,
 
     pub fn init(registry: providers.ProviderRegistry) SearchService {
         return .{ .registry = registry };
@@ -29,13 +28,10 @@ pub const SearchService = struct {
 
     pub fn searchQuery(self: *SearchService, allocator: std.mem.Allocator, raw_query: []const u8) ![]search.ScoredCandidate {
         const started_ns = nowNs();
-        self.setProviderFailure(false);
-
         var candidates = search.CandidateList.empty;
         defer candidates.deinit(allocator);
 
-        const report = try self.registry.collectAllWithReport(allocator, &candidates);
-        self.setProviderFailure(report.had_runtime_failure);
+        try self.registry.collectAll(allocator, &candidates);
 
         const recent = try self.historySnapshotNewestFirstOwned(allocator);
         defer history_access.freeSnapshot(allocator, recent);
@@ -48,17 +44,6 @@ pub const SearchService = struct {
         );
         self.setElapsed(started_ns);
         return ranked;
-    }
-
-    pub fn defaultLoadout(self: *SearchService, allocator: std.mem.Allocator) ![]search.ScoredCandidate {
-        return self.searchQuery(allocator, "");
-    }
-
-    pub fn prewarmProviders(self: *SearchService, allocator: std.mem.Allocator) !void {
-        var candidates = search.CandidateList.empty;
-        defer candidates.deinit(allocator);
-        const report = try self.registry.collectAllWithReport(allocator, &candidates);
-        self.setProviderFailure(report.had_runtime_failure);
     }
 
     pub fn recordSelection(self: *SearchService, allocator: std.mem.Allocator, action: []const u8) !void {
@@ -85,23 +70,11 @@ pub const SearchService = struct {
         try history_access.saveLocked(self.history.items, self.history_path, allocator);
     }
 
-    pub fn lastQueryElapsedNs(self: *SearchService) u64 {
-        self.query_mu.lockUncancelable(std.Options.debug_io);
-        defer self.query_mu.unlock(std.Options.debug_io);
-        return self.last_query_elapsed_ns;
-    }
-
     fn setElapsed(self: *SearchService, started_ns: i96) void {
         const now = nowNs();
         const elapsed: u64 = if (now > started_ns) @intCast(now - started_ns) else 0;
         self.query_mu.lockUncancelable(std.Options.debug_io);
         self.last_query_elapsed_ns = elapsed;
-        self.query_mu.unlock(std.Options.debug_io);
-    }
-
-    fn setProviderFailure(self: *SearchService, failed: bool) void {
-        self.query_mu.lockUncancelable(std.Options.debug_io);
-        self.last_query_had_provider_runtime_failure = failed;
         self.query_mu.unlock(std.Options.debug_io);
     }
 };

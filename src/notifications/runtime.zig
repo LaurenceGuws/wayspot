@@ -1,5 +1,4 @@
 const std = @import("std");
-const search = @import("../search/mod.zig");
 
 const max_entries: u32 = 256;
 
@@ -186,77 +185,6 @@ pub fn freeSnapshot(allocator: std.mem.Allocator, rows: []Snapshot) void {
     allocator.free(rows);
 }
 
-pub fn appendRouteCandidates(
-    dynamic_owned: *std.ArrayListUnmanaged([]u8),
-    allocator: std.mem.Allocator,
-    term: []const u8,
-    out: *search.CandidateList,
-) !void {
-    const rows = try snapshot(allocator);
-    defer freeSnapshot(allocator, rows);
-
-    var active_count: u32 = 0;
-    for (rows) |row| {
-        if (row.active) active_count += 1;
-    }
-
-    if (active_count > 0) {
-        const title = try keep(dynamic_owned, allocator, "Dismiss All Notifications");
-        const subtitle = try keep(dynamic_owned, allocator, "Close all active notifications");
-        const action = try keep(dynamic_owned, allocator, "notif-dismiss-all");
-        try out.append(allocator, search.Candidate.initWithIcon(.action, title, subtitle, action, "window-close-symbolic"));
-    }
-
-    if (rows.len == 0) {
-        const title = try keep(dynamic_owned, allocator, "No notifications yet");
-        const subtitle = try keep(dynamic_owned, allocator, "Send a notification, then search with $ prefix");
-        try out.append(allocator, search.Candidate.initWithIcon(.hint, title, subtitle, "", "preferences-system-notifications-symbolic"));
-        return;
-    }
-
-    var i = rows.len;
-    while (i > 0) {
-        i -= 1;
-        const row = rows[i];
-        if (!matchesTerm(row, term)) continue;
-
-        const title = if (row.summary.len > 0) row.summary else row.app_name;
-        const age = formatAge(allocator, row.updated_ns) catch continue;
-        defer allocator.free(age);
-        const subtitle_base = if (row.active)
-            try std.fmt.allocPrint(allocator, "{s} | {s}", .{ row.app_name, age })
-        else
-            try std.fmt.allocPrint(allocator, "{s} | closed ({d}) | {s}", .{ row.app_name, row.closed_reason, age });
-        defer allocator.free(subtitle_base);
-
-        const subtitle_buf = if (row.body.len > 0) blk: {
-            const snippet = try truncateBody(allocator, row.body, 120);
-            defer allocator.free(snippet);
-            break :blk try std.fmt.allocPrint(allocator, "{s} | {s}", .{ subtitle_base, snippet });
-        } else try allocator.dupe(u8, subtitle_base);
-        defer allocator.free(subtitle_buf);
-
-        const action_buf = if (row.active)
-            try std.fmt.allocPrint(allocator, "notif-dismiss:{d}", .{row.id})
-        else
-            try std.fmt.allocPrint(allocator, "notif-noop:{d}", .{row.id});
-        defer allocator.free(action_buf);
-
-        const kept_title = try keep(dynamic_owned, allocator, title);
-        const kept_subtitle = try keep(dynamic_owned, allocator, subtitle_buf);
-        const kept_action = try keep(dynamic_owned, allocator, action_buf);
-        const icon_hint = if (std.mem.trim(u8, row.app_icon, " \t\r\n").len > 0) row.app_icon else row.app_name;
-        const kept_icon = try keep(dynamic_owned, allocator, icon_hint);
-        try out.append(allocator, search.Candidate.initWithIcon(
-            .notification,
-            kept_title,
-            kept_subtitle,
-            kept_action,
-            kept_icon,
-        ));
-    }
-}
-
 fn findIndexLocked(id: u32) ?u32 {
     for (runtime.entries.items, 0..) |row, idx| {
         if (row.id == id) return @intCast(idx);
@@ -278,47 +206,6 @@ fn freeSnapshotRow(allocator: std.mem.Allocator, row: Snapshot) void {
     allocator.free(row.body);
 }
 
-fn keep(dynamic_owned: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
-    const copy = try allocator.dupe(u8, value);
-    try dynamic_owned.append(allocator, copy);
-    return copy;
-}
-
-fn matchesTerm(row: Snapshot, term: []const u8) bool {
-    const trimmed = std.mem.trim(u8, term, " \t\r\n");
-    if (trimmed.len == 0) return true;
-    return containsIgnoreCase(row.summary, trimmed) or
-        containsIgnoreCase(row.body, trimmed) or
-        containsIgnoreCase(row.app_name, trimmed);
-}
-
-fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (hay.len < needle.len) return false;
-    var i: u32 = 0;
-    while (i + needle.len <= hay.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-fn truncateBody(allocator: std.mem.Allocator, body: []const u8, max_len: u32) ![]u8 {
-    const trimmed = std.mem.trim(u8, body, " \t\r\n");
-    if (trimmed.len <= max_len) return allocator.dupe(u8, trimmed);
-    return std.fmt.allocPrint(allocator, "{s}...", .{trimmed[0..max_len]});
-}
-
-fn formatAge(allocator: std.mem.Allocator, ts_ns: i128) ![]u8 {
-    const now = std.time.nanoTimestamp();
-    const diff_ns: u64 = if (now <= ts_ns) 0 else @intCast(now - ts_ns);
-    const secs = diff_ns / std.time.ns_per_s;
-    if (secs < 60) return std.fmt.allocPrint(allocator, "{d}s ago", .{secs});
-    const mins = secs / 60;
-    if (mins < 60) return std.fmt.allocPrint(allocator, "{d}m ago", .{mins});
-    const hours = mins / 60;
-    return std.fmt.allocPrint(allocator, "{d}h ago", .{hours});
-}
-
 test "recordNotify and snapshot preserve latest state" {
     const allocator = std.testing.allocator;
     resetForTest(allocator);
@@ -335,26 +222,4 @@ test "recordNotify and snapshot preserve latest state" {
     try std.testing.expectEqualStrings("app2", rows[0].app_name);
     try std.testing.expectEqualStrings("app2-icon", rows[0].app_icon);
     try std.testing.expect(rows[0].active);
-}
-
-test "appendRouteCandidates emits dismiss-all and notification rows" {
-    const allocator = std.testing.allocator;
-    resetForTest(allocator);
-    defer resetForTest(allocator);
-
-    try recordNotify(allocator, 1, "notify-send", "notify-send", "Title", "Body", 1, false);
-    var owned = std.ArrayListUnmanaged([]u8){};
-    defer {
-        for (owned.items) |item| allocator.free(item);
-        owned.deinit(allocator);
-    }
-    var out = search.CandidateList.empty;
-    defer out.deinit(allocator);
-
-    try appendRouteCandidates(&owned, allocator, "", &out);
-    try std.testing.expect(out.items.len >= 2);
-    try std.testing.expectEqual(search.CandidateKind.action, out.items[0].kind);
-    try std.testing.expectEqualStrings("notif-dismiss-all", out.items[0].action);
-    try std.testing.expectEqual(search.CandidateKind.notification, out.items[1].kind);
-    try std.testing.expectEqualStrings("notify-send", out.items[1].icon);
 }

@@ -7,7 +7,6 @@ pub const AppsProvider = struct {
     cache_path: []const u8,
     owned_strings_current: std.ArrayListUnmanaged([]u8) = .empty,
     owned_strings_previous: std.ArrayListUnmanaged([]u8) = .empty,
-    had_runtime_failure: bool = false,
 
     pub fn init(cache_path: []const u8) AppsProvider {
         return .{
@@ -37,19 +36,13 @@ pub const AppsProvider = struct {
         ) catch |err| switch (err) {
             error.FileNotFound => {
                 const count = self.collectFromDesktopFiles(allocator, out) catch |scan_err| {
-                    self.had_runtime_failure = true;
                     std.log.warn("apps provider desktop scan failed: {s}", .{@errorName(scan_err)});
                     return;
                 };
-                if (count == 0) {
-                    self.had_runtime_failure = true;
-                    return;
-                }
-                self.had_runtime_failure = false;
+                if (count == 0) return;
                 return;
             },
             else => {
-                self.had_runtime_failure = true;
                 std.log.warn("apps provider cache read failed: {s}", .{@errorName(err)});
                 return;
             },
@@ -63,7 +56,6 @@ pub const AppsProvider = struct {
                 break :blk 0;
             };
             if (added > 0) {
-                self.had_runtime_failure = false;
                 return;
             }
         }
@@ -91,18 +83,9 @@ pub const AppsProvider = struct {
         }
 
         if (count == 0) {
-            self.had_runtime_failure = true;
             std.log.warn("apps provider cache contained no parsable rows path={s}", .{self.cache_path});
             return;
         }
-        self.had_runtime_failure = false;
-    }
-
-    /// health reports whether the app source is ready or needs a scan.
-    pub fn health(self: *AppsProvider) search.ProviderHealth {
-        std.Io.Dir.cwd().access(std.Options.debug_io, self.cache_path, .{}) catch return .degraded;
-        if (self.had_runtime_failure) return .degraded;
-        return .ready;
     }
 
     fn keepString(self: *AppsProvider, allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -427,7 +410,6 @@ test "apps provider collects rows from cache file" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(search.ProviderHealth.ready, provider.health());
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
@@ -477,7 +459,7 @@ test "cacheContainsThreeColumnRows detects three-column cache lines" {
     try std.testing.expect(!cacheContainsThreeColumnRows(modern));
 }
 
-test "apps provider falls back when cache is missing" {
+test "apps provider scans desktop files when cache is missing" {
     var apps = AppsProvider.init("/tmp/non-existent-app-cache.tsv");
     defer apps.deinit(std.testing.allocator);
 
@@ -487,11 +469,10 @@ test "apps provider falls back when cache is missing" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(search.ProviderHealth.degraded, provider.health());
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
 }
 
-test "apps provider degrades when cache exists but no valid rows are parsed" {
+test "apps provider returns no rows when cache has no valid rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -517,7 +498,6 @@ test "apps provider degrades when cache exists but no valid rows are parsed" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqual(search.ProviderHealth.degraded, provider.health());
 }
 
 test "apps provider rotates owned strings across collects with bounded growth" {

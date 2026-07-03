@@ -1,12 +1,8 @@
 pub const AppsProvider = @import("apps.zig").AppsProvider;
 pub const invalidateAppsCache = @import("apps.zig").invalidateDefaultCache;
 pub const ActionsProvider = @import("actions.zig").ActionsProvider;
-pub const CollectReport = @import("registry.zig").CollectReport;
 pub const Provider = @import("registry.zig").Provider;
-pub const ProviderCollectFailure = @import("registry.zig").ProviderCollectFailure;
 pub const ProviderRegistry = @import("registry.zig").ProviderRegistry;
-pub const ProviderStatus = @import("registry.zig").ProviderStatus;
 pub const executeAction = @import("actions.zig").executeAction;
-pub const requiresConfirmation = @import("actions.zig").requiresConfirmation;
 pub const resolveActionSpec = @import("actions.zig").resolveActionSpec;
 pub const resolveExecutionCommand = @import("actions.zig").resolveExecutionCommand;

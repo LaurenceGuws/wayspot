@@ -9,7 +9,6 @@ pub const Command = enum {
     hide,
     toggle,
     version,
-    shell_health,
 };
 
 pub const HandlerResult = struct {
@@ -22,19 +21,36 @@ pub const HandlerResult = struct {
 pub const ControlSlot = struct {
     mu: std.Io.Mutex = .init,
     command: ?Command = null,
+    wake_event_type: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    wake_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn put(self: *ControlSlot, command: Command) void {
         self.mu.lockUncancelable(std.Options.debug_io);
-        defer self.mu.unlock(std.Options.debug_io);
         self.command = command;
+        self.mu.unlock(std.Options.debug_io);
+        self.wake();
     }
 
     pub fn take(self: *ControlSlot) ?Command {
         self.mu.lockUncancelable(std.Options.debug_io);
-        defer self.mu.unlock(std.Options.debug_io);
         const command = self.command;
         self.command = null;
+        self.mu.unlock(std.Options.debug_io);
+        self.wake_pending.store(false, .release);
         return command;
+    }
+
+    pub fn setWakeEvent(self: *ControlSlot, event_type: u32) void {
+        std.debug.assert(event_type != 0);
+        self.wake_event_type.store(event_type, .release);
+    }
+
+    fn wake(self: *ControlSlot) void {
+        const event_type = self.wake_event_type.load(.acquire);
+        if (event_type == 0) return;
+        if (self.wake_pending.swap(true, .acq_rel)) return;
+        var event = @import("sdl_c").SDL_Event{ .user = .{ .type = event_type } };
+        _ = @import("sdl_c").SDL_PushEvent(&event);
     }
 };
 
@@ -100,66 +116,6 @@ pub const Server = struct {
         self.allocator.free(self.socket_path);
     }
 };
-
-pub fn trySendCommand(allocator: std.mem.Allocator, cmd: Command) !bool {
-    const start_ns = nowNs();
-    const response = sendCommand(allocator, cmd) catch |err| {
-        const elapsed_ns = elapsedFrom(start_ns);
-        std.log.warn(
-            "ipc control route failure endpoint=ui-daemon route={s} elapsed_ns={d} exit_code=transport_error err={s}",
-            .{ @tagName(cmd), elapsed_ns, @errorName(err) },
-        );
-        return err;
-    };
-    defer {
-        allocator.free(response.code);
-        allocator.free(response.message);
-    }
-    if (!response.ok) {
-        std.log.warn(
-            "ipc control route rejected endpoint=ui-daemon route={s} exit_code={s} elapsed_ns={d} message={s}",
-            .{ @tagName(cmd), response.code, response.elapsed_ns, response.message },
-        );
-        return false;
-    }
-    std.log.info(
-        "ipc control route exit endpoint=ui-daemon route={s} exit_code={s} elapsed_ns={d}",
-        .{ @tagName(cmd), response.code, response.elapsed_ns },
-    );
-    return std.mem.eql(u8, response.code, "ok");
-}
-
-pub fn queryCommandMessage(allocator: std.mem.Allocator, cmd: Command) !?[]u8 {
-    const start_ns = nowNs();
-    const response = sendCommand(allocator, cmd) catch |err| {
-        const elapsed_ns = elapsedFrom(start_ns);
-        std.log.warn(
-            "ipc control query failure endpoint=ui-daemon route={s} elapsed_ns={d} exit_code=transport_error err={s}",
-            .{ @tagName(cmd), elapsed_ns, @errorName(err) },
-        );
-        return err;
-    };
-    defer {
-        allocator.free(response.code);
-        allocator.free(response.message);
-    }
-    if (!response.ok) {
-        std.log.warn(
-            "ipc control query rejected endpoint=ui-daemon route={s} exit_code={s} elapsed_ns={d} message={s}",
-            .{ @tagName(cmd), response.code, response.elapsed_ns, response.message },
-        );
-        return null;
-    }
-    if (!std.mem.eql(u8, response.code, "ok")) {
-        return null;
-    }
-    std.log.info(
-        "ipc control query ok endpoint=ui-daemon route={s} exit_code={s} elapsed_ns={d}",
-        .{ @tagName(cmd), response.code, response.elapsed_ns },
-    );
-    const msg = try allocator.dupe(u8, response.message);
-    return msg;
-}
 
 pub fn executeCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
     return sendCommand(allocator, cmd);
@@ -382,19 +338,12 @@ fn handleClient(server: *Server, client_fd: std.posix.fd_t) void {
     switch (cmd) {
         .ping => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "pong"),
         .version => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", build_options.app_version),
-        .shell_health => {
-            writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", shellHealthMessage);
-        },
         .summon, .hide, .toggle => {
             server.control_slot.put(cmd);
             writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "accepted");
         },
     }
 }
-
-const shellHealthMessage =
-    "module=launcher status=ready detail=sdl-shell;" ++
-    "module=notifications status=unknown detail=not-wired";
 
 fn parseCommand(value: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
