@@ -47,10 +47,12 @@ const row_height: f32 = 44;
 const row_gap: f32 = 6;
 const no_wake_timeout_ms: i32 = 1000;
 const launch_child_fail_code: i32 = 127;
+const max_launch_wait_interrupts: u32 = 16;
 
 comptime {
     std.debug.assert(max_results > 0);
     std.debug.assert(max_command_bytes > 0);
+    std.debug.assert(max_launch_wait_interrupts > 0);
 }
 
 /// LaunchQueue owns one detached command intent between picker activation and controlled drain.
@@ -483,17 +485,21 @@ fn launchFork() !std.c.pid_t {
 
 fn launchWait(pid: std.c.pid_t) !void {
     var status: i32 = 0;
-    while (true) {
+    var interrupts: u32 = 0;
+    while (interrupts < max_launch_wait_interrupts) {
         const waited = std.c.waitpid(pid, &status, 0);
         if (waited == pid) break;
         if (waited == -1) {
             const errno = std.c._errno().*;
             if (errno == @intFromEnum(std.c.E.INTR)) {
+                interrupts += 1;
                 continue;
             }
             return error.WaitFailed;
         }
         return error.WaitFailed;
+    } else {
+        return error.WaitInterruptedTooOften;
     }
     const status_bits: u32 = @bitCast(status);
     if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;

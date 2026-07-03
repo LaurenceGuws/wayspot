@@ -2,9 +2,8 @@
 //!
 //! Foot's useful lesson here is damage-directed pragmatism: draw the changed
 //! surface with the smallest renderer that meets the product need, then mature
-//! the font path only when the UI needs shaping. Howl's text renderer remains
-//! the source to copy from when Wayspot needs glyph atlases, fallback fonts, or
-//! HarfBuzz shaping; this module intentionally does not link Howl's C ABI.
+//! the font path only when the UI needs shaping. This module intentionally does
+//! not link Howl's C ABI.
 
 const std = @import("std");
 const c = @import("sdl_c");

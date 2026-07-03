@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const sdl = @import("sdl_c");
 
 pub const Command = enum {
     ping,
@@ -49,8 +50,12 @@ pub const ControlSlot = struct {
         const event_type = self.wake_event_type.load(.acquire);
         if (event_type == 0) return;
         if (self.wake_pending.swap(true, .acq_rel)) return;
-        var event = @import("sdl_c").SDL_Event{ .user = .{ .type = event_type } };
-        _ = @import("sdl_c").SDL_PushEvent(&event);
+        var event = sdl.SDL_Event{ .user = .{ .type = event_type } };
+        const pushed = sdl.SDL_PushEvent(&event);
+        if (!pushed) {
+            self.wake_pending.store(false, .release);
+            std.log.warn("ipc wake event push failed type={d}", .{event_type});
+        }
     }
 };
 
@@ -73,8 +78,12 @@ const OwnedResponse = struct {
 };
 
 const connect_timeout_ms: u64 = 250;
+const connect_retry_sleep_ms: u64 = 5;
+const request_timeout_ms: i32 = 500;
 const response_timeout_ms: i32 = 500;
+const max_request_bytes: u32 = 64 * 1024;
 const max_response_bytes: u32 = 8 * 1024 * 1024;
+const request_chunk_size: u32 = 4096;
 const response_chunk_size: u32 = 4096;
 
 pub const Server = struct {
@@ -157,13 +166,14 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
     var response_buf: [response_chunk_size]u8 = undefined;
     var response_buf_list = std.ArrayList(u8).empty;
     defer response_buf_list.deinit(allocator);
-    const timeout_deadline = nowNs() + (@as(i96, response_timeout_ms) * std.time.ns_per_ms);
+    const response_read_deadline_ns = nowNs() + (@as(i96, response_timeout_ms) * std.time.ns_per_ms);
     var total_reads: u32 = 0;
     var total_bytes: u32 = 0;
-    while (true) {
+    var response_closed = false;
+    while (nowNs() <= response_read_deadline_ns) {
         const n = osRead(fd, &response_buf) catch |err| switch (err) {
-            error.WouldBlock => blk: {
-                const remaining_ns = timeout_deadline - nowNs();
+            error.WouldBlock => {
+                const remaining_ns = response_read_deadline_ns - nowNs();
                 if (remaining_ns <= 0) {
                     std.log.warn(
                         "ipc read timeout cmd={s} reads={d} bytes={d}",
@@ -191,7 +201,7 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
                 if ((followup_poll_fds[0].revents & std.posix.POLL.IN) == 0) {
                     continue;
                 }
-                break :blk 0;
+                continue;
             },
             else => {
                 std.log.warn(
@@ -201,7 +211,10 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
                 return error.ReadFailed;
             },
         };
-        if (n == 0) break;
+        if (n == 0) {
+            response_closed = true;
+            break;
+        }
         total_reads += 1;
         total_bytes += @intCast(n);
         if (response_buf_list.items.len + n > max_response_bytes) {
@@ -212,6 +225,13 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
             return error.ReadFailed;
         }
         try response_buf_list.appendSlice(allocator, response_buf[0..n]);
+    }
+    if (!response_closed) {
+        std.log.warn(
+            "ipc read timeout cmd={s} reads={d} bytes={d}",
+            .{ @tagName(cmd), total_reads, total_bytes },
+        );
+        return error.PollTimeout;
     }
     if (response_buf_list.items.len == 0) return error.EmptyResponse;
 
@@ -291,11 +311,16 @@ fn isSocketLive(socket_path: []const u8) bool {
 }
 
 fn serverMain(server: *Server) void {
+    // serverMain stops only when Server.deinit closes the listener and sets stop_flag.
     while (!server.stop_flag.load(.seq_cst)) {
         const client_fd = osAccept(server.listener_fd, std.posix.SOCK.CLOEXEC) catch |err| {
             switch (err) {
                 error.WouldBlock, error.ConnectionAborted => continue,
-                error.FileDescriptorNotASocket, error.OperationNotSupported, error.SystemResources, error.ProcessFdQuotaExceeded => continue,
+                error.FileDescriptorNotASocket,
+                error.OperationNotSupported,
+                error.SystemResources,
+                error.ProcessFdQuotaExceeded,
+                => continue,
                 else => {
                     if (server.stop_flag.load(.seq_cst)) break;
                     continue;
@@ -394,16 +419,34 @@ fn readRequestAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
 
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = osRead(fd, &buf) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
+    var buf: [request_chunk_size]u8 = undefined;
+    const request_read_deadline_ns = nowNs() + (@as(i96, request_timeout_ms) * std.time.ns_per_ms);
+    var request_closed = false;
+    while (nowNs() <= request_read_deadline_ns) {
+        var poll_fds = [_]std.posix.pollfd{
+            .{
+                .fd = fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            },
         };
-        if (n == 0) break;
-        if (out.items.len + n > max_response_bytes) return error.MessageTooLong;
+        const remaining_ns = request_read_deadline_ns - nowNs();
+        if (remaining_ns <= 0) return error.PollTimeout;
+        const raw_remaining_ms = @divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        const remaining_ms = @as(i32, @intCast(@max(@as(i128, 1), raw_remaining_ms)));
+        const ready = try osPoll(&poll_fds, remaining_ms);
+        if (ready <= 0) return error.PollTimeout;
+        if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
+
+        const n = try osRead(fd, &buf);
+        if (n == 0) {
+            request_closed = true;
+            break;
+        }
+        if (out.items.len + n > max_request_bytes) return error.MessageTooLong;
         try out.appendSlice(allocator, buf[0..n]);
     }
+    if (!request_closed) return error.PollTimeout;
 
     return out.toOwnedSlice(allocator);
 }
@@ -417,26 +460,41 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     }
 }
 
-fn connectWithRetryTimeout(fd: std.posix.fd_t, sockaddr: *const std.os.linux.sockaddr, socklen: std.posix.socklen_t, timeout_ms: u64) !bool {
+fn connectWithRetryTimeout(
+    fd: std.posix.fd_t,
+    sockaddr: *const std.os.linux.sockaddr,
+    socklen: std.posix.socklen_t,
+    timeout_ms: u64,
+) !bool {
     const start_ns = nowNs();
     const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
-    while (true) {
+    while (nowNs() - start_ns < @as(i96, @intCast(timeout_ns))) {
         osConnect(fd, sockaddr, socklen) catch |err| switch (err) {
-            error.WouldBlock, error.FileNotFound, error.ConnectionRefused, error.ConnectionResetByPeer, error.NetworkUnreachable, error.AddressNotAvailable => {
+            error.WouldBlock,
+            error.FileNotFound,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.NetworkUnreachable,
+            error.AddressNotAvailable,
+            => {
                 const now_ns = nowNs();
                 if (now_ns - start_ns >= @as(i96, @intCast(timeout_ns))) return false;
                 std.Io.sleep(
                     std.Options.debug_io,
-                    .fromNanoseconds(5 * std.time.ns_per_ms),
+                    .fromNanoseconds(connect_retry_sleep_ms * std.time.ns_per_ms),
                     .awake,
-                ) catch {};
+                ) catch |err_sleep| {
+                    std.log.debug("ipc connect retry sleep failed err={s}", .{@errorName(err_sleep)});
+                    return false;
+                };
                 continue;
             },
             else => return err,
         };
         return true;
     }
+    return false;
 }
 
 fn osSocket(domain: u32, socket_type: u32, protocol: u32) !std.posix.fd_t {
