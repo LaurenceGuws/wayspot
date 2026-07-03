@@ -1,4 +1,7 @@
-const std = @import("std");
+//! Builtin config owns Wayspot's local defaults without a runtime scripting VM.
+
+const placement = @import("../ui/placement/mod.zig");
+const surfaces = @import("../ui/surfaces/mod.zig");
 
 pub const PackageManager = enum {
     yay,
@@ -14,100 +17,35 @@ pub const PackageManager = enum {
 
 pub const TerminalTool = enum {
     kitty,
-    zide_terminal,
-    alacritty,
-    footclient,
-    foot,
-    wezterm,
-    gnome_terminal,
-    konsole,
-    xfce4_terminal,
-    tilix,
-    xterm,
 
-    pub fn command(self: TerminalTool) []const u8 {
-        return switch (self) {
-            .kitty => "kitty",
-            .zide_terminal => "zide-terminal",
-            .alacritty => "alacritty",
-            .footclient => "footclient",
-            .foot => "foot",
-            .wezterm => "wezterm",
-            .gnome_terminal => "gnome-terminal",
-            .konsole => "konsole",
-            .xfce4_terminal => "xfce4-terminal",
-            .tilix => "tilix",
-            .xterm => "xterm",
-        };
-    }
-
-    pub fn shellExecWithCommand(self: TerminalTool) []const u8 {
-        return switch (self) {
-            .kitty, .zide_terminal, .alacritty, .footclient, .foot, .wezterm, .xterm => "{term} -e sh -lc \"$install_cmd\"",
-            .gnome_terminal, .konsole, .xfce4_terminal, .tilix => "{term} -- sh -lc \"$install_cmd\"",
-        };
+    pub fn command(_: TerminalTool) []const u8 {
+        return "kitty";
     }
 };
 
 pub const ClipboardTool = enum {
     wl_copy,
-    xclip,
 
-    pub fn command(self: ClipboardTool) []const u8 {
-        return switch (self) {
-            .wl_copy => "wl-copy",
-            .xclip => "xclip -selection clipboard",
-        };
+    pub fn command(_: ClipboardTool) []const u8 {
+        return "wl-copy";
     }
 };
 
 pub const EditorTool = enum {
-    nvim,
-    vim,
-    vi,
-    helix,
-    hx,
-    kak,
-    nano,
-    code,
-    codium,
-    code_insiders,
-    subl,
     xdg_open,
 
-    pub fn command(self: EditorTool) []const u8 {
-        return switch (self) {
-            .nvim => "nvim",
-            .vim => "vim",
-            .vi => "vi",
-            .helix => "helix",
-            .hx => "hx",
-            .kak => "kak",
-            .nano => "nano",
-            .code => "code",
-            .codium => "codium",
-            .code_insiders => "code-insiders",
-            .subl => "subl",
-            .xdg_open => "xdg-open",
-        };
+    pub fn command(_: EditorTool) []const u8 {
+        return "xdg-open";
     }
 };
 
+/// Settings is the built-in runtime policy used by the app launcher and banner windows.
 pub const Settings = struct {
-    pub const ThemePolicy = struct {
-        current: []u8 = &.{},
-
-        pub fn deinit(self: *ThemePolicy, allocator: std.mem.Allocator) void {
-            if (self.current.len > 0) allocator.free(self.current);
-            self.* = .{};
-        }
-    };
-
     pub const UiPolicy = struct {
         show_nerd_stats: bool = true,
     };
 
-    pub const NotificationActionsPolicy = struct {
+    pub const NotificationPolicy = struct {
         show_close_button: bool = true,
         show_dbus_actions: bool = true,
     };
@@ -115,59 +53,22 @@ pub const Settings = struct {
     pub const ToolsPolicy = struct {
         package_manager: PackageManager = .yay,
         terminal: TerminalTool = .kitty,
-        grep_include_hidden: bool = false,
         clipboard_tool: ClipboardTool = .wl_copy,
         editor_tool: EditorTool = .xdg_open,
     };
 
-    theme: ThemePolicy = .{},
-    surface_mode: ?@import("../ui/surfaces/mod.zig").SurfaceMode = null,
-    placement_policy: @import("../ui/placement/mod.zig").RuntimePolicy = .{},
+    surface_mode: surfaces.SurfaceMode = .toplevel,
+    placement_policy: placement.RuntimePolicy = .{},
     ui: UiPolicy = .{},
-    notification_actions: NotificationActionsPolicy = .{},
+    notifications: NotificationPolicy = .{},
     tools: ToolsPolicy = .{},
-    launcher_monitor_name: ?[]u8 = null,
-    notifications_monitor_name: ?[]u8 = null,
 
-    pub fn applyPlacementOverrides(self: *Settings) void {
-        if (self.launcher_monitor_name) |name| {
-            self.placement_policy.launcher.window.monitor = .{
-                .policy = .by_name,
-                .output_name = name,
-            };
-        }
-        if (self.notifications_monitor_name) |name| {
-            self.placement_policy.notifications.window.monitor = .{
-                .policy = .by_name,
-                .output_name = name,
-            };
-        }
-    }
-
-    pub fn deinit(self: *Settings, allocator: std.mem.Allocator) void {
-        self.theme.deinit(allocator);
-        if (self.launcher_monitor_name) |name| allocator.free(name);
-        if (self.notifications_monitor_name) |name| allocator.free(name);
-        self.* = .{};
+    /// defaults returns the single source of runtime defaults for the current shell.
+    pub fn defaults() Settings {
+        return .{};
     }
 };
 
-const impl = @import("lua_config.zig");
-pub const runtime_tools = @import("runtime_tools.zig");
-pub const issue_notice = @import("issue_notice.zig");
-
-pub fn load(allocator: std.mem.Allocator) Settings {
-    return impl.load(allocator);
-}
-
-pub fn loadStrict(allocator: std.mem.Allocator) !Settings {
-    return impl.loadStrict(allocator);
-}
-
-pub fn consumeLastLoadIssue(allocator: std.mem.Allocator) ?[]u8 {
-    return impl.consumeLastLoadIssue(allocator);
-}
-
-pub fn save(allocator: std.mem.Allocator, settings: Settings) !void {
-    return impl.save(allocator, settings);
+pub fn load() Settings {
+    return Settings.defaults();
 }

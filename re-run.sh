@@ -9,6 +9,7 @@ set -euo pipefail
 #   RERUN_DAEMON_ARGS="--ui-daemon"
 #   RERUN_BIN="./zig-out/bin/wayspot"
 #   RERUN_LOG="$HOME/.local/state/wayspot/daemon.log"
+#   RERUN_SUMMON=false
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
@@ -19,29 +20,22 @@ cd "$ROOT_DIR"
 : "${RERUN_INSTALL_BIN:=$HOME/.local/bin/wayspot}"
 : "${RERUN_LOG:=$HOME/.local/state/wayspot/daemon.log}"
 : "${RERUN_KILL_TARGET:=true}"
+: "${RERUN_SUMMON:=true}"
 
 read -r -a build_flags <<<"$RERUN_BUILD_FLAGS"
 read -r -a daemon_args <<<"$RERUN_DAEMON_ARGS"
 
-runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-sock="$runtime_dir/wayspot.sock"
+sock="/tmp/wayspot-$(id -u).sock"
 
 mkdir -p "$(dirname "$RERUN_LOG")"
 
 echo "[re-run] building: zig build ${build_flags[*]}"
-zig build "${build_flags[@]}"
-
-if [[ -n "$RERUN_INSTALL_BIN" ]]; then
-    echo "[re-run] syncing binary: $RERUN_BIN -> $RERUN_INSTALL_BIN"
-    mkdir -p "$(dirname "$RERUN_INSTALL_BIN")"
-    cp "$RERUN_BIN" "$RERUN_INSTALL_BIN"
-    chmod +x "$RERUN_INSTALL_BIN"
-fi
+zigup run 0.16.0 build "${build_flags[@]}"
 
 if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
     echo "[re-run] stopping existing daemon variants (--ui-daemon)"
     mapfile -t matched_pids < <(
-        pgrep -a -f 'wayspot.*(--ui-daemon)' | awk '{print $1}' || true
+        pgrep -a -x 'wayspot' | awk '/--ui-daemon/ {print $1}' || true
     )
     if ((${#matched_pids[@]} == 0)); then
         echo "[re-run] no existing daemon found"
@@ -51,10 +45,27 @@ if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
     for pid in "${matched_pids[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
+    still_running=()
+    for _ in {1..20}; do
+        still_running=()
+        for pid in "${matched_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still_running+=("$pid")
+            fi
+        done
+        ((${#still_running[@]} == 0)) && break
+        sleep 0.05
+    done
+    if ((${#still_running[@]} > 0)); then
+        echo "[re-run] force killing: ${still_running[*]}"
+        for pid in "${still_running[@]}"; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
+    fi
 
     echo "[re-run] stopping existing slideshow variants (--wallpaper-slideshow)"
     mapfile -t slideshow_pids < <(
-        pgrep -a -f 'wayspot.*(--wallpaper-slideshow)' | awk '{print $1}' || true
+        pgrep -a -x 'wayspot' | awk '/--wallpaper-slideshow/ {print $1}' || true
     )
     if ((${#slideshow_pids[@]} == 0)); then
         echo "[re-run] no existing slideshow found"
@@ -64,10 +75,35 @@ if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
     for pid in "${slideshow_pids[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
+    slideshow_still_running=()
+    for _ in {1..20}; do
+        slideshow_still_running=()
+        for pid in "${slideshow_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                slideshow_still_running+=("$pid")
+            fi
+        done
+        ((${#slideshow_still_running[@]} == 0)) && break
+        sleep 0.05
+    done
+    if ((${#slideshow_still_running[@]} > 0)); then
+        echo "[re-run] force killing slideshow: ${slideshow_still_running[*]}"
+        for pid in "${slideshow_still_running[@]}"; do
+            kill -9 "$pid" 2>/dev/null || true
+        done
+    fi
+
 else
     echo "[re-run] skipping daemon kill (RERUN_KILL_TARGET=false)"
 fi
 rm -f "$sock" 2>/dev/null || true
+
+if [[ -n "$RERUN_INSTALL_BIN" ]]; then
+    echo "[re-run] syncing binary: $RERUN_BIN -> $RERUN_INSTALL_BIN"
+    mkdir -p "$(dirname "$RERUN_INSTALL_BIN")"
+    cp "$RERUN_BIN" "$RERUN_INSTALL_BIN"
+    chmod +x "$RERUN_INSTALL_BIN"
+fi
 
 echo "[re-run] starting daemon: $RERUN_BIN ${daemon_args[*]}"
 nohup "$RERUN_BIN" "${daemon_args[@]}" >"$RERUN_LOG" 2>&1 &
@@ -81,8 +117,12 @@ for _ in {1..30}; do
   sleep 0.1
 done
 
-echo "[re-run] summoning UI"
-"$RERUN_BIN" --ctl summon
+if [[ "$RERUN_SUMMON" == "true" ]]; then
+    echo "[re-run] summoning UI"
+    "$RERUN_BIN" --ctl summon
+else
+    echo "[re-run] summon skipped (RERUN_SUMMON=false)"
+fi
 
 echo "[re-run] done"
 echo "[re-run] daemon log: $RERUN_LOG"

@@ -1,3 +1,5 @@
+//! IPC control owns the local Unix socket protocol for one resident picker.
+
 const std = @import("std");
 const build_options = @import("build_options");
 
@@ -6,12 +8,8 @@ pub const Command = enum {
     summon,
     hide,
     toggle,
-    slideshow_start,
-    slideshow_toggle,
-    slideshow_status,
     version,
     shell_health,
-    wm_event_stats,
 };
 
 pub const HandlerResult = struct {
@@ -20,8 +18,25 @@ pub const HandlerResult = struct {
     message: []const u8,
 };
 
-pub const Handler = *const fn (Command, *anyopaque) HandlerResult;
-pub const QueryHandler = *const fn (std.mem.Allocator, Command, *anyopaque) anyerror!?[]u8;
+/// ControlSlot carries accepted visibility commands from the socket thread to the UI loop.
+pub const ControlSlot = struct {
+    mu: std.Io.Mutex = .init,
+    command: ?Command = null,
+
+    pub fn put(self: *ControlSlot, command: Command) void {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
+        self.command = command;
+    }
+
+    pub fn take(self: *ControlSlot) ?Command {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
+        const command = self.command;
+        self.command = null;
+        return command;
+    }
+};
 
 const Request = struct {
     v: u32 = 0,
@@ -43,24 +58,20 @@ const OwnedResponse = struct {
 
 const connect_timeout_ms: u64 = 250;
 const response_timeout_ms: i32 = 500;
-const max_response_bytes: usize = 8 * 1024 * 1024;
-const response_chunk_size: usize = 4096;
+const max_response_bytes: u32 = 8 * 1024 * 1024;
+const response_chunk_size: u32 = 4096;
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
     socket_path: []u8,
-    listener_fd: std.posix.socket_t,
-    handler: Handler,
-    query_handler: ?QueryHandler,
-    user_data: *anyopaque,
+    listener_fd: std.posix.fd_t,
+    control_slot: *ControlSlot,
     stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        handler: Handler,
-        query_handler: ?QueryHandler,
-        user_data: *anyopaque,
+        control_slot: *ControlSlot,
     ) !Server {
         const socket_path = try defaultSocketPathAlloc(allocator);
         const listener_fd = try bindListener(socket_path);
@@ -68,9 +79,7 @@ pub const Server = struct {
             .allocator = allocator,
             .socket_path = socket_path,
             .listener_fd = listener_fd,
-            .handler = handler,
-            .query_handler = query_handler,
-            .user_data = user_data,
+            .control_slot = control_slot,
         };
     }
 
@@ -80,12 +89,12 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         self.stop_flag.store(true, .seq_cst);
-        std.posix.close(self.listener_fd);
+        osClose(self.listener_fd);
         if (self.thread) |thread| {
             thread.join();
             self.thread = null;
         }
-        std.posix.unlink(self.socket_path) catch |err| {
+        osUnlink(self.socket_path) catch |err| {
             std.log.debug("ipc socket unlink failed path={s} err={s}", .{ self.socket_path, @errorName(err) });
         };
         self.allocator.free(self.socket_path);
@@ -93,7 +102,7 @@ pub const Server = struct {
 };
 
 pub fn trySendCommand(allocator: std.mem.Allocator, cmd: Command) !bool {
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nowNs();
     const response = sendCommand(allocator, cmd) catch |err| {
         const elapsed_ns = elapsedFrom(start_ns);
         std.log.warn(
@@ -121,7 +130,7 @@ pub fn trySendCommand(allocator: std.mem.Allocator, cmd: Command) !bool {
 }
 
 pub fn queryCommandMessage(allocator: std.mem.Allocator, cmd: Command) !?[]u8 {
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nowNs();
     const response = sendCommand(allocator, cmd) catch |err| {
         const elapsed_ns = elapsedFrom(start_ns);
         std.log.warn(
@@ -157,24 +166,24 @@ pub fn executeCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse
 }
 
 fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
-    const start_ns = std.time.nanoTimestamp();
+    const start_ns = nowNs();
     const socket_path = try defaultSocketPathAlloc(allocator);
     defer allocator.free(socket_path);
 
-    const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, 0) catch |err| {
+    const fd = osSocket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK, 0) catch |err| {
         if (err == error.AddressFamilyNotSupported) return error.NoSocketSupport;
         return err;
     };
-    defer std.posix.close(fd);
+    defer osClose(fd);
 
-    const addr = try std.net.Address.initUnix(socket_path);
-    const connected = try connectWithRetryTimeout(fd, &addr.any, addr.getOsSockLen(), connect_timeout_ms);
+    const addr = try unixAddress(socket_path);
+    const connected = try connectWithRetryTimeout(fd, @ptrCast(&addr.addr), addr.len, connect_timeout_ms);
     if (!connected) return error.ConnectTimeout;
 
     const request = try std.fmt.allocPrint(allocator, "{{\"v\":1,\"cmd\":\"{s}\"}}", .{@tagName(cmd)});
     defer allocator.free(request);
     try writeAll(fd, request);
-    std.posix.shutdown(fd, .send) catch |err| {
+    osShutdownSend(fd) catch |err| {
         std.log.debug("ipc client shutdown(send) failed route={s} err={s}", .{ @tagName(cmd), @errorName(err) });
     };
 
@@ -185,20 +194,20 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
             .revents = 0,
         },
     };
-    const poll_count = std.posix.poll(&poll_fds, response_timeout_ms) catch return error.PollFailed;
+    const poll_count = osPoll(&poll_fds, response_timeout_ms) catch return error.PollFailed;
     if (poll_count <= 0) return error.PollTimeout;
     if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) return error.NoPollInput;
 
     var response_buf: [response_chunk_size]u8 = undefined;
     var response_buf_list = std.ArrayList(u8).empty;
     defer response_buf_list.deinit(allocator);
-    const timeout_deadline = std.time.nanoTimestamp() + (@as(i128, response_timeout_ms) * std.time.ns_per_ms);
-    var total_reads: usize = 0;
-    var total_bytes: usize = 0;
+    const timeout_deadline = nowNs() + (@as(i96, response_timeout_ms) * std.time.ns_per_ms);
+    var total_reads: u32 = 0;
+    var total_bytes: u32 = 0;
     while (true) {
-        const n = std.posix.read(fd, &response_buf) catch |err| switch (err) {
+        const n = osRead(fd, &response_buf) catch |err| switch (err) {
             error.WouldBlock => blk: {
-                const remaining_ns = timeout_deadline - std.time.nanoTimestamp();
+                const remaining_ns = timeout_deadline - nowNs();
                 if (remaining_ns <= 0) {
                     std.log.warn(
                         "ipc read timeout cmd={s} reads={d} bytes={d}",
@@ -215,7 +224,7 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
                         .revents = 0,
                     },
                 };
-                const ready = std.posix.poll(&followup_poll_fds, remaining_ms) catch return error.PollFailed;
+                const ready = osPoll(&followup_poll_fds, remaining_ms) catch return error.PollFailed;
                 if (ready <= 0) {
                     std.log.warn(
                         "ipc read timeout cmd={s} reads={d} bytes={d}",
@@ -238,7 +247,7 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
         };
         if (n == 0) break;
         total_reads += 1;
-        total_bytes += n;
+        total_bytes += @intCast(n);
         if (response_buf_list.items.len + n > max_response_bytes) {
             std.log.warn(
                 "ipc response exceeds max bytes cmd={s} bytes={d} max={d} reads={d}",
@@ -280,34 +289,32 @@ fn sendCommand(allocator: std.mem.Allocator, cmd: Command) !OwnedResponse {
     };
 }
 
-fn elapsedFrom(start_ns: i128) u64 {
-    const elapsed = std.time.nanoTimestamp() - start_ns;
+fn elapsedFrom(start_ns: i96) u64 {
+    const elapsed = nowNs() - start_ns;
     return if (elapsed > 0) @intCast(elapsed) else 0;
 }
 
-pub fn defaultSocketPathAlloc(allocator: std.mem.Allocator) ![]u8 {
-    const xdg_runtime = std.process.getEnvVarOwned(allocator, "XDG_RUNTIME_DIR") catch null;
-    if (xdg_runtime) |runtime_dir| {
-        defer allocator.free(runtime_dir);
-        return std.fmt.allocPrint(allocator, "{s}/wayspot.sock", .{runtime_dir});
-    }
+fn nowNs() i96 {
+    return std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
+}
 
-    const uid = std.posix.getuid();
+pub fn defaultSocketPathAlloc(allocator: std.mem.Allocator) ![]u8 {
+    const uid = std.os.linux.getuid();
     return std.fmt.allocPrint(allocator, "/tmp/wayspot-{d}.sock", .{uid});
 }
 
-fn bindListener(socket_path: []const u8) !std.posix.socket_t {
-    const fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
-    errdefer std.posix.close(fd);
+fn bindListener(socket_path: []const u8) !std.posix.fd_t {
+    const fd = try osSocket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    errdefer osClose(fd);
 
-    const addr = try std.net.Address.initUnix(socket_path);
-    std.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
+    const addr = try unixAddress(socket_path);
+    osBind(fd, @ptrCast(&addr.addr), addr.len) catch |err| {
         if (err == error.AddressInUse) {
             if (!isSocketLive(socket_path)) {
-                std.posix.unlink(socket_path) catch |unlink_err| {
+                osUnlink(socket_path) catch |unlink_err| {
                     std.log.warn("ipc stale socket unlink failed path={s} err={s}", .{ socket_path, @errorName(unlink_err) });
                 };
-                try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
+                try osBind(fd, @ptrCast(&addr.addr), addr.len);
             } else {
                 return error.AddressInUse;
             }
@@ -315,24 +322,21 @@ fn bindListener(socket_path: []const u8) !std.posix.socket_t {
             return err;
         }
     };
-    try std.posix.listen(fd, 32);
-    std.posix.fchmodat(std.posix.AT.FDCWD, socket_path, 0o600, 0) catch |err| {
-        std.log.warn("ipc socket chmod failed path={s} err={s}", .{ socket_path, @errorName(err) });
-    };
+    try osListen(fd, 32);
     return fd;
 }
 
 fn isSocketLive(socket_path: []const u8) bool {
-    const fd = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch return false;
-    defer std.posix.close(fd);
-    const addr = std.net.Address.initUnix(socket_path) catch return false;
-    std.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch return false;
+    const fd = osSocket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch return false;
+    defer osClose(fd);
+    const addr = unixAddress(socket_path) catch return false;
+    osConnect(fd, @ptrCast(&addr.addr), addr.len) catch return false;
     return true;
 }
 
 fn serverMain(server: *Server) void {
     while (!server.stop_flag.load(.seq_cst)) {
-        const client_fd = std.posix.accept(server.listener_fd, null, null, std.posix.SOCK.CLOEXEC) catch |err| {
+        const client_fd = osAccept(server.listener_fd, std.posix.SOCK.CLOEXEC) catch |err| {
             switch (err) {
                 error.WouldBlock, error.ConnectionAborted => continue,
                 error.FileDescriptorNotASocket, error.OperationNotSupported, error.SystemResources, error.ProcessFdQuotaExceeded => continue,
@@ -343,11 +347,11 @@ fn serverMain(server: *Server) void {
             }
         };
         handleClient(server, client_fd);
-        std.posix.close(client_fd);
+        osClose(client_fd);
     }
 }
 
-fn handleClient(server: *Server, client_fd: std.posix.socket_t) void {
+fn handleClient(server: *Server, client_fd: std.posix.fd_t) void {
     const request_bytes = readRequestAlloc(server.allocator, client_fd) catch {
         writeResponse(server.allocator, client_fd, "invalid_request", false, "read_error", "Failed to read request");
         return;
@@ -379,43 +383,18 @@ fn handleClient(server: *Server, client_fd: std.posix.socket_t) void {
         .ping => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "pong"),
         .version => writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", build_options.app_version),
         .shell_health => {
-            const query = server.query_handler orelse {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "No query handler");
-                return;
-            };
-            const msg_opt = query(server.allocator, cmd, server.user_data) catch {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "Query failed");
-                return;
-            };
-            if (msg_opt) |msg| {
-                defer server.allocator.free(msg);
-                writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", msg);
-            } else {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "No data");
-            }
+            writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", shellHealthMessage);
         },
-        .wm_event_stats => {
-            const query = server.query_handler orelse {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "No query handler");
-                return;
-            };
-            const msg_opt = query(server.allocator, cmd, server.user_data) catch {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "Query failed");
-                return;
-            };
-            if (msg_opt) |msg| {
-                defer server.allocator.free(msg);
-                writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", msg);
-            } else {
-                writeResponse(server.allocator, client_fd, @tagName(cmd), false, "rejected", "No data");
-            }
-        },
-        else => {
-            const result = server.handler(cmd, server.user_data);
-            writeResponse(server.allocator, client_fd, @tagName(cmd), result.ok, result.code, result.message);
+        .summon, .hide, .toggle => {
+            server.control_slot.put(cmd);
+            writeResponse(server.allocator, client_fd, @tagName(cmd), true, "ok", "accepted");
         },
     }
 }
+
+const shellHealthMessage =
+    "module=launcher status=ready detail=sdl-shell;" ++
+    "module=notifications status=unknown detail=not-wired";
 
 fn parseCommand(value: []const u8) ?Command {
     inline for (std.meta.fields(Command)) |field| {
@@ -428,7 +407,7 @@ fn parseCommand(value: []const u8) ?Command {
 
 fn writeResponse(
     allocator: std.mem.Allocator,
-    fd: std.posix.socket_t,
+    fd: std.posix.fd_t,
     endpoint: []const u8,
     ok: bool,
     code: []const u8,
@@ -443,7 +422,7 @@ fn writeResponse(
     var output = std.ArrayList(u8).empty;
     defer output.deinit(allocator);
     const payload = std.json.fmt(Payload{ .ok = ok, .code = code, .message = message }, .{});
-    output.writer(allocator).print("{f}", .{payload}) catch return;
+    output.print(allocator, "{f}", .{payload}) catch return;
     if (output.items.len > max_response_bytes) {
         std.log.warn(
             "ipc response too large for client protocol cmd={s} bytes={d} max={d}",
@@ -462,13 +441,13 @@ fn writeResponse(
     };
 }
 
-fn readRequestAlloc(allocator: std.mem.Allocator, fd: std.posix.socket_t) ![]u8 {
+fn readRequestAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = std.posix.read(fd, &buf) catch |err| switch (err) {
+        const n = osRead(fd, &buf) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -480,31 +459,161 @@ fn readRequestAlloc(allocator: std.mem.Allocator, fd: std.posix.socket_t) ![]u8 
     return out.toOwnedSlice(allocator);
 }
 
-fn writeAll(fd: std.posix.socket_t, bytes: []const u8) !void {
-    var offset: usize = 0;
+fn writeAll(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var offset: u32 = 0;
     while (offset < bytes.len) {
-        const n = try std.posix.write(fd, bytes[offset..]);
+        const n = try osWrite(fd, bytes[@intCast(offset)..]);
         if (n == 0) return error.WriteFailed;
-        offset += n;
+        offset += @intCast(n);
     }
 }
 
-fn connectWithRetryTimeout(fd: std.posix.socket_t, sockaddr: *const std.posix.sockaddr, socklen: std.posix.socklen_t, timeout_ms: u64) !bool {
-    const start_ns = std.time.nanoTimestamp();
+fn connectWithRetryTimeout(fd: std.posix.fd_t, sockaddr: *const std.os.linux.sockaddr, socklen: std.posix.socklen_t, timeout_ms: u64) !bool {
+    const start_ns = nowNs();
     const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
     while (true) {
-        std.posix.connect(fd, sockaddr, socklen) catch |err| switch (err) {
+        osConnect(fd, sockaddr, socklen) catch |err| switch (err) {
             error.WouldBlock, error.FileNotFound, error.ConnectionRefused, error.ConnectionResetByPeer, error.NetworkUnreachable, error.AddressNotAvailable => {
-                const now_ns = std.time.nanoTimestamp();
-                if (now_ns - start_ns >= @as(i128, @intCast(timeout_ns))) return false;
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                const now_ns = nowNs();
+                if (now_ns - start_ns >= @as(i96, @intCast(timeout_ns))) return false;
+                std.Io.sleep(
+                    std.Options.debug_io,
+                    .fromNanoseconds(5 * std.time.ns_per_ms),
+                    .awake,
+                ) catch {};
                 continue;
             },
             else => return err,
         };
         return true;
     }
+}
+
+fn osSocket(domain: u32, socket_type: u32, protocol: u32) !std.posix.fd_t {
+    const rc = std.os.linux.socket(domain, socket_type, protocol);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AFNOSUPPORT => error.AddressFamilyNotSupported,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osClose(fd: std.posix.fd_t) void {
+    const rc = std.os.linux.close(fd);
+    if (std.os.linux.errno(rc) != .SUCCESS) {
+        std.log.debug("unix socket close failed fd={d}", .{fd});
+    }
+}
+
+const UnixSockAddr = struct {
+    addr: std.os.linux.sockaddr.un,
+    len: std.posix.socklen_t,
+};
+
+fn unixAddress(path: []const u8) !UnixSockAddr {
+    if (path.len >= 108) return error.NameTooLong;
+    var addr: std.os.linux.sockaddr.un = .{
+        .family = std.os.linux.AF.UNIX,
+        .path = [_]u8{0} ** 108,
+    };
+    @memcpy(addr.path[0..path.len], path);
+    addr.path[path.len] = 0;
+    return .{
+        .addr = addr,
+        .len = @intCast(@offsetOf(std.os.linux.sockaddr.un, "path") + path.len + 1),
+    };
+}
+
+fn osBind(fd: std.posix.fd_t, sockaddr: *const std.os.linux.sockaddr, socklen: std.posix.socklen_t) !void {
+    const rc = std.os.linux.bind(fd, sockaddr, socklen);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        .ADDRINUSE => error.AddressInUse,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osListen(fd: std.posix.fd_t, backlog: u32) !void {
+    const rc = std.os.linux.listen(fd, backlog);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osConnect(fd: std.posix.fd_t, sockaddr: *const std.os.linux.sockaddr, socklen: std.posix.socklen_t) !void {
+    const rc = std.os.linux.connect(fd, sockaddr, socklen);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        .AGAIN => error.WouldBlock,
+        .NOENT => error.FileNotFound,
+        .CONNREFUSED => error.ConnectionRefused,
+        .CONNRESET => error.ConnectionResetByPeer,
+        .NETUNREACH => error.NetworkUnreachable,
+        .ADDRNOTAVAIL => error.AddressNotAvailable,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osAccept(fd: std.posix.fd_t, flags: u32) !std.posix.fd_t {
+    const rc = std.os.linux.accept4(fd, null, null, flags);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN => error.WouldBlock,
+        .CONNABORTED => error.ConnectionAborted,
+        .NOTSOCK => error.FileDescriptorNotASocket,
+        .OPNOTSUPP => error.OperationNotSupported,
+        .NOMEM => error.SystemResources,
+        .MFILE, .NFILE => error.ProcessFdQuotaExceeded,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osPoll(fds: []std.posix.pollfd, timeout_ms: i32) !u32 {
+    const rc = std.os.linux.poll(fds.ptr, @intCast(fds.len), timeout_ms);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osRead(fd: std.posix.fd_t, buf: []u8) !u32 {
+    const rc = std.os.linux.read(fd, buf.ptr, buf.len);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN => error.WouldBlock,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
+    const rc = std.os.linux.write(fd, bytes.ptr, bytes.len);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osShutdownSend(fd: std.posix.fd_t) !void {
+    const rc = std.os.linux.shutdown(fd, std.os.linux.SHUT.WR);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        else => error.SystemCallFailed,
+    };
+}
+
+fn osUnlink(path: []const u8) !void {
+    if (path.len >= std.fs.max_path_bytes) return error.NameTooLong;
+    var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const rc = std.os.linux.unlink(@ptrCast(&path_z));
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        .NOENT => error.FileNotFound,
+        else => error.SystemCallFailed,
+    };
 }
 
 test "bindListener replaces stale occupied path and binds socket" {

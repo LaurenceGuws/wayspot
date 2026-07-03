@@ -2,59 +2,15 @@ const std = @import("std");
 const providers = @import("../providers/mod.zig");
 const search = @import("../search/mod.zig");
 const history_access = @import("search_service/history_access.zig");
-const cache_read = @import("search_service/cache_read.zig");
-const cache_refresh = @import("search_service/cache_refresh.zig");
-const cache_coordinator = @import("search_service/cache_coordinator.zig");
-const cache_snapshots = @import("search_service/cache_snapshots.zig");
-const dynamic_generations = @import("search_service/dynamic_generations.zig");
-const dynamic_query_engine = @import("search_service/dynamic_query_engine.zig");
-const dynamic_routes = @import("search_service/dynamic_routes.zig");
-const query_dispatch = @import("search_service/query_dispatch.zig");
-const query_metrics_access = @import("search_service/query_metrics_access.zig");
-const query_refresh_gate = @import("search_service/query_refresh_gate.zig");
-const query_engine = @import("search_service/query_engine.zig");
-const refresh_worker = @import("search_service/refresh_worker.zig");
-const default_loadout = @import("search_service/default_loadout.zig");
 
 pub const SearchService = struct {
-    pub const QueryFlagsSnapshot = query_metrics_access.QueryFlagsSnapshot;
-    pub const EventRefreshResult = enum {
-        scheduled,
-        skipped_running,
-        failed_spawn,
-    };
-    pub const StaticQueryExecution = enum {
-        ready,
-        refreshing,
-        cache_cold,
-    };
-
     registry: providers.ProviderRegistry,
-    query_mu: std.Thread.Mutex = .{},
+    query_mu: std.Io.Mutex = .init,
     history_path: ?[]const u8 = null,
-    history: std.ArrayListUnmanaged([]u8) = .{},
-    cache_mu: std.Thread.Mutex = .{},
-    cached_candidates: search.CandidateList = .empty,
-    cached_rank_generations: std.ArrayListUnmanaged([]search.Candidate) = .{},
-    cache_generation_keep: usize = 4,
-    cache_ready: bool = false,
-    cache_last_refresh_ns: i128 = 0,
-    cache_ttl_ns: u64 = 30 * std.time.ns_per_s,
-    enable_async_refresh: bool = false,
-    refresh_requested: bool = false,
-    refresh_thread_running: bool = false,
-    refresh_thread: ?std.Thread = null,
-    dynamic_mu: std.Thread.Mutex = .{},
-    dynamic_tool_state: dynamic_routes.ToolState = .{},
-    dynamic_generations: std.ArrayListUnmanaged(dynamic_generations.Generation) = .{},
-    dynamic_generation_keep: usize = 12,
-    dynamic_generation_keep_bytes: usize = 256 * 1024 * 1024,
-    max_history: usize = 32,
+    history: std.ArrayListUnmanaged([]u8) = .empty,
+    max_history: u32 = 32,
     last_query_elapsed_ns: u64 = 0,
-    last_query_refreshed_cache: bool = false,
-    last_query_used_stale_cache: bool = false,
     last_query_had_provider_runtime_failure: bool = false,
-    cache_snapshot_had_provider_runtime_failure: bool = false,
 
     pub fn init(registry: providers.ProviderRegistry) SearchService {
         return .{ .registry = registry };
@@ -68,348 +24,88 @@ pub const SearchService = struct {
     }
 
     pub fn deinit(self: *SearchService, allocator: std.mem.Allocator) void {
-        if (self.refresh_thread) |t| {
-            t.join();
-            self.refresh_thread = null;
-        }
-        self.refresh_thread_running = false;
-
-        self.cache_mu.lock();
-        cache_snapshots.clearGenerations(&self.cached_rank_generations, allocator);
-        self.cache_ready = false;
-        self.refresh_requested = false;
-        self.cache_last_refresh_ns = 0;
-        self.cache_mu.unlock();
-
-        dynamic_generations.clear(&self.dynamic_generations, allocator);
         history_access.deinitHistory(&self.history, allocator);
-        self.cached_candidates.deinit(allocator);
     }
 
     pub fn searchQuery(self: *SearchService, allocator: std.mem.Allocator, raw_query: []const u8) ![]search.ScoredCandidate {
-        const sw = @import("metrics.zig").Stopwatch.start();
-        query_metrics_access.resetFlags(
-            &self.query_mu,
-            &self.last_query_refreshed_cache,
-            &self.last_query_used_stale_cache,
-            &self.last_query_had_provider_runtime_failure,
-        );
+        const started_ns = nowNs();
+        self.setProviderFailure(false);
 
-        const dispatch = query_dispatch.parseAndClassify(raw_query);
-        if (dispatch.use_dynamic) {
-            const ranked_dynamic = try self.searchDynamicRoute(allocator, dispatch.parsed);
-            query_metrics_access.setElapsed(&self.query_mu, &self.last_query_elapsed_ns, sw.elapsedNs());
-            return ranked_dynamic;
-        }
+        var candidates = search.CandidateList.empty;
+        defer candidates.deinit(allocator);
 
-        if (dispatch.parsed.route == .web) {
-            var query_candidates = search.CandidateList.empty;
-            defer query_candidates.deinit(allocator);
-
-            const recent = try self.historySnapshotNewestFirstOwned(allocator);
-            defer history_access.freeSnapshot(allocator, recent);
-
-            var had_provider_runtime_failure = false;
-            const ranked_web = try query_engine.collectAndRank(
-                allocator,
-                self.registry,
-                dispatch.parsed,
-                recent,
-                &query_candidates,
-                &had_provider_runtime_failure,
-            );
-            self.query_mu.lock();
-            self.last_query_had_provider_runtime_failure = had_provider_runtime_failure;
-            self.query_mu.unlock();
-            query_metrics_access.setElapsed(&self.query_mu, &self.last_query_elapsed_ns, sw.elapsedNs());
-            return ranked_web;
-        }
-
-        try self.prepareRefreshForStaticQuery();
-        var query_candidates = search.CandidateList.empty;
-        defer query_candidates.deinit(allocator);
+        const report = try self.registry.collectAllWithReport(allocator, &candidates);
+        self.setProviderFailure(report.had_runtime_failure);
 
         const recent = try self.historySnapshotNewestFirstOwned(allocator);
         defer history_access.freeSnapshot(allocator, recent);
 
-        self.cache_mu.lock();
-        const cache_view = cache_read.readViewLocked(self.cache_ready, &self.cached_rank_generations);
-        if (cache_view.ready) {
-            const cache_snapshot_had_provider_runtime_failure = self.cache_snapshot_had_provider_runtime_failure;
-            var had_provider_runtime_failure = false;
-            const ranked_cache_or_collect = query_engine.rankFromCacheSnapshot(
-                allocator,
-                dispatch.parsed,
-                recent,
-                cache_view.snapshot,
-                &had_provider_runtime_failure,
-            ) catch |err| {
-                self.cache_mu.unlock();
-                return err;
-            };
-            self.cache_mu.unlock();
-            self.query_mu.lock();
-            self.last_query_had_provider_runtime_failure =
-                cache_snapshot_had_provider_runtime_failure or had_provider_runtime_failure;
-            self.query_mu.unlock();
-            query_metrics_access.setElapsed(&self.query_mu, &self.last_query_elapsed_ns, sw.elapsedNs());
-            return ranked_cache_or_collect;
-        }
-        self.cache_mu.unlock();
-
-        var had_provider_runtime_failure = false;
-        const ranked = try query_engine.collectAndRank(
+        const ranked = try search.rankCandidatesWithHistory(
             allocator,
-            self.registry,
-            dispatch.parsed,
+            search.parseQuery(raw_query),
+            candidates.items,
             recent,
-            &query_candidates,
-            &had_provider_runtime_failure,
         );
-        self.query_mu.lock();
-        self.last_query_had_provider_runtime_failure = had_provider_runtime_failure;
-        self.query_mu.unlock();
-        query_metrics_access.setElapsed(&self.query_mu, &self.last_query_elapsed_ns, sw.elapsedNs());
+        self.setElapsed(started_ns);
         return ranked;
     }
 
     pub fn defaultLoadout(self: *SearchService, allocator: std.mem.Allocator) ![]search.ScoredCandidate {
-        return default_loadout.collect(self, allocator);
-    }
-
-    fn searchDynamicRoute(self: *SearchService, allocator: std.mem.Allocator, query: search.Query) ![]search.ScoredCandidate {
-        // Dynamic route candidates reference owned strings stored in retained generations.
-        // We keep a bounded number of generations to cap long-session memory growth.
-        const recent = try self.historySnapshotNewestFirstOwned(allocator);
-        defer history_access.freeSnapshot(allocator, recent);
-        return dynamic_query_engine.rankDynamicRoute(
-            &self.dynamic_mu,
-            &self.dynamic_tool_state,
-            &self.dynamic_generations,
-            self.dynamic_generation_keep,
-            self.dynamic_generation_keep_bytes,
-            allocator,
-            query,
-            recent,
-        ) catch |err| {
-            self.query_mu.lock();
-            self.last_query_had_provider_runtime_failure = true;
-            self.query_mu.unlock();
-            std.log.warn("dynamic route query failed route={s} err={s}", .{ @tagName(query.route), @errorName(err) });
-            return allocator.alloc(search.ScoredCandidate, 0);
-        };
-    }
-
-    pub fn clearDynamicState(self: *SearchService, allocator: std.mem.Allocator) void {
-        self.dynamic_mu.lock();
-        const before = dynamic_generations.metrics(self.dynamic_generations.items);
-        const prune_report = dynamic_generations.prune(
-            &self.dynamic_generations,
-            0,
-            std.math.maxInt(usize),
-            allocator,
-        );
-        dynamic_routes.invalidateToolStateCache(&self.dynamic_tool_state);
-        const after = dynamic_generations.metrics(self.dynamic_generations.items);
-        self.dynamic_mu.unlock();
-        if (before.generation_count == 0 and prune_report.removed_generations == 0) {
-            return;
-        }
-        std.log.info(
-            "ram_event=dynamic_cache_clear query_hash={d} route={s} query_term_len={d} emitted_rows={d} owned_item_count={d} owned_bytes={d} generation_count={d} pruned_count={d} window_limit={d} cached_rows={d} cached_bytes={d}",
-            .{
-                0,
-                "dynamic",
-                0,
-                0,
-                after.owned_item_count,
-                after.owned_bytes,
-                after.generation_count,
-                prune_report.removed_generations,
-                0,
-                after.owned_item_count,
-                prune_report.removed_bytes,
-            },
-        );
+        return self.searchQuery(allocator, "");
     }
 
     pub fn prewarmProviders(self: *SearchService, allocator: std.mem.Allocator) !void {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-        const report = try cache_coordinator.prewarmLocked(
-            self.registry,
-            allocator,
-            &self.cached_candidates,
-            &self.cache_ready,
-            &self.cache_last_refresh_ns,
-            &self.refresh_requested,
-            &self.cached_rank_generations,
-            self.cache_generation_keep,
-        );
-        self.cache_snapshot_had_provider_runtime_failure = report.had_runtime_failure;
-    }
-
-    pub fn kickAsyncStartupPrewarm(self: *SearchService) void {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-
-        self.reapFinishedRefreshThreadLocked();
-        if (self.cache_ready) return;
-        if (self.refresh_thread_running or self.refresh_thread != null) return;
-
-        self.refresh_requested = true;
-        refresh_worker.markRunning(&self.refresh_thread_running);
-        self.refresh_thread = std.Thread.spawn(.{}, refreshWorkerMain, .{self}) catch {
-            refresh_worker.markStopped(&self.refresh_thread_running);
-            return;
-        };
-    }
-
-    pub fn invalidateSnapshot(self: *SearchService) void {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-        cache_coordinator.invalidateLocked(&self.cache_ready, &self.cache_last_refresh_ns, &self.refresh_requested);
-    }
-
-    pub fn scheduleRefreshFromEvent(self: *SearchService) EventRefreshResult {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-
-        self.reapFinishedRefreshThreadLocked();
-        if (self.refresh_thread_running or self.refresh_thread != null) return .skipped_running;
-
-        self.refresh_requested = true;
-        refresh_worker.markRunning(&self.refresh_thread_running);
-        self.refresh_thread = std.Thread.spawn(.{}, refreshWorkerMain, .{self}) catch {
-            self.refresh_requested = false;
-            refresh_worker.markStopped(&self.refresh_thread_running);
-            return .failed_spawn;
-        };
-        return .scheduled;
-    }
-
-    pub fn maybeStartRequestedRefreshWorker(self: *SearchService) bool {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-
-        self.reapFinishedRefreshThreadLocked();
-        if (!self.refresh_requested) return false;
-        if (self.refresh_thread_running or self.refresh_thread != null) return false;
-
-        refresh_worker.markRunning(&self.refresh_thread_running);
-        self.refresh_thread = std.Thread.spawn(.{}, refreshWorkerMain, .{self}) catch {
-            refresh_worker.markStopped(&self.refresh_thread_running);
-            return false;
-        };
-        return true;
-    }
-
-    pub fn staticQueryExecution(self: *SearchService) StaticQueryExecution {
-        if (!self.cache_mu.tryLock()) return .refreshing;
-        defer self.cache_mu.unlock();
-
-        self.reapFinishedRefreshThreadLocked();
-        if (self.refresh_thread_running or self.refresh_thread != null) return .refreshing;
-        if (!self.cache_ready) return .cache_cold;
-        return .ready;
-    }
-
-    pub fn refreshInFlight(self: *SearchService) bool {
-        if (!self.cache_mu.tryLock()) return true;
-        defer self.cache_mu.unlock();
-        return self.refresh_requested or self.refresh_thread_running;
-    }
-
-    pub fn drainScheduledRefresh(self: *SearchService, allocator: std.mem.Allocator) !bool {
-        self.cache_mu.lock();
-        const requested = self.refresh_requested;
-        self.cache_mu.unlock();
-        if (!cache_coordinator.shouldDrain(requested)) return false;
-        try self.prewarmProviders(allocator);
-        query_metrics_access.markRefreshed(&self.query_mu, &self.last_query_refreshed_cache);
-        return true;
-    }
-
-    fn prepareRefreshForStaticQuery(self: *SearchService) !void {
-        self.cache_mu.lock();
-        defer self.cache_mu.unlock();
-        self.reapFinishedRefreshThreadLocked();
-        const refresh_worker_active = self.refresh_thread_running or self.refresh_thread != null;
-        if (!query_refresh_gate.scheduleAndShouldStartWorker(
-            self.cache_ready,
-            self.cache_ttl_ns,
-            self.cache_last_refresh_ns,
-            &self.refresh_requested,
-            &self.last_query_used_stale_cache,
-            self.enable_async_refresh,
-            refresh_worker_active,
-        )) return;
-        refresh_worker.markRunning(&self.refresh_thread_running);
-        errdefer refresh_worker.markStopped(&self.refresh_thread_running);
-        self.refresh_thread = try std.Thread.spawn(.{}, refreshWorkerMain, .{self});
-    }
-
-    fn reapFinishedRefreshThreadLocked(self: *SearchService) void {
-        if (self.refresh_thread_running) return;
-        if (self.refresh_thread) |t| {
-            // The worker clears `refresh_thread_running` while holding `cache_mu`,
-            // so observing `false` under the same mutex means it is safe to join.
-            self.refresh_thread = null;
-            t.join();
-        }
-    }
-
-    fn refreshWorkerMain(self: *SearchService) void {
-        _ = self.drainScheduledRefresh(std.heap.page_allocator) catch |err| {
-            std.log.warn("async refresh worker drain failed: {s}", .{@errorName(err)});
-        };
-        self.cache_mu.lock();
-        refresh_worker.markStopped(&self.refresh_thread_running);
-        self.cache_mu.unlock();
+        var candidates = search.CandidateList.empty;
+        defer candidates.deinit(allocator);
+        const report = try self.registry.collectAllWithReport(allocator, &candidates);
+        self.setProviderFailure(report.had_runtime_failure);
     }
 
     pub fn recordSelection(self: *SearchService, allocator: std.mem.Allocator, action: []const u8) !void {
-        self.query_mu.lock();
-        defer self.query_mu.unlock();
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
         try history_access.recordLocked(&self.history, self.max_history, allocator, action);
     }
 
     pub fn historySnapshotNewestFirstOwned(self: *SearchService, allocator: std.mem.Allocator) ![]const []const u8 {
-        return self.historySnapshotNewestFirstOwnedInternal(allocator);
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
+        return history_access.snapshotNewestFirstOwnedLocked(self.history.items, allocator);
     }
 
     pub fn loadHistory(self: *SearchService, allocator: std.mem.Allocator) !void {
-        self.query_mu.lock();
-        defer self.query_mu.unlock();
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
         try history_access.loadLocked(&self.history, self.max_history, self.history_path, allocator);
     }
 
     pub fn saveHistory(self: *SearchService, allocator: std.mem.Allocator) !void {
-        self.query_mu.lock();
-        defer self.query_mu.unlock();
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
         try history_access.saveLocked(self.history.items, self.history_path, allocator);
     }
 
-    pub fn queryFlagsSnapshot(self: *SearchService) QueryFlagsSnapshot {
-        return query_metrics_access.readFlags(
-            &self.query_mu,
-            &self.last_query_refreshed_cache,
-            &self.last_query_used_stale_cache,
-            &self.last_query_had_provider_runtime_failure,
-        );
-    }
-
     pub fn lastQueryElapsedNs(self: *SearchService) u64 {
-        return query_metrics_access.readElapsed(&self.query_mu, &self.last_query_elapsed_ns);
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
+        return self.last_query_elapsed_ns;
     }
 
-    fn historySnapshotNewestFirstOwnedInternal(self: *SearchService, allocator: std.mem.Allocator) ![]const []const u8 {
-        self.query_mu.lock();
-        defer self.query_mu.unlock();
-        return history_access.snapshotNewestFirstOwnedLocked(self.history.items, allocator);
+    fn setElapsed(self: *SearchService, started_ns: i96) void {
+        const now = nowNs();
+        const elapsed: u64 = if (now > started_ns) @intCast(now - started_ns) else 0;
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        self.last_query_elapsed_ns = elapsed;
+        self.query_mu.unlock(std.Options.debug_io);
+    }
+
+    fn setProviderFailure(self: *SearchService, failed: bool) void {
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        self.last_query_had_provider_runtime_failure = failed;
+        self.query_mu.unlock(std.Options.debug_io);
     }
 };
 
-test {
-    _ = @import("search_service_test.zig");
+fn nowNs() i96 {
+    return std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
 }

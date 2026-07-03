@@ -1,7 +1,7 @@
 const std = @import("std");
 
-var cache_lock: std.Thread.Mutex = .{};
-var cache: std.StringHashMapUnmanaged(bool) = .{};
+var cache_lock: std.Io.Mutex = .init;
+var cache: std.StringHashMapUnmanaged(bool) = .empty;
 var command_exists_runner: *const fn (name: []const u8) bool = commandExistsViaShell;
 
 pub fn commandExists(name: []const u8) bool {
@@ -9,17 +9,17 @@ pub fn commandExists(name: []const u8) bool {
 }
 
 pub fn commandExistsCached(name: []const u8) bool {
-    cache_lock.lock();
+    cache_lock.lockUncancelable(std.Options.debug_io);
     if (cache.get(name)) |value| {
-        cache_lock.unlock();
+        cache_lock.unlock(std.Options.debug_io);
         return value;
     }
-    cache_lock.unlock();
+    cache_lock.unlock(std.Options.debug_io);
 
     const value = command_exists_runner(name);
 
-    cache_lock.lock();
-    defer cache_lock.unlock();
+    cache_lock.lockUncancelable(std.Options.debug_io);
+    defer cache_lock.unlock(std.Options.debug_io);
     if (cache.get(name)) |existing| return existing;
     const key = std.heap.page_allocator.dupe(u8, name) catch return value;
     cache.put(std.heap.page_allocator, key, value) catch {
@@ -34,15 +34,14 @@ pub fn invalidateCache() void {
 }
 
 fn commandExistsViaShell(name: []const u8) bool {
-    const result = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
+    var child = std.process.spawn(std.Options.debug_io, .{
         .argv = &.{ "sh", "-lc", "command -v \"$1\" >/dev/null 2>&1", "_", name },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
     }) catch return false;
-    defer {
-        std.heap.page_allocator.free(result.stdout);
-        std.heap.page_allocator.free(result.stderr);
-    }
-    return result.term == .Exited and result.term.Exited == 0;
+    const term = child.wait(std.Options.debug_io) catch return false;
+    return term == .exited and term.exited == 0;
 }
 
 fn clearCacheForTests() void {
@@ -50,20 +49,20 @@ fn clearCacheForTests() void {
 }
 
 fn clearCacheLocked() void {
-    cache_lock.lock();
-    defer cache_lock.unlock();
+    cache_lock.lockUncancelable(std.Options.debug_io);
+    defer cache_lock.unlock(std.Options.debug_io);
 
     var it = cache.iterator();
     while (it.next()) |entry| {
         std.heap.page_allocator.free(entry.key_ptr.*);
     }
     cache.deinit(std.heap.page_allocator);
-    cache = .{};
+    cache = .empty;
 }
 
 test "commandExistsCached reuses prior command result for repeated checks" {
     const Fake = struct {
-        var calls: usize = 0;
+        var calls: u32 = 0;
 
         fn run(name: []const u8) bool {
             calls += 1;
@@ -80,12 +79,12 @@ test "commandExistsCached reuses prior command result for repeated checks" {
 
     try std.testing.expect(commandExistsCached("present"));
     try std.testing.expect(commandExistsCached("present"));
-    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    try std.testing.expectEqual(@as(u32, 1), Fake.calls);
 }
 
 test "commandExistsCached tracks each command key independently" {
     const Fake = struct {
-        var calls: usize = 0;
+        var calls: u32 = 0;
 
         fn run(name: []const u8) bool {
             calls += 1;
@@ -104,5 +103,5 @@ test "commandExistsCached tracks each command key independently" {
     try std.testing.expect(!commandExistsCached("beta"));
     try std.testing.expect(commandExistsCached("alpha"));
     try std.testing.expect(!commandExistsCached("beta"));
-    try std.testing.expectEqual(@as(usize, 2), Fake.calls);
+    try std.testing.expectEqual(@as(u32, 2), Fake.calls);
 }

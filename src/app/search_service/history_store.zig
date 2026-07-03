@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn recordSelection(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: usize,
+    max_history: u32,
     allocator: std.mem.Allocator,
     action: []const u8,
 ) !void {
@@ -18,7 +18,7 @@ pub fn recordSelection(
 
 pub fn loadHistory(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: usize,
+    max_history: u32,
     history_path: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !void {
@@ -42,10 +42,10 @@ pub fn saveHistory(history: []const []u8, history_path: ?[]const u8, allocator: 
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
-    const writer = out.writer(allocator);
 
     for (history) |entry| {
-        try writer.print("{s}\\n", .{entry});
+        try out.appendSlice(allocator, entry);
+        try out.append(allocator, '\n');
     }
     try writeFileAnyPathAtomic(allocator, path, out.items);
 }
@@ -65,7 +65,7 @@ pub fn historySnapshotNewestFirstOwned(history: []const []u8, allocator: std.mem
     var out = try allocator.alloc([]const u8, history.len);
     errdefer allocator.free(out);
 
-    var out_idx: usize = 0;
+    var out_idx: u32 = 0;
     var idx = history.len;
     while (idx > 0) : (idx -= 1) {
         const dup = allocator.dupe(u8, history[idx - 1]) catch |err| {
@@ -83,50 +83,47 @@ pub fn freeOwnedHistorySnapshot(allocator: std.mem.Allocator, history_snapshot: 
     allocator.free(history_snapshot);
 }
 
-fn readFileAnyPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        const file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
-        return file.readToEndAlloc(allocator, max_bytes);
-    }
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+fn readFileAnyPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: u32) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_bytes));
 }
 
 fn writeFileAnyPathAtomic(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
     defer allocator.free(tmp_path);
     try ensureParentDir(path);
+    const io = std.Options.debug_io;
 
     if (std.fs.path.isAbsolute(path)) {
-        const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(data);
-        try file.sync();
-        try std.fs.renameAbsolute(tmp_path, path);
+        const file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, data);
+        try file.sync(io);
+        try std.Io.Dir.renameAbsolute(tmp_path, path, io);
         try syncParentDir(path);
         return;
     }
-    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(data);
-    try file.sync();
-    try std.fs.cwd().rename(tmp_path, path);
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, data);
+    try file.sync(io);
+    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
     try syncParentDir(path);
 }
 
 fn ensureParentDir(path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return;
-    try std.fs.cwd().makePath(parent);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, parent);
 }
 
 fn syncParentDir(path: []const u8) !void {
+    const io = std.Options.debug_io;
     const parent = std.fs.path.dirname(path) orelse ".";
     var parent_dir = if (std.fs.path.isAbsolute(path))
-        try std.fs.openDirAbsolute(parent, .{})
+        try std.Io.Dir.openDirAbsolute(io, parent, .{})
     else
-        try std.fs.cwd().openDir(parent, .{});
-    defer parent_dir.close();
-    const rc = std.posix.system.fsync(parent_dir.fd);
+        try std.Io.Dir.cwd().openDir(io, parent, .{});
+    defer parent_dir.close(io);
+    const rc = std.posix.system.fsync(parent_dir.handle);
     switch (std.posix.errno(rc)) {
         .SUCCESS => return,
         // Some filesystems/dirfds do not support directory fsync; keep write atomic

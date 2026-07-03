@@ -3,7 +3,7 @@ const history_store = @import("history_store.zig");
 
 pub fn recordLocked(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: usize,
+    max_history: u32,
     allocator: std.mem.Allocator,
     action: []const u8,
 ) !void {
@@ -12,7 +12,7 @@ pub fn recordLocked(
 
 pub fn loadLocked(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: usize,
+    max_history: u32,
     history_path: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !void {

@@ -1,17 +1,17 @@
-const wm_adapter = @import("../../wm/adapter.zig");
+//! Placement policy owns persisted picker geometry preferences.
+
 const engine = @import("engine.zig");
 
 pub const WindowPolicy = struct {
     anchor: engine.Anchor,
     margins: engine.Margins,
-    monitor: wm_adapter.MonitorTarget,
+    monitor_name: ?[]const u8 = null,
 };
 
 pub const LauncherPolicy = struct {
     window: WindowPolicy = .{
         .anchor = .center,
         .margins = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 },
-        .monitor = .{ .policy = .primary },
     },
     width_percent: i32 = 48,
     height_percent: i32 = 56,
@@ -27,7 +27,6 @@ pub const NotificationPolicy = struct {
     window: WindowPolicy = .{
         .anchor = .top_right,
         .margins = .{ .left = 24, .right = 24, .top = 24, .bottom = 24 },
-        .monitor = .{ .policy = .primary },
     },
     width_percent: i32 = 26,
     height_percent: i32 = 46,

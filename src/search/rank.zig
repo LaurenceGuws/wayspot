@@ -1,3 +1,5 @@
+//! Ranking owns deterministic scoring for app and action launcher candidates.
+
 const std = @import("std");
 const query_mod = @import("query.zig");
 const types = @import("types.zig");
@@ -62,18 +64,7 @@ fn matchesRoute(route: query_mod.Route, kind: types.CandidateKind) bool {
     return switch (route) {
         .blended => true,
         .apps => kind == .app,
-        .windows => kind == .window,
-        .workspaces => kind == .workspace,
-        .dirs => kind == .dir,
-        .theme => kind == .action,
-        .files => kind == .file or kind == .dir,
-        .grep => kind == .grep,
-        .packages => kind == .action or kind == .hint,
-        .icons => kind == .file,
-        .nerd_icons, .emoji => kind == .hint,
-        .notifications => kind == .notification or kind == .action or kind == .hint,
-        .run, .calc => true,
-        .web => kind == .web,
+        .run => true,
     };
 }
 
@@ -84,7 +75,6 @@ fn candidateScore(
     candidate: types.Candidate,
     recent_actions: []const []const u8,
 ) !i32 {
-    if (route == .theme and !isThemeAction(candidate.action, needle)) return 0;
     var score: i32 = baseWeight(route, candidate.kind);
     if (needle.len == 0) {
         score += recencyBoost(candidate.action, recent_actions);
@@ -111,42 +101,34 @@ fn candidateScore(
     return score;
 }
 
-fn isThemeAction(action: []const u8, needle: []const u8) bool {
-    if (std.mem.startsWith(u8, action, "theme-apply:")) return true;
-    if (needle.len == 0) return false;
-    if (std.mem.indexOfScalar(u8, needle, '/') == null) return false;
-    return std.mem.startsWith(u8, action, "theme-open-dir:") or
-        std.mem.startsWith(u8, action, "theme-slideshow-toggle:");
-}
-
 fn lowerAsciiLossyAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, input.len);
-    for (input, 0..) |ch, i| {
-        out[i] = if (std.ascii.isAscii(ch)) std.ascii.toLower(ch) else ch;
+    var index: u32 = 0;
+    for (input) |ch| {
+        out[index] = if (std.ascii.isAscii(ch)) std.ascii.toLower(ch) else ch;
+        index += 1;
     }
     return out;
 }
 
-fn shortQueryBias(needle_len: usize, kind: types.CandidateKind) i32 {
+fn shortQueryBias(needle_len: u64, kind: types.CandidateKind) i32 {
     if (needle_len == 0 or needle_len > 2) return 0;
     return switch (kind) {
         .action => 50,
         .app => 0,
-        .window => -5,
-        .workspace => -4,
-        .dir => -10,
-        .file => -8,
-        .grep => -6,
-        .web => 0,
         .notification => 0,
         .hint => 0,
     };
 }
 
 fn recencyBoost(action: []const u8, recent_actions: []const []const u8) i32 {
-    for (recent_actions, 0..) |recent, idx| {
-        if (!std.mem.eql(u8, recent, action)) continue;
-        const decay = @as(i32, @intCast(idx)) * 5;
+    var index: u32 = 0;
+    for (recent_actions) |recent| {
+        if (!std.mem.eql(u8, recent, action)) {
+            index += 1;
+            continue;
+        }
+        const decay = @as(i32, @intCast(index)) * 5;
         const bonus = 40 - decay;
         return if (bonus > 0) bonus else 0;
     }
@@ -154,22 +136,11 @@ fn recencyBoost(action: []const u8, recent_actions: []const []const u8) i32 {
 }
 
 fn baseWeight(route: query_mod.Route, kind: types.CandidateKind) i32 {
-    if (route == .theme) {
-        return switch (kind) {
-            .action => 110,
-            else => 0,
-        };
-    }
+    if (route == .run) return 0;
     return switch (kind) {
         .app => 100,
-        .window => 90,
-        .workspace => 88,
-        .dir => 80,
-        .file => 78,
-        .grep => 76,
-        .web => 72,
-        .notification => 74,
         .action => 70,
+        .notification => 60,
         .hint => 10,
     };
 }
@@ -184,21 +155,21 @@ test "exact match outranks prefix match" {
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqualStrings("kitty", ranked[0].candidate.title);
 }
 
 test "route filter limits result kinds" {
     const candidates = [_]types.Candidate{
         .init(.app, "kitty", "Terminal", "kitty"),
-        .init(.window, "Terminal", "kitty", "0xabc"),
+        .init(.action, "Terminal", "kitty", "terminal-action"),
     };
 
     const query = query_mod.parse("@ term");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 1), ranked.len);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqual(types.CandidateKind.app, ranked[0].candidate.kind);
 }
 
@@ -213,41 +184,11 @@ test "empty apps route keeps app-only scoring order" {
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqual(types.CandidateKind.app, ranked[0].candidate.kind);
     try std.testing.expectEqual(types.CandidateKind.app, ranked[1].candidate.kind);
     try std.testing.expectEqualStrings("Alacritty", ranked[0].candidate.title);
     try std.testing.expectEqualStrings("Firefox", ranked[1].candidate.title);
-}
-
-test "files route includes file and directory candidates" {
-    const candidates = [_]types.Candidate{
-        .init(.file, "main.zig", "/tmp/main.zig", "/tmp/main.zig"),
-        .init(.dir, "src", "/tmp/src", "/tmp/src"),
-        .init(.app, "kitty", "Terminal", "kitty"),
-    };
-
-    const query = query_mod.parse("% ");
-    const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
-    defer std.testing.allocator.free(ranked);
-
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
-    try std.testing.expectEqual(types.CandidateKind.dir, ranked[0].candidate.kind);
-    try std.testing.expectEqual(types.CandidateKind.file, ranked[1].candidate.kind);
-}
-
-test "theme route prefers action entries over wallpaper files" {
-    const candidates = [_]types.Candidate{
-        .init(.file, "wallpaper.png", "Wallpaper file in ayu", "/tmp/wallpaper.png"),
-        .init(.action, "Ayu", "Theme", "theme-apply:ayu"),
-    };
-
-    const query = query_mod.parse(", ");
-    const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
-    defer std.testing.allocator.free(ranked);
-
-    try std.testing.expectEqual(@as(usize, 1), ranked.len);
-    try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
 }
 
 test "recency history boosts repeated action candidates" {
@@ -260,7 +201,7 @@ test "recency history boosts repeated action candidates" {
     const ranked = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &history);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 1), ranked.len);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqualStrings("Power menu", ranked[0].candidate.title);
 }
 
@@ -274,7 +215,7 @@ test "short blended query prefers actions over broad app matches" {
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
     try std.testing.expectEqualStrings("Settings", ranked[0].candidate.title);
 }
@@ -318,7 +259,7 @@ test "equal score and title uses deterministic tie-breakers" {
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqualStrings("a-action", ranked[0].candidate.action);
     try std.testing.expectEqualStrings("z-action", ranked[1].candidate.action);
 }

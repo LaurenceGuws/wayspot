@@ -1,3 +1,5 @@
+//! ActionsProvider owns fixed local action candidates and their command mapping.
+
 const std = @import("std");
 const search = @import("../search/mod.zig");
 const tool_check = @import("tool_check.zig");
@@ -51,28 +53,30 @@ pub const ActionsProvider = struct {
     command_exists_fn: *const fn (name: []const u8) bool = tool_check.commandExists,
     path_exists_fn: *const fn (path: []const u8) bool = pathExists,
 
-    pub fn provider(self: *ActionsProvider) search.Provider {
-        return .{
-            .name = "actions",
-            .context = self,
-            .vtable = &.{
-                .collect = collect,
-                .health = health,
-            },
-        };
-    }
-
-    fn collect(context: *anyopaque, allocator: std.mem.Allocator, out: *search.CandidateList) !void {
-        const self: *ActionsProvider = @ptrCast(@alignCast(context));
+    /// collect appends action candidates whose local dependencies are present.
+    pub fn collect(
+        self: *ActionsProvider,
+        allocator: std.mem.Allocator,
+        out: *search.CandidateList,
+    ) !void {
         for (action_specs) |spec| {
             if (!self.actionAvailable(spec)) continue;
-            try out.append(allocator, search.Candidate.initWithIcon(.action, spec.title, spec.subtitle, spec.action, spec.icon));
+            try out.append(
+                allocator,
+                search.Candidate.initWithIcon(
+                    .action,
+                    spec.title,
+                    spec.subtitle,
+                    spec.action,
+                    spec.icon,
+                ),
+            );
         }
     }
 
-    fn health(context: *anyopaque) search.ProviderHealth {
-        const self: *ActionsProvider = @ptrCast(@alignCast(context));
-        var available_count: usize = 0;
+    /// health reports whether the configured action commands are available.
+    pub fn health(self: *ActionsProvider) search.ProviderHealth {
+        var available_count: u32 = 0;
         for (action_specs) |spec| {
             if (self.actionAvailable(spec)) available_count += 1;
         }
@@ -90,8 +94,7 @@ pub const ActionsProvider = struct {
     }
 
     fn homeRelativePathExists(self: *ActionsProvider, relative_path: []const u8) bool {
-        const home = std.process.getEnvVarOwned(std.heap.page_allocator, "HOME") catch return false;
-        defer std.heap.page_allocator.free(home);
+        const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else return false;
 
         const path = std.fs.path.join(std.heap.page_allocator, &.{ home, relative_path }) catch return false;
         defer std.heap.page_allocator.free(path);
@@ -138,13 +141,16 @@ pub fn resolveExecutionCommand(allocator: std.mem.Allocator, execution: ActionEx
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
+        return true;
+    }
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
 fn resolveHomeRelativeCommand(allocator: std.mem.Allocator, relative_command: []const u8) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
-    defer allocator.free(home);
+    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else ".";
 
     const split_idx = std.mem.indexOfScalar(u8, relative_command, ' ');
     const relative_path = if (split_idx) |idx| relative_command[0..idx] else relative_command;
@@ -162,8 +168,7 @@ test "actions provider collects available action candidates only" {
         }
 
         fn pathExists(path: []const u8) bool {
-            _ = path;
-            return false;
+            return path.len == 0;
         }
     };
 
@@ -174,10 +179,8 @@ test "actions provider collects available action candidates only" {
         .command_exists_fn = Fake.commandExists,
         .path_exists_fn = Fake.pathExists,
     };
-    const provider = provider_impl.provider();
-
-    try provider.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try provider_impl.collect(std.testing.allocator, &list);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqual(search.CandidateKind.action, list.items[0].kind);
     try std.testing.expectEqualStrings("settings", list.items[0].action);
     try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].icon);
@@ -207,13 +210,13 @@ test "actions provider health reflects dependency availability" {
         .command_exists_fn = FakeAllMissing.commandExists,
         .path_exists_fn = FakeAllMissing.pathExists,
     };
-    try std.testing.expectEqual(search.ProviderHealth.unavailable, none_provider_impl.provider().health());
+    try std.testing.expectEqual(search.ProviderHealth.unavailable, none_provider_impl.health());
 
     var partial_provider_impl = ActionsProvider{
         .command_exists_fn = FakePartial.commandExists,
         .path_exists_fn = FakePartial.pathExists,
     };
-    try std.testing.expectEqual(search.ProviderHealth.degraded, partial_provider_impl.provider().health());
+    try std.testing.expectEqual(search.ProviderHealth.degraded, partial_provider_impl.health());
 }
 
 test "execute action resolves command mapping" {

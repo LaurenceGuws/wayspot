@@ -37,8 +37,8 @@ pub const Store = struct {
         self.map.deinit();
     }
 
-    pub fn len(self: *const Store) usize {
-        return self.map.count();
+    pub fn len(self: *const Store) u32 {
+        return @intCast(self.map.count());
     }
 
     pub fn notify(self: *Store, req: NotifyRequest) !u32 {
@@ -65,7 +65,7 @@ pub const Store = struct {
     }
 
     fn allocateId(self: *Store) !u32 {
-        var attempts: usize = 0;
+        var attempts: u32 = 0;
         var id = self.next_id;
 
         while (attempts <= std.math.maxInt(u32)) : (attempts += 1) {
@@ -115,10 +115,10 @@ test "store notify allocates ids and close removes" {
 
     try std.testing.expectEqual(@as(u32, 1), first);
     try std.testing.expectEqual(@as(u32, 2), second);
-    try std.testing.expectEqual(@as(usize, 2), store.len());
+    try std.testing.expectEqual(@as(u32, 2), store.len());
 
     try std.testing.expect(store.close(first));
-    try std.testing.expectEqual(@as(usize, 1), store.len());
+    try std.testing.expectEqual(@as(u32, 1), store.len());
     try std.testing.expect(!store.close(first));
 }
 
@@ -142,7 +142,7 @@ test "store notify replaces existing id" {
     });
 
     try std.testing.expectEqual(id, replaced);
-    try std.testing.expectEqual(@as(usize, 1), store.len());
+    try std.testing.expectEqual(@as(u32, 1), store.len());
     const entry = store.map.get(id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("summary-2", entry.summary);
     try std.testing.expectEqualStrings("body-2", entry.body);

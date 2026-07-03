@@ -1,10 +1,12 @@
+//! AppsProvider owns desktop application discovery and candidate string lifetimes.
+
 const std = @import("std");
 const search = @import("../search/mod.zig");
 
 pub const AppsProvider = struct {
     cache_path: []const u8,
-    owned_strings_current: std.ArrayListUnmanaged([]u8) = .{},
-    owned_strings_previous: std.ArrayListUnmanaged([]u8) = .{},
+    owned_strings_current: std.ArrayListUnmanaged([]u8) = .empty,
+    owned_strings_previous: std.ArrayListUnmanaged([]u8) = .empty,
     had_runtime_failure: bool = false,
 
     pub fn init(cache_path: []const u8) AppsProvider {
@@ -20,21 +22,19 @@ pub const AppsProvider = struct {
         self.owned_strings_previous.deinit(allocator);
     }
 
-    pub fn provider(self: *AppsProvider) search.Provider {
-        return .{
-            .name = "apps",
-            .context = self,
-            .vtable = &.{
-                .collect = collect,
-                .health = health,
-            },
-        };
-    }
-
-    fn collect(context: *anyopaque, allocator: std.mem.Allocator, out: *search.CandidateList) !void {
-        const self: *AppsProvider = @ptrCast(@alignCast(context));
+    /// collect appends launchable desktop application candidates.
+    pub fn collect(
+        self: *AppsProvider,
+        allocator: std.mem.Allocator,
+        out: *search.CandidateList,
+    ) !void {
         self.rotateOwnedStringsForCollect(allocator);
-        const data = std.fs.cwd().readFileAlloc(allocator, self.cache_path, 2 * 1024 * 1024) catch |err| switch (err) {
+        const data = std.Io.Dir.cwd().readFileAlloc(
+            std.Options.debug_io,
+            self.cache_path,
+            allocator,
+            .limited(2 * 1024 * 1024),
+        ) catch |err| switch (err) {
             error.FileNotFound => {
                 const count = self.collectFromDesktopFiles(allocator, out) catch |scan_err| {
                     self.had_runtime_failure = true;
@@ -56,10 +56,10 @@ pub const AppsProvider = struct {
         };
         defer allocator.free(data);
 
-        if (cacheContainsLegacyThreeColumnRows(data)) {
-            std.log.info("apps provider detected legacy cache rows; attempting desktop refresh", .{});
-            const added: usize = self.collectFromDesktopFiles(allocator, out) catch |scan_err| blk: {
-                std.log.warn("apps provider legacy refresh scan failed: {s}", .{@errorName(scan_err)});
+        if (cacheContainsThreeColumnRows(data)) {
+            std.log.info("apps provider detected three-column cache rows; attempting desktop refresh", .{});
+            const added = self.collectFromDesktopFiles(allocator, out) catch |scan_err| blk: {
+                std.log.warn("apps provider three-column refresh scan failed: {s}", .{@errorName(scan_err)});
                 break :blk 0;
             };
             if (added > 0) {
@@ -68,22 +68,25 @@ pub const AppsProvider = struct {
             }
         }
 
-        var count: usize = 0;
+        var count: u32 = 0;
         var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| {
-            const normalized_line = std.mem.trimRight(u8, line, "\r");
+            const normalized_line = std.mem.trimEnd(u8, line, "\r");
             if (normalized_line.len == 0) continue;
             var fields = std.mem.splitScalar(u8, normalized_line, '\t');
-            const category = std.mem.trimRight(u8, fields.next() orelse continue, " \t\r");
-            const name = std.mem.trimRight(u8, fields.next() orelse continue, " \t\r");
-            const exec_cmd = std.mem.trimRight(u8, fields.next() orelse continue, " \t\r");
-            const icon_name = std.mem.trimRight(u8, fields.next() orelse "", " \t\r");
+            const category = std.mem.trimEnd(u8, fields.next() orelse continue, " \t\r");
+            const name = std.mem.trimEnd(u8, fields.next() orelse continue, " \t\r");
+            const exec_cmd = std.mem.trimEnd(u8, fields.next() orelse continue, " \t\r");
+            const icon_name = std.mem.trimEnd(u8, fields.next() orelse "", " \t\r");
 
             const kept_name = try self.keepString(allocator, name);
             const kept_category = try self.keepString(allocator, category);
             const kept_exec = try self.keepString(allocator, exec_cmd);
             const kept_icon = try self.keepString(allocator, icon_name);
-            try out.append(allocator, search.Candidate.initWithIcon(.app, kept_name, kept_category, kept_exec, kept_icon));
+            try out.append(
+                allocator,
+                search.Candidate.initWithIcon(.app, kept_name, kept_category, kept_exec, kept_icon),
+            );
             count += 1;
         }
 
@@ -95,9 +98,9 @@ pub const AppsProvider = struct {
         self.had_runtime_failure = false;
     }
 
-    fn health(context: *anyopaque) search.ProviderHealth {
-        const self: *AppsProvider = @ptrCast(@alignCast(context));
-        std.fs.cwd().access(self.cache_path, .{}) catch return .degraded;
+    /// health reports whether the app source is ready or needs a scan.
+    pub fn health(self: *AppsProvider) search.ProviderHealth {
+        std.Io.Dir.cwd().access(std.Options.debug_io, self.cache_path, .{}) catch return .degraded;
         if (self.had_runtime_failure) return .degraded;
         return .ready;
     }
@@ -119,12 +122,16 @@ pub const AppsProvider = struct {
     }
 
     fn freeOwnedStrings(self: *AppsProvider, allocator: std.mem.Allocator, strings: *std.ArrayListUnmanaged([]u8)) void {
-        _ = self;
+        if (self.cache_path.len == 0) return;
         for (strings.items) |item| allocator.free(item);
         strings.clearRetainingCapacity();
     }
 
-    fn collectFromDesktopFiles(self: *AppsProvider, allocator: std.mem.Allocator, out: *search.CandidateList) !usize {
+    fn collectFromDesktopFiles(
+        self: *AppsProvider,
+        allocator: std.mem.Allocator,
+        out: *search.CandidateList,
+    ) !u32 {
         const start_len = out.items.len;
         var scan = DesktopScanState{};
         defer scan.deinit(allocator);
@@ -139,7 +146,7 @@ pub const AppsProvider = struct {
                 else => return err,
             };
         }
-        const added = out.items.len - start_len;
+        const added = @as(u32, @intCast(out.items.len - start_len));
         if (added > 0) {
             writeAppCacheFromCandidates(self.cache_path, out.items[start_len..]) catch |err| {
                 std.log.warn("apps provider failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
@@ -155,16 +162,16 @@ pub const AppsProvider = struct {
         scan: *DesktopScanState,
         root_path: []const u8,
     ) !void {
-        var dir = try std.fs.openDirAbsolute(root_path, .{ .iterate = true });
-        defer dir.close();
+        var dir = try std.Io.Dir.openDirAbsolute(std.Options.debug_io, root_path, .{ .iterate = true });
+        defer dir.close(std.Options.debug_io);
 
         var walker = try dir.walk(allocator);
         defer walker.deinit();
-        while (try walker.next()) |entry| {
+        while (try walker.next(std.Options.debug_io)) |entry| {
             if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, entry.path, ".desktop")) continue;
             if (entry.path.len >= 512) continue;
-            const data = entry.dir.readFileAlloc(allocator, entry.basename, 128 * 1024) catch continue;
+            const data = entry.dir.readFileAlloc(std.Options.debug_io, entry.basename, allocator, .limited(128 * 1024)) catch continue;
             defer allocator.free(data);
             const parsed = parseDesktopEntry(data) orelse continue;
             if (parsed.hidden or parsed.no_display) continue;
@@ -189,22 +196,21 @@ pub const AppsProvider = struct {
 
 pub fn invalidateDefaultCache() void {
     const allocator = std.heap.page_allocator;
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return;
-    defer allocator.free(home);
+    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else return;
     const cache_path = std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home}) catch return;
     defer allocator.free(cache_path);
-    std.fs.deleteFileAbsolute(cache_path) catch |err| switch (err) {
+    std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, cache_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => std.log.warn("apps provider cache invalidate failed path={s} err={s}", .{ cache_path, @errorName(err) }),
     };
 }
 
-fn cacheContainsLegacyThreeColumnRows(data: []const u8) bool {
+fn cacheContainsThreeColumnRows(data: []const u8) bool {
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |line_raw| {
-        const line = std.mem.trim(u8, std.mem.trimRight(u8, line_raw, "\r"), " \t");
+        const line = std.mem.trim(u8, std.mem.trimEnd(u8, line_raw, "\r"), " \t");
         if (line.len == 0) continue;
-        var tab_count: usize = 0;
+        var tab_count: u32 = 0;
         for (line) |ch| {
             if (ch == '\t') tab_count += 1;
         }
@@ -244,7 +250,7 @@ fn parseDesktopEntry(data: []const u8) ?ParsedDesktopEntry {
     var parsed = ParsedDesktopEntry{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, std.mem.trimRight(u8, raw_line, "\r"), " \t");
+        const line = std.mem.trim(u8, std.mem.trimEnd(u8, raw_line, "\r"), " \t");
         if (line.len == 0 or line[0] == '#') continue;
         if (line[0] == '[' and line[line.len - 1] == ']') {
             in_entry = std.mem.eql(u8, line, "[Desktop Entry]");
@@ -291,7 +297,7 @@ fn normalizeDesktopExecAlloc(allocator: std.mem.Allocator, exec_cmd: []const u8)
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
 
-    var i: usize = 0;
+    var i: u32 = 0;
     var in_single = false;
     var in_double = false;
     while (i < exec_cmd.len) : (i += 1) {
@@ -310,7 +316,9 @@ fn normalizeDesktopExecAlloc(allocator: std.mem.Allocator, exec_cmd: []const u8)
             const code = exec_cmd[i + 1];
             if (std.ascii.isAlphabetic(code) or code == '%') {
                 i += 1;
-                while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') _ = out.pop();
+                while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+                    out.shrinkRetainingCapacity(out.items.len - 1);
+                }
                 continue;
             }
         }
@@ -328,11 +336,11 @@ fn desktopSearchRoots(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
         roots.deinit(allocator);
     }
 
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    const home = if (std.c.getenv("HOME")) |value| allocator.dupe(u8, std.mem.span(value)) catch null else null;
     defer if (home) |h| allocator.free(h);
-    const xdg_data_home = std.process.getEnvVarOwned(allocator, "XDG_DATA_HOME") catch null;
+    const xdg_data_home = if (std.c.getenv("XDG_DATA_HOME")) |value| allocator.dupe(u8, std.mem.span(value)) catch null else null;
     defer if (xdg_data_home) |x| allocator.free(x);
-    const xdg_data_dirs = std.process.getEnvVarOwned(allocator, "XDG_DATA_DIRS") catch null;
+    const xdg_data_dirs = if (std.c.getenv("XDG_DATA_DIRS")) |value| allocator.dupe(u8, std.mem.span(value)) catch null else null;
     defer if (xdg_data_dirs) |x| allocator.free(x);
 
     if (xdg_data_home) |x| {
@@ -370,26 +378,28 @@ fn writeAppCacheFromCandidates(cache_path: []const u8, rows: []const search.Cand
     if (rows.len == 0) return;
     const parent = std.fs.path.dirname(cache_path) orelse return;
     if (std.fs.path.isAbsolute(parent)) {
-        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(std.Options.debug_io, parent, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
     } else {
-        try std.fs.cwd().makePath(parent);
+        try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, parent);
     }
 
     var file = if (std.fs.path.isAbsolute(cache_path))
-        try std.fs.createFileAbsolute(cache_path, .{ .truncate = true })
+        try std.Io.Dir.createFileAbsolute(std.Options.debug_io, cache_path, .{ .truncate = true })
     else
-        try std.fs.cwd().createFile(cache_path, .{ .truncate = true });
-    defer file.close();
+        try std.Io.Dir.cwd().createFile(std.Options.debug_io, cache_path, .{ .truncate = true });
+    defer file.close(std.Options.debug_io);
 
-    var writer = file.writer(&.{});
+    var file_buffer: [4096]u8 = undefined;
+    var writer = file.writer(std.Options.debug_io, &file_buffer);
     for (rows) |row| {
         if (row.kind != .app) continue;
         try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ row.subtitle, row.title, row.action, row.icon });
     }
-    try file.sync();
+    try writer.interface.flush();
+    try file.sync(std.Options.debug_io);
 }
 
 test "apps provider collects rows from cache file" {
@@ -418,14 +428,14 @@ test "apps provider collects rows from cache file" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(search.ProviderHealth.ready, provider.health());
-    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
     try std.testing.expectEqualStrings("kitty", list.items[0].action);
     try std.testing.expectEqualStrings("kitty", list.items[0].icon);
 }
 
-test "apps provider accepts legacy three-column rows with empty icon metadata" {
+test "apps provider accepts three-column rows with empty icon metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -450,21 +460,21 @@ test "apps provider accepts legacy three-column rows with empty icon metadata" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title);
     try std.testing.expectEqualStrings("", list.items[0].icon);
     try std.testing.expectEqualStrings("firefox", list.items[1].icon);
 }
 
-test "cacheContainsLegacyThreeColumnRows detects three-column cache lines" {
-    const legacy =
+test "cacheContainsThreeColumnRows detects three-column cache lines" {
+    const three_column =
         "Utilities\tKitty\tkitty\n" ++
         "Internet\tFirefox\tfirefox\tfirefox\n";
     const modern =
         "Utilities\tKitty\tkitty\tkitty\n" ++
         "Internet\tFirefox\tfirefox\tfirefox\n";
-    try std.testing.expect(cacheContainsLegacyThreeColumnRows(legacy));
-    try std.testing.expect(!cacheContainsLegacyThreeColumnRows(modern));
+    try std.testing.expect(cacheContainsThreeColumnRows(three_column));
+    try std.testing.expect(!cacheContainsThreeColumnRows(modern));
 }
 
 test "apps provider falls back when cache is missing" {
@@ -478,7 +488,7 @@ test "apps provider falls back when cache is missing" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(search.ProviderHealth.degraded, provider.health());
-    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
 }
 
 test "apps provider degrades when cache exists but no valid rows are parsed" {
@@ -506,7 +516,7 @@ test "apps provider degrades when cache exists but no valid rows are parsed" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqual(search.ProviderHealth.degraded, provider.health());
 }
 
@@ -535,17 +545,17 @@ test "apps provider rotates owned strings across collects with bounded growth" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
     const first_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(usize, 8), first_total);
+    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(first_total)));
 
     list.clearRetainingCapacity();
     try provider.collect(std.testing.allocator, &list);
     const second_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(usize, 16), second_total);
+    try std.testing.expectEqual(@as(u32, 16), @as(u32, @intCast(second_total)));
 
     list.clearRetainingCapacity();
     try provider.collect(std.testing.allocator, &list);
     const third_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(usize, 16), third_total);
+    try std.testing.expectEqual(@as(u32, 16), @as(u32, @intCast(third_total)));
 }
 
 test "apps provider trims crlf and trailing whitespace from stored fields" {
@@ -573,7 +583,7 @@ test "apps provider trims crlf and trailing whitespace from stored fields" {
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
     try std.testing.expectEqualStrings("kitty", list.items[0].action);
     try std.testing.expectEqualStrings("kitty", list.items[0].icon);
@@ -634,13 +644,13 @@ test "apps provider can scan desktop root and rebuild cache rows" {
     defer scan.deinit(std.testing.allocator);
 
     try apps.collectFromDesktopRoot(std.testing.allocator, &list, &scan, root_path);
-    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqualStrings("Test App", list.items[0].title);
     try std.testing.expectEqualStrings("Utility", list.items[0].subtitle);
     try std.testing.expectEqualStrings("test-app", list.items[0].action);
 
     try writeAppCacheFromCandidates(cache_file, list.items);
-    const written = try std.fs.cwd().readFileAlloc(std.testing.allocator, cache_file, 4096);
+    const written = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cache_file, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(written);
     try std.testing.expect(std.mem.indexOf(u8, written, "Utility\tTest App\ttest-app\ttest-icon\n") != null);
 }

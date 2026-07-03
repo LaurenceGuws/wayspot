@@ -1,7 +1,7 @@
 const std = @import("std");
 const search = @import("../search/mod.zig");
 
-const max_entries: usize = 256;
+const max_entries: u32 = 256;
 
 const Entry = struct {
     id: u32,
@@ -34,26 +34,21 @@ pub const Snapshot = struct {
 const Runtime = struct {
     mu: std.Thread.Mutex = .{},
     entries: std.ArrayListUnmanaged(Entry) = .{},
-    close_ctx: ?*anyopaque = null,
-    close_fn: ?*const fn (*anyopaque, u32) bool = null,
+    close_fn: ?*const fn (u32) bool = null,
 };
 
 var runtime: Runtime = .{};
 
-pub fn registerCloser(ctx: *anyopaque, close_fn: *const fn (*anyopaque, u32) bool) void {
+pub fn registerCloser(close_fn: *const fn (u32) bool) void {
     runtime.mu.lock();
     defer runtime.mu.unlock();
-    runtime.close_ctx = ctx;
     runtime.close_fn = close_fn;
 }
 
-pub fn clearCloser(ctx: *anyopaque) void {
+pub fn clearCloser(close_fn: *const fn (u32) bool) void {
     runtime.mu.lock();
     defer runtime.mu.unlock();
-    if (runtime.close_ctx == ctx) {
-        runtime.close_ctx = null;
-        runtime.close_fn = null;
-    }
+    if (runtime.close_fn == close_fn) runtime.close_fn = null;
 }
 
 pub fn resetForTest(allocator: std.mem.Allocator) void {
@@ -63,7 +58,6 @@ pub fn resetForTest(allocator: std.mem.Allocator) void {
         freeEntry(allocator, row);
     }
     runtime.entries.clearRetainingCapacity();
-    runtime.close_ctx = null;
     runtime.close_fn = null;
 }
 
@@ -132,17 +126,15 @@ pub fn closeById(id: u32) bool {
     runtime.mu.lock();
     defer runtime.mu.unlock();
     const close_fn = runtime.close_fn orelse return false;
-    const close_ctx = runtime.close_ctx orelse return false;
-    return close_fn(close_ctx, id);
+    return close_fn(id);
 }
 
-pub fn closeAllActive() usize {
+pub fn closeAllActive() u32 {
     runtime.mu.lock();
     const close_fn = runtime.close_fn;
-    const close_ctx = runtime.close_ctx;
     var ids = std.ArrayList(u32).empty;
     defer ids.deinit(std.heap.page_allocator);
-    if (close_fn != null and close_ctx != null) {
+    if (close_fn != null) {
         for (runtime.entries.items) |entry| {
             if (!entry.active) continue;
             ids.append(std.heap.page_allocator, entry.id) catch |err| {
@@ -153,10 +145,10 @@ pub fn closeAllActive() usize {
     }
     runtime.mu.unlock();
 
-    if (close_fn == null or close_ctx == null) return 0;
-    var closed: usize = 0;
+    if (close_fn == null) return 0;
+    var closed: u32 = 0;
     for (ids.items) |id| {
-        if (close_fn.?(close_ctx.?, id)) closed += 1;
+        if (close_fn.?(id)) closed += 1;
     }
     return closed;
 }
@@ -203,7 +195,7 @@ pub fn appendRouteCandidates(
     const rows = try snapshot(allocator);
     defer freeSnapshot(allocator, rows);
 
-    var active_count: usize = 0;
+    var active_count: u32 = 0;
     for (rows) |row| {
         if (row.active) active_count += 1;
     }
@@ -222,7 +214,7 @@ pub fn appendRouteCandidates(
         return;
     }
 
-    var i: usize = rows.len;
+    var i = rows.len;
     while (i > 0) {
         i -= 1;
         const row = rows[i];
@@ -265,9 +257,9 @@ pub fn appendRouteCandidates(
     }
 }
 
-fn findIndexLocked(id: u32) ?usize {
+fn findIndexLocked(id: u32) ?u32 {
     for (runtime.entries.items, 0..) |row, idx| {
-        if (row.id == id) return idx;
+        if (row.id == id) return @intCast(idx);
     }
     return null;
 }
@@ -303,14 +295,14 @@ fn matchesTerm(row: Snapshot, term: []const u8) bool {
 fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (hay.len < needle.len) return false;
-    var i: usize = 0;
+    var i: u32 = 0;
     while (i + needle.len <= hay.len) : (i += 1) {
         if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
     }
     return false;
 }
 
-fn truncateBody(allocator: std.mem.Allocator, body: []const u8, max_len: usize) ![]u8 {
+fn truncateBody(allocator: std.mem.Allocator, body: []const u8, max_len: u32) ![]u8 {
     const trimmed = std.mem.trim(u8, body, " \t\r\n");
     if (trimmed.len <= max_len) return allocator.dupe(u8, trimmed);
     return std.fmt.allocPrint(allocator, "{s}...", .{trimmed[0..max_len]});
@@ -338,7 +330,7 @@ test "recordNotify and snapshot preserve latest state" {
 
     const rows = try snapshot(allocator);
     defer freeSnapshot(allocator, rows);
-    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(rows.len)));
     try std.testing.expectEqual(@as(u32, 7), rows[0].id);
     try std.testing.expectEqualStrings("app2", rows[0].app_name);
     try std.testing.expectEqualStrings("app2-icon", rows[0].app_icon);

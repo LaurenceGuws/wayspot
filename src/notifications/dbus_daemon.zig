@@ -90,9 +90,8 @@ pub const Daemon = struct {
     };
 
     pub const Hooks = struct {
-        user_data: ?*anyopaque = null,
-        on_notify: ?*const fn (*anyopaque, NotifyEvent) void = null,
-        on_closed: ?*const fn (*anyopaque, ClosedEvent) void = null,
+        on_notify: ?*const fn (NotifyEvent) void = null,
+        on_closed: ?*const fn (ClosedEvent) void = null,
     };
 
     allocator: std.mem.Allocator,
@@ -134,7 +133,8 @@ pub const Daemon = struct {
 
     pub fn deinit(self: *Daemon) void {
         if (self.registration_id != 0 and self.connection != null) {
-            _ = c.g_dbus_connection_unregister_object(self.connection.?, self.registration_id);
+            const removed = c.g_dbus_connection_unregister_object(self.connection.?, self.registration_id);
+            if (removed == 0) log.warn("notifications object unregister failed", .{});
             self.registration_id = 0;
         }
         if (self.owner_id != 0) {
@@ -165,12 +165,10 @@ pub const Daemon = struct {
         notifications_runtime.recordClosed(id, reason);
         emitNotificationClosed(self, id, reason);
         if (self.hooks.on_closed) |on_closed| {
-            if (self.hooks.user_data) |user_data| {
-                on_closed(user_data, .{
-                    .id = id,
-                    .reason = reason,
-                });
-            }
+            on_closed(.{
+                .id = id,
+                .reason = reason,
+            });
         }
         return true;
     }
@@ -179,7 +177,7 @@ pub const Daemon = struct {
         const conn = self.connection orelse return;
         const key_z = self.allocator.dupeZ(u8, action_key) catch return;
         defer self.allocator.free(key_z);
-        _ = c.g_dbus_connection_emit_signal(
+        const emitted = c.g_dbus_connection_emit_signal(
             conn,
             null,
             object_path,
@@ -188,6 +186,7 @@ pub const Daemon = struct {
             c.g_variant_new("(us)", id, key_z.ptr),
             null,
         );
+        if (emitted == 0) log.warn("ActionInvoked signal failed id={d}", .{id});
     }
 };
 
@@ -353,20 +352,18 @@ fn handleNotify(self: *Daemon, parameters: ?*c.GVariant, invocation: *c.GDBusMet
     };
 
     if (self.hooks.on_notify) |on_notify| {
-        if (self.hooks.user_data) |user_data| {
-            on_notify(user_data, .{
-                .id = id,
-                .app_name = std.mem.span(app_name),
-                .app_icon = std.mem.span(app_icon),
-                .summary = std.mem.span(summary),
-                .body = std.mem.span(body),
-                .expire_timeout = expire_timeout,
-                .replaced = replaced and id == replaces_id,
-                .urgency = parsed_hints.urgency,
-                .transient = parsed_hints.transient,
-                .actions = action_pairs,
-            });
-        }
+        on_notify(.{
+            .id = id,
+            .app_name = std.mem.span(app_name),
+            .app_icon = std.mem.span(app_icon),
+            .summary = std.mem.span(summary),
+            .body = std.mem.span(body),
+            .expire_timeout = expire_timeout,
+            .replaced = replaced and id == replaces_id,
+            .urgency = parsed_hints.urgency,
+            .transient = parsed_hints.transient,
+            .actions = action_pairs,
+        });
     }
     notifications_runtime.recordNotify(
         self.allocator,
@@ -399,14 +396,15 @@ fn handleCloseNotification(self: *Daemon, parameters: ?*c.GVariant, invocation: 
     defer c.g_variant_unref(id_variant);
     const notification_id = c.g_variant_get_uint32(id_variant);
 
-    _ = self.closeWithReason(notification_id, 3);
+    const closed = self.closeWithReason(notification_id, 3);
+    if (!closed) log.debug("CloseNotification ignored unknown id={d}", .{notification_id});
 
     c.g_dbus_method_invocation_return_value(invocation, c.g_variant_new("()"));
 }
 
 fn emitNotificationClosed(self: *Daemon, id: u32, reason: u32) void {
     const conn = self.connection orelse return;
-    _ = c.g_dbus_connection_emit_signal(
+    const emitted = c.g_dbus_connection_emit_signal(
         conn,
         null,
         object_path,
@@ -415,6 +413,7 @@ fn emitNotificationClosed(self: *Daemon, id: u32, reason: u32) void {
         c.g_variant_new("(uu)", id, reason),
         null,
     );
+    if (emitted == 0) log.warn("NotificationClosed signal failed id={d}", .{id});
 }
 
 fn returnInvalidArgs(invocation: *c.GDBusMethodInvocation, message: [*:0]const u8) void {
@@ -451,8 +450,8 @@ fn parseActions(allocator: std.mem.Allocator, actions_variant: *c.GVariant) ![]D
     var actions = try allocator.alloc(Daemon.Action, @intCast(pair_count));
     errdefer allocator.free(actions);
 
-    var out_idx: usize = 0;
-    var i: usize = 0;
+    var out_idx: u32 = 0;
+    var i: u32 = 0;
     while (i + 1 < child_count and out_idx < actions.len) : (i += 2) {
         const key_variant = c.g_variant_get_child_value(actions_variant, @intCast(i));
         defer c.g_variant_unref(key_variant);
