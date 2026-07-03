@@ -1,0 +1,36 @@
+# SDL_TimeFormat
+
+The preferred time format of the current system locale.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_time.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_time.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef enum SDL_TimeFormat
+{
+    SDL_TIME_FORMAT_24HR = 0, /**< 24 hour time */
+    SDL_TIME_FORMAT_12HR = 1  /**< 12 hour time */
+} SDL_TimeFormat;
+```
+
+</div>
+
+## Version
+
+This enum is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_GetDateTimeLocalePreferences](SDL_GetDateTimeLocalePreferences.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnum](CategoryAPIEnum.html),
+[CategoryTime](CategoryTime.html)

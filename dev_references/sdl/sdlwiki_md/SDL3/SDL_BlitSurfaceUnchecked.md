@@ -1,0 +1,56 @@
+# SDL_BlitSurfaceUnchecked
+
+Perform low-level surface blitting only.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_surface.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_surface.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_BlitSurfaceUnchecked(SDL_Surface *src, const SDL_Rect *srcrect, SDL_Surface *dst, const SDL_Rect *dstrect);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [SDL_Surface](SDL_Surface.html) \* | **src** | the [SDL_Surface](SDL_Surface.html) structure to be copied from. |
+| const [SDL_Rect](SDL_Rect.html) \* | **srcrect** | the [SDL_Rect](SDL_Rect.html) structure representing the rectangle to be copied, may not be NULL. |
+| [SDL_Surface](SDL_Surface.html) \* | **dst** | the [SDL_Surface](SDL_Surface.html) structure that is the blit target. |
+| const [SDL_Rect](SDL_Rect.html) \* | **dstrect** | the [SDL_Rect](SDL_Rect.html) structure representing the target rectangle in the destination surface, may not be NULL. |
+
+## Return Value
+
+(bool) Returns true on success or false on failure; call
+[SDL_GetError](SDL_GetError.html)() for more information.
+
+## Remarks
+
+This is a semi-private blit function and it performs low-level surface
+blitting, assuming the input rectangles have already been clipped.
+
+## Thread Safety
+
+Only one thread should be using the `src` and `dst` surfaces at any
+given time.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_BlitSurface](SDL_BlitSurface.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategorySurface](CategorySurface.html)

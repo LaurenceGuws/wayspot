@@ -1,0 +1,55 @@
+# SDL_LogMessageV
+
+Log a message with the specified category and priority.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_log.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_log.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+void SDL_LogMessageV(int category,
+                 SDL_LogPriority priority,
+                 const char *fmt, va_list ap);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| int | **category** | the category of the message. |
+| [SDL_LogPriority](SDL_LogPriority.html) | **priority** | the priority of the message. |
+| const char \* | **fmt** | a printf() style message format string. |
+| va_list | **ap** | a variable argument list. |
+
+## Thread Safety
+
+It is safe to call this function from any thread.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_Log](SDL_Log.html)
+- [SDL_LogCritical](SDL_LogCritical.html)
+- [SDL_LogDebug](SDL_LogDebug.html)
+- [SDL_LogError](SDL_LogError.html)
+- [SDL_LogInfo](SDL_LogInfo.html)
+- [SDL_LogMessage](SDL_LogMessage.html)
+- [SDL_LogTrace](SDL_LogTrace.html)
+- [SDL_LogVerbose](SDL_LogVerbose.html)
+- [SDL_LogWarn](SDL_LogWarn.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryLog](CategoryLog.html)

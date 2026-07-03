@@ -1,0 +1,12 @@
+###### (This function is part of SDL_image, a separate library from SDL.)
+
+# IMG_DECODER_STATUS_COMPLETE
+
+Please refer to
+[IMG_AnimationDecoderStatus](IMG_AnimationDecoderStatus.html) for
+details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnumerators](CategoryAPIEnumerators.html)

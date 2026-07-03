@@ -1,0 +1,47 @@
+###### (This function is part of SDL_image, a separate library from SDL.)
+
+# IMG_GetAnimationDecoderStatus
+
+Get the decoder status indicating the current state of the decoder.
+
+## Header File
+
+Defined in
+[\<SDL3_image/SDL_image.h\>](https://github.com/libsdl-org/SDL_image/blob/main/include/SDL3_image/SDL_image.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+IMG_AnimationDecoderStatus IMG_GetAnimationDecoderStatus(IMG_AnimationDecoder *decoder);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [IMG_AnimationDecoder](IMG_AnimationDecoder.html) \* | **decoder** | the decoder to get the status of. |
+
+## Return Value
+
+([IMG_AnimationDecoderStatus](IMG_AnimationDecoderStatus.html)) Returns
+the status of the underlying decoder, or
+[IMG_DECODER_STATUS_INVALID](IMG_DECODER_STATUS_INVALID.html) if the
+given decoder is invalid.
+
+## Version
+
+This function is available since SDL_image 3.4.0.
+
+## See Also
+
+- [IMG_GetAnimationDecoderFrame](IMG_GetAnimationDecoderFrame.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategorySDLImage](CategorySDLImage.html)

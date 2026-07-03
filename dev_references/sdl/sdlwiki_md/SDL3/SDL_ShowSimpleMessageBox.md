@@ -1,0 +1,76 @@
+# SDL_ShowSimpleMessageBox
+
+Display a simple modal message box.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_messagebox.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_messagebox.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_ShowSimpleMessageBox(SDL_MessageBoxFlags flags, const char *title, const char *message, SDL_Window *window);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [SDL_MessageBoxFlags](SDL_MessageBoxFlags.html) | **flags** | an [SDL_MessageBoxFlags](SDL_MessageBoxFlags.html) value. |
+| const char \* | **title** | UTF-8 title text. |
+| const char \* | **message** | UTF-8 message text. |
+| [SDL_Window](SDL_Window.html) \* | **window** | the parent window, or NULL for no parent. |
+
+## Return Value
+
+(bool) Returns true on success or false on failure; call
+[SDL_GetError](SDL_GetError.html)() for more information.
+
+## Remarks
+
+If your needs aren't complex, this function is preferred over
+[SDL_ShowMessageBox](SDL_ShowMessageBox.html).
+
+`flags` may be any of the following:
+
+- [`SDL_MESSAGEBOX_ERROR`](SDL_MESSAGEBOX_ERROR.html): error dialog
+- [`SDL_MESSAGEBOX_WARNING`](SDL_MESSAGEBOX_WARNING.html): warning
+  dialog
+- [`SDL_MESSAGEBOX_INFORMATION`](SDL_MESSAGEBOX_INFORMATION.html):
+  informational dialog
+
+This function should be called on the thread that created the parent
+window, or on the main thread if the messagebox has no parent. It will
+block execution of that thread until the user clicks a button or closes
+the messagebox.
+
+This function may be called at any time, even before
+[SDL_Init](SDL_Init.html)(). This makes it useful for reporting errors
+like a failure to create a renderer or OpenGL context.
+
+On X11, SDL rolls its own dialog box with X11 primitives instead of a
+formal toolkit like GTK+ or Qt.
+
+Note that if [SDL_Init](SDL_Init.html)() would fail because there isn't
+any available video target, this function is likely to fail for the same
+reasons. If this is a concern, check the return value from this function
+and fall back to writing to stderr if you can.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_ShowMessageBox](SDL_ShowMessageBox.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryMessagebox](CategoryMessagebox.html)

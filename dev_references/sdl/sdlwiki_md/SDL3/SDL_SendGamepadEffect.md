@@ -1,0 +1,45 @@
+# SDL_SendGamepadEffect
+
+Send a gamepad specific effect packet.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_gamepad.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_gamepad.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_SendGamepadEffect(SDL_Gamepad *gamepad, const void *data, int size);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [SDL_Gamepad](SDL_Gamepad.html) \* | **gamepad** | the gamepad to affect. |
+| const void \* | **data** | the data to send to the gamepad. |
+| int | **size** | the size of the data to send to the gamepad. |
+
+## Return Value
+
+(bool) Returns true on success or false on failure; call
+[SDL_GetError](SDL_GetError.html)() for more information.
+
+## Thread Safety
+
+It is safe to call this function from any thread.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryGamepad](CategoryGamepad.html)

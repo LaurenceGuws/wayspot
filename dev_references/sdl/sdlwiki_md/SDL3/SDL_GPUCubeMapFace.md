@@ -1,0 +1,39 @@
+# SDL_GPUCubeMapFace
+
+Specifies the face of a cube map.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_gpu.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_gpu.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef enum SDL_GPUCubeMapFace
+{
+    SDL_GPU_CUBEMAPFACE_POSITIVEX,
+    SDL_GPU_CUBEMAPFACE_NEGATIVEX,
+    SDL_GPU_CUBEMAPFACE_POSITIVEY,
+    SDL_GPU_CUBEMAPFACE_NEGATIVEY,
+    SDL_GPU_CUBEMAPFACE_POSITIVEZ,
+    SDL_GPU_CUBEMAPFACE_NEGATIVEZ
+} SDL_GPUCubeMapFace;
+```
+
+</div>
+
+## Remarks
+
+Can be passed in as the layer field in texture-related structs.
+
+## Version
+
+This enum is available since SDL 3.2.0.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnum](CategoryAPIEnum.html), [CategoryGPU](CategoryGPU.html)

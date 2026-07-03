@@ -1,0 +1,50 @@
+# SDL_GetAudioStreamFormat
+
+Query the current format of an audio stream.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_audio.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_audio.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_GetAudioStreamFormat(SDL_AudioStream *stream, SDL_AudioSpec *src_spec, SDL_AudioSpec *dst_spec);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [SDL_AudioStream](SDL_AudioStream.html) \* | **stream** | the [SDL_AudioStream](SDL_AudioStream.html) to query. |
+| [SDL_AudioSpec](SDL_AudioSpec.html) \* | **src_spec** | where to store the input audio format; ignored if NULL. |
+| [SDL_AudioSpec](SDL_AudioSpec.html) \* | **dst_spec** | where to store the output audio format; ignored if NULL. |
+
+## Return Value
+
+(bool) Returns true on success or false on failure; call
+[SDL_GetError](SDL_GetError.html)() for more information.
+
+## Thread Safety
+
+It is safe to call this function from any thread, as it holds a
+stream-specific mutex while running.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_SetAudioStreamFormat](SDL_SetAudioStreamFormat.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryAudio](CategoryAudio.html)

@@ -1,0 +1,52 @@
+# SDL_GamepadAxis
+
+The list of axes available on a gamepad
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_gamepad.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_gamepad.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef enum SDL_GamepadAxis
+{
+    SDL_GAMEPAD_AXIS_INVALID = -1,
+    SDL_GAMEPAD_AXIS_LEFTX,
+    SDL_GAMEPAD_AXIS_LEFTY,
+    SDL_GAMEPAD_AXIS_RIGHTX,
+    SDL_GAMEPAD_AXIS_RIGHTY,
+    SDL_GAMEPAD_AXIS_LEFT_TRIGGER,
+    SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
+    SDL_GAMEPAD_AXIS_COUNT
+} SDL_GamepadAxis;
+```
+
+</div>
+
+## Remarks
+
+Thumbstick axis values range from
+[SDL_JOYSTICK_AXIS_MIN](SDL_JOYSTICK_AXIS_MIN.html) to
+[SDL_JOYSTICK_AXIS_MAX](SDL_JOYSTICK_AXIS_MAX.html), and are centered
+within ~8000 of zero, though advanced UI will allow users to set or
+autodetect the dead zone, which varies between gamepads.
+
+Trigger axis values range from 0 (released) to
+[SDL_JOYSTICK_AXIS_MAX](SDL_JOYSTICK_AXIS_MAX.html) (fully pressed) when
+reported by [SDL_GetGamepadAxis](SDL_GetGamepadAxis.html)(). Note that
+this is not the same range that will be reported by the lower-level
+[SDL_GetJoystickAxis](SDL_GetJoystickAxis.html)().
+
+## Version
+
+This enum is available since SDL 3.2.0.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnum](CategoryAPIEnum.html),
+[CategoryGamepad](CategoryGamepad.html)

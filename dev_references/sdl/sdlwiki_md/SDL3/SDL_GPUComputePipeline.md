@@ -1,0 +1,38 @@
+# SDL_GPUComputePipeline
+
+An opaque handle representing a compute pipeline.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_gpu.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_gpu.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef struct SDL_GPUComputePipeline SDL_GPUComputePipeline;
+```
+
+</div>
+
+## Remarks
+
+Used during compute passes.
+
+## Version
+
+This struct is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_CreateGPUComputePipeline](SDL_CreateGPUComputePipeline.html)
+- [SDL_BindGPUComputePipeline](SDL_BindGPUComputePipeline.html)
+- [SDL_ReleaseGPUComputePipeline](SDL_ReleaseGPUComputePipeline.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIDatatype](CategoryAPIDatatype.html),
+[CategoryGPU](CategoryGPU.html)

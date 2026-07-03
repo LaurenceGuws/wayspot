@@ -1,0 +1,10 @@
+###### (This function is part of SDL_mixer, a separate library from SDL.)
+
+# MIX_PROP_PLAY_APPEND_SILENCE_MILLISECONDS_NUMBER
+
+Please refer to [MIX_PlayTrack](MIX_PlayTrack.html) for details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIMacro](CategoryAPIMacro.html)

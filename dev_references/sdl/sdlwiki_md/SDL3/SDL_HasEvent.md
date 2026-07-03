@@ -1,0 +1,52 @@
+# SDL_HasEvent
+
+Check for the existence of a certain event type in the event queue.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_events.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_events.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_HasEvent(Uint32 type);
+```
+
+</div>
+
+## Function Parameters
+
+|  |  |  |
+|----|----|----|
+| [Uint32](Uint32.html) | **type** | the type of event to be queried; see [SDL_EventType](SDL_EventType.html) for details. |
+
+## Return Value
+
+(bool) Returns true if events matching `type` are present, or false if
+events matching `type` are not present.
+
+## Remarks
+
+If you need to check for a range of event types, use
+[SDL_HasEvents](SDL_HasEvents.html)() instead.
+
+## Thread Safety
+
+It is safe to call this function from any thread.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_HasEvents](SDL_HasEvents.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryEvents](CategoryEvents.html)

@@ -1,0 +1,8 @@
+# SDL_GL_CONTEXT_MAJOR_VERSION
+
+Please refer to [SDL_GLAttr](SDL_GLAttr.html) for details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnumerators](CategoryAPIEnumerators.html)

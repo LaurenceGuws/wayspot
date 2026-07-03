@@ -1,0 +1,10 @@
+# SDL_GL_CONTEXT_RESET_LOSE_CONTEXT
+
+Please refer to
+[SDL_GLContextResetNotification](SDL_GLContextResetNotification.html)
+for details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIMacro](CategoryAPIMacro.html)

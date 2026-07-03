@@ -8,6 +8,7 @@
   - `/home/home/personal/projects/team/.agent/history/tigerbeetle-overnight-bar.md`
   - `/home/home/personal/projects/team/.agent/history/qserver-zig-migration-map.yaml`
 - Treat those files as the local engineering bible: exact owners, bounded runtime behavior, accountable comments, no stale vocabulary, and no compatibility-shaped code.
+- Use `dev_references/` for local source-backed docs before browsing. It contains Zig 0.16 release notes, SDL wiki markdown, captured Hyprland docs, TigerBeetle, and foot references with provenance in `dev_references/manifests/SOURCES.md`.
 
 ## Wayspot Scope
 - Wayspot is a resident app launcher plus a minimal freedesktop notification daemon.

@@ -1,0 +1,42 @@
+# SDL_HasLSX
+
+Determine whether the CPU has LSX (LOONGARCH SIMD) features.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_cpuinfo.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_cpuinfo.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+bool SDL_HasLSX(void);
+```
+
+</div>
+
+## Return Value
+
+(bool) Returns true if the CPU has LOONGARCH LSX features or false if
+not.
+
+## Remarks
+
+This always returns false on CPUs that aren't using LOONGARCH
+instruction sets.
+
+## Thread Safety
+
+It is safe to call this function from any thread.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryCPUInfo](CategoryCPUInfo.html)

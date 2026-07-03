@@ -1,0 +1,37 @@
+# SDL_LASX_INTRINSICS
+
+Defined if (and only if) the compiler supports Loongarch LSX intrinsics.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_intrin.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_intrin.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+#define SDL_LASX_INTRINSICS 1
+```
+
+</div>
+
+## Remarks
+
+If this macro is defined, SDL will have already included
+`<lasxintrin.h>`
+
+## Version
+
+This macro is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_LASX_INTRINSICS](SDL_LASX_INTRINSICS.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIMacro](CategoryAPIMacro.html),
+[CategoryIntrinsics](CategoryIntrinsics.html)

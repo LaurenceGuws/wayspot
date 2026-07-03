@@ -1,0 +1,39 @@
+# SDL_ThreadID
+
+A unique numeric ID that identifies a thread.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_thread.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_thread.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef Uint64 SDL_ThreadID;
+```
+
+</div>
+
+## Remarks
+
+These are different from [SDL_Thread](SDL_Thread.html) objects, which
+are generally what an application will operate on, but having a way to
+uniquely identify a thread can be useful at times.
+
+## Version
+
+This datatype is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_GetThreadID](SDL_GetThreadID.html)
+- [SDL_GetCurrentThreadID](SDL_GetCurrentThreadID.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIDatatype](CategoryAPIDatatype.html),
+[CategoryThread](CategoryThread.html)

@@ -1,0 +1,43 @@
+# SDL_GPUSampleCount
+
+Specifies the sample count of a texture.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_gpu.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_gpu.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+typedef enum SDL_GPUSampleCount
+{
+    SDL_GPU_SAMPLECOUNT_1,  /**< No multisampling. */
+    SDL_GPU_SAMPLECOUNT_2,  /**< MSAA 2x */
+    SDL_GPU_SAMPLECOUNT_4,  /**< MSAA 4x */
+    SDL_GPU_SAMPLECOUNT_8   /**< MSAA 8x */
+} SDL_GPUSampleCount;
+```
+
+</div>
+
+## Remarks
+
+Used in multisampling. Note that this value only applies when the
+texture is used as a render target.
+
+## Version
+
+This enum is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_CreateGPUTexture](SDL_CreateGPUTexture.html)
+- [SDL_GPUTextureSupportsSampleCount](SDL_GPUTextureSupportsSampleCount.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnum](CategoryAPIEnum.html), [CategoryGPU](CategoryGPU.html)

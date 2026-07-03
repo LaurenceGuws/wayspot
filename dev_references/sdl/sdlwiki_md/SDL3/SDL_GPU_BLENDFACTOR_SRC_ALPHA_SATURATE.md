@@ -1,0 +1,9 @@
+# SDL_GPU_BLENDFACTOR_SRC_ALPHA_SATURATE
+
+Please refer to [SDL_GPUBlendFactor](SDL_GPUBlendFactor.html) for
+details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnumerators](CategoryAPIEnumerators.html)

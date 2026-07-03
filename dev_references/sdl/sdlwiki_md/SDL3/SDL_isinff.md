@@ -1,0 +1,46 @@
+# SDL_isinff
+
+Return whether the value is infinity.
+
+## Header File
+
+Defined in
+[\<SDL3/SDL_stdinc.h\>](https://github.com/libsdl-org/SDL/blob/main/include/SDL3/SDL_stdinc.h)
+
+## Syntax
+
+<div id="cb1" class="sourceCode">
+
+``` sourceCode
+int SDL_isinff(float x);
+```
+
+</div>
+
+## Function Parameters
+
+|       |       |                       |
+|-------|-------|-----------------------|
+| float | **x** | floating point value. |
+
+## Return Value
+
+(int) Returns non-zero if the value is infinity, 0 otherwise.
+
+## Thread Safety
+
+It is safe to call this function from any thread.
+
+## Version
+
+This function is available since SDL 3.2.0.
+
+## See Also
+
+- [SDL_isinf](SDL_isinf.html)
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIFunction](CategoryAPIFunction.html),
+[CategoryStdinc](CategoryStdinc.html)

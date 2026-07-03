@@ -1,0 +1,8 @@
+# SDL_JOYSTICK_TYPE_FLIGHT_STICK
+
+Please refer to [SDL_JoystickType](SDL_JoystickType.html) for details.
+
+------------------------------------------------------------------------
+
+[CategoryAPI](CategoryAPI.html),
+[CategoryAPIEnumerators](CategoryAPIEnumerators.html)
