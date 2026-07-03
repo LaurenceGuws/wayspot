@@ -1,33 +1,132 @@
-status: proposed_for_approval
+status: approved_for_worker_execution
 purpose: >
-  Define the shared SDL surface scale slice before implementation. This index
-  becomes executable only after explicit user approval.
+  Add one shared SDL surface scale owner and wire it through the picker and
+  notification banner without creating a theme system or broad surface platform.
 
 reread_statements:
   - reread /home/home/personal/wayspot/AGENTS.md
-  - reread /home/home/personal/projects/team/.agent/history/README.md
-  - reread /home/home/personal/projects/team/.agent/history/qserver-zig-migration-map.yaml
-  - reread one qserver-zig index for structure
+  - reread .agent/history/artifacts.jsonl
+  - reread .agent/history/wayspot-scope-map.yaml
+  - reread src/ui/sdl_text.zig
+  - reread src/ui/sdl_shell.zig
+  - reread src/ui/sdl_banner.zig
+  - reread /home/home/personal/bash_engine/dots/hypr/modules/wayspot.lua
 
-scale_budget:
-  memory_records_max: 6
-  index_files_max: 1
-  no_long_planning_archives: true
-  no_expired_planning_chatter: true
+objective:
+  - share one bounded zoom setting between SDL picker and SDL notification banner
+  - allow zoom in, zoom out, and reset while a surface is active
+  - persist the zoom setting for the current desktop session
+  - make actual glyph size scalable by replacing SDL debug text with a pragmatic text path
 
-scope:
-  product: wayspot
-  shape: small launcher plus minimal notification daemon
-  exclusions:
-    - GTK
-    - shell modules
-    - open provider registries
-    - broad WM abstractions
-    - web, window, and workspace providers
-    - runtime scripting VMs
+non_goals:
+  - no GTK
+  - no runtime scripting VM
+  - no theme registry
+  - no provider or search config
+  - no Hypr placement expansion beyond existing Wayspot module knobs
+  - no broad surface abstraction
+  - no C ABI boundary for copied Howl internals
 
-allowed_changes:
-  - .agent/history/README.md
-  - .agent/history/artifacts.jsonl
-  - .agent/history/wayspot-scope-map.yaml
-  - .agent/history/wayspot-surface-scale-index.yaml
+current_facts:
+  text_owner: src/ui/sdl_text.zig
+  text_renderer: SDL_RenderDebugText
+  debug_text_limits:
+    - no font family control
+    - no font size control
+    - non ASCII bytes render as question marks
+  picker_owner: src/ui/sdl_shell.zig
+  banner_owner: src/ui/sdl_banner.zig
+  hypr_owner: /home/home/personal/bash_engine/dots/hypr/modules/wayspot.lua
+
+approved_owner_shape:
+  add:
+    src/ui/surface_config.zig:
+      owns:
+        - zoom_step
+        - zoom bounds
+        - scale math
+        - tiny state load/save
+        - accepted zoom key interpretation
+      does_not_own:
+        - colors
+        - search results
+        - notification content
+        - Hypr placement
+        - font raster cache internals
+  modify:
+    src/ui/mod.zig:
+      - export surface_config
+    src/ui/sdl_shell.zig:
+      - load config at picker start
+      - apply scale to window and layout dimensions
+      - handle Ctrl+Equal, Ctrl+Minus, Ctrl+0
+      - save after accepted zoom key
+    src/ui/sdl_banner.zig:
+      - load config in banner child
+      - apply scale to banner dimensions and layout
+      - keep banner process lifecycle bounded
+    src/ui/sdl_text.zig:
+      - keep existing debug path until replacement slice
+      - then own a real scalable text API with explicit font size input
+    /home/home/personal/bash_engine/dots/hypr/modules/wayspot.lua:
+      - keep comments aligned with base banner dimensions and scale behavior
+
+state_contract:
+  path: ~/.local/state/wayspot/surface.conf
+  format: zoom_step=<signed decimal newline>
+  max_file_bytes: 64
+  min_zoom_step: -2
+  max_zoom_step: 5
+  default_zoom_step: 0
+  invalid_state_policy: use default and rewrite only after the next accepted zoom key
+  cleanup_owner: surface_config closes files and frees buffers it allocates
+
+runtime_controls:
+  zoom_in: Ctrl+Equal
+  zoom_out: Ctrl+Minus
+  reset: Ctrl+0
+  event_policy:
+    - only active SDL surface handles its own key events
+    - no resident IPC for zoom
+    - no background watcher
+
+implementation_order:
+  - id: 01_surface_config_owner
+    result: surface_config compiles and has unit tests before UI wiring
+  - id: 02_picker_wiring
+    result: picker scales window and layout and persists zoom keys
+  - id: 03_banner_wiring
+    result: banner scales window and layout and still appears on focused monitor right corner
+  - id: 04_scalable_text
+    result: sdl_text exposes real font size control copied from Howl internals or stops with a source-backed rejection
+
+tests:
+  unit:
+    - default zoom state
+    - clamp min and max zoom
+    - parse valid persisted zoom
+    - reject oversized state file
+    - reject malformed state to default
+  build:
+    - zigup run 0.16.0 build
+    - zigup run 0.16.0 build test --summary all
+  smoke:
+    - ./zig-out/bin/wayspot --ui
+    - ./zig-out/bin/wayspot --notifications-daemon plus notify-send
+    - hyprctl clients -j confirms banner class, size, monitor, and right corner
+
+hygiene_gates:
+  - rg -n "anytype|anyopaque|usize|_ =" src
+  - run the AGENTS banned-vocabulary scan against src and .agent/history
+
+stop_conditions:
+  - Howl text internals require a large renderer import instead of a tiny copied subset
+  - SDL debug text prevents meaningful glyph scaling after layout scale is wired
+  - zoom persistence introduces unbounded parsing or hidden background state
+  - picker launch lifecycle regresses
+  - notification daemon blocks on banner display
+
+memory_policy:
+  - update artifacts.jsonl only for accepted decisions or rejected paths
+  - keep this index current while executing the slice
+  - planning and memory are production artifacts
