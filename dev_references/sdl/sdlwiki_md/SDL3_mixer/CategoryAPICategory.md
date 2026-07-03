@@ -1,3 +1,0 @@
-# CategoryAPICategory
-
-- [CategorySDLMixer](CategorySDLMixer.html)

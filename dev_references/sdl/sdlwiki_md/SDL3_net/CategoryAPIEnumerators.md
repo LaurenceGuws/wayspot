@@ -1,5 +1,0 @@
-# CategoryAPIEnumerators
-
-- [NET_FAILURE](NET_FAILURE.html)
-- [NET_SUCCESS](NET_SUCCESS.html)
-- [NET_WAITING](NET_WAITING.html)

@@ -1,9 +1,0 @@
-# SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER
-
-Please refer to
-[SDL_GetDisplayProperties](SDL_GetDisplayProperties.html) for details.
-
-------------------------------------------------------------------------
-
-[CategoryAPI](CategoryAPI.html),
-[CategoryAPIMacro](CategoryAPIMacro.html)

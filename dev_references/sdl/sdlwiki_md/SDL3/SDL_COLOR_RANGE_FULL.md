@@ -1,8 +1,0 @@
-# SDL_COLOR_RANGE_FULL
-
-Please refer to [SDL_ColorRange](SDL_ColorRange.html) for details.
-
-------------------------------------------------------------------------
-
-[CategoryAPI](CategoryAPI.html),
-[CategoryAPIEnumerators](CategoryAPIEnumerators.html)

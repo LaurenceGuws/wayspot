@@ -5,6 +5,10 @@ zig-pkg/
 reference_repo/*
 !reference_repo/.gitignore
 !reference_repo/README.md
+dev_references/*
+!dev_references/README.md
+!dev_references/manifests/
+!dev_references/manifests/SOURCES.md
 packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/wayspot-git/

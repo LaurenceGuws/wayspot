@@ -1,3 +1,0 @@
-# CategoryAPICategory
-
-- [CategorySDLImage](CategorySDLImage.html)

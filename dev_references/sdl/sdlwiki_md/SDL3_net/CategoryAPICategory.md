@@ -1,3 +1,0 @@
-# CategoryAPICategory
-
-- [CategorySDLNet](CategorySDLNet.html)

@@ -1,8 +1,0 @@
-# SDL_TEXTUREACCESS_TARGET
-
-Please refer to [SDL_TextureAccess](SDL_TextureAccess.html) for details.
-
-------------------------------------------------------------------------
-
-[CategoryAPI](CategoryAPI.html),
-[CategoryAPIEnumerators](CategoryAPIEnumerators.html)

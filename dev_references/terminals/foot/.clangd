@@ -1,5 +1,0 @@
-# -*- yaml -*-
-
-CompileFlags:
-  Add:
-    - -Wno-c2y-extensions

@@ -1,3 +1,0 @@
-# CategoryAPICategory
-
-- [CategorySDLTTF](CategorySDLTTF.html)

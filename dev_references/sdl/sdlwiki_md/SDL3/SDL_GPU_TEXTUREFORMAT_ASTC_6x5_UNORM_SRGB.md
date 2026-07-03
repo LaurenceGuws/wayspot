@@ -1,9 +1,0 @@
-# SDL_GPU_TEXTUREFORMAT_ASTC_6x5_UNORM_SRGB
-
-Please refer to [SDL_GPUTextureFormat](SDL_GPUTextureFormat.html) for
-details.
-
-------------------------------------------------------------------------
-
-[CategoryAPI](CategoryAPI.html),
-[CategoryAPIEnumerators](CategoryAPIEnumerators.html)
