@@ -144,132 +144,132 @@ pub const Viewport = struct {
         };
     }
 
-    pub fn resetResults(self: *Viewport, total_rows: u32) bool {
-        const before = self.*;
-        self.total_rows = total_rows;
-        self.visible_rows = clampVisibleRows(self.visible_rows);
+    pub fn resetResults(viewport: *Viewport, total_rows: u32) bool {
+        const before = viewport.*;
+        viewport.total_rows = total_rows;
+        viewport.visible_rows = clampVisibleRows(viewport.visible_rows);
         if (total_rows == 0) {
-            self.selected_row = null;
-            self.scroll_offset = 0;
-            return !sameState(before, self.*);
+            viewport.selected_row = null;
+            viewport.scroll_offset = 0;
+            return !sameState(before, viewport.*);
         }
 
-        const selected_index = self.selected_row orelse 0;
-        self.selected_row = @min(selected_index, total_rows - 1);
-        self.scroll_offset = @min(self.scroll_offset, maxScrollOffset(self.total_rows, self.visible_rows));
-        self.keepSelectionVisible();
-        self.assertValid();
-        return !sameState(before, self.*);
+        const selected_index = viewport.selected_row orelse 0;
+        viewport.selected_row = @min(selected_index, total_rows - 1);
+        viewport.scroll_offset = @min(viewport.scroll_offset, maxScrollOffset(viewport.total_rows, viewport.visible_rows));
+        viewport.keepSelectionVisible();
+        viewport.assertValid();
+        return !sameState(before, viewport.*);
     }
 
-    pub fn resize(self: *Viewport, visible_rows: u32) bool {
-        const before = self.*;
-        self.visible_rows = clampVisibleRows(visible_rows);
-        self.scroll_offset = @min(self.scroll_offset, maxScrollOffset(self.total_rows, self.visible_rows));
-        self.keepSelectionVisible();
-        self.assertValid();
-        return !sameState(before, self.*);
+    pub fn resize(viewport: *Viewport, visible_rows: u32) bool {
+        const before = viewport.*;
+        viewport.visible_rows = clampVisibleRows(visible_rows);
+        viewport.scroll_offset = @min(viewport.scroll_offset, maxScrollOffset(viewport.total_rows, viewport.visible_rows));
+        viewport.keepSelectionVisible();
+        viewport.assertValid();
+        return !sameState(before, viewport.*);
     }
 
-    pub fn moveSelection(self: *Viewport, delta: i32) bool {
-        const selected_index = self.selected_row orelse return false;
-        const before = self.*;
-        const last = self.total_rows - 1;
-        self.selected_row = if (delta < 0)
+    pub fn moveSelection(viewport: *Viewport, delta: i32) bool {
+        const selected_index = viewport.selected_row orelse return false;
+        const before = viewport.*;
+        const last = viewport.total_rows - 1;
+        viewport.selected_row = if (delta < 0)
             selected_index - @min(selected_index, negativeMagnitude(delta))
         else
             @min(last, selected_index + @min(last - selected_index, @as(u32, @intCast(delta))));
-        self.keepSelectionVisible();
-        self.assertValid();
-        return !sameState(before, self.*);
+        viewport.keepSelectionVisible();
+        viewport.assertValid();
+        return !sameState(before, viewport.*);
     }
 
-    pub fn scrollLines(self: *Viewport, delta: i32) bool {
-        if (self.total_rows == 0) return false;
-        const before = self.*;
-        const max_scroll = maxScrollOffset(self.total_rows, self.visible_rows);
+    pub fn scrollLines(viewport: *Viewport, delta: i32) bool {
+        if (viewport.total_rows == 0) return false;
+        const before = viewport.*;
+        const max_scroll = maxScrollOffset(viewport.total_rows, viewport.visible_rows);
         if (delta < 0) {
-            self.scroll_offset -= @min(self.scroll_offset, negativeMagnitude(delta));
+            viewport.scroll_offset -= @min(viewport.scroll_offset, negativeMagnitude(delta));
         } else {
             const amount: u32 = @intCast(delta);
-            self.scroll_offset = @min(max_scroll, self.scroll_offset + @min(max_scroll - self.scroll_offset, amount));
+            viewport.scroll_offset = @min(max_scroll, viewport.scroll_offset + @min(max_scroll - viewport.scroll_offset, amount));
         }
-        self.keepSelectionInsideVisibleRange();
-        self.assertValid();
-        return !sameState(before, self.*);
+        viewport.keepSelectionInsideVisibleRange();
+        viewport.assertValid();
+        return !sameState(before, viewport.*);
     }
 
-    pub fn selectVisibleRow(self: *Viewport, visible_row: u32) bool {
-        const result_index = self.resultAtVisibleRow(visible_row) orelse return false;
-        if (self.selected_row == result_index) return false;
-        self.selected_row = result_index;
-        self.keepSelectionVisible();
-        self.assertValid();
+    pub fn selectVisibleRow(viewport: *Viewport, visible_row: u32) bool {
+        const result_index = viewport.resultAtVisibleRow(visible_row) orelse return false;
+        if (viewport.selected_row == result_index) return false;
+        viewport.selected_row = result_index;
+        viewport.keepSelectionVisible();
+        viewport.assertValid();
         return true;
     }
 
-    pub fn resultAtVisibleRow(self: *const Viewport, visible_row: u32) ?u32 {
-        const range = self.visibleRange();
+    pub fn resultAtVisibleRow(viewport: *const Viewport, visible_row: u32) ?u32 {
+        const range = viewport.visibleRange();
         if (visible_row >= range.count) return null;
         const result_index = range.start + visible_row;
-        std.debug.assert(result_index < self.total_rows);
+        std.debug.assert(result_index < viewport.total_rows);
         return result_index;
     }
 
-    pub fn visibleRange(self: *const Viewport) VisibleRange {
-        if (self.total_rows == 0) return .{ .start = 0, .count = 0 };
-        const visible_rows = clampVisibleRows(self.visible_rows);
-        const start = @min(self.scroll_offset, maxScrollOffset(self.total_rows, visible_rows));
+    pub fn visibleRange(viewport: *const Viewport) VisibleRange {
+        if (viewport.total_rows == 0) return .{ .start = 0, .count = 0 };
+        const visible_rows = clampVisibleRows(viewport.visible_rows);
+        const start = @min(viewport.scroll_offset, maxScrollOffset(viewport.total_rows, visible_rows));
         return .{
             .start = start,
-            .count = @min(visible_rows, self.total_rows - start),
+            .count = @min(visible_rows, viewport.total_rows - start),
         };
     }
 
-    pub fn selected(self: *const Viewport) ?u32 {
-        return self.selected_row;
+    pub fn selected(viewport: *const Viewport) ?u32 {
+        return viewport.selected_row;
     }
 
-    fn keepSelectionVisible(self: *Viewport) void {
-        const selected_row = self.selected_row orelse return;
-        const visible_rows = clampVisibleRows(self.visible_rows);
-        self.scroll_offset = @min(self.scroll_offset, maxScrollOffset(self.total_rows, visible_rows));
-        if (selected_row < self.scroll_offset) {
-            self.scroll_offset = selected_row;
-        } else if (selected_row >= self.scroll_offset + visible_rows) {
-            self.scroll_offset = selected_row - visible_rows + 1;
+    fn keepSelectionVisible(viewport: *Viewport) void {
+        const selected_row = viewport.selected_row orelse return;
+        const visible_rows = clampVisibleRows(viewport.visible_rows);
+        viewport.scroll_offset = @min(viewport.scroll_offset, maxScrollOffset(viewport.total_rows, visible_rows));
+        if (selected_row < viewport.scroll_offset) {
+            viewport.scroll_offset = selected_row;
+        } else if (selected_row >= viewport.scroll_offset + visible_rows) {
+            viewport.scroll_offset = selected_row - visible_rows + 1;
         }
-        self.scroll_offset = @min(self.scroll_offset, maxScrollOffset(self.total_rows, visible_rows));
+        viewport.scroll_offset = @min(viewport.scroll_offset, maxScrollOffset(viewport.total_rows, visible_rows));
     }
 
-    fn keepSelectionInsideVisibleRange(self: *Viewport) void {
-        if (self.selected_row == null) return;
-        const range = self.visibleRange();
+    fn keepSelectionInsideVisibleRange(viewport: *Viewport) void {
+        if (viewport.selected_row == null) return;
+        const range = viewport.visibleRange();
         if (range.count == 0) {
-            self.selected_row = null;
+            viewport.selected_row = null;
             return;
         }
         const range_end = range.start + range.count - 1;
-        const selected_row = self.selected_row.?;
+        const selected_row = viewport.selected_row.?;
         if (selected_row < range.start) {
-            self.selected_row = range.start;
+            viewport.selected_row = range.start;
         } else if (selected_row > range_end) {
-            self.selected_row = range_end;
+            viewport.selected_row = range_end;
         }
     }
 
-    fn assertValid(self: *const Viewport) void {
-        std.debug.assert(self.visible_rows >= 1);
-        std.debug.assert(self.visible_rows <= max_visible_rows);
-        std.debug.assert(self.scroll_offset <= maxScrollOffset(self.total_rows, self.visible_rows));
-        if (self.total_rows == 0) {
-            std.debug.assert(self.selected_row == null);
-            std.debug.assert(self.scroll_offset == 0);
+    fn assertValid(viewport: *const Viewport) void {
+        std.debug.assert(viewport.visible_rows >= 1);
+        std.debug.assert(viewport.visible_rows <= max_visible_rows);
+        std.debug.assert(viewport.scroll_offset <= maxScrollOffset(viewport.total_rows, viewport.visible_rows));
+        if (viewport.total_rows == 0) {
+            std.debug.assert(viewport.selected_row == null);
+            std.debug.assert(viewport.scroll_offset == 0);
             return;
         }
-        const selected_row = self.selected_row.?;
-        std.debug.assert(selected_row < self.total_rows);
-        const range = self.visibleRange();
+        const selected_row = viewport.selected_row.?;
+        std.debug.assert(selected_row < viewport.total_rows);
+        const range = viewport.visibleRange();
         std.debug.assert(selected_row >= range.start);
         std.debug.assert(selected_row < range.start + range.count);
     }

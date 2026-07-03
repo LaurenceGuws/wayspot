@@ -25,7 +25,7 @@ pub const Shell = struct {
     }
 };
 
-const max_results = 8;
+const max_visible_result_rows: u32 = 8;
 const max_command_bytes = 4096;
 const base_window_width: i32 = 760;
 const base_window_height: i32 = 420;
@@ -45,7 +45,7 @@ const LaunchRunner = *const fn ([*:0]const u8) LaunchRunError!void;
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
-    std.debug.assert(max_results > 0);
+    std.debug.assert(max_visible_result_rows > 0);
     std.debug.assert(max_command_bytes > 0);
     std.debug.assert(max_launch_wait_interrupts > 0);
     std.debug.assert(max_title_bytes > 0);
@@ -223,7 +223,8 @@ const SdlShell = struct {
     wake_event_type: u32 = 0,
     query: std.ArrayList(u8) = .empty,
     results: []@import("../search/mod.zig").ScoredCandidate = &.{},
-    selected: u32 = 0,
+    /// The viewport is the only owner of picker selection and scroll offset.
+    viewport: picker_viewport.Viewport = picker_viewport.Viewport.init(),
     dirty: bool = true,
     launch_queue: LaunchQueue = .{},
     title_buf: [max_title_bytes:0]u8 = undefined,
@@ -264,6 +265,8 @@ const SdlShell = struct {
             .config = config,
             .wake_event_type = wake_event_type,
         };
+        const viewport_resized = self.viewport.resize(max_visible_result_rows);
+        std.debug.assert(viewport_resized);
         try self.applySurfaceScale();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
@@ -360,12 +363,10 @@ const SdlShell = struct {
                         try self.queueSelectedLaunch();
                     },
                     c.SDLK_UP => {
-                        if (self.selected > 0) self.selected -= 1;
-                        self.dirty = true;
+                        if (self.viewport.moveSelection(-1)) self.dirty = true;
                     },
                     c.SDLK_DOWN => {
-                        if (self.selected + 1 < self.results.len) self.selected += 1;
-                        self.dirty = true;
+                        if (self.viewport.moveSelection(1)) self.dirty = true;
                     },
                     else => {},
                 }
@@ -378,16 +379,21 @@ const SdlShell = struct {
     fn refreshResults(self: *SdlShell) !void {
         self.freeResults();
         self.results = try self.service.searchQuery(self.allocator, self.query.items);
-        if (self.selected >= self.results.len) {
-            self.selected = if (self.results.len == 0) 0 else @intCast(self.results.len - 1);
-        }
+        const viewport_changed = self.viewport.resetResults(@intCast(self.results.len));
+        if (viewport_changed) self.dirty = true;
         self.dirty = true;
     }
 
     fn queueSelectedLaunch(self: *SdlShell) !void {
-        if (self.results.len == 0) return;
+        const result_index = self.viewport.selected() orelse return;
+        try self.queueLaunchAtResult(result_index);
+    }
+
+    fn queueLaunchAtResult(self: *SdlShell, result_index: u32) !void {
+        if (result_index >= self.results.len) return error.ResultIndexOutOfBounds;
+        std.debug.assert(result_index < self.results.len);
         if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
-        const candidate = self.results[@intCast(self.selected)].candidate;
+        const candidate = self.results[@intCast(result_index)].candidate;
         var plan = try common_dispatch.planCommandKind(self.allocator, uiKind(candidate.kind), candidate.action);
         defer plan.deinit(self.allocator);
         if (!plan.detach_command) return error.LaunchMustDetach;
@@ -403,9 +409,9 @@ const SdlShell = struct {
     }
 
     fn activeResult(self: *SdlShell) ?@import("../search/mod.zig").ScoredCandidate {
-        if (self.results.len == 0) return null;
-        std.debug.assert(self.selected < self.results.len);
-        return self.results[@intCast(self.selected)];
+        const result_index = self.viewport.selected() orelse return null;
+        if (result_index >= self.results.len) return null;
+        return self.results[@intCast(result_index)];
     }
 
     fn setTitle(self: *SdlShell) !void {
@@ -436,6 +442,7 @@ const SdlShell = struct {
 
         try self.drawChrome();
         try self.drawResults();
+        try self.drawScrollbar();
 
         const presented = c.SDL_RenderPresent(self.renderer);
         if (!presented) return error.SdlRenderFailed;
@@ -460,12 +467,15 @@ const SdlShell = struct {
     }
 
     fn drawResults(self: *SdlShell) !void {
-        const visible = @min(self.results.len, max_results);
-        const layout = picker_viewport.ResultLayout.default(@intCast(visible));
+        const range = self.viewport.visibleRange();
+        const layout = picker_viewport.ResultLayout.default(range.count);
+        const selected_result = self.viewport.selected();
         var i: u32 = 0;
-        while (i < visible) : (i += 1) {
-            const result = self.results[i].candidate;
-            const selected = i == self.selected;
+        while (i < range.count) : (i += 1) {
+            const result_index = range.start + i;
+            std.debug.assert(result_index < self.results.len);
+            const result = self.results[@intCast(result_index)].candidate;
+            const selected = selected_result == result_index;
             const shade: u8 = if (selected) 64 else 31;
             const row_rect = layout.rowRect(i);
             const row_color = c.SDL_SetRenderDrawColor(
@@ -502,7 +512,7 @@ const SdlShell = struct {
             });
         }
 
-        if (visible == 0) {
+        if (range.count == 0) {
             try self.text.draw(self.renderer, layout.title_x, layout.titleY(0), "No results", .{
                 .color = .{ .r = 190, .g = 198, .b = 208 },
                 .max_bytes = 32,
@@ -511,6 +521,32 @@ const SdlShell = struct {
         }
 
         try self.setTitle();
+    }
+
+    fn drawScrollbar(self: *SdlShell) !void {
+        const layout = picker_viewport.ResultLayout.default(self.viewport.visibleRange().count);
+        const scrollbar = layout.scrollbar(&self.viewport);
+        if (!scrollbar.needed) return;
+
+        const track_color = c.SDL_SetRenderDrawColor(self.renderer, 38, 44, 52, 255);
+        const track = c.SDL_FRect{
+            .x = scrollbar.track.x,
+            .y = scrollbar.track.y,
+            .w = scrollbar.track.w,
+            .h = scrollbar.track.h,
+        };
+        const track_drawn = c.SDL_RenderFillRect(self.renderer, &track);
+        if (!track_color or !track_drawn) return error.SdlRenderFailed;
+
+        const thumb_color = c.SDL_SetRenderDrawColor(self.renderer, 104, 118, 136, 255);
+        const thumb = c.SDL_FRect{
+            .x = scrollbar.thumb.x,
+            .y = scrollbar.thumb.y,
+            .w = scrollbar.thumb.w,
+            .h = scrollbar.thumb.h,
+        };
+        const thumb_drawn = c.SDL_RenderFillRect(self.renderer, &thumb);
+        if (!thumb_color or !thumb_drawn) return error.SdlRenderFailed;
     }
 
     fn freeResults(self: *SdlShell) void {
