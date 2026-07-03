@@ -1,42 +1,24 @@
-//! SDL shell owns the resident picker window and drains local IPC visibility commands.
+//! SDL shell owns one bounded picker lifecycle from CLI summon to cleanup.
 //!
-//! Approved happy path: one prebuilt SDL window, one local IPC slot, app/action
-//! search, and typed notification rows. Rendering stays immediate-mode until
-//! profiler evidence justifies a retained scene. Text currently uses SDL's
-//! built-in debug font; copy Howl text internals only when shaping or glyph
-//! atlas reuse becomes a product requirement.
+//! Approved happy path: create one SDL window, search app/action candidates,
+//! launch one detached command when selected, and release every owned resource.
 
 const std = @import("std");
 const app = @import("../app/mod.zig");
 const common_dispatch = @import("common/dispatch.zig");
-const ipc_control = @import("../ipc/control.zig");
 const sdl_text = @import("sdl_text.zig");
-const SurfaceMode = @import("surfaces/mod.zig").SurfaceMode;
-const PlacementPolicy = @import("placement/mod.zig").RuntimePolicy;
 
 const c = @import("sdl_c");
 
 pub const Shell = struct {
-    pub const RunOptions = struct {
-        resident_mode: bool = false,
-        start_hidden: bool = false,
-        surface_mode: SurfaceMode = .layer_shell,
-        placement_policy: PlacementPolicy = .{},
-        show_nerd_stats: bool = true,
-        notifications_show_close_button: bool = true,
-        notifications_show_dbus_actions: bool = true,
-    };
-
     pub fn run(
         allocator: std.mem.Allocator,
         service: *app.SearchService,
-        options: RunOptions,
     ) !void {
-        var shell = try SdlShell.init(allocator, service, options);
+        var shell = try SdlShell.init(allocator, service);
         var shutdown_signal = try ShutdownSignal.init();
         defer shell.deinit();
         try shell.startShutdownSignal(&shutdown_signal);
-        try shell.startControlServer(options.resident_mode);
         try shell.loop();
     }
 };
@@ -46,7 +28,6 @@ const max_command_bytes = 4096;
 const row_height: f32 = 44;
 const row_gap: f32 = 6;
 const no_wake_timeout_ms: i32 = 1000;
-const resident_shutdown_check_ms: i32 = 250;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 const max_title_bytes = 160;
@@ -58,7 +39,6 @@ var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 comptime {
     std.debug.assert(max_results > 0);
     std.debug.assert(max_command_bytes > 0);
-    std.debug.assert(resident_shutdown_check_ms > 0);
     std.debug.assert(max_launch_wait_interrupts > 0);
     std.debug.assert(max_title_bytes > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
@@ -229,12 +209,8 @@ const SdlShell = struct {
     service: *app.SearchService,
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
-    control_server: ?ipc_control.Server = null,
     shutdown_signal: ?*ShutdownSignal = null,
-    control_slot: ipc_control.ControlSlot = .{},
     wake_event_type: u32 = 0,
-    visible: bool = false,
-    resident_mode: bool = false,
     query: std.ArrayList(u8) = .empty,
     results: []@import("../search/mod.zig").ScoredCandidate = &.{},
     selected: u32 = 0,
@@ -243,7 +219,7 @@ const SdlShell = struct {
     title_buf: [max_title_bytes:0]u8 = undefined,
     shutdown_after_launch: bool = false,
 
-    fn init(allocator: std.mem.Allocator, service: *app.SearchService, options: Shell.RunOptions) !SdlShell {
+    fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         errdefer c.SDL_Quit();
 
@@ -267,23 +243,12 @@ const SdlShell = struct {
             .window = window,
             .renderer = renderer,
             .wake_event_type = wake_event_type,
-            .visible = !options.start_hidden,
-            .resident_mode = options.resident_mode,
         };
-        self.control_slot.setWakeEvent(wake_event_type);
-        if (self.visible) {
-            const shown = c.SDL_ShowWindow(window);
-            const raised = c.SDL_RaiseWindow(window);
-            if (!shown or !raised) return error.SdlShowFailed;
-        }
+        const shown = c.SDL_ShowWindow(window);
+        const raised = c.SDL_RaiseWindow(window);
+        if (!shown or !raised) return error.SdlShowFailed;
         try self.refreshResults();
         return self;
-    }
-
-    fn startControlServer(self: *SdlShell, resident_mode: bool) !void {
-        if (!resident_mode) return;
-        self.control_server = try ipc_control.Server.init(self.allocator, &self.control_slot);
-        try self.control_server.?.start();
     }
 
     fn startShutdownSignal(self: *SdlShell, shutdown_signal: *ShutdownSignal) !void {
@@ -295,10 +260,6 @@ const SdlShell = struct {
         if (self.shutdown_signal) |shutdown_signal| {
             shutdown_signal.stop();
             self.shutdown_signal = null;
-        }
-        if (self.control_server) |*server| {
-            server.deinit();
-            self.control_server = null;
         }
         self.freeResults();
         self.query.deinit(self.allocator);
@@ -313,7 +274,6 @@ const SdlShell = struct {
         var running = true;
         while (running) {
             if (self.shutdownRequested()) break;
-            self.applyPendingControl();
             if (self.dirty) {
                 try self.render();
                 self.dirty = false;
@@ -322,10 +282,7 @@ const SdlShell = struct {
             if (self.shutdown_after_launch) break;
 
             var event: c.SDL_Event = undefined;
-            if (self.control_server == null and c.SDL_WaitEventTimeout(&event, no_wake_timeout_ms)) {
-                running = try self.handleEvent(&event);
-            }
-            if (self.control_server != null and c.SDL_WaitEventTimeout(&event, resident_shutdown_check_ms)) {
+            if (c.SDL_WaitEventTimeout(&event, no_wake_timeout_ms)) {
                 running = try self.handleEvent(&event);
             }
             while (c.SDL_PollEvent(&event)) {
@@ -349,7 +306,6 @@ const SdlShell = struct {
             if (self.shutdown_signal) |shutdown_signal| {
                 if (shutdown_signal.requested()) return false;
             }
-            self.applyPendingControl();
             return true;
         }
         switch (event.type) {
@@ -357,13 +313,7 @@ const SdlShell = struct {
             c.SDL_EVENT_TERMINATING,
             c.SDL_EVENT_WINDOW_DESTROYED,
             => return false,
-            c.SDL_EVENT_WINDOW_CLOSE_REQUESTED => {
-                if (self.resident_mode) {
-                    self.hide();
-                } else {
-                    return false;
-                }
-            },
+            c.SDL_EVENT_WINDOW_CLOSE_REQUESTED => return false,
             c.SDL_EVENT_TEXT_INPUT => {
                 const text = std.mem.span(event.text.text);
                 try self.query.appendSlice(self.allocator, text);
@@ -372,11 +322,7 @@ const SdlShell = struct {
             c.SDL_EVENT_KEY_DOWN => {
                 switch (event.key.key) {
                     c.SDLK_ESCAPE => {
-                        if (self.resident_mode) {
-                            self.hide();
-                        } else {
-                            return false;
-                        }
+                        return false;
                     },
                     c.SDLK_BACKSPACE => {
                         trimLastUtf8(&self.query);
@@ -401,30 +347,6 @@ const SdlShell = struct {
         return true;
     }
 
-    fn applyPendingControl(self: *SdlShell) void {
-        const command = self.control_slot.take() orelse return;
-        switch (command) {
-            .summon => self.show(),
-            .hide => self.hide(),
-            .toggle => if (self.visible) self.hide() else self.show(),
-            else => {},
-        }
-    }
-
-    fn show(self: *SdlShell) void {
-        self.visible = true;
-        const shown = c.SDL_ShowWindow(self.window);
-        const raised = c.SDL_RaiseWindow(self.window);
-        if (!shown or !raised) std.log.warn("sdl show failed", .{});
-        self.dirty = true;
-    }
-
-    fn hide(self: *SdlShell) void {
-        self.visible = false;
-        const hidden = c.SDL_HideWindow(self.window);
-        if (!hidden) std.log.warn("sdl hide failed", .{});
-    }
-
     fn refreshResults(self: *SdlShell) !void {
         self.freeResults();
         self.results = try self.service.searchQuery(self.allocator, self.query.items);
@@ -445,8 +367,7 @@ const SdlShell = struct {
             try self.service.recordSelection(self.allocator, candidate.action);
         }
         try self.launch_queue.queue(plan.command);
-        self.hide();
-        self.shutdown_after_launch = !self.resident_mode;
+        self.shutdown_after_launch = true;
     }
 
     fn drainPendingLaunch(self: *SdlShell) !void {

@@ -1,11 +1,11 @@
 [Unit]
-Description=Wayspot Launcher
+Description=Wayspot Notification Daemon
 After=graphical-session.target
 Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/wayspot --ui-daemon
+ExecStart=/usr/bin/wayspot --notifications-daemon
 Restart=on-failure
 RestartSec=1
 

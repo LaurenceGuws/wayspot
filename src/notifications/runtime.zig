@@ -45,28 +45,28 @@ pub const Snapshot = struct {
 };
 
 const Runtime = struct {
-    mu: std.Thread.Mutex = .{},
-    entries: std.ArrayListUnmanaged(Entry) = .{},
+    mu: std.Io.Mutex = .init,
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
     close_fn: ?*const fn (u32) bool = null,
 };
 
 var runtime: Runtime = .{};
 
 pub fn registerCloser(close_fn: *const fn (u32) bool) void {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
     runtime.close_fn = close_fn;
 }
 
 pub fn clearCloser(close_fn: *const fn (u32) bool) void {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
     if (runtime.close_fn == close_fn) runtime.close_fn = null;
 }
 
 pub fn resetForTest(allocator: std.mem.Allocator) void {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
     for (runtime.entries.items) |row| {
         freeEntry(allocator, row);
     }
@@ -84,10 +84,10 @@ pub fn recordNotify(
     urgency: u8,
     transient: bool,
 ) !void {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
 
-    const now = std.time.nanoTimestamp();
+    const now = nowNs();
     if (findIndexLocked(id)) |idx| {
         var row = &runtime.entries.items[idx];
         allocator.free(row.app_name);
@@ -127,23 +127,23 @@ pub fn recordNotify(
 }
 
 pub fn recordClosed(id: u32, reason: u32) void {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
     const idx = findIndexLocked(id) orelse return;
     runtime.entries.items[idx].active = false;
     runtime.entries.items[idx].closed_reason = reason;
-    runtime.entries.items[idx].updated_ns = std.time.nanoTimestamp();
+    runtime.entries.items[idx].updated_ns = nowNs();
 }
 
 pub fn closeById(id: u32) bool {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
     const close_fn = runtime.close_fn orelse return false;
     return close_fn(id);
 }
 
 pub fn closeAllActive() u32 {
-    runtime.mu.lock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
     const close_fn = runtime.close_fn;
     var ids: [max_entries]u32 = undefined;
     var id_count: u32 = 0;
@@ -155,7 +155,7 @@ pub fn closeAllActive() u32 {
             id_count += 1;
         }
     }
-    runtime.mu.unlock();
+    runtime.mu.unlock(std.Options.debug_io);
 
     if (close_fn == null) return 0;
     var closed: u32 = 0;
@@ -166,8 +166,8 @@ pub fn closeAllActive() u32 {
 }
 
 pub fn snapshot(allocator: std.mem.Allocator) ![]Snapshot {
-    runtime.mu.lock();
-    defer runtime.mu.unlock();
+    runtime.mu.lockUncancelable(std.Options.debug_io);
+    defer runtime.mu.unlock(std.Options.debug_io);
 
     var out = try allocator.alloc(Snapshot, runtime.entries.items.len);
     errdefer {
@@ -210,6 +210,10 @@ fn duplicateBounded(allocator: std.mem.Allocator, text: []const u8, max_bytes: u
     const out = try allocator.dupe(u8, text[0..out_len]);
     if (text.len > out_len and out_len > 0) out[out_len - 1] = '~';
     return out;
+}
+
+fn nowNs() i128 {
+    return std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
 }
 
 fn freeEntry(allocator: std.mem.Allocator, row: Entry) void {

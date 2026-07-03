@@ -4,9 +4,129 @@ const notifications_runtime = @import("runtime.zig");
 
 const log = std.log.scoped(.notifications);
 
-const c = @cImport({
-    @cInclude("gio/gio.h");
-});
+const guint = c_uint;
+const gboolean = c_int;
+const guchar = u8;
+const gssize = isize;
+const gsize = c_ulong;
+
+const GBusType = c_int;
+const GBusNameOwnerFlags = c_uint;
+const G_BUS_TYPE_SESSION: GBusType = 2;
+const G_BUS_NAME_OWNER_FLAGS_REPLACE: GBusNameOwnerFlags = 1 << 1;
+
+const GDBusConnection = opaque {};
+const GDBusMethodInvocation = opaque {};
+const GDBusNodeInfo = opaque {};
+const GDBusInterfaceInfo = opaque {};
+const GVariant = opaque {};
+const GVariantType = opaque {};
+const GMainLoop = opaque {};
+
+const GError = extern struct {
+    domain: c_uint,
+    code: c_int,
+    message: [*:0]u8,
+};
+
+const GDBusInterfaceVTable = extern struct {
+    method_call: ?*const fn (
+        ?*GDBusConnection,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        ?*GVariant,
+        ?*GDBusMethodInvocation,
+        ?*anyopaque,
+    ) callconv(.c) void,
+    get_property: ?*const fn (
+        ?*GDBusConnection,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        ?*GDBusMethodInvocation,
+        ?*anyopaque,
+    ) callconv(.c) ?*GVariant,
+    set_property: ?*const fn (
+        ?*GDBusConnection,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        [*c]const u8,
+        ?*GVariant,
+        ?*GDBusMethodInvocation,
+        ?*anyopaque,
+    ) callconv(.c) gboolean,
+};
+
+extern fn g_bus_own_name(
+    bus_type: GBusType,
+    name: [*:0]const u8,
+    flags: GBusNameOwnerFlags,
+    bus_acquired_handler: ?*const fn (?*GDBusConnection, [*c]const u8, ?*anyopaque) callconv(.c) void,
+    name_acquired_handler: ?*const fn (?*GDBusConnection, [*c]const u8, ?*anyopaque) callconv(.c) void,
+    name_lost_handler: ?*const fn (?*GDBusConnection, [*c]const u8, ?*anyopaque) callconv(.c) void,
+    user_data: ?*anyopaque,
+    user_data_free_func: ?*const fn (?*anyopaque) callconv(.c) void,
+) guint;
+extern fn g_bus_unown_name(owner_id: guint) void;
+extern fn g_dbus_node_info_new_for_xml(xml_data: [*:0]const u8, error_out: *?*GError) ?*GDBusNodeInfo;
+extern fn g_dbus_node_info_unref(info: *GDBusNodeInfo) void;
+extern fn g_dbus_node_info_lookup_interface(info: *GDBusNodeInfo, name: [*:0]const u8) ?*GDBusInterfaceInfo;
+extern fn g_dbus_connection_register_object(
+    connection: ?*GDBusConnection,
+    object_path: [*:0]const u8,
+    interface_info: *GDBusInterfaceInfo,
+    vtable: *const GDBusInterfaceVTable,
+    user_data: ?*anyopaque,
+    user_data_free_func: ?*const fn (?*anyopaque) callconv(.c) void,
+    error_out: *?*GError,
+) guint;
+extern fn g_dbus_connection_unregister_object(connection: *GDBusConnection, registration_id: guint) gboolean;
+extern fn g_dbus_connection_emit_signal(
+    connection: *GDBusConnection,
+    destination_bus_name: ?[*:0]const u8,
+    object_path: [*:0]const u8,
+    interface_name: [*:0]const u8,
+    signal_name: [*:0]const u8,
+    parameters: ?*GVariant,
+    error_out: ?*?*GError,
+) gboolean;
+extern fn g_dbus_method_invocation_return_value(invocation: *GDBusMethodInvocation, parameters: ?*GVariant) void;
+extern fn g_dbus_method_invocation_return_dbus_error(
+    invocation: *GDBusMethodInvocation,
+    error_name: [*:0]const u8,
+    error_message: [*:0]const u8,
+) void;
+extern fn g_object_ref(object: *GDBusConnection) ?*GDBusConnection;
+extern fn g_object_unref(object: *GDBusConnection) void;
+extern fn g_error_free(error_value: *GError) void;
+extern fn g_variant_new(format_string: [*:0]const u8, ...) ?*GVariant;
+extern fn g_variant_new_strv(strv: [*]?[*:0]const u8, length: gssize) ?*GVariant;
+extern fn g_variant_new_tuple(children: [*]?*GVariant, length: gssize) ?*GVariant;
+extern fn g_variant_unref(value: ?*GVariant) void;
+extern fn g_variant_n_children(value: *GVariant) gsize;
+extern fn g_variant_get_child_value(value: *GVariant, index: gsize) ?*GVariant;
+extern fn g_variant_get_string(value: *GVariant, length: ?*gsize) [*:0]const u8;
+extern fn g_variant_get_uint32(value: *GVariant) u32;
+extern fn g_variant_get_int32(value: *GVariant) i32;
+extern fn g_variant_is_of_type(value: ?*GVariant, variant_type: *const GVariantType) gboolean;
+extern fn g_variant_lookup(value: *GVariant, key: [*:0]const u8, format_string: [*:0]const u8, ...) gboolean;
+extern fn g_main_loop_new(context: ?*opaque {}, is_running: gboolean) ?*GMainLoop;
+extern fn g_main_loop_run(loop: *GMainLoop) void;
+extern fn g_main_loop_unref(loop: *GMainLoop) void;
+
+pub fn run(allocator: std.mem.Allocator) !void {
+    var daemon = try Daemon.init(allocator);
+    defer daemon.deinit();
+    try daemon.start();
+
+    const loop = g_main_loop_new(null, 0) orelse return error.NotificationsMainLoopFailed;
+    defer g_main_loop_unref(loop);
+    g_main_loop_run(loop);
+}
 
 const service_name: [*:0]const u8 = "org.freedesktop.Notifications";
 const interface_name: [*:0]const u8 = "org.freedesktop.Notifications";
@@ -64,7 +184,7 @@ const introspection_xml: [*:0]const u8 =
     \\</node>
 ;
 
-const vtable = c.GDBusInterfaceVTable{
+const vtable = GDBusInterfaceVTable{
     .method_call = onMethodCall,
     .get_property = null,
     .set_property = null,
@@ -101,15 +221,15 @@ pub const Daemon = struct {
 
     allocator: std.mem.Allocator,
     state: notifications_state.Store,
-    owner_id: c.guint = 0,
-    registration_id: c.guint = 0,
-    node_info: ?*c.GDBusNodeInfo = null,
-    connection: ?*c.GDBusConnection = null,
+    owner_id: guint = 0,
+    registration_id: guint = 0,
+    node_info: ?*GDBusNodeInfo = null,
+    connection: ?*GDBusConnection = null,
     hooks: Hooks = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Daemon {
-        var gerr: ?*c.GError = null;
-        const node = c.g_dbus_node_info_new_for_xml(introspection_xml, &gerr);
+        var gerr: ?*GError = null;
+        const node = g_dbus_node_info_new_for_xml(introspection_xml, &gerr);
         if (node == null) {
             logGError("failed to parse notifications introspection XML", gerr);
             return error.NotificationsIntrospectionFailed;
@@ -123,10 +243,10 @@ pub const Daemon = struct {
 
     pub fn start(self: *Daemon) !void {
         if (self.owner_id != 0) return;
-        self.owner_id = c.g_bus_own_name(
-            c.G_BUS_TYPE_SESSION,
+        self.owner_id = g_bus_own_name(
+            G_BUS_TYPE_SESSION,
             service_name,
-            c.G_BUS_NAME_OWNER_FLAGS_REPLACE,
+            G_BUS_NAME_OWNER_FLAGS_REPLACE,
             onBusAcquired,
             onNameAcquired,
             onNameLost,
@@ -138,20 +258,20 @@ pub const Daemon = struct {
 
     pub fn deinit(self: *Daemon) void {
         if (self.registration_id != 0 and self.connection != null) {
-            const removed = c.g_dbus_connection_unregister_object(self.connection.?, self.registration_id);
+            const removed = g_dbus_connection_unregister_object(self.connection.?, self.registration_id);
             if (removed == 0) log.warn("notifications object unregister failed", .{});
             self.registration_id = 0;
         }
         if (self.owner_id != 0) {
-            c.g_bus_unown_name(self.owner_id);
+            g_bus_unown_name(self.owner_id);
             self.owner_id = 0;
         }
         if (self.connection) |conn| {
-            c.g_object_unref(conn);
+            g_object_unref(conn);
             self.connection = null;
         }
         if (self.node_info) |node| {
-            c.g_dbus_node_info_unref(node);
+            g_dbus_node_info_unref(node);
             self.node_info = null;
         }
         self.state.deinit();
@@ -182,34 +302,33 @@ pub const Daemon = struct {
         const conn = self.connection orelse return;
         const key_z = self.allocator.dupeZ(u8, action_key) catch return;
         defer self.allocator.free(key_z);
-        const emitted = c.g_dbus_connection_emit_signal(
+        const emitted = g_dbus_connection_emit_signal(
             conn,
             null,
             object_path,
             interface_name,
             "ActionInvoked",
-            c.g_variant_new("(us)", id, key_z.ptr),
+            g_variant_new("(us)", id, key_z.ptr),
             null,
         );
         if (emitted == 0) log.warn("ActionInvoked signal failed id={d}", .{id});
     }
 };
 
-fn onBusAcquired(connection: ?*c.GDBusConnection, _: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+fn onBusAcquired(connection: ?*GDBusConnection, _: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
     if (connection == null or user_data == null) return;
     const self: *Daemon = @ptrCast(@alignCast(user_data.?));
 
     if (self.connection) |existing| {
-        c.g_object_unref(existing);
+        g_object_unref(existing);
     }
-    self.connection = @ptrCast(c.g_object_ref(connection));
+    self.connection = g_object_ref(connection.?);
 
     const node_info = self.node_info orelse return;
-    const iface = c.g_dbus_node_info_lookup_interface(node_info, interface_name);
-    if (iface == null) return;
+    const iface = g_dbus_node_info_lookup_interface(node_info, interface_name) orelse return;
 
-    var gerr: ?*c.GError = null;
-    self.registration_id = c.g_dbus_connection_register_object(
+    var gerr: ?*GError = null;
+    self.registration_id = g_dbus_connection_register_object(
         connection,
         object_path,
         iface,
@@ -223,13 +342,13 @@ fn onBusAcquired(connection: ?*c.GDBusConnection, _: [*c]const u8, user_data: ?*
     }
 }
 
-fn onNameAcquired(_: ?*c.GDBusConnection, name: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
+fn onNameAcquired(_: ?*GDBusConnection, name: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
     if (name != null) {
         log.info("owned dbus name: {s}", .{std.mem.span(name)});
     }
 }
 
-fn onNameLost(_: ?*c.GDBusConnection, name: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
+fn onNameLost(_: ?*GDBusConnection, name: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
     if (name != null) {
         log.warn("lost dbus name: {s}", .{std.mem.span(name)});
     }
@@ -239,13 +358,13 @@ fn onNameLost(_: ?*c.GDBusConnection, name: [*c]const u8, user_data: ?*anyopaque
 }
 
 fn onMethodCall(
-    _: ?*c.GDBusConnection,
+    _: ?*GDBusConnection,
     _: [*c]const u8,
     _: [*c]const u8,
     _: [*c]const u8,
     method_name: [*c]const u8,
-    parameters: ?*c.GVariant,
-    invocation: ?*c.GDBusMethodInvocation,
+    parameters: ?*GVariant,
+    invocation: ?*GDBusMethodInvocation,
     user_data: ?*anyopaque,
 ) callconv(.c) void {
     if (invocation == null or user_data == null) return;
@@ -269,71 +388,71 @@ fn onMethodCall(
         return;
     }
 
-    c.g_dbus_method_invocation_return_dbus_error(
-        invocation,
+    g_dbus_method_invocation_return_dbus_error(
+        invocation.?,
         "org.freedesktop.DBus.Error.UnknownMethod",
         "Unknown method",
     );
 }
 
-fn handleGetCapabilities(invocation: *c.GDBusMethodInvocation) void {
+fn handleGetCapabilities(invocation: *GDBusMethodInvocation) void {
     var capabilities = [_]?[*:0]const u8{
         "actions",
         "body",
         "body-markup",
         null,
     };
-    const caps = c.g_variant_new_strv(@ptrCast(&capabilities[0]), 3);
-    var tuple_items = [_]?*c.GVariant{caps};
-    c.g_dbus_method_invocation_return_value(invocation, c.g_variant_new_tuple(@ptrCast(&tuple_items[0]), 1));
+    const caps = g_variant_new_strv(@ptrCast(&capabilities[0]), 3);
+    var tuple_items = [_]?*GVariant{caps};
+    g_dbus_method_invocation_return_value(invocation, g_variant_new_tuple(@ptrCast(&tuple_items[0]), 1));
 }
 
-fn handleGetServerInformation(invocation: *c.GDBusMethodInvocation) void {
-    c.g_dbus_method_invocation_return_value(
+fn handleGetServerInformation(invocation: *GDBusMethodInvocation) void {
+    g_dbus_method_invocation_return_value(
         invocation,
-        c.g_variant_new("(ssss)", server_name, server_vendor, server_version, server_spec_version),
+        g_variant_new("(ssss)", server_name, server_vendor, server_version, server_spec_version),
     );
 }
 
-fn handleNotify(self: *Daemon, parameters: ?*c.GVariant, invocation: *c.GDBusMethodInvocation) void {
+fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
     const payload = parameters orelse {
         returnInvalidArgs(invocation, "Notify expects parameters");
         return;
     };
 
-    if (c.g_variant_n_children(payload) != 8) {
+    if (g_variant_n_children(payload) != 8) {
         returnInvalidArgs(invocation, "Notify expects 8 arguments");
         return;
     }
 
-    const app_name_variant = c.g_variant_get_child_value(payload, 0);
-    defer c.g_variant_unref(app_name_variant);
-    const replaces_id_variant = c.g_variant_get_child_value(payload, 1);
-    defer c.g_variant_unref(replaces_id_variant);
-    const app_icon_variant = c.g_variant_get_child_value(payload, 2);
-    defer c.g_variant_unref(app_icon_variant);
-    const summary_variant = c.g_variant_get_child_value(payload, 3);
-    defer c.g_variant_unref(summary_variant);
-    const body_variant = c.g_variant_get_child_value(payload, 4);
-    defer c.g_variant_unref(body_variant);
-    const actions_variant = c.g_variant_get_child_value(payload, 5);
-    defer c.g_variant_unref(actions_variant);
-    const hints_variant = c.g_variant_get_child_value(payload, 6);
-    defer c.g_variant_unref(hints_variant);
-    const expire_timeout_variant = c.g_variant_get_child_value(payload, 7);
-    defer c.g_variant_unref(expire_timeout_variant);
+    const app_name_variant = g_variant_get_child_value(payload, 0);
+    defer g_variant_unref(app_name_variant);
+    const replaces_id_variant = g_variant_get_child_value(payload, 1);
+    defer g_variant_unref(replaces_id_variant);
+    const app_icon_variant = g_variant_get_child_value(payload, 2);
+    defer g_variant_unref(app_icon_variant);
+    const summary_variant = g_variant_get_child_value(payload, 3);
+    defer g_variant_unref(summary_variant);
+    const body_variant = g_variant_get_child_value(payload, 4);
+    defer g_variant_unref(body_variant);
+    const actions_variant = g_variant_get_child_value(payload, 5);
+    defer g_variant_unref(actions_variant);
+    const hints_variant = g_variant_get_child_value(payload, 6);
+    defer g_variant_unref(hints_variant);
+    const expire_timeout_variant = g_variant_get_child_value(payload, 7);
+    defer g_variant_unref(expire_timeout_variant);
 
-    if (c.g_variant_is_of_type(hints_variant, c.G_VARIANT_TYPE("a{sv}")) == 0) {
+    if (g_variant_is_of_type(hints_variant, variantType("a{sv}")) == 0) {
         returnInvalidArgs(invocation, "Notify hints must be a{sv}");
         return;
     }
 
-    const app_name = c.g_variant_get_string(app_name_variant, null);
-    const app_icon = c.g_variant_get_string(app_icon_variant, null);
-    const summary = c.g_variant_get_string(summary_variant, null);
-    const body = c.g_variant_get_string(body_variant, null);
-    const replaces_id = c.g_variant_get_uint32(replaces_id_variant);
-    const expire_timeout = c.g_variant_get_int32(expire_timeout_variant);
+    const app_name = g_variant_get_string(app_name_variant.?, null);
+    const app_icon = g_variant_get_string(app_icon_variant.?, null);
+    const summary = g_variant_get_string(summary_variant.?, null);
+    const body = g_variant_get_string(body_variant.?, null);
+    const replaces_id = g_variant_get_uint32(replaces_id_variant.?);
+    const expire_timeout = g_variant_get_int32(expire_timeout_variant.?);
     const action_pairs = parseActions(self.allocator, actions_variant.?) catch &.{};
     defer if (action_pairs.len > 0) self.allocator.free(action_pairs);
     const has_actions = action_pairs.len > 0;
@@ -348,7 +467,7 @@ fn handleNotify(self: *Daemon, parameters: ?*c.GVariant, invocation: *c.GDBusMet
         .expire_timeout = expire_timeout,
         .has_actions = has_actions,
     }) catch {
-        c.g_dbus_method_invocation_return_dbus_error(
+        g_dbus_method_invocation_return_dbus_error(
             invocation,
             "org.freedesktop.DBus.Error.NoMemory",
             "Unable to persist notification",
@@ -383,46 +502,46 @@ fn handleNotify(self: *Daemon, parameters: ?*c.GVariant, invocation: *c.GDBusMet
         std.log.warn("notifications runtime record failed id={d} err={s}", .{ id, @errorName(err) });
     };
 
-    c.g_dbus_method_invocation_return_value(invocation, c.g_variant_new("(u)", id));
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
 }
 
-fn handleCloseNotification(self: *Daemon, parameters: ?*c.GVariant, invocation: *c.GDBusMethodInvocation) void {
+fn handleCloseNotification(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
     const payload = parameters orelse {
         returnInvalidArgs(invocation, "CloseNotification expects parameters");
         return;
     };
 
-    if (c.g_variant_n_children(payload) != 1) {
+    if (g_variant_n_children(payload) != 1) {
         returnInvalidArgs(invocation, "CloseNotification expects one argument");
         return;
     }
 
-    const id_variant = c.g_variant_get_child_value(payload, 0);
-    defer c.g_variant_unref(id_variant);
-    const notification_id = c.g_variant_get_uint32(id_variant);
+    const id_variant = g_variant_get_child_value(payload, 0);
+    defer g_variant_unref(id_variant);
+    const notification_id = g_variant_get_uint32(id_variant.?);
 
     const closed = self.closeWithReason(notification_id, 3);
     if (!closed) log.debug("CloseNotification ignored unknown id={d}", .{notification_id});
 
-    c.g_dbus_method_invocation_return_value(invocation, c.g_variant_new("()"));
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
 }
 
 fn emitNotificationClosed(self: *Daemon, id: u32, reason: u32) void {
     const conn = self.connection orelse return;
-    const emitted = c.g_dbus_connection_emit_signal(
+    const emitted = g_dbus_connection_emit_signal(
         conn,
         null,
         object_path,
         interface_name,
         "NotificationClosed",
-        c.g_variant_new("(uu)", id, reason),
+        g_variant_new("(uu)", id, reason),
         null,
     );
     if (emitted == 0) log.warn("NotificationClosed signal failed id={d}", .{id});
 }
 
-fn returnInvalidArgs(invocation: *c.GDBusMethodInvocation, message: [*:0]const u8) void {
-    c.g_dbus_method_invocation_return_dbus_error(
+fn returnInvalidArgs(invocation: *GDBusMethodInvocation, message: [*:0]const u8) void {
+    g_dbus_method_invocation_return_dbus_error(
         invocation,
         "org.freedesktop.DBus.Error.InvalidArgs",
         message,
@@ -434,21 +553,21 @@ const ParsedHints = struct {
     transient: bool = false,
 };
 
-fn parseHints(hints_variant: *c.GVariant) ParsedHints {
+fn parseHints(hints_variant: *GVariant) ParsedHints {
     var result: ParsedHints = .{};
-    var urgency: c.guchar = result.urgency;
-    if (c.g_variant_lookup(hints_variant, "urgency", "y", &urgency) != 0) {
+    var urgency: guchar = result.urgency;
+    if (g_variant_lookup(hints_variant, "urgency", "y", &urgency) != 0) {
         result.urgency = urgency;
     }
-    var transient_bool: c.gboolean = 0;
-    if (c.g_variant_lookup(hints_variant, "transient", "b", &transient_bool) != 0) {
+    var transient_bool: gboolean = 0;
+    if (g_variant_lookup(hints_variant, "transient", "b", &transient_bool) != 0) {
         result.transient = transient_bool != 0;
     }
     return result;
 }
 
-fn parseActions(allocator: std.mem.Allocator, actions_variant: *c.GVariant) ![]Daemon.Action {
-    const child_count = c.g_variant_n_children(actions_variant);
+fn parseActions(allocator: std.mem.Allocator, actions_variant: *GVariant) ![]Daemon.Action {
+    const child_count = g_variant_n_children(actions_variant);
     if (child_count < 2) return &.{};
 
     const pair_count = child_count / 2;
@@ -457,15 +576,15 @@ fn parseActions(allocator: std.mem.Allocator, actions_variant: *c.GVariant) ![]D
     errdefer allocator.free(actions);
 
     var out_idx: u32 = 0;
-    var i: u32 = 0;
+    var i: gsize = 0;
     while (i + 1 < child_count and out_idx < actions.len) : (i += 2) {
-        const key_variant = c.g_variant_get_child_value(actions_variant, @intCast(i));
-        defer c.g_variant_unref(key_variant);
-        const label_variant = c.g_variant_get_child_value(actions_variant, @intCast(i + 1));
-        defer c.g_variant_unref(label_variant);
+        const key_variant = g_variant_get_child_value(actions_variant, i);
+        defer g_variant_unref(key_variant);
+        const label_variant = g_variant_get_child_value(actions_variant, i + 1);
+        defer g_variant_unref(label_variant);
 
-        const key = std.mem.span(c.g_variant_get_string(key_variant, null));
-        const label = std.mem.span(c.g_variant_get_string(label_variant, null));
+        const key = std.mem.span(g_variant_get_string(key_variant.?, null));
+        const label = std.mem.span(g_variant_get_string(label_variant.?, null));
         actions[out_idx] = .{
             .key = key,
             .label = label,
@@ -476,13 +595,15 @@ fn parseActions(allocator: std.mem.Allocator, actions_variant: *c.GVariant) ![]D
     return actions[0..out_idx];
 }
 
-fn logGError(context: []const u8, gerr: ?*c.GError) void {
+fn variantType(signature: [*:0]const u8) *const GVariantType {
+    return @ptrCast(signature);
+}
+
+fn logGError(context: []const u8, gerr: ?*GError) void {
     if (gerr) |err| {
-        defer c.g_error_free(err);
-        if (err.message != null) {
-            log.err("{s}: {s}", .{ context, std.mem.span(err.message) });
-            return;
-        }
+        defer g_error_free(err);
+        log.err("{s}: {s}", .{ context, std.mem.span(err.message) });
+        return;
     }
     log.err("{s}", .{context});
 }

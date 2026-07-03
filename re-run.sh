@@ -1,102 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rebuild + restart daemon + summon UI in one step.
-# Keep runtime/build flags in one place below (or override via env vars).
+# Rebuild, install the local binary, and run one picker lifecycle.
 #
 # Optional overrides:
 #   RERUN_BUILD_FLAGS="-Doptimize=ReleaseFast"
-#   RERUN_DAEMON_ARGS="--ui-daemon"
 #   RERUN_BIN="./zig-out/bin/wayspot"
-#   RERUN_LOG="$HOME/.local/state/wayspot/daemon.log"
-#   RERUN_SUMMON=false
+#   RERUN_INSTALL_BIN="$HOME/.local/bin/wayspot"
+#   RERUN_UI=false
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 : "${RERUN_BUILD_FLAGS:=-Doptimize=ReleaseFast}"
-: "${RERUN_DAEMON_ARGS:=--ui-daemon}"
 : "${RERUN_BIN:=./zig-out/bin/wayspot}"
 : "${RERUN_INSTALL_BIN:=$HOME/.local/bin/wayspot}"
-: "${RERUN_LOG:=$HOME/.local/state/wayspot/daemon.log}"
-: "${RERUN_KILL_TARGET:=true}"
-: "${RERUN_SUMMON:=true}"
+: "${RERUN_UI:=true}"
 
 read -r -a build_flags <<<"$RERUN_BUILD_FLAGS"
-read -r -a daemon_args <<<"$RERUN_DAEMON_ARGS"
-
-sock="/tmp/wayspot-$(id -u).sock"
-
-mkdir -p "$(dirname "$RERUN_LOG")"
 
 echo "[re-run] building: zig build ${build_flags[*]}"
 zigup run 0.16.0 build "${build_flags[@]}"
-
-if [[ "$RERUN_KILL_TARGET" == "true" ]]; then
-    echo "[re-run] stopping existing daemon variants (--ui-daemon)"
-    mapfile -t matched_pids < <(
-        pgrep -a -x 'wayspot' | awk '/--ui-daemon/ {print $1}' || true
-    )
-    if ((${#matched_pids[@]} == 0)); then
-        echo "[re-run] no existing daemon found"
-    else
-        echo "[re-run] killing: ${matched_pids[*]}"
-    fi
-    for pid in "${matched_pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-    done
-    still_running=()
-    for _ in {1..20}; do
-        still_running=()
-        for pid in "${matched_pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                still_running+=("$pid")
-            fi
-        done
-        ((${#still_running[@]} == 0)) && break
-        sleep 0.05
-    done
-    if ((${#still_running[@]} > 0)); then
-        echo "[re-run] force killing: ${still_running[*]}"
-        for pid in "${still_running[@]}"; do
-            kill -9 "$pid" 2>/dev/null || true
-        done
-    fi
-
-    echo "[re-run] stopping existing slideshow variants (--wallpaper-slideshow)"
-    mapfile -t slideshow_pids < <(
-        pgrep -a -x 'wayspot' | awk '/--wallpaper-slideshow/ {print $1}' || true
-    )
-    if ((${#slideshow_pids[@]} == 0)); then
-        echo "[re-run] no existing slideshow found"
-    else
-        echo "[re-run] killing slideshow: ${slideshow_pids[*]}"
-    fi
-    for pid in "${slideshow_pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-    done
-    slideshow_still_running=()
-    for _ in {1..20}; do
-        slideshow_still_running=()
-        for pid in "${slideshow_pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                slideshow_still_running+=("$pid")
-            fi
-        done
-        ((${#slideshow_still_running[@]} == 0)) && break
-        sleep 0.05
-    done
-    if ((${#slideshow_still_running[@]} > 0)); then
-        echo "[re-run] force killing slideshow: ${slideshow_still_running[*]}"
-        for pid in "${slideshow_still_running[@]}"; do
-            kill -9 "$pid" 2>/dev/null || true
-        done
-    fi
-
-else
-    echo "[re-run] skipping daemon kill (RERUN_KILL_TARGET=false)"
-fi
-rm -f "$sock" 2>/dev/null || true
 
 if [[ -n "$RERUN_INSTALL_BIN" ]]; then
     echo "[re-run] syncing binary: $RERUN_BIN -> $RERUN_INSTALL_BIN"
@@ -105,24 +29,9 @@ if [[ -n "$RERUN_INSTALL_BIN" ]]; then
     chmod +x "$RERUN_INSTALL_BIN"
 fi
 
-echo "[re-run] starting daemon: $RERUN_BIN ${daemon_args[*]}"
-nohup "$RERUN_BIN" "${daemon_args[@]}" >"$RERUN_LOG" 2>&1 &
-disown
-
-echo "[re-run] waiting for control socket"
-for _ in {1..30}; do
-  if "$RERUN_BIN" --ctl ping >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.1
-done
-
-if [[ "$RERUN_SUMMON" == "true" ]]; then
-    echo "[re-run] summoning UI"
-    "$RERUN_BIN" --ctl summon
+if [[ "$RERUN_UI" == "true" ]]; then
+    echo "[re-run] running picker"
+    "$RERUN_BIN" --ui
 else
-    echo "[re-run] summon skipped (RERUN_SUMMON=false)"
+    echo "[re-run] picker skipped (RERUN_UI=false)"
 fi
-
-echo "[re-run] done"
-echo "[re-run] daemon log: $RERUN_LOG"

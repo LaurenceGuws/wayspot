@@ -13,18 +13,18 @@
 ## Wayspot Scope
 - Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop notification daemon.
 - Keep the core path small: initialize SDL for one bounded picker lifecycle, load app/action candidates, launch the selected command, clean up once, and render typed notification rows.
-- Treat resident IPC as optional future evidence work. It must not be required for the Super+Space happy path.
+- The notification daemon is the only long-lived interface. Do not restore resident launcher IPC without a fresh approved design.
 - GTK, shell modules, open provider registries, broad WM abstractions, web/window/workspace providers, and runtime scripting VMs are out of scope.
 
 ## Code Rules
 - Everything has a bound: loops, queues, buffers, command strings, result pages, wake slots, and retained notifications.
 - Everything is cleaned up once by the owner that allocated or started it.
-- CPU should sleep unless there is input, IPC, notification work, or a scheduled deadline.
+- CPU should sleep unless there is input, notification work, or a scheduled deadline.
 - Do not use `_ =`, `usize`, `anytype`, or `anyopaque` in active Zig code. The only known `anyopaque` exception is the GLib D-Bus callback boundary in the notification daemon.
 - Comments are production assertions. Keep `//!` file role comments and `///` important boundary comments; delete decorative, stale, roadmap, compatibility, TODO, legacy, and maybe-path text.
 
 ## Local Dev
-- Use `./re-run.sh` to rebuild, restart the daemon, and summon UI.
+- Use `./re-run.sh` to rebuild, install the binary, and run one picker lifecycle.
 - Keep runtime/build flags centralized in `re-run.sh` or `.rerun.env`.
 - Zig 0.16 on Arch needs `exe.use_llvm = true`.
 
