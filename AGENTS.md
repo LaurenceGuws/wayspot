@@ -8,6 +8,12 @@
   - `/home/home/personal/projects/team/.agent/history/tigerbeetle-overnight-bar.md`
   - `/home/home/personal/projects/team/.agent/history/qserver-zig-migration-map.yaml`
 - Treat those files as the local engineering bible: exact owners, bounded runtime behavior, accountable comments, no stale vocabulary, and no compatibility-shaped code.
+- Wayspot-local project memory lives in `.agent/history/`:
+  - `.agent/history/README.md`
+  - `.agent/history/artifacts.jsonl`
+  - `.agent/history/wayspot-scope-map.yaml`
+  - `.agent/history/wayspot-surface-scale-index.yaml`
+- Treat the local memory surface as production artifacts. Comments are planned production code; planning and memory are production artifacts.
 - Use `dev_references/` for local source-backed docs before browsing. It contains Zig 0.16 release notes, SDL wiki markdown, captured Hyprland docs, TigerBeetle, and foot references with provenance in `dev_references/manifests/SOURCES.md`.
 
 ## Wayspot Scope

@@ -1,0 +1,33 @@
+status: proposed_for_approval
+purpose: >
+  Define the shared SDL surface scale slice before implementation. This index
+  becomes executable only after explicit user approval.
+
+reread_statements:
+  - reread /home/home/personal/wayspot/AGENTS.md
+  - reread /home/home/personal/projects/team/.agent/history/README.md
+  - reread /home/home/personal/projects/team/.agent/history/qserver-zig-migration-map.yaml
+  - reread one qserver-zig index for structure
+
+scale_budget:
+  memory_records_max: 6
+  index_files_max: 1
+  no_long_planning_archives: true
+  no_expired_planning_chatter: true
+
+scope:
+  product: wayspot
+  shape: small launcher plus minimal notification daemon
+  exclusions:
+    - GTK
+    - shell modules
+    - open provider registries
+    - broad WM abstractions
+    - web, window, and workspace providers
+    - runtime scripting VMs
+
+allowed_changes:
+  - .agent/history/README.md
+  - .agent/history/artifacts.jsonl
+  - .agent/history/wayspot-scope-map.yaml
+  - .agent/history/wayspot-surface-scale-index.yaml

@@ -1,0 +1,32 @@
+status: active_scope_map
+purpose: >
+  Define the local Wayspot product scope and memory surface.
+
+mission:
+  product: CLI-summoned SDL app launcher plus minimal freedesktop notification daemon
+  core_path:
+    - initialize SDL for one bounded picker lifecycle
+    - load app and action candidates
+    - launch the selected command
+    - clean up once
+    - render typed notification rows
+  long_lived_interface: notification daemon only
+  out_of_scope:
+    - GTK
+    - shell modules
+    - open provider registries
+    - broad WM abstractions
+    - web, window, and workspace providers
+    - runtime scripting VMs
+
+code_rules:
+  - everything_has_a_bound: true
+  - every_owner_cleans_up_once: true
+  - comments_are_planned_production_code: true
+  - planning_and_memory_are_production_artifacts: true
+  - keep_expired_planning_chatter_out_of_runtime_files: true
+
+references:
+  - .agent/history/README.md
+  - .agent/history/artifacts.jsonl
+  - AGENTS.md
