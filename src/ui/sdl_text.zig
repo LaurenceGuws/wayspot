@@ -41,6 +41,7 @@ pub const TextStyle = struct {
     max_bytes: u32,
     font_size_px: u16 = default_font_size_px,
     surface_scale: f32 = 1.0,
+    cursor_color: ?Rgba8 = null,
 };
 
 const GlyphPlacement = struct {
@@ -124,13 +125,19 @@ pub const TextEngine = struct {
     ) !void {
         var codepoints: [max_codepoints]u32 = undefined;
         const codepoint_count = boundedCodepoints(&codepoints, text, style.max_bytes);
-        if (codepoint_count == 0) return;
         const surface_scale = clampedSurfaceScale(style.surface_scale);
         try self.setFontSize(effectiveFontSizePx(style.font_size_px, surface_scale));
+        if (codepoint_count == 0) {
+            if (style.cursor_color) |cursor_color| try renderCursor(renderer, x, y, 0, self.lineHeightPx(), surface_scale, cursor_color);
+            return;
+        }
 
         var glyphs: [max_glyphs]GlyphPlacement = undefined;
         const glyph_count = try self.shape(codepoints[0..codepoint_count], &glyphs);
-        if (glyph_count == 0) return;
+        if (glyph_count == 0) {
+            if (style.cursor_color) |cursor_color| try renderCursor(renderer, x, y, 0, self.lineHeightPx(), surface_scale, cursor_color);
+            return;
+        }
 
         const bounds = try self.measure(glyphs[0..glyph_count]);
         if (bounds.width() == 0 or bounds.height() == 0) return;
@@ -141,6 +148,15 @@ pub const TextEngine = struct {
         @memset(self.pixels.items, 0);
         try self.rasterize(self.pixels.items, bounds, glyphs[0..glyph_count], style.color);
         try renderTexture(renderer, self.pixels.items, bounds, x, y, surface_scale);
+        if (style.cursor_color) |cursor_color| try renderCursor(
+            renderer,
+            x,
+            y,
+            glyphAdvancePx(glyphs[0..glyph_count]),
+            self.lineHeightPx(),
+            surface_scale,
+            cursor_color,
+        );
     }
 
     fn loadPrimaryFace(self: *TextEngine) !void {
@@ -396,6 +412,39 @@ fn renderTexture(
     if (!rendered) return error.SdlTextRenderFailed;
 }
 
+fn renderCursor(
+    renderer: *sdl.SDL_Renderer,
+    x: f32,
+    y: f32,
+    advance_px: f32,
+    line_height_px: i32,
+    surface_scale: f32,
+    color: Rgba8,
+) !void {
+    const cursor_rect = textCursorRect(x, y, advance_px, line_height_px, surface_scale);
+    const cursor_color = sdl.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+    const cursor_drawn = sdl.SDL_RenderFillRect(renderer, &cursor_rect);
+    if (!cursor_color or !cursor_drawn) return error.SdlTextRenderFailed;
+}
+
+fn textCursorRect(x: f32, y: f32, advance_px: f32, line_height_px: i32, surface_scale: f32) sdl.SDL_FRect {
+    const scale = clampedSurfaceScale(surface_scale);
+    return .{
+        .x = x + (advance_px / scale),
+        .y = y,
+        .w = @max(1.0 / scale, 1.0),
+        .h = @as(f32, @floatFromInt(@max(line_height_px, 1))) / scale,
+    };
+}
+
+fn glyphAdvancePx(glyphs: []const GlyphPlacement) f32 {
+    var advance: f32 = 0;
+    for (glyphs) |glyph| {
+        advance += if (glyph.x_advance_px > 0) glyph.x_advance_px else missing_glyph_advance_px;
+    }
+    return advance;
+}
+
 fn textDestination(bounds: TextBounds, x: f32, y: f32, surface_scale: f32) sdl.SDL_FRect {
     const scale = clampedSurfaceScale(surface_scale);
     return .{
@@ -495,4 +544,12 @@ test "surface scale changes the raster size and preserves base destination" {
     try std.testing.expectEqual(@as(f32, 22), dst.y);
     try std.testing.expectEqual(@as(f32, 30), dst.w);
     try std.testing.expectEqual(@as(f32, 15), dst.h);
+}
+
+test "cursor rectangle follows shaped advance in base coordinates" {
+    const rect = textCursorRect(12, 24, 80, 40, 2.0);
+    try std.testing.expectEqual(@as(f32, 52), rect.x);
+    try std.testing.expectEqual(@as(f32, 24), rect.y);
+    try std.testing.expectEqual(@as(f32, 1), rect.w);
+    try std.testing.expectEqual(@as(f32, 20), rect.h);
 }

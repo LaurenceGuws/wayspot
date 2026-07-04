@@ -35,7 +35,6 @@ const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
 const cursor_blink_interval_ms: u64 = 530;
-const max_cursor_query_bytes: u32 = 96;
 const LaunchRunError = error{
     CommandFailed,
     ForkFailed,
@@ -51,7 +50,6 @@ comptime {
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
     std.debug.assert(cursor_blink_interval_ms > 0);
-    std.debug.assert(max_cursor_query_bytes > 0);
 }
 
 /// LaunchQueue owns one detached command intent between picker activation and controlled drain.
@@ -559,15 +557,22 @@ const SdlShell = struct {
                 .font_size_px = 17,
                 .surface_scale = surface_scale,
             });
+            if (self.cursor.visible) try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, "", .{
+                .color = .{ .r = 168, .g = 185, .b = 204 },
+                .max_bytes = 0,
+                .font_size_px = 17,
+                .surface_scale = surface_scale,
+                .cursor_color = .{ .r = 214, .g = 226, .b = 244 },
+            });
         } else {
             try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, self.query.items, .{
                 .color = .{ .r = 168, .g = 185, .b = 204 },
                 .max_bytes = 84,
                 .font_size_px = 17,
                 .surface_scale = surface_scale,
+                .cursor_color = if (self.cursor.visible) .{ .r = 214, .g = 226, .b = 244 } else null,
             });
         }
-        if (self.cursor.visible) try self.drawQueryCursor(layout);
 
         const query_rect = c.SDL_FRect{
             .x = layout.query_line.x,
@@ -578,27 +583,6 @@ const SdlShell = struct {
         const line_color = c.SDL_SetRenderDrawColor(self.renderer, 64, 74, 84, 255);
         const line_drawn = c.SDL_RenderFillRect(self.renderer, &query_rect);
         if (!line_color or !line_drawn) return error.SdlRenderFailed;
-    }
-
-    fn drawQueryCursor(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
-        const cursor_color = c.SDL_SetRenderDrawColor(self.renderer, 214, 226, 244, 255);
-        const cursor_rect = c.SDL_FRect{
-            .x = self.queryCursorX(layout),
-            .y = layout.query_text_y - 2,
-            .w = 1.5,
-            .h = 19,
-        };
-        const cursor_drawn = c.SDL_RenderFillRect(self.renderer, &cursor_rect);
-        if (!cursor_color or !cursor_drawn) return error.SdlRenderFailed;
-    }
-
-    fn queryCursorX(self: *const SdlShell, layout: picker_viewport.ResultLayout) f32 {
-        const byte_count: u32 = @intCast(@min(self.query.items.len, max_cursor_query_bytes));
-        const text_advance = @as(f32, @floatFromInt(byte_count)) * 8.5;
-        const line_left = layout.query_line.x;
-        const line_right = layout.query_line.x + @max(1, layout.query_line.w) - 1;
-        const raw_x = layout.query_text_x + text_advance;
-        return @min(line_right, @max(line_left, raw_x));
     }
 
     fn drawResults(self: *SdlShell, range: picker_viewport.VisibleRange, layout: picker_viewport.ResultLayout) !void {

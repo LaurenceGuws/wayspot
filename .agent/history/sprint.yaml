@@ -260,6 +260,19 @@ text_zoom_sharpness_receipt:
   verification:
     - zigup run 0.16.0 build test --summary all
 
+query_cursor_text_owner_receipt:
+  id: query_cursor_uses_shaped_text_advance
+  state: completed
+  behavior:
+    - sdl_shell no longer estimates query cursor x from byte count.
+    - sdl_text draws the query insertion cursor from the shaped glyph advance and active surface scale.
+    - empty query cursor placement is owned by the same text draw path as typed query cursor placement.
+  changed_files:
+    - src/ui/sdl_text.zig
+    - src/ui/sdl_shell.zig
+  verification:
+    - zigup run 0.16.0 build test --summary all
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all
