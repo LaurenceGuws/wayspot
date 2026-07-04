@@ -256,6 +256,7 @@ first_implementation_slice:
 
 later_slices:
   - id: wallpaper_config_and_library_index
+    status: completed
     result: >
       Read wallpaper.conf, scan one configured directory, and retain a bounded
       index of still image records with resolution only.
@@ -269,6 +270,7 @@ later_slices:
       max_directory_entries: 16384
       max_header_read_bytes: 65536
   - id: wallpaper_decode_and_draw
+    status: current
     result: >
       Decode one chosen still image per monitor into SDL-owned texture state and
       draw cover-cropped to monitor resolution.

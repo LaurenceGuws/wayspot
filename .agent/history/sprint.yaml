@@ -42,8 +42,15 @@ progress:
           - zero_wayspot_wallpaper_layers_after_cleanup
           - zero_wayspot_wallpaper_xdg_clients
           - no_wayland_protocol_errors
+    - wallpaper_config_and_library_index:
+        facts:
+          - wallpaper_conf_loads_one_absolute_library_path
+          - interval_seconds_clamps_to_30_86400_with_900_default
+          - library_scan_indexes_png_and_bmp_headers_without_full_decode
+          - records_store_path_byte_size_mtime_format_width_and_height
+          - scan_bounds_max_images_paths_directory_entries_and_header_bytes
   current:
-    - wallpaper_config_and_library_index
+    - wallpaper_decode_and_draw
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -55,7 +62,6 @@ verification_floor:
   - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
 
 next_candidates:
-  - wallpaper_decode_and_draw
   - wallpaper_random_timer
   - wallpaper_monitor_change_events
 
