@@ -13,16 +13,20 @@ const log = std.log.scoped(.notification_banner);
 
 const window_title = "Wayspot Notification";
 const app_id = "wayspot-notification";
-const base_window_width: i32 = 460;
-const base_window_height: i32 = 118;
-const banner_margin: i32 = 12;
+const base_window_width: i32 = 400;
+const base_window_height: i32 = 88;
+const accent_width: f32 = 2;
+const text_x: f32 = 8;
+const app_y: f32 = 6;
+const summary_y: f32 = 24;
+const body_y: f32 = 50;
 const default_timeout_ms: u32 = 4200;
 const min_timeout_ms: u32 = 1200;
 const max_timeout_ms: u32 = 10000;
 const event_wait_ms: i32 = 250;
 const max_app_bytes: u32 = 80;
-const max_summary_bytes: u32 = 160;
-const max_body_bytes: u32 = 220;
+const max_summary_bytes: u32 = 132;
+const max_body_bytes: u32 = 132;
 const placement_child_fail_code: i32 = 127;
 const max_placement_wait_interrupts: u32 = 8;
 const placement_command: [:0]const u8 =
@@ -116,24 +120,24 @@ fn render(
     const cleared = c.SDL_RenderClear(renderer);
     if (!background_set or !cleared) return error.SdlRenderFailed;
 
-    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = 4, .h = @floatFromInt(base_window_height) };
+    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = accent_width, .h = @floatFromInt(base_window_height) };
     const accent_color = c.SDL_SetRenderDrawColor(renderer, 105, 184, 150, 255);
     const accent_drawn = c.SDL_RenderFillRect(renderer, &accent);
     if (!accent_color or !accent_drawn) return error.SdlRenderFailed;
 
-    try text.draw(renderer, 18, 14, request.app_name, .{
+    try text.draw(renderer, text_x, app_y, request.app_name, .{
         .color = .{ .r = 150, .g = 166, .b = 184 },
         .max_bytes = max_app_bytes,
         .font_size_px = 13,
         .surface_scale = scale,
     });
-    try text.draw(renderer, 18, 36, request.summary, .{
+    try text.draw(renderer, text_x, summary_y, request.summary, .{
         .color = .{ .r = 238, .g = 242, .b = 247 },
         .max_bytes = max_summary_bytes,
         .font_size_px = 18,
         .surface_scale = scale,
     });
-    try text.draw(renderer, 18, 66, request.body, .{
+    try text.draw(renderer, text_x, body_y, request.body, .{
         .color = .{ .r = 188, .g = 198, .b = 210 },
         .max_bytes = max_body_bytes,
         .font_size_px = 15,

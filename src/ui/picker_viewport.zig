@@ -4,22 +4,22 @@ const std = @import("std");
 
 pub const max_visible_rows: u32 = 64;
 pub const min_scrollbar_thumb_height: f32 = 12;
-pub const default_result_list_top: f32 = 66;
-pub const default_result_row_x: f32 = 20;
-pub const default_result_row_height: f32 = 44;
-pub const default_result_row_gap: f32 = 6;
-pub const default_result_right_margin: f32 = 10;
-pub const default_result_scrollbar_gap: f32 = 6;
-pub const default_result_bottom_margin: f32 = 10;
-pub const default_result_title_x: f32 = 34;
-pub const default_result_text_top_inset: f32 = 6;
-pub const default_result_subtitle_offset: f32 = 20;
-pub const default_result_icon_size: f32 = 28;
-pub const default_result_icon_right_inset: f32 = 14;
-pub const default_query_text_x: f32 = 24;
-pub const default_query_text_y: f32 = 40;
-pub const default_query_line_y: f32 = 58;
-pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 344 };
+pub const default_result_list_top: f32 = 42;
+pub const default_result_row_x: f32 = 8;
+pub const default_result_row_height: f32 = 38;
+pub const default_result_row_gap: f32 = 2;
+pub const default_result_right_margin: f32 = 4;
+pub const default_result_scrollbar_gap: f32 = 3;
+pub const default_result_bottom_margin: f32 = 4;
+pub const default_result_title_x: f32 = 18;
+pub const default_result_text_top_inset: f32 = 4;
+pub const default_result_subtitle_offset: f32 = 18;
+pub const default_result_icon_size: f32 = 26;
+pub const default_result_icon_right_inset: f32 = 8;
+pub const default_query_text_x: f32 = 10;
+pub const default_query_text_y: f32 = 20;
+pub const default_query_line_y: f32 = 36;
+pub const default_scrollbar_track = Rect{ .x = 752, .y = 42, .w = 4, .h = 374 };
 pub const default_base_width: f32 = 760;
 pub const default_base_height: f32 = 420;
 pub const min_base_width_px: i32 = 220;
@@ -547,14 +547,14 @@ test "default result layout preserves shell row geometry" {
     const first_row = layout.rowRect(0);
     const second_row = layout.rowRect(1);
 
-    try testing.expectEqual(Rect{ .x = 20, .y = 66, .w = 720, .h = 44 }, first_row);
-    try testing.expectEqual(@as(f32, 72), layout.titleY(0));
-    try testing.expectEqual(@as(f32, 92), layout.subtitleY(0));
-    try testing.expectEqual(@as(f32, 116), second_row.y);
-    try testing.expectEqual(Rect{ .x = 20, .y = 58, .w = 720, .h = 1 }, layout.query_line);
+    try testing.expectEqual(Rect{ .x = 8, .y = 42, .w = 741, .h = 38 }, first_row);
+    try testing.expectEqual(@as(f32, 46), layout.titleY(0));
+    try testing.expectEqual(@as(f32, 64), layout.subtitleY(0));
+    try testing.expectEqual(@as(f32, 82), second_row.y);
+    try testing.expectEqual(Rect{ .x = 8, .y = 36, .w = 741, .h = 1 }, layout.query_line);
     try testing.expectEqual(default_scrollbar_track, layout.scrollbar_track);
-    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 112));
-    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 122));
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 81));
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 83));
 }
 
 test "default result layout places icon inside row hit area" {
@@ -563,8 +563,8 @@ test "default result layout places icon inside row hit area" {
     const icon = layout.iconRect(1);
     const row = layout.rowRect(1);
 
-    try testing.expectEqual(@as(f32, 28), icon.w);
-    try testing.expectEqual(@as(f32, 28), icon.h);
+    try testing.expectEqual(@as(f32, 26), icon.w);
+    try testing.expectEqual(@as(f32, 26), icon.h);
     try testing.expect(icon.x >= row.x);
     try testing.expect(icon.y >= row.y);
     try testing.expect(icon.x + icon.w <= row.x + row.w);

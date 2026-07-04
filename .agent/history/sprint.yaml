@@ -273,6 +273,25 @@ query_cursor_text_owner_receipt:
   verification:
     - zigup run 0.16.0 build test --summary all
 
+dense_surface_pane_receipt:
+  id: compact_picker_and_notification_surfaces
+  state: completed
+  behavior:
+    - picker layout uses narrow pane gutters, a shorter query strip, tighter rows, and smaller row gaps.
+    - picker hit testing, scrollbar geometry, and icon bounds still derive from ResultLayout.
+    - notification banner uses a smaller borderless window, a thinner accent rail, and tighter text offsets.
+    - notification text byte admission is lower so long bodies fail closed less often under the text texture bound.
+  changed_files:
+    - src/ui/picker_viewport.zig
+    - src/ui/sdl_banner.zig
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - grim picker screenshot from Hyprland client geometry 523,299 874x483
+    - grim notification screenshot from Hyprland client geometry 1448,12 460x101
+  screenshots:
+    - .agent/history/screenshots/picker-dense-pane.png
+    - .agent/history/screenshots/notification-dense-pane.png
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all
