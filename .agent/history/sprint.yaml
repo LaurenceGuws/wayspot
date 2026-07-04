@@ -167,6 +167,45 @@ follow_up_receipt:
     - stale vocabulary scan over changed active Zig files
     - ./zig-out/bin/wayspot --icon-diag
 
+svg_cache_receipt:
+  id: manual_svg_to_png_icon_cache
+  state: completed
+  command: ./zig-out/bin/wayspot --icon-cache-refresh
+  cache_dir: ~/.cache/wayspot/icons
+  index_file: ~/.cache/wayspot/icons/index.tsv
+  behavior:
+    - SVG conversion is manual-only and never runs during picker rendering.
+    - The binary owns candidate discovery, SVG source lookup, output paths, index writing, and child process execution.
+    - rsvg-convert is invoked from PATH; librsvg is not linked or vendored into Wayspot.
+    - cached SVG PNGs are resolved through the normal app icon texture path after refresh.
+  local_counts:
+    refresh:
+      app_rows: 105
+      converted: 15
+      already_raster: 59
+      missing_svg: 31
+      unsupported: 0
+      failed: 0
+      skipped: 0
+    diag_after_refresh:
+      app_rows: 105
+      resolved: 74
+      surface_ok: 74
+      surface_failed: 0
+      iconless: 31
+      unsupported: 0
+      skipped: 0
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - zigup run 0.16.0 build -Doptimize=ReleaseFast
+    - zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/ui/app_icons.zig src/ui/app_icon_cache.zig src/ui/app_icon_diag.zig src/ui/mod.zig
+    - git diff --check
+    - banned pattern scan over changed active Zig files
+    - stale vocabulary scan over changed active Zig files
+    - ./zig-out/bin/wayspot --icon-cache-refresh
+    - ./zig-out/bin/wayspot --icon-diag
+    - timeout 8s ./zig-out/bin/wayspot --ui
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all

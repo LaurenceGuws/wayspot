@@ -21,6 +21,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (hasArg(args, "--icon-cache-refresh")) {
+        try runIconCacheRefresh(allocator, home);
+        return;
+    }
+
     try wayspot.bufferedPrint();
 }
 
@@ -57,6 +62,20 @@ fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
 
     try apps.collect(allocator, &candidates);
     try wayspot.ui.app_icon_diag.writeReceipt(candidates.items);
+}
+
+fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
+    const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
+    defer allocator.free(app_cache);
+
+    var apps = wayspot.providers.AppsProvider.init(app_cache);
+    defer apps.deinit(allocator);
+    var candidates = wayspot.search.CandidateList.empty;
+    defer candidates.deinit(allocator);
+
+    try apps.collect(allocator, &candidates);
+    const counts = try wayspot.ui.app_icon_cache.refresh(home, candidates.items);
+    try wayspot.ui.app_icon_cache.printRefreshSummary(counts);
 }
 
 const Runtime = struct {

@@ -12,8 +12,10 @@ pub const max_icon_source_dimension: i32 = 4096;
 pub const max_icon_texture_dimension: i32 = 64;
 pub const max_icon_roots: u32 = 8;
 pub const max_icon_probes: u32 = 96;
+pub const max_icon_cache_index_bytes = 256 * 1024;
 
 const default_data_dirs = "/usr/local/share:/usr/share";
+const icon_cache_index_relative_path = ".cache/wayspot/icons/index.tsv";
 const hicolor_sizes = [_][]const u8{ "48x48", "64x64", "32x32", "128x128", "256x256" };
 const supported_extensions = [_][]const u8{ ".png", ".bmp" };
 const unsupported_image_extensions = [_][]const u8{ ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".ico", ".gif", ".tif", ".tiff", ".avif" };
@@ -146,6 +148,7 @@ pub fn diagnoseIcon(icon_name: []const u8, roots: ResolveRoots, out: []u8) IconR
     if (icon_name.len == 0) return .{ .status = .empty };
     if (icon_name.len > max_icon_name_bytes) return .{ .status = .name_too_long };
     if (!std.fs.path.isAbsolute(icon_name) and std.mem.indexOfScalar(u8, icon_name, '/') != null) return .{ .status = .relative_path };
+    if (findCachedIconPath(icon_name, out)) |path| return .{ .status = .resolved, .path = path };
     if (hasUnsupportedImageExtension(icon_name)) return .{ .status = .unsupported };
 
     const base_name = iconNameBase(icon_name) orelse return .{ .status = .unsupported };
@@ -175,8 +178,19 @@ pub fn resolveIconPathForTest(icon_name: []const u8, roots: ResolveRoots, out: [
     return resolveIconPath(icon_name, roots, out);
 }
 
+pub fn resolveRasterIconPath(icon_name: []const u8, roots: ResolveRoots, out: []u8) ?[:0]const u8 {
+    return resolveIconPathInternal(icon_name, roots, out, false);
+}
+
 fn resolveIconPath(icon_name: []const u8, roots: ResolveRoots, out: []u8) ?[:0]const u8 {
+    return resolveIconPathInternal(icon_name, roots, out, true);
+}
+
+fn resolveIconPathInternal(icon_name: []const u8, roots: ResolveRoots, out: []u8, use_cache: bool) ?[:0]const u8 {
     if (icon_name.len == 0 or icon_name.len > max_icon_name_bytes) return null;
+    if (use_cache) {
+        if (findCachedIconPath(icon_name, out)) |path| return path;
+    }
     if (std.fs.path.isAbsolute(icon_name)) {
         if (!hasSupportedExtension(icon_name)) return null;
         if (!fileStatAccepted(icon_name)) return null;
@@ -204,6 +218,29 @@ fn resolveIconPath(icon_name: []const u8, roots: ResolveRoots, out: []u8) ?[:0]c
         root_count += 1;
         if (root_count > max_icon_roots) break;
         if (resolveFromDataRoot(data_root, icon_name, base_name, out, &probes)) |path| return path;
+    }
+    return null;
+}
+
+fn findCachedIconPath(icon_name: []const u8, out: []u8) ?[:0]const u8 {
+    if (icon_name.len == 0 or icon_name.len > max_icon_name_bytes) return null;
+    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else return null;
+    var index_path_buffer: [max_icon_path_bytes + 1]u8 = undefined;
+    const index_path = std.fmt.bufPrintZ(&index_path_buffer, "{s}/{s}", .{ home, icon_cache_index_relative_path }) catch return null;
+
+    var index_buffer: [max_icon_cache_index_bytes]u8 = undefined;
+    const index_data = std.Io.Dir.cwd().readFile(std.Options.debug_io, index_path, &index_buffer) catch return null;
+    var lines = std.mem.splitScalar(u8, index_data, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trimEnd(u8, line_raw, "\r");
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const key = fields.next() orelse continue;
+        const path = fields.next() orelse continue;
+        if (!std.mem.eql(u8, key, icon_name)) continue;
+        if (!hasSupportedExtension(path)) return null;
+        if (!fileStatAccepted(path)) return null;
+        return copyPathZ(out, path);
     }
     return null;
 }
