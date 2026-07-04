@@ -64,10 +64,11 @@ cold_path:
     - first render draws chrome, visible result rows, optional scrollbar, then sleeps in SDL_WaitEvent
   pressure_points:
     - app candidate discovery and retained strings
-    - history snapshot allocation per query
     - text engine FreeType and HarfBuzz init before first useful render
     - per-draw shape, raster, texture create, texture upload, texture destroy
     - shutdown signal thread startup before first event wait
+  accepted_improvements:
+    - search service ranks against retained oldest-first history without duplicating history strings per query.
 
 current_rejected_path:
   text_texture_cache:
