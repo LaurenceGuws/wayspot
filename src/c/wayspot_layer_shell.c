@@ -386,22 +386,6 @@ void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display)
     (void)wl_display_roundtrip(display);
 }
 
-int wayspot_shm_buffer_create_solid(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t red, uint32_t green, uint32_t blue)
-{
-    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height) != 0) {
-        return -1;
-    }
-    uint32_t pixel = 0xff000000u | ((red & 0xffu) << 16) | ((green & 0xffu) << 8) | (blue & 0xffu);
-    uint32_t *pixels = buffer->data;
-    uint32_t pixel_count = width * height;
-    uint32_t index = 0;
-    while (index < pixel_count) {
-        pixels[index] = pixel;
-        index += 1;
-    }
-    return 0;
-}
-
 int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path)
 {
     if (wayspot_shm_buffer_create_empty(globals, buffer, width, height) != 0) {

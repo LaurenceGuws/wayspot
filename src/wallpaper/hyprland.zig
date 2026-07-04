@@ -48,7 +48,6 @@ pub fn queryMonitors(allocator: std.mem.Allocator, hypr: Connection) !MonitorLis
 
 pub const MonitorEvent = enum {
     monitor_changed,
-    focused_monitor,
     stopped,
 };
 
@@ -248,9 +247,6 @@ fn classifyEventLine(line: []const u8) ?MonitorEvent {
     {
         return .monitor_changed;
     }
-    if (std.mem.eql(u8, name, "focusedmon") or std.mem.eql(u8, name, "focusedmonv2")) {
-        return .focused_monitor;
-    }
     return null;
 }
 
@@ -341,16 +337,16 @@ test "monitor JSON parser rejects oversized and malformed responses" {
 test "socket2 event classifier accepts only monitor events" {
     try std.testing.expectEqual(@as(?MonitorEvent, .monitor_changed), classifyEventLine("monitoradded>>DP-1"));
     try std.testing.expectEqual(@as(?MonitorEvent, .monitor_changed), classifyEventLine("monitorremovedv2>>1,DP-1,desc"));
-    try std.testing.expectEqual(@as(?MonitorEvent, .focused_monitor), classifyEventLine("focusedmon>>DP-1,1"));
+    try std.testing.expectEqual(@as(?MonitorEvent, null), classifyEventLine("focusedmon>>DP-1,1"));
     try std.testing.expectEqual(@as(?MonitorEvent, null), classifyEventLine("openwindow>>addr,ws,class,title"));
     try std.testing.expectEqual(@as(?MonitorEvent, null), classifyEventLine("focusedmon"));
 }
 
 test "socket2 pending parser skips ignored lines before monitor event" {
     var stream = EventStream{};
-    const bytes = "openwindow>>addr,ws,class,title\nfocusedmonv2>>DP-1,1\n";
+    const bytes = "openwindow>>addr,ws,class,title\nmonitoradded>>DP-1\n";
     @memcpy(stream.pending[0..bytes.len], bytes);
     stream.pending_len = @intCast(bytes.len);
-    try std.testing.expectEqual(@as(?MonitorEvent, .focused_monitor), stream.nextPendingEvent());
+    try std.testing.expectEqual(@as(?MonitorEvent, .monitor_changed), stream.nextPendingEvent());
     try std.testing.expectEqual(@as(u32, 0), stream.pending_len);
 }

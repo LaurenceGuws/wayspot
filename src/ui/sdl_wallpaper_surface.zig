@@ -10,25 +10,15 @@ const max_title_bytes: u32 = 160;
 const layer_namespace = "wayspot-wallpaper";
 const anchor_all_edges: u32 = 1 | 2 | 4 | 8;
 
-pub const Color = struct {
-    r: u8,
-    g: u8,
-    b: u8,
-};
-
 pub const WallpaperSurface = struct {
     window: *c.SDL_Window,
     layer: LayerShellRole,
-    title_buf: [max_title_bytes:0]u8 = undefined,
-    title_len: u32 = 0,
     monitor: hyprland.Monitor,
-    generation: u32,
-    color: Color,
 
     /// The surface does not own image discovery, Hyprland IPC, or process lifetime.
-    pub fn init(monitor: hyprland.Monitor, generation: u32) !WallpaperSurface {
+    pub fn init(monitor: hyprland.Monitor) !WallpaperSurface {
         var title_buf: [max_title_bytes:0]u8 = undefined;
-        const window_title = try writeTitle(&title_buf, monitor.name(), generation);
+        const window_title = try writeTitle(&title_buf, monitor.name());
 
         const props = c.SDL_CreateProperties();
         if (props == 0) return error.SdlWindowFailed;
@@ -44,28 +34,15 @@ pub const WallpaperSurface = struct {
         const window = c.SDL_CreateWindowWithProperties(props) orelse return error.SdlWindowFailed;
         errdefer c.SDL_DestroyWindow(window);
 
-        const color = colorFor(monitor, generation);
-        var layer = try LayerShellRole.init(window, monitor, color);
+        var layer = try LayerShellRole.init(window, monitor);
         errdefer layer.deinit();
 
         const surface = WallpaperSurface{
             .window = window,
             .layer = layer,
-            .title_buf = title_buf,
-            .title_len = @intCast(window_title.len),
             .monitor = monitor,
-            .generation = generation,
-            .color = color,
         };
         return surface;
-    }
-
-    pub fn title(self: *const WallpaperSurface) []const u8 {
-        return self.title_buf[0..self.title_len];
-    }
-
-    pub fn drawSolidProof(self: *WallpaperSurface) !void {
-        try self.layer.drawSolidProof(self.monitor, self.color);
     }
 
     pub fn drawImage(self: *WallpaperSurface, path: [:0]const u8) !void {
@@ -87,8 +64,8 @@ const LayerShellRole = struct {
     attached_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 },
     attached_buffer_created: bool = false,
 
-    /// Layer-shell owns the surface role before the proof buffer is attached.
-    fn init(window: *c.SDL_Window, monitor: hyprland.Monitor, color: Color) !LayerShellRole {
+    /// The first wallpaper image attach is the first shm buffer; init only owns the role handshake.
+    fn init(window: *c.SDL_Window, monitor: hyprland.Monitor) !LayerShellRole {
         const props = c.SDL_GetWindowProperties(window);
         if (props == 0) return error.SdlWindowFailed;
 
@@ -131,25 +108,9 @@ const LayerShellRole = struct {
 
         c.wayspot_layer_surface_ack_configure(layer_surface, configure_state.serial);
         if (!c.SDL_SetWindowSize(window, monitor.width, monitor.height)) return error.SdlWindowSizeFailed;
-        try role.drawSolidProof(monitor, color);
         c.wayspot_wl_surface_commit(wl_surface);
         if (c.wayspot_wl_display_roundtrip(display) < 0) return error.LayerShellConfigureFailed;
         return role;
-    }
-
-    fn drawSolidProof(self: *LayerShellRole, monitor: hyprland.Monitor, color: Color) !void {
-        var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
-        const created = c.wayspot_shm_buffer_create_solid(
-            &self.globals,
-            &next_buffer,
-            @intCast(monitor.width),
-            @intCast(monitor.height),
-            color.r,
-            color.g,
-            color.b,
-        );
-        if (created != 0) return error.LayerShellBufferFailed;
-        try self.attachCreatedBuffer(monitor, &next_buffer);
     }
 
     fn drawImage(self: *LayerShellRole, monitor: hyprland.Monitor, path: [:0]const u8) !void {
@@ -218,19 +179,7 @@ const LayerShellRole = struct {
     }
 };
 
-fn writeTitle(buf: *[max_title_bytes:0]u8, monitor_name: []const u8, generation: u32) ![:0]const u8 {
-    const title = try std.fmt.bufPrintZ(buf, "wayspot-wallpaper:{s}:{d}", .{ monitor_name, generation });
+fn writeTitle(buf: *[max_title_bytes:0]u8, monitor_name: []const u8) ![:0]const u8 {
+    const title = try std.fmt.bufPrintZ(buf, "wayspot-wallpaper:{s}", .{monitor_name});
     return title;
-}
-
-fn colorFor(monitor: hyprland.Monitor, generation: u32) Color {
-    var hash = generation *% 16777619;
-    for (monitor.name()) |byte| {
-        hash = (hash ^ byte) *% 16777619;
-    }
-    return .{
-        .r = @intCast(48 + (hash & 63)),
-        .g = @intCast(80 + ((hash >> 8) & 79)),
-        .b = @intCast(118 + ((hash >> 16) & 91)),
-    };
 }

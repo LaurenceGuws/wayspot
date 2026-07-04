@@ -50,7 +50,6 @@ void wayspot_layer_surface_destroy(struct zwlr_layer_surface_v1 *surface);
 void wayspot_wl_surface_commit(struct wl_surface *surface);
 int wayspot_wl_display_roundtrip(struct wl_display *display);
 void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display);
-int wayspot_shm_buffer_create_solid(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t red, uint32_t green, uint32_t blue);
 int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path);
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer);
 void wayspot_wl_surface_attach_buffer(struct wl_surface *surface, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height);

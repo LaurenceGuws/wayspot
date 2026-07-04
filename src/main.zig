@@ -26,16 +26,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (hasArg(args, "--wallpaper-lifecycle-proof")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        try runWallpaperLifecycleProof(allocator, .{
-            .runtime_dir = runtime_dir,
-            .signature = signature,
-        });
-        return;
-    }
-
     if (hasArg(args, "--wallpaper")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
@@ -99,15 +89,6 @@ fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     try apps.collect(allocator, &candidates);
     const counts = try wayspot.ui.app_icon_cache.refresh(home, candidates.items);
     try wayspot.ui.app_icon_cache.printRefreshSummary(counts);
-}
-
-fn runWallpaperLifecycleProof(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
-    if (!wayspot.ui.sdl_enabled) {
-        std.log.err("wallpaper lifecycle proof requires SDL build", .{});
-        std.process.exit(2);
-    }
-
-    try wayspot.wallpaper.Runtime.runLifecycleProof(allocator, hypr);
 }
 
 fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {

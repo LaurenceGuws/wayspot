@@ -1,12 +1,13 @@
-id: wallpaper_v1
-state: complete
+id: post_wallpaper_footification
+state: active
 
 source:
-  detailed_index: .agent/history/wallpaper-v1-sprint-contract.yaml
+  detailed_index: .agent/history/post-wallpaper-footification-sprint.yaml
 
 purpose: >
-  Add the minimal Wayspot-owned wallpaper daemon path after proving direct
-  Hyprland layer surfaces, without restoring broad compositor abstractions.
+  Shrink and clarify the post-expansion wallpaper path before the next domain
+  expansion. Delete stale proof surfaces, stale vocabulary, and unearned helper
+  shape while preserving the proven daemon behavior.
 
 law:
   - foot_it_up: keep surface owners direct, shallow, and practical
@@ -16,64 +17,41 @@ law:
 
 current_scope:
   in:
-    - one SDL custom Wayland background layer surface per active monitor
-    - one configured wallpaper library path
-    - bounded still-image index with resolution metadata only
-    - one random alternating timer mode
-    - exact cleanup for surface, image, and retained path owners
+    - remove public lifecycle proof API now replaced by the real wallpaper daemon
+    - keep only direct owner comments that assert live cleanup and bounds
+    - shrink wallpaper runtime, Hyprland IPC, and layer-shell surface code where clarity survives
+    - keep startup/config memory aligned with the installed two-daemon Hyprland path
+    - preserve wallpaper daemon behavior that is already visually proven
   out:
-    - hyprpaper backend
-    - resident launcher IPC
-    - broad surface framework
-    - runtime scripting VM
-    - monitor_glasses overlay implementation
-    - animation, video, playlists, tags, ratings, or UI controls
+    - new wallpaper features
+    - monitor_glasses implementation
+    - generic compositor or surface framework
+    - cache or performance work without a proved owner and invalidation rule
+    - metadata expansion beyond the existing resolution index
 
 baseline:
-  src_lines: 6742
-  src_zig_chars: 250448
+  wallpaper_slice_lines: 2158
+  wallpaper_slice_chars: 73249
 
 progress:
   completed:
-    - wallpaper_lifecycle_proof:
-        receipt: /tmp/wayspot-wallpaper-shm-proof-20260704-195903
+    - stale_lifecycle_proof_api_removed:
         facts:
-          - two_wayspot_wallpaper_layer_surfaces_during
-          - zero_wayspot_wallpaper_layers_after_cleanup
-          - zero_wayspot_wallpaper_xdg_clients
-          - no_wayland_protocol_errors
-    - wallpaper_config_and_library_index:
+          - public_wallpaper_lifecycle_proof_cli_removed
+          - proof_named_runtime_wait_loop_removed
+          - surface_initial_buffer_renamed_to_live_layer_shell_role
+    - proof_shm_and_noop_wakes_removed:
+        receipt: /tmp/wayspot-post-wallpaper-footification-20260704-212427
         facts:
-          - wallpaper_conf_loads_one_absolute_library_path
-          - interval_seconds_clamps_to_30_86400_with_900_default
-          - library_scan_indexes_png_and_bmp_headers_without_full_decode
-          - records_store_path_byte_size_mtime_format_width_and_height
-          - scan_bounds_max_images_paths_directory_entries_and_header_bytes
-    - wallpaper_decode_and_draw:
-        receipt: /tmp/wayspot-wallpaper-decode-slice-proof-20260704-204359
-        facts:
-          - image_decode_uses_wallpaper_surface_shm_path
-          - no_sdl_renderer_texture_path_added
-          - layer_surface_count_remained_bounded
-    - wallpaper_random_timer:
-        receipt: /tmp/wayspot-wallpaper-daemon-smoke-20260704-205249
-        facts:
-          - wallpaper_mode_loads_config_and_library_before_starting_sdl
-          - empty_library_exits_before_surface_retention
-          - one_random_timer_redraws_all_monitor_surfaces
-          - event_loop_sleeps_on_sdl_wait_timeout_until_event_or_deadline
-          - sigterm_wakes_daemon_and_runtime_cleanup_removes_layers
-          - cleanup_remains_runtime_owned
-    - wallpaper_monitor_change_events:
-        receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
-        facts:
-          - socket2_is_owned_by_one_wallpaper_monitor_watcher
-          - monitor_added_and_removed_events_wake_the_sdl_loop
-          - add_remove_rebuilds_surface_slots_from_a_fresh_monitor_query
-          - focused_monitor_events_wake_and_drain_without_rebuilding_per_monitor_wallpaper_surfaces
-          - runtime_still_sleeps_until_sdl_event_monitor_event_shutdown_or_timer_deadline
-          - configured_daemon_smoke_removed_all_layers_after_sigterm
-  current: []
+          - solid_color_wallpaper_buffer_c_path_removed
+          - wallpaper_first_draw_attaches_the_first_shm_buffer
+          - focused_monitor_socket2_events_no_longer_wake_wallpaper_runtime
+          - surface_slot_state_removed_because_slot_count_owns_initialized_range
+          - unused_shutdown_requested_state_removed
+          - wallpaper_module_reexports_narrowed_to_runtime_config_and_hyprland
+          - refreshed_wallpaper_daemon_retained_one_background_layer_per_monitor
+  current:
+    - audit_remaining_wallpaper_expansion_surface_for_one_more_small_cut
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -81,14 +59,17 @@ verification_floor:
   - zigup run 0.16.0 fmt --check touched Zig files
   - git diff --check
   - banned active Zig pattern scan
-  - stale runtime vocabulary scan
+  - stale runtime vocabulary scan for proof inert-fallback old-roadmap text
   - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
   - configured wallpaper smoke receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
 
-next_candidates: []
+next_candidates:
+  - audit src/wallpaper/runtime.zig shutdown and monitor watcher ownership for shrink without hiding cleanup
+  - audit src/wallpaper/hyprland.zig request and socket2 parsing for direct bounds
+  - audit src/c/wayspot_layer_shell.c comments and cleanup paths against the Zig owner comments
 
 accepted_discoveries:
   - hyprland_direct_surface_discovery:
       memory: .agent/history/hyprland-direct-surface-discovery.yaml
       wallpaper_backend: Wayspot_owned_SDL_custom_Wayland_surfaces_with_wlr_layer_shell_background
-      future_noun: monitor_glasses
+      reserved_noun: monitor_glasses

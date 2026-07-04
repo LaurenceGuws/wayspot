@@ -7,7 +7,7 @@ product:
   summary: >
     Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
     notification daemon.
-  active_focus: wallpaper_v1_sprint
+  active_focus: post_wallpaper_footification
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
@@ -48,10 +48,10 @@ ownership:
   wallpaper:
     - one Wayspot-owned SDL surface per monitor
     - Hyprland monitor discovery and wlr-layer-shell background output binding
-    - still-image random alternating timer after config, index, and decode are proven
-  future_monitor_glasses:
-    - named future noun for non-interactive per-monitor overlay and filter surfaces
-    - shares direct Hyprland window mechanics with wallpaper but uses explicit overlay placement
+    - still-image random alternating timer from one configured library path
+  reserved_monitor_glasses:
+    - named noun for non-interactive per-monitor overlay and filter surfaces
+    - shares direct Hyprland window mechanics with wallpaper but requires explicit overlay placement
 
 boundaries:
   - notification_daemon_is_the_only_long_lived_interface
@@ -68,7 +68,7 @@ design_law:
     - keep direct owners before adding retained resources
     - delete unearned helper shape before adding optimization shape
     - model only the current product domain
-    - do not preserve old architecture as no-op compatibility
+    - do not preserve old architecture as inert fallback surface
     - prove behavior through bounded tests and manual receipts
 
 constraints:
@@ -90,11 +90,11 @@ accepted_discoveries:
   hyprland_direct_surfaces:
     memory: .agent/history/hyprland-direct-surface-discovery.yaml
     wallpaper_path: sdl_custom_wayland_surface_plus_wlr_layer_shell_background
-    overlay_noun: monitor_glasses
+    reserved_overlay_noun: monitor_glasses
     rule: >
       Wallpaper starts from direct Wayspot-owned SDL custom Wayland surfaces on
-      the background layer. Normal toplevel windows are preserved only for the
-      future monitor_glasses overlay noun.
+      the background layer. Normal toplevel windows are preserved only for
+      monitor_glasses overlay work.
 
 memory_policy:
   live_files:
