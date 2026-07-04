@@ -5,13 +5,14 @@ workspace:
 
 product:
   summary: >
-    Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
-    notification daemon.
-  active_focus: runtime_modes_sprint
+    Wayspot is a pragmatic DE busybox: CLI-summoned SDL app launcher,
+    notification daemon, wallpaper daemon, and focused runtime surfaces.
+  active_focus: sunglasses_foundations
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
     wallpaper: cli_or_daemon -> hyprland_monitor_facts -> sdl_custom_wayland_surfaces -> wlr_layer_shell_background
+    sunglasses: picker_form -> persisted_filter_state -> overlay_daemon -> per_monitor_pass_through_layer_surfaces
 
 ownership:
   main:
@@ -54,9 +55,11 @@ ownership:
     - slash-prefixed picker mode rows
     - /notifications and /wallpapers daemon command lists
     - no /apps row because apps remain the default picker list
-  reserved_monitor_glasses:
-    - named noun for non-interactive per-monitor overlay and filter surfaces
-    - shares direct Hyprland window mechanics with wallpaper but requires explicit overlay placement
+  sunglasses:
+    - /sunglasses opens a form pane, not a result list
+    - each monitor has a red/blue toggle and bounded slider
+    - each monitor has a dimming toggle and bounded black-overlay slider
+    - state applies through a resident non-interactive per-monitor overlay owner
 
 boundaries:
   - notification_daemon_is_the_only_long_lived_interface

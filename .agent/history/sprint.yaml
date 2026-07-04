@@ -1,45 +1,41 @@
-id: runtime_modes
-state: complete
+id: sunglasses_foundations
+state: approved
 
 source:
-  detailed_index: .agent/history/runtime-modes-sprint.yaml
+  detailed_index: .agent/history/sunglasses-foundations-sprint.yaml
 
 purpose: >
-  Add the smallest runtime maturity surface to the picker: slash modes that
-  switch result lists, with daemon modes exposing one restart command each.
+  Add the v1 foundations for /sunglasses as a real subsystem: a picker form
+  for red/blue and dim controls, persisted bounded state, and a non-interactive
+  overlay daemon that applies the state per monitor.
 
 law:
-  - modes_are_a_picker_noun_not_a_plugin_registry
-  - default_picker_list_is_apps_without_a_slash_mode
-  - daemon_commands_are_static_bounded_rows
-  - selecting_a_mode_changes_the_query_without_launching_a_process
+  - sunglasses_is_a_runtime_surface_subsystem_not_a_picker_row
+  - form_modes_are_not_result_lists
+  - overlay_surfaces_must_be_non_interactive_and_cleaned_up_once
+  - no_generic_surface_framework_before_two_real_owners_force_a_deletion
 
 current_scope:
   in:
-    - typing / shows mode rows
-    - /notifications opens the notifications daemon list
-    - /wallpapers opens the wallpaper daemon list
-    - selecting a mode row changes the picker list in place
-    - daemon mode first row restarts the daemon process through the existing singleton lock path
+    - /sunglasses mode row
+    - /sunglasses opens a form pane in the picker
+    - one red/blue toggle and bounded slider per monitor
+    - one dim toggle and bounded slider per monitor
+    - persisted sunglasses state
+    - one resident sunglasses daemon
+    - one pass-through overlay surface per monitor
+    - daemon apply wake when form state changes
   out:
-    - /apps row
-    - plugin/provider registry
-    - resident launcher IPC
-    - daemon status dashboards
-    - notification history browsing
-    - wallpaper library browsing
+    - color science beyond a simple signed blue-to-red tint
+    - schedules, sunrise, location, animation, profiles, presets
+    - generic UI framework
+    - plugin or provider registry
+    - scripting VM
 
 progress:
-  completed:
-    - slash_modes_and_daemon_restart_rows:
-        facts:
-          - ModesProvider owns static slash mode candidates
-          - default route excludes mode and daemon rows
-          - /notifications filters to notifications daemon restart
-          - /wallpapers filters to wallpaper daemon restart
-          - mode selection rewrites the picker query instead of launching
-          - daemon selection launches a static restart command
-  current: []
+  completed: []
+  current:
+    - ready_for_01_state_owner
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -47,4 +43,5 @@ verification_floor:
   - zigup run 0.16.0 fmt --check touched Zig files
   - git diff --check
   - banned active Zig pattern scan
-  - manual picker smoke for slash modes
+  - hyprctl layers receipt for sunglasses overlay surfaces
+  - screenshot receipt for visible red/blue and dim effects
