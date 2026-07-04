@@ -110,6 +110,7 @@ const Runtime = struct {
     app_cache_path: []u8,
     history_path: []u8,
     actions: wayspot.providers.ActionsProvider = .{},
+    modes: wayspot.providers.ModesProvider = .{},
     apps: wayspot.providers.AppsProvider,
     service: wayspot.app.SearchService,
 
@@ -121,7 +122,7 @@ const Runtime = struct {
     }
 
     fn wireProviders(self: *Runtime) void {
-        self.service = wayspot.app.SearchService.initWithHistoryPath(&self.actions, &self.apps, self.history_path);
+        self.service = wayspot.app.SearchService.initWithHistoryPath(&self.actions, &self.apps, &self.modes, self.history_path);
         self.service.max_history = 64;
     }
 };

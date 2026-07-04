@@ -15,7 +15,7 @@ pub const CommandPlan = struct {
 
 pub fn shouldRecordCandidate(kind: search.CandidateKind) bool {
     return switch (kind) {
-        .notification, .hint => false,
+        .mode, .daemon, .notification, .hint => false,
         else => true,
     };
 }
@@ -24,7 +24,8 @@ pub fn planCommandKind(allocator: std.mem.Allocator, kind: kinds.UiKind, action:
     return switch (kind) {
         .app => planApp(action),
         .action => try planAction(allocator, action),
-        .notification, .hint, .unknown => error.UnsupportedCommandKind,
+        .daemon => planDaemon(action),
+        .mode, .notification, .hint, .unknown => error.UnsupportedCommandKind,
     };
 }
 
@@ -46,6 +47,14 @@ fn planAction(allocator: std.mem.Allocator, action: []const u8) !CommandPlan {
     };
 }
 
+fn planDaemon(action: []const u8) !CommandPlan {
+    const command = providers_mod.resolveDaemonCommand(action) orelse return error.UnknownAction;
+    return .{
+        .command = command,
+        .detach_command = true,
+    };
+}
+
 test "app action launches detached command" {
     var plan = try planCommandKind(std.testing.allocator, .app, "kitty");
     defer plan.deinit(std.testing.allocator);
@@ -63,4 +72,12 @@ test "configured action resolves through action provider" {
 
 test "unknown action is rejected" {
     try std.testing.expectError(error.UnknownAction, planCommandKind(std.testing.allocator, .action, "cmd:echo hacked"));
+}
+
+test "daemon action resolves through modes provider" {
+    var plan = try planCommandKind(std.testing.allocator, .daemon, "daemon:wallpapers:restart");
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, plan.command, "--wallpaper") != null);
+    try std.testing.expect(plan.detach_command);
 }

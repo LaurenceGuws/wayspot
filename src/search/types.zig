@@ -5,6 +5,8 @@ const std = @import("std");
 pub const CandidateKind = enum {
     app,
     action,
+    mode,
+    daemon,
     notification,
     hint,
 };

@@ -467,6 +467,10 @@ const SdlShell = struct {
         std.debug.assert(result_index < self.results.len);
         if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
         const candidate = self.results[@intCast(result_index)].candidate;
+        if (candidate.kind == .mode) {
+            try self.switchMode(candidate.action);
+            return;
+        }
         var plan = try common_dispatch.planCommandKind(self.allocator, uiKind(candidate.kind), candidate.action);
         defer plan.deinit(self.allocator);
         if (!plan.detach_command) return error.LaunchMustDetach;
@@ -475,6 +479,13 @@ const SdlShell = struct {
         }
         try self.launch_queue.queue(plan.command);
         self.shutdown_after_launch = true;
+    }
+
+    fn switchMode(self: *SdlShell, mode_query: []const u8) !void {
+        self.query.clearRetainingCapacity();
+        try self.query.appendSlice(self.allocator, mode_query);
+        self.resetCursorBlink();
+        try self.refreshResults();
     }
 
     fn drainPendingLaunch(self: *SdlShell) !void {
@@ -706,6 +717,8 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
     return switch (kind) {
         .app => .app,
         .action => .action,
+        .mode => .mode,
+        .daemon => .daemon,
         .notification => .notification,
         .hint => .hint,
     };

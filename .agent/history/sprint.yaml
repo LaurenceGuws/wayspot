@@ -1,68 +1,45 @@
-id: post_wallpaper_footification
-state: active
+id: runtime_modes
+state: complete
 
 source:
-  detailed_index: .agent/history/post-wallpaper-footification-sprint.yaml
+  detailed_index: .agent/history/runtime-modes-sprint.yaml
 
 purpose: >
-  Shrink and clarify the post-expansion wallpaper path before the next domain
-  expansion. Delete stale proof surfaces, stale vocabulary, and unearned helper
-  shape while preserving the proven daemon behavior.
+  Add the smallest runtime maturity surface to the picker: slash modes that
+  switch result lists, with daemon modes exposing one restart command each.
 
 law:
-  - foot_it_up: keep surface owners direct, shallow, and practical
-  - tigerbeetle_pressure: every owner has bounded state and exact cleanup
-  - no_architecture_astronautics: abstractions earn their file, name, and call site
-  - character_reduction_is_good_only_when_behavior_and_ownership_stay_clear
+  - modes_are_a_picker_noun_not_a_plugin_registry
+  - default_picker_list_is_apps_without_a_slash_mode
+  - daemon_commands_are_static_bounded_rows
+  - selecting_a_mode_changes_the_query_without_launching_a_process
 
 current_scope:
   in:
-    - remove public lifecycle proof API now replaced by the real wallpaper daemon
-    - keep only direct owner comments that assert live cleanup and bounds
-    - shrink wallpaper runtime, Hyprland IPC, and layer-shell surface code where clarity survives
-    - keep startup/config memory aligned with the installed two-daemon Hyprland path
-    - preserve wallpaper daemon behavior that is already visually proven
-    - expose one CLI rotate-now request for the running wallpaper daemon
+    - typing / shows mode rows
+    - /notifications opens the notifications daemon list
+    - /wallpapers opens the wallpaper daemon list
+    - selecting a mode row changes the picker list in place
+    - daemon mode first row restarts the daemon process through the existing singleton lock path
   out:
-    - new wallpaper features
-    - monitor_glasses implementation
-    - generic compositor or surface framework
-    - cache or performance work without a proved owner and invalidation rule
-    - metadata expansion beyond the existing resolution index
-
-baseline:
-  wallpaper_slice_lines: 2158
-  wallpaper_slice_chars: 73249
+    - /apps row
+    - plugin/provider registry
+    - resident launcher IPC
+    - daemon status dashboards
+    - notification history browsing
+    - wallpaper library browsing
 
 progress:
   completed:
-    - stale_lifecycle_proof_api_removed:
+    - slash_modes_and_daemon_restart_rows:
         facts:
-          - public_wallpaper_lifecycle_proof_cli_removed
-          - proof_named_runtime_wait_loop_removed
-          - surface_initial_buffer_renamed_to_live_layer_shell_role
-    - proof_shm_and_noop_wakes_removed:
-        receipt: /tmp/wayspot-post-wallpaper-footification-20260704-212427
-        facts:
-          - solid_color_wallpaper_buffer_c_path_removed
-          - wallpaper_first_draw_attaches_the_first_shm_buffer
-          - focused_monitor_socket2_events_no_longer_wake_wallpaper_runtime
-          - surface_slot_state_removed_because_slot_count_owns_initialized_range
-          - unused_shutdown_requested_state_removed
-          - wallpaper_module_reexports_narrowed_to_runtime_config_and_hyprland
-          - refreshed_wallpaper_daemon_retained_one_background_layer_per_monitor
-    - wallpaper_rotate_now_cli:
-        receipt: /tmp/wayspot-wallpaper-rotate-single-20260704-213643
-        facts:
-          - --next-wallpaper remains the Hyprland binding flag
-          - --wallpaper-rotate-now is a readable alias
-          - daemon owns one pid receipt under XDG_RUNTIME_DIR
-          - CLI verifies pid command line before SIGUSR1
-          - SIGUSR1 wakes the sleeping SDL loop
-          - rotate redraws all monitor surfaces and resets the timer
-          - one CLI request produced one daemon rotate receipt
-  current:
-    - final_verification_before_commit
+          - ModesProvider owns static slash mode candidates
+          - default route excludes mode and daemon rows
+          - /notifications filters to notifications daemon restart
+          - /wallpapers filters to wallpaper daemon restart
+          - mode selection rewrites the picker query instead of launching
+          - daemon selection launches a static restart command
+  current: []
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -70,17 +47,4 @@ verification_floor:
   - zigup run 0.16.0 fmt --check touched Zig files
   - git diff --check
   - banned active Zig pattern scan
-  - stale runtime vocabulary scan for proof inert-fallback old-roadmap text
-  - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
-  - configured wallpaper smoke receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
-
-next_candidates:
-  - audit src/wallpaper/runtime.zig shutdown and monitor watcher ownership for shrink without hiding cleanup
-  - audit src/wallpaper/hyprland.zig request and socket2 parsing for direct bounds
-  - audit src/c/wayspot_layer_shell.c comments and cleanup paths against the Zig owner comments
-
-accepted_discoveries:
-  - hyprland_direct_surface_discovery:
-      memory: .agent/history/hyprland-direct-surface-discovery.yaml
-      wallpaper_backend: Wayspot_owned_SDL_custom_Wayland_surfaces_with_wlr_layer_shell_background
-      reserved_noun: monitor_glasses
+  - manual picker smoke for slash modes

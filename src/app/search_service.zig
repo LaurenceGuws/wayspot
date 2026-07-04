@@ -6,6 +6,7 @@ const history_access = @import("search_service/history_access.zig");
 pub const SearchService = struct {
     actions: ?*providers.ActionsProvider = null,
     apps: ?*providers.AppsProvider = null,
+    modes: ?*providers.ModesProvider = null,
     query_mu: std.Io.Mutex = .init,
     history_path: ?[]const u8 = null,
     candidates: search.CandidateList = .empty,
@@ -23,11 +24,13 @@ pub const SearchService = struct {
     pub fn initWithHistoryPath(
         actions: ?*providers.ActionsProvider,
         apps: ?*providers.AppsProvider,
+        modes: ?*providers.ModesProvider,
         history_path: []const u8,
     ) SearchService {
         return .{
             .actions = actions,
             .apps = apps,
+            .modes = modes,
             .history_path = history_path,
         };
     }
@@ -71,6 +74,7 @@ pub const SearchService = struct {
 
     fn loadCandidatesOnce(self: *SearchService, allocator: std.mem.Allocator) !void {
         if (self.candidates_loaded) return;
+        if (self.modes) |provider| try provider.collect(allocator, &self.candidates);
         if (self.actions) |provider| try provider.collect(allocator, &self.candidates);
         if (self.apps) |provider| try provider.collect(allocator, &self.candidates);
         self.candidates_loaded = true;
@@ -107,6 +111,19 @@ test "search service collects candidates once per service lifetime" {
     defer std.testing.allocator.free(second);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+}
+
+test "search service exposes modes without hiding default app search" {
+    var modes = providers.ModesProvider{};
+    var service = SearchService{
+        .modes = &modes,
+    };
+    defer service.deinit(std.testing.allocator);
+
+    const mode_results = try service.searchQuery(std.testing.allocator, "/");
+    defer std.testing.allocator.free(mode_results);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(mode_results.len)));
+    try std.testing.expectEqual(search.CandidateKind.mode, mode_results[0].candidate.kind);
 }
 
 test "search service ranks retained history without query history allocation" {

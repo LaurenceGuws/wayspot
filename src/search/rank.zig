@@ -27,7 +27,7 @@ pub fn rankCandidatesWithHistory(
     defer scored.deinit(allocator);
 
     for (candidates) |candidate| {
-        if (!matchesRoute(query.route, candidate.kind)) continue;
+        if (!matchesRoute(query.route, candidate)) continue;
         const score = candidateScoreNewestFirst(query.route, query.term, candidate, recent_actions);
         if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
@@ -47,7 +47,7 @@ pub fn rankCandidatesWithOldestFirstHistory(
     defer scored.deinit(allocator);
 
     for (candidates) |candidate| {
-        if (!matchesRoute(query.route, candidate.kind)) continue;
+        if (!matchesRoute(query.route, candidate)) continue;
         const score = candidateScoreOldestFirst(query.route, query.term, candidate, history_actions);
         if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
@@ -77,10 +77,13 @@ fn lessThan(_: void, a: ScoredCandidate, b: ScoredCandidate) bool {
     return icon_order == .lt;
 }
 
-fn matchesRoute(route: query_mod.Route, kind: types.CandidateKind) bool {
+fn matchesRoute(route: query_mod.Route, candidate: types.Candidate) bool {
     return switch (route) {
-        .blended => true,
-        .apps => kind == .app,
+        .blended => candidate.kind == .app,
+        .apps => candidate.kind == .app,
+        .modes => candidate.kind == .mode,
+        .notifications => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:notifications:restart"),
+        .wallpapers => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:wallpapers:restart"),
         .run => true,
     };
 }
@@ -164,6 +167,8 @@ fn shortQueryBias(needle_len: u64, kind: types.CandidateKind) i32 {
     return switch (kind) {
         .action => 50,
         .app => 0,
+        .mode => 0,
+        .daemon => 0,
         .notification => 0,
         .hint => 0,
     };
@@ -202,6 +207,8 @@ fn baseWeight(route: query_mod.Route, kind: types.CandidateKind) i32 {
     return switch (kind) {
         .app => 100,
         .action => 70,
+        .mode => 90,
+        .daemon => 80,
         .notification => 60,
         .hint => 10,
     };
@@ -235,6 +242,41 @@ test "route filter limits result kinds" {
     try std.testing.expectEqual(types.CandidateKind.app, ranked[0].candidate.kind);
 }
 
+test "slash routes expose modes and daemon commands only" {
+    const candidates = [_]types.Candidate{
+        .init(.mode, "/notifications", "Runtime mode", "/notifications"),
+        .init(.mode, "/wallpapers", "Runtime mode", "/wallpapers"),
+        .init(.daemon, "Restart notifications daemon", "Runtime", "daemon:notifications:restart"),
+        .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
+        .init(.app, "Kitty", "Terminal", "kitty"),
+    };
+
+    const modes = try rankCandidates(std.testing.allocator, query_mod.parse("/"), &candidates);
+    defer std.testing.allocator.free(modes);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(modes.len)));
+    try std.testing.expectEqual(types.CandidateKind.mode, modes[0].candidate.kind);
+
+    const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
+    defer std.testing.allocator.free(notifications);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(notifications.len)));
+    try std.testing.expectEqualStrings("daemon:notifications:restart", notifications[0].candidate.action);
+}
+
+test "default route is apps only" {
+    const candidates = [_]types.Candidate{
+        .init(.mode, "/notifications", "Daemon mode", "/notifications"),
+        .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
+        .init(.action, "Settings", "System", "settings"),
+        .init(.app, "Kitty", "Terminal", "kitty"),
+    };
+
+    const ranked = try rankCandidates(std.testing.allocator, query_mod.parse(""), &candidates);
+    defer std.testing.allocator.free(ranked);
+
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
+    try std.testing.expectEqual(types.CandidateKind.app, ranked[0].candidate.kind);
+}
+
 test "empty apps route keeps app-only scoring order" {
     const candidates = [_]types.Candidate{
         .init(.app, "Firefox", "Browser", "firefox"),
@@ -259,7 +301,7 @@ test "recency history boosts repeated action candidates" {
         .init(.action, "Power menu", "Session", "power"),
     };
     const history = [_][]const u8{"power"};
-    const query = query_mod.parse("p");
+    const query = query_mod.parse("> p");
     const ranked = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &history);
     defer std.testing.allocator.free(ranked);
 
@@ -277,7 +319,7 @@ test "newest-first and oldest-first histories produce equivalent recency ranking
     var settings = [_]u8{ 's', 'e', 't', 't', 'i', 'n', 'g', 's' };
     var power = [_]u8{ 'p', 'o', 'w', 'e', 'r' };
     const oldest_first = [_][]u8{ settings[0..], power[0..] };
-    const query = query_mod.parse("");
+    const query = query_mod.parse("> e");
 
     const ranked_newest = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &newest_first);
     defer std.testing.allocator.free(ranked_newest);
@@ -293,7 +335,7 @@ test "newest-first and oldest-first histories produce equivalent recency ranking
     try std.testing.expectEqualStrings("power", ranked_oldest[0].candidate.action);
 }
 
-test "short blended query prefers actions over broad app matches" {
+test "default route ignores action rows" {
     const candidates = [_]types.Candidate{
         .init(.app, "Redis Desktop Manager", "Database GUI", "redis-desktop"),
         .init(.action, "Settings", "System", "settings"),
@@ -303,9 +345,9 @@ test "short blended query prefers actions over broad app matches" {
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
-    try std.testing.expectEqual(types.CandidateKind.action, ranked[0].candidate.kind);
-    try std.testing.expectEqualStrings("Settings", ranked[0].candidate.title);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
+    try std.testing.expectEqual(types.CandidateKind.app, ranked[0].candidate.kind);
+    try std.testing.expectEqualStrings("Redis Desktop Manager", ranked[0].candidate.title);
 }
 
 test "rankCandidates propagates scored result alloc failure" {
