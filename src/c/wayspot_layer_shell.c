@@ -70,6 +70,79 @@ static uint32_t wayspot_min_u32(uint32_t a, uint32_t b)
     return a < b ? a : b;
 }
 
+static int wayspot_has_extension(const char *path, const char *extension)
+{
+    size_t path_len = strlen(path);
+    size_t extension_len = strlen(extension);
+    if (path_len < extension_len) {
+        return 0;
+    }
+    return SDL_strcasecmp(path + path_len - extension_len, extension) == 0;
+}
+
+static int wayspot_cover_source_rect(int source_width, int source_height, int target_width, int target_height, SDL_Rect *rect)
+{
+    if (source_width <= 0 || source_height <= 0 || target_width <= 0 || target_height <= 0) {
+        return -1;
+    }
+
+    int64_t source_as_target_wide = (int64_t)source_width * target_height;
+    int64_t target_as_source_wide = (int64_t)target_width * source_height;
+    if (source_as_target_wide > target_as_source_wide) {
+        int crop_width = (int)((int64_t)source_height * target_width / target_height);
+        rect->x = (source_width - crop_width) / 2;
+        rect->y = 0;
+        rect->w = crop_width;
+        rect->h = source_height;
+    } else {
+        int crop_height = (int)((int64_t)source_width * target_height / target_width);
+        rect->x = 0;
+        rect->y = (source_height - crop_height) / 2;
+        rect->w = source_width;
+        rect->h = crop_height;
+    }
+    return rect->w <= 0 || rect->h <= 0 ? -1 : 0;
+}
+
+static int wayspot_shm_buffer_create_empty(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height)
+{
+    if (width == 0 || height == 0 || width > UINT32_MAX / 4 || height > UINT32_MAX / (width * 4)) {
+        return -1;
+    }
+    uint32_t stride = width * 4;
+    uint32_t byte_len = stride * height;
+    int fd = memfd_create("wayspot-wallpaper", MFD_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    if (ftruncate(fd, byte_len) != 0) {
+        close(fd);
+        return -1;
+    }
+    void *data = mmap(NULL, byte_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+    struct wl_shm_pool *pool = wl_shm_create_pool(globals->shm, fd, (int32_t)byte_len);
+    if (pool == NULL) {
+        munmap(data, byte_len);
+        close(fd);
+        return -1;
+    }
+    struct wl_buffer *wl_buffer = wl_shm_pool_create_buffer(pool, 0, (int32_t)width, (int32_t)height, (int32_t)stride, WL_SHM_FORMAT_XRGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    if (wl_buffer == NULL) {
+        munmap(data, byte_len);
+        return -1;
+    }
+    buffer->buffer = wl_buffer;
+    buffer->data = data;
+    buffer->byte_len = byte_len;
+    return 0;
+}
+
 static void wayspot_output_geometry(void *data, struct wl_output *output, int32_t x, int32_t y, int32_t physical_width, int32_t physical_height, int32_t subpixel, const char *make, const char *model, int32_t transform)
 {
     (void)data;
@@ -315,45 +388,62 @@ void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display)
 
 int wayspot_shm_buffer_create_solid(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t red, uint32_t green, uint32_t blue)
 {
-    uint32_t stride = width * 4;
-    uint32_t byte_len = stride * height;
-    int fd = memfd_create("wayspot-wallpaper", MFD_CLOEXEC);
-    if (fd < 0) {
-        return -1;
-    }
-    if (ftruncate(fd, byte_len) != 0) {
-        close(fd);
-        return -1;
-    }
-    void *data = mmap(NULL, byte_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
-        close(fd);
+    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height) != 0) {
         return -1;
     }
     uint32_t pixel = 0xff000000u | ((red & 0xffu) << 16) | ((green & 0xffu) << 8) | (blue & 0xffu);
-    uint32_t *pixels = data;
+    uint32_t *pixels = buffer->data;
     uint32_t pixel_count = width * height;
     uint32_t index = 0;
     while (index < pixel_count) {
         pixels[index] = pixel;
         index += 1;
     }
-    struct wl_shm_pool *pool = wl_shm_create_pool(globals->shm, fd, (int32_t)byte_len);
-    if (pool == NULL) {
-        munmap(data, byte_len);
-        close(fd);
+    return 0;
+}
+
+int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path)
+{
+    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height) != 0) {
         return -1;
     }
-    struct wl_buffer *wl_buffer = wl_shm_pool_create_buffer(pool, 0, (int32_t)width, (int32_t)height, (int32_t)stride, WL_SHM_FORMAT_XRGB8888);
-    wl_shm_pool_destroy(pool);
-    close(fd);
-    if (wl_buffer == NULL) {
-        munmap(data, byte_len);
+
+    SDL_Surface *loaded = NULL;
+    if (wayspot_has_extension(path, ".png")) {
+        loaded = SDL_LoadPNG(path);
+    } else if (wayspot_has_extension(path, ".bmp")) {
+        loaded = SDL_LoadBMP(path);
+    }
+    if (loaded == NULL) {
+        wayspot_shm_buffer_destroy(buffer);
         return -1;
     }
-    buffer->buffer = wl_buffer;
-    buffer->data = data;
-    buffer->byte_len = byte_len;
+
+    SDL_Surface *source = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_XRGB8888);
+    SDL_DestroySurface(loaded);
+    if (source == NULL) {
+        wayspot_shm_buffer_destroy(buffer);
+        return -1;
+    }
+
+    SDL_Surface *target = SDL_CreateSurfaceFrom((int)width, (int)height, SDL_PIXELFORMAT_XRGB8888, buffer->data, (int)(width * 4));
+    if (target == NULL) {
+        SDL_DestroySurface(source);
+        wayspot_shm_buffer_destroy(buffer);
+        return -1;
+    }
+
+    SDL_Rect source_rect;
+    int crop_ok = wayspot_cover_source_rect(source->w, source->h, (int)width, (int)height, &source_rect);
+    if (crop_ok != 0 || !SDL_BlitSurfaceScaled(source, &source_rect, target, NULL, SDL_SCALEMODE_LINEAR)) {
+        SDL_DestroySurface(target);
+        SDL_DestroySurface(source);
+        wayspot_shm_buffer_destroy(buffer);
+        return -1;
+    }
+
+    SDL_DestroySurface(target);
+    SDL_DestroySurface(source);
     return 0;
 }
 

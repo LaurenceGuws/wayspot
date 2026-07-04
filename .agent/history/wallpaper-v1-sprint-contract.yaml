@@ -272,9 +272,13 @@ later_slices:
   - id: wallpaper_decode_and_draw
     status: current
     result: >
-      Decode one chosen still image per monitor into SDL-owned texture state and
-      draw cover-cropped to monitor resolution.
+      Decode one chosen still image per monitor, copy cover-cropped pixels into
+      the Wayspot-owned shm buffer, and commit the existing layer surface.
     rule: decode only after the lifecycle and index are accepted
+    corrected_surface_rule: >
+      Do not add SDL_Renderer, SDL_Texture, or a render cache for wallpaper.
+      SDL may decode image files, but layer-shell presentation stays owned by
+      WallpaperSurface through one shm buffer per monitor surface.
   - id: wallpaper_random_timer
     result: >
       Replace images on one bounded random alternating timer while CPU sleeps

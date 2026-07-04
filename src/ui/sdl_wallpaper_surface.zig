@@ -1,4 +1,4 @@
-//! SDL wallpaper surface owns one layer-shell surface and one proof shm buffer.
+//! SDL wallpaper surface owns one layer-shell surface and one attached shm buffer.
 
 const std = @import("std");
 const hyprland = @import("../wallpaper/hyprland.zig");
@@ -68,9 +68,14 @@ pub const WallpaperSurface = struct {
         try self.layer.drawSolidProof(self.monitor, self.color);
     }
 
+    pub fn drawImage(self: *WallpaperSurface, path: [:0]const u8) !void {
+        try self.layer.drawImage(self.monitor, path);
+    }
+
     pub fn deinit(self: *WallpaperSurface) void {
         self.layer.deinit();
         c.SDL_DestroyWindow(self.window);
+        self.layer.flushDisplay();
     }
 };
 
@@ -79,8 +84,8 @@ const LayerShellRole = struct {
     layer_surface: ?*c.struct_zwlr_layer_surface_v1 = null,
     wl_surface: ?*c.struct_wl_surface = null,
     display: ?*c.struct_wl_display = null,
-    solid_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 },
-    solid_buffer_created: bool = false,
+    attached_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 },
+    attached_buffer_created: bool = false,
 
     /// Layer-shell owns the surface role before the proof buffer is attached.
     fn init(window: *c.SDL_Window, monitor: hyprland.Monitor, color: Color) !LayerShellRole {
@@ -133,21 +138,51 @@ const LayerShellRole = struct {
     }
 
     fn drawSolidProof(self: *LayerShellRole, monitor: hyprland.Monitor, color: Color) !void {
-        if (!self.solid_buffer_created) {
-            const created = c.wayspot_shm_buffer_create_solid(
-                &self.globals,
-                &self.solid_buffer,
-                @intCast(monitor.width),
-                @intCast(monitor.height),
-                color.r,
-                color.g,
-                color.b,
-            );
-            if (created != 0) return error.LayerShellBufferFailed;
-            self.solid_buffer_created = true;
+        var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
+        const created = c.wayspot_shm_buffer_create_solid(
+            &self.globals,
+            &next_buffer,
+            @intCast(monitor.width),
+            @intCast(monitor.height),
+            color.r,
+            color.g,
+            color.b,
+        );
+        if (created != 0) return error.LayerShellBufferFailed;
+        try self.attachCreatedBuffer(monitor, &next_buffer);
+    }
+
+    fn drawImage(self: *LayerShellRole, monitor: hyprland.Monitor, path: [:0]const u8) !void {
+        var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
+        const created = c.wayspot_shm_buffer_create_image(
+            &self.globals,
+            &next_buffer,
+            @intCast(monitor.width),
+            @intCast(monitor.height),
+            path.ptr,
+        );
+        if (created != 0) return error.WallpaperImageDecodeFailed;
+        try self.attachCreatedBuffer(monitor, &next_buffer);
+    }
+
+    fn attachCreatedBuffer(self: *LayerShellRole, monitor: hyprland.Monitor, next_buffer: *c.struct_wayspot_shm_buffer) !void {
+        const wl_surface = self.wl_surface orelse {
+            c.wayspot_shm_buffer_destroy(next_buffer);
+            return error.WaylandSurfaceUnavailable;
+        };
+        var old_buffer = self.attached_buffer;
+        const had_old_buffer = self.attached_buffer_created;
+        self.attached_buffer = next_buffer.*;
+        next_buffer.* = .{ .buffer = null, .data = null, .byte_len = 0 };
+        self.attached_buffer_created = true;
+        c.wayspot_wl_surface_attach_buffer(wl_surface, &self.attached_buffer, @intCast(monitor.width), @intCast(monitor.height));
+        c.wayspot_wl_surface_commit(wl_surface);
+        if (self.display) |display| {
+            c.wayspot_wl_display_roundtrip_cleanup(display);
         }
-        const wl_surface = self.wl_surface orelse return error.WaylandSurfaceUnavailable;
-        c.wayspot_wl_surface_attach_buffer(wl_surface, &self.solid_buffer, @intCast(monitor.width), @intCast(monitor.height));
+        if (had_old_buffer) {
+            c.wayspot_shm_buffer_destroy(&old_buffer);
+        }
     }
 
     fn deinit(self: *LayerShellRole) void {
@@ -158,11 +193,14 @@ const LayerShellRole = struct {
                 c.wayspot_wl_display_roundtrip_cleanup(display);
             }
         }
-        if (self.solid_buffer_created) {
-            c.wayspot_shm_buffer_destroy(&self.solid_buffer);
-            self.solid_buffer_created = false;
+        if (self.attached_buffer_created) {
+            c.wayspot_shm_buffer_destroy(&self.attached_buffer);
+            self.attached_buffer_created = false;
         }
         self.destroyLayerSurface();
+        if (self.display) |display| {
+            c.wayspot_wl_display_roundtrip_cleanup(display);
+        }
         c.wayspot_layer_globals_deinit(&self.globals);
     }
 
@@ -170,6 +208,12 @@ const LayerShellRole = struct {
         if (self.layer_surface) |layer_surface| {
             c.wayspot_layer_surface_destroy(layer_surface);
             self.layer_surface = null;
+        }
+    }
+
+    fn flushDisplay(self: *LayerShellRole) void {
+        if (self.display) |display| {
+            c.wayspot_wl_display_roundtrip_cleanup(display);
         }
     }
 };
