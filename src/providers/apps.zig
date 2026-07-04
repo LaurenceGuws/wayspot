@@ -48,18 +48,6 @@ pub const AppsProvider = struct {
             },
         };
 
-        if (cacheContainsThreeColumnRows(data)) {
-            std.log.info("apps provider detected three-column cache rows; attempting desktop refresh", .{});
-            const added = self.collectFromDesktopFiles(allocator, out) catch |scan_err| blk: {
-                std.log.warn("apps provider three-column refresh scan failed: {s}", .{@errorName(scan_err)});
-                break :blk 0;
-            };
-            if (added > 0) {
-                allocator.free(data);
-                return;
-            }
-        }
-
         self.cache_data = data;
         var count: u32 = 0;
         var lines = std.mem.splitScalar(u8, self.cache_data.?, '\n');
@@ -180,20 +168,6 @@ pub fn invalidateDefaultCache() void {
         error.FileNotFound => {},
         else => std.log.warn("apps provider cache invalidate failed path={s} err={s}", .{ cache_path, @errorName(err) }),
     };
-}
-
-fn cacheContainsThreeColumnRows(data: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, data, '\n');
-    while (lines.next()) |line_raw| {
-        const line = std.mem.trim(u8, std.mem.trimEnd(u8, line_raw, "\r"), " \t");
-        if (line.len == 0) continue;
-        var tab_count: u32 = 0;
-        for (line) |ch| {
-            if (ch == '\t') tab_count += 1;
-        }
-        if (tab_count == 2) return true;
-    }
-    return false;
 }
 
 const DesktopScanState = struct {
@@ -413,7 +387,7 @@ test "apps provider collects rows from cache file" {
     try std.testing.expectEqualStrings("kitty", list.items[0].icon);
 }
 
-test "apps provider accepts three-column rows with empty icon metadata" {
+test "apps provider accepts cache rows without icon metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -439,20 +413,11 @@ test "apps provider accepts three-column rows with empty icon metadata" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title);
     try std.testing.expectEqualStrings("", list.items[0].icon);
     try std.testing.expectEqualStrings("firefox", list.items[1].icon);
-}
-
-test "cacheContainsThreeColumnRows detects three-column cache lines" {
-    const three_column =
-        "Utilities\tKitty\tkitty\n" ++
-        "Internet\tFirefox\tfirefox\tfirefox\n";
-    const modern =
-        "Utilities\tKitty\tkitty\tkitty\n" ++
-        "Internet\tFirefox\tfirefox\tfirefox\n";
-    try std.testing.expect(cacheContainsThreeColumnRows(three_column));
-    try std.testing.expect(!cacheContainsThreeColumnRows(modern));
 }
 
 test "apps provider scans desktop files when cache is missing" {
