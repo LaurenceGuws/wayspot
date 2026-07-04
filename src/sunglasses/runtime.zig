@@ -441,8 +441,24 @@ fn processLooksLikeSunglassesDaemon(pid: std.os.linux.pid_t) bool {
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
     var cmdline_buf: [max_proc_cmdline_bytes]u8 = undefined;
     const cmdline = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, &cmdline_buf) catch return false;
-    return std.mem.indexOf(u8, cmdline, "wayspot") != null and
-        std.mem.indexOf(u8, cmdline, "--sunglasses-daemon") != null;
+    return cmdlineLooksLikeSunglassesDaemon(cmdline);
+}
+
+fn cmdlineLooksLikeSunglassesDaemon(cmdline: []const u8) bool {
+    var has_binary = false;
+    var has_daemon_arg = false;
+    var args = std.mem.splitScalar(u8, cmdline, 0);
+    while (args.next()) |arg| {
+        if (arg.len == 0) continue;
+        if (std.mem.eql(u8, arg, "--sunglasses-daemon")) {
+            has_daemon_arg = true;
+            continue;
+        }
+        if (std.mem.eql(u8, std.fs.path.basename(arg), "wayspot")) {
+            has_binary = true;
+        }
+    }
+    return has_binary and has_daemon_arg;
 }
 
 fn removePidFile(pid_path: []const u8) void {
@@ -523,4 +539,10 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
         .SUCCESS => @intCast(rc),
         else => error.SystemCallFailed,
     };
+}
+
+test "sunglasses daemon cmdline check requires exact argv entries" {
+    try std.testing.expect(cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-daemon\x00"));
+    try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("bash\x00-c\x00wayspot --sunglasses-daemon\x00"));
+    try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-apply\x00"));
 }

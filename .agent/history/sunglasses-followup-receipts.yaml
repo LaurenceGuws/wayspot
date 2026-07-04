@@ -1,0 +1,59 @@
+id: sunglasses_followup_receipts
+date: 2026-07-04
+status: completed
+
+purpose: >
+  Pin the post-foundation fixes that made /sunglasses feel real instead of
+  visually present but operationally inert.
+
+fixed_failures:
+  - name: form_state_targeted_default_monitor
+    assertion: >
+      Picker form state is normalized to current Hyprland monitor names before
+      rendering, so saves target daemon-owned monitor slots such as HDMI-A-1
+      instead of a legacy default placeholder.
+  - name: stale_pid_detection_was_too_loose
+    assertion: >
+      --sunglasses-apply only treats a PID as live when proc cmdline has a
+      wayspot argv basename and a separate --sunglasses-daemon argv.
+  - name: row_text_was_bottom_heavy
+    assertion: >
+      Picker result rows center the title/subtitle block inside row geometry,
+      and sunglasses form rows center their single-line labels inside the row.
+
+automated_receipts:
+  - command: zigup run 0.16.0 build test --summary all
+    result: passed
+  - command: zigup run 0.16.0 build -Doptimize=ReleaseFast
+    result: passed
+  - command: zigup run 0.16.0 fmt --check src/sunglasses/runtime.zig src/ui/sdl_shell.zig src/ui/sunglasses_form.zig src/ui/picker_viewport.zig
+    result: passed
+  - command: rg banned patterns over touched Zig files
+    result: no hits
+  - command: git diff --check
+    result: passed
+
+cli_receipts:
+  - name: missing_daemon
+    command: XDG_RUNTIME_DIR=temp ./zig-out/bin/wayspot --sunglasses-apply
+    result: exit_1
+  - name: stale_pid
+    command: pid_file_contains_1 ./zig-out/bin/wayspot --sunglasses-apply
+    result: exit_1_and_pid_file_removed
+  - name: live_daemon_apply
+    command: ./zig-out/bin/wayspot --sunglasses-daemon plus ./zig-out/bin/wayspot --sunglasses-apply
+    result: exit_0
+  - name: enabled_overlay_layers
+    command: hyprctl layers -j
+    result: two wayspot-sunglasses layer namespaces while daemon is alive and zero after cleanup
+
+visual_receipts:
+  - /tmp/wayspot-row-alignment-after.png
+  - /tmp/wayspot-sunglasses-alignment-after.png
+
+handover:
+  - Use hyprctl layers, not hyprctl clients, to receipt sunglasses surfaces.
+  - Transparent or disabled sunglasses state may produce no visible tint even
+    when apply succeeds.
+  - Keep form monitor names tied to live Hyprland monitor names before adding
+    profiles, presets, schedules, or any richer color model.

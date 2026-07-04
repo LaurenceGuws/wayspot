@@ -6,14 +6,14 @@ pub const max_visible_rows: u32 = 64;
 pub const min_scrollbar_thumb_height: f32 = 12;
 pub const default_result_list_gap: f32 = 2;
 pub const default_result_row_x: f32 = 8;
-pub const default_result_row_height: f32 = 38;
+pub const default_result_row_height: f32 = 42;
 pub const default_result_row_gap: f32 = 2;
 pub const default_result_right_margin: f32 = 4;
 pub const default_result_scrollbar_gap: f32 = 3;
 pub const default_result_bottom_margin: f32 = 4;
 pub const default_result_title_x: f32 = 18;
-pub const default_result_text_top_inset: f32 = 4;
-pub const default_result_subtitle_offset: f32 = 18;
+pub const default_result_title_line_height: f32 = 19;
+pub const default_result_subtitle_line_height: f32 = 16;
 pub const default_result_icon_size: f32 = 26;
 pub const default_result_icon_right_inset: f32 = 8;
 pub const default_query_text_x: f32 = 10;
@@ -82,8 +82,8 @@ pub const ResultLayout = struct {
     row_height: f32,
     row_gap: f32,
     title_x: f32,
-    text_top_inset: f32,
-    subtitle_offset: f32,
+    title_line_height: f32,
+    subtitle_line_height: f32,
     icon_size: f32,
     icon_right_inset: f32,
     query_text_x: f32,
@@ -115,8 +115,8 @@ pub const ResultLayout = struct {
             .row_height = default_result_row_height,
             .row_gap = default_result_row_gap,
             .title_x = left + (default_result_title_x - default_result_row_x),
-            .text_top_inset = default_result_text_top_inset,
-            .subtitle_offset = default_result_subtitle_offset,
+            .title_line_height = default_result_title_line_height,
+            .subtitle_line_height = default_result_subtitle_line_height,
             .icon_size = default_result_icon_size,
             .icon_right_inset = default_result_icon_right_inset,
             .query_text_x = left + (default_query_text_x - default_result_row_x),
@@ -139,11 +139,16 @@ pub const ResultLayout = struct {
     }
 
     pub fn titleY(self: ResultLayout, visible_row: u32) f32 {
-        return self.rowRect(visible_row).y + self.text_top_inset;
+        const row = self.rowRect(visible_row);
+        return row.y + (row.h - self.textBlockHeight()) / 2;
     }
 
     pub fn subtitleY(self: ResultLayout, visible_row: u32) f32 {
-        return self.titleY(visible_row) + self.subtitle_offset;
+        return self.titleY(visible_row) + self.title_line_height;
+    }
+
+    fn textBlockHeight(self: ResultLayout) f32 {
+        return self.title_line_height + self.subtitle_line_height;
     }
 
     pub fn iconRect(self: ResultLayout, visible_row: u32) Rect {
@@ -524,8 +529,8 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
         .row_height = 44,
         .row_gap = 6,
         .title_x = 34,
-        .text_top_inset = 6,
-        .subtitle_offset = 20,
+        .title_line_height = 19,
+        .subtitle_line_height = 16,
         .icon_size = 28,
         .icon_right_inset = 14,
         .query_text_x = 24,
@@ -548,14 +553,14 @@ test "default result layout preserves shell row geometry" {
     const first_row = layout.rowRect(0);
     const second_row = layout.rowRect(1);
 
-    try testing.expectEqual(Rect{ .x = 8, .y = 30, .w = 741, .h = 38 }, first_row);
-    try testing.expectEqual(@as(f32, 34), layout.titleY(0));
-    try testing.expectEqual(@as(f32, 52), layout.subtitleY(0));
-    try testing.expectEqual(@as(f32, 70), second_row.y);
+    try testing.expectEqual(Rect{ .x = 8, .y = 30, .w = 741, .h = 42 }, first_row);
+    try testing.expectEqual(@as(f32, 33.5), layout.titleY(0));
+    try testing.expectEqual(@as(f32, 52.5), layout.subtitleY(0));
+    try testing.expectEqual(@as(f32, 74), second_row.y);
     try testing.expectEqual(Rect{ .x = 8, .y = 28, .w = 741, .h = 1 }, layout.query_line);
     try testing.expectEqual(default_scrollbar_track, layout.scrollbar_track);
-    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 69));
-    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 71));
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 73));
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 75));
 }
 
 test "default result layout places icon inside row hit area" {

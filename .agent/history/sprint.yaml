@@ -3,6 +3,7 @@ state: completed
 
 source:
   detailed_index: .agent/history/sunglasses-foundations-sprint.yaml
+  followup_receipts: .agent/history/sunglasses-followup-receipts.yaml
 
 purpose: >
   Add the v1 foundations for /sunglasses as a real subsystem: a picker form

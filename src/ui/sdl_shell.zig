@@ -9,6 +9,7 @@ const app_icons = @import("app_icons.zig");
 const common_dispatch = @import("common/dispatch.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const query_mod = @import("../search/query.zig");
+const hyprland = @import("../wallpaper/hyprland.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 const sunglasses_form = @import("sunglasses_form.zig");
@@ -296,7 +297,7 @@ const SdlShell = struct {
         const wake_event_type = c.SDL_RegisterEvents(1);
         if (wake_event_type == 0) return error.SdlWakeUnavailable;
 
-        const persisted_sunglasses_state = try sunglasses_state.load(allocator);
+        const persisted_sunglasses_state = try loadSunglassesStateForSession(allocator);
         var self = SdlShell{
             .allocator = allocator,
             .service = service,
@@ -800,8 +801,70 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
     };
 }
 
+fn loadSunglassesStateForSession(allocator: std.mem.Allocator) !sunglasses_state.State {
+    const loaded = try sunglasses_state.load(allocator);
+    const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
+        std.mem.span(runtime_dir_z)
+    else
+        return loaded;
+    const signature = if (std.c.getenv("HYPRLAND_INSTANCE_SIGNATURE")) |signature_z|
+        std.mem.span(signature_z)
+    else
+        return loaded;
+
+    const monitors = hyprland.queryMonitors(allocator, .{
+        .runtime_dir = runtime_dir,
+        .signature = signature,
+    }) catch |err| {
+        std.log.warn("sunglasses monitor state seed skipped err={s}", .{@errorName(err)});
+        return loaded;
+    };
+    if (monitors.count == 0) return loaded;
+
+    return normalizeSunglassesStateForMonitors(loaded, monitors);
+}
+
+fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors: hyprland.MonitorList) !sunglasses_state.State {
+    var normalized = sunglasses_state.defaultState();
+    var index: u32 = 0;
+    while (index < monitors.count) : (index += 1) {
+        const monitor_name = monitors.items[index].name();
+        var monitor_state = if (loaded.get(monitor_name)) |existing|
+            existing.*
+        else if (loaded.get("default")) |fallback|
+            fallback.*
+        else
+            try sunglasses_state.MonitorState.init(monitor_name);
+        try monitor_state.setName(monitor_name);
+        try normalized.append(monitor_state);
+    }
+    return normalized;
+}
+
 fn sliderKeyboardStep() i32 {
     return 5;
+}
+
+test "sunglasses state maps legacy default values onto real monitor names" {
+    var loaded = sunglasses_state.defaultState();
+    var fallback = try sunglasses_state.MonitorState.init("default");
+    fallback.red_blue_enabled = true;
+    fallback.setRedBlueValue(35);
+    try loaded.append(fallback);
+
+    var monitors = hyprland.MonitorList{};
+    monitors.items[0] = .{};
+    const monitor_name = "DP-1";
+    @memcpy(monitors.items[0].name_buf[0..monitor_name.len], monitor_name);
+    monitors.items[0].name_len = @intCast(monitor_name.len);
+    monitors.count = 1;
+
+    const normalized = try normalizeSunglassesStateForMonitors(loaded, monitors);
+    try std.testing.expectEqual(@as(u32, 1), normalized.count);
+    const monitor = normalized.get("DP-1") orelse return error.MissingMonitorState;
+    try std.testing.expect(monitor.red_blue_enabled);
+    try std.testing.expectEqual(@as(i32, 35), monitor.red_blue_value);
+    try std.testing.expect(normalized.get("default") == null);
 }
 
 fn osEventFd() !std.posix.fd_t {

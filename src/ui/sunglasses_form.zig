@@ -9,14 +9,16 @@ const c = @import("sdl_c");
 
 const default_monitor_name = "default";
 const control_count: u32 = 5;
-const row_height: f32 = 46;
-const row_gap: f32 = 4;
-const label_x_offset: f32 = 14;
-const value_x_offset: f32 = 214;
-const slider_x_offset: f32 = 320;
-const slider_width: f32 = 260;
-const slider_height: f32 = 6;
-const toggle_size: f32 = 18;
+const row_height: f32 = 42;
+const row_gap: f32 = 2;
+const label_x_offset: f32 = 10;
+const value_column_width: f32 = 46;
+const control_right_inset: f32 = 12;
+const form_text_line_height: f32 = 18;
+const slider_height: f32 = 4;
+const toggle_size: f32 = 16;
+const knob_width: f32 = 8;
+const knob_height: f32 = 20;
 
 const Control = enum {
     monitor,
@@ -127,10 +129,11 @@ pub const Form = struct {
         try drawControlBackground(renderer, controlRow(layout, .dim_slider), self.focus == .dim_slider);
 
         try drawText(text, renderer, layout, .monitor, surface_scale, "Monitor");
-        try text.draw(renderer, controlRow(layout, .monitor).x + value_x_offset, textY(layout, .monitor), monitor.name(), .{
+        const monitor_row = controlRow(layout, .monitor);
+        try text.draw(renderer, valueX(monitor_row), textY(layout, .monitor), monitor.name(), .{
             .color = .{ .r = 218, .g = 226, .b = 236 },
             .max_bytes = sunglasses_state.max_monitor_name_bytes,
-            .font_size_px = 16,
+            .font_size_px = 15,
             .surface_scale = surface_scale,
         });
 
@@ -202,7 +205,8 @@ fn controlRow(layout: picker_viewport.ResultLayout, control: Control) picker_vie
 }
 
 fn textY(layout: picker_viewport.ResultLayout, control: Control) f32 {
-    return controlRow(layout, control).y + 14;
+    const row = controlRow(layout, control);
+    return row.y + (row.h - form_text_line_height) / 2;
 }
 
 fn controlAt(layout: picker_viewport.ResultLayout, x: f32, y: f32) ?Hit {
@@ -237,7 +241,7 @@ fn drawText(
     try text.draw(renderer, row.x + label_x_offset, textY(layout, control), value, .{
         .color = .{ .r = 216, .g = 222, .b = 230 },
         .max_bytes = 32,
-        .font_size_px = 16,
+        .font_size_px = 15,
         .surface_scale = surface_scale,
     });
 }
@@ -280,8 +284,6 @@ fn drawSliderTrack(renderer: *c.SDL_Renderer, track: picker_viewport.Rect) !void
 }
 
 fn drawSliderKnob(renderer: *c.SDL_Renderer, track: picker_viewport.Rect, normalized: f32) !void {
-    const knob_width: f32 = 10;
-    const knob_height: f32 = 22;
     const x = track.x + (track.w * @min(1, @max(0, normalized))) - (knob_width / 2);
     const y = track.y + (track.h / 2) - (knob_height / 2);
     const color = c.SDL_SetRenderDrawColor(renderer, 228, 235, 244, 255);
@@ -300,10 +302,11 @@ fn drawSignedValue(
 ) !void {
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampRedBlue(value)});
-    try text.draw(renderer, controlRow(layout, control).x + value_x_offset, textY(layout, control), rendered, .{
+    const row = controlRow(layout, control);
+    try text.draw(renderer, valueX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
         .max_bytes = 16,
-        .font_size_px = 16,
+        .font_size_px = 15,
         .surface_scale = surface_scale,
     });
 }
@@ -318,17 +321,18 @@ fn drawUnsignedValue(
 ) !void {
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampDim(value)});
-    try text.draw(renderer, controlRow(layout, control).x + value_x_offset, textY(layout, control), rendered, .{
+    const row = controlRow(layout, control);
+    try text.draw(renderer, valueX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
         .max_bytes = 16,
-        .font_size_px = 16,
+        .font_size_px = 15,
         .surface_scale = surface_scale,
     });
 }
 
 fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
     return .{
-        .x = row.x + value_x_offset,
+        .x = valueX(row),
         .y = row.y + (row.h - toggle_size) / 2,
         .w = toggle_size,
         .h = toggle_size,
@@ -336,12 +340,18 @@ fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
 }
 
 fn sliderTrack(row: picker_viewport.Rect) picker_viewport.Rect {
+    const track_x = valueX(row) + value_column_width;
+    const track_right = row.x + row.w - control_right_inset;
     return .{
-        .x = row.x + slider_x_offset,
+        .x = track_x,
         .y = row.y + (row.h - slider_height) / 2,
-        .w = @min(slider_width, @max(1, row.w - slider_x_offset - 18)),
+        .w = @max(1, track_right - track_x),
         .h = slider_height,
     };
+}
+
+fn valueX(row: picker_viewport.Rect) f32 {
+    return row.x + @max(132, row.w * 0.32);
 }
 
 fn redBlueFromX(row: picker_viewport.Rect, x: f32) i32 {
