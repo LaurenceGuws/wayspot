@@ -260,7 +260,7 @@ const SdlShell = struct {
             .config = config,
             .wake_event_type = wake_event_type,
         };
-        try self.applySurfaceScale();
+        try self.updateViewportForWindow();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
