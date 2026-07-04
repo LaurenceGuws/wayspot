@@ -302,11 +302,12 @@ const SdlShell = struct {
             .wake_event_type = wake_event_type,
             .cursor = CursorBlink.init(sdlNowMs()),
         };
-        try self.applyMinimumWindowSize();
-        try self.updateViewportForWindow();
+        try self.applyDefaultWindowSize();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
+        try self.applyDefaultWindowSize();
+        try self.updateViewportForWindow();
         try self.refreshResults();
         return self;
     }
@@ -543,12 +544,9 @@ const SdlShell = struct {
         self.dirty = true;
     }
 
-    fn applyMinimumWindowSize(self: *SdlShell) !void {
-        const size = self.config.scaledDimensions(
-            picker_viewport.min_base_width_px,
-            picker_viewport.min_base_height_px,
-        );
-        const resized = c.SDL_SetWindowMinimumSize(self.window, @intCast(size.width), @intCast(size.height));
+    fn applyDefaultWindowSize(self: *SdlShell) !void {
+        const size = self.config.scaledDimensions(base_window_width, base_window_height);
+        const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
         if (!resized) return error.SdlResizeFailed;
     }
 
@@ -694,10 +692,7 @@ const SdlShell = struct {
     }
 
     fn applySurfaceScale(self: *SdlShell) !void {
-        try self.applyMinimumWindowSize();
-        const size = self.config.scaledDimensions(base_window_width, base_window_height);
-        const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
-        if (!resized) return error.SdlResizeFailed;
+        try self.applyDefaultWindowSize();
         const scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
         if (!scaled) return error.SdlScaleFailed;

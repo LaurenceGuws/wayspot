@@ -211,8 +211,9 @@ geometry_search_chrome_receipt:
   state: completed
   behavior:
     - picker row, icon, scrollbar, query line, and mouse hit geometry derive from current SDL window size and zoom scale.
-    - SDL enforces the scaled minimum window size supported by picker geometry.
-    - zoom updates the minimum window size before resizing the picker surface.
+    - picker geometry clamps internally to a supported minimum for calculations.
+    - SDL minimum-size hints are not used because Hyprland mapped the picker at the minimum instead of the intended default size.
+    - startup applies the scaled default window size before and after mapping so the first visible frame opens at the intended size.
     - the fixed Wayspot heading was removed from content chrome.
     - empty query renders Search as ghost text.
     - the query cursor blinks from an event deadline and resets visible after text input and backspace.
@@ -228,6 +229,21 @@ geometry_search_chrome_receipt:
     - stale vocabulary scan over changed active Zig files
     - timeout 8s ./zig-out/bin/wayspot --ui
     - pgrep cleanup check for leftover wayspot UI processes
+
+default_window_size_fix_receipt:
+  id: picker_default_size_after_wayland_map
+  state: completed
+  behavior:
+    - removed SDL minimum-size enforcement from picker startup and zoom handling.
+    - kept internal minimum layout clamp for geometry calculations.
+    - applied the configured default picker size before and after SDL window mapping.
+    - verified Hyprland maps the picker at 988x546 with local zoom_step=2 instead of the previous 286x234 minimum box.
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - zigup run 0.16.0 build -Doptimize=ReleaseFast
+    - zigup run 0.16.0 fmt --check src/ui/sdl_shell.zig src/ui/picker_viewport.zig
+    - git diff --check
+    - hyprctl clients receipt for class=wayspot size=[988,546]
 
 verification_floor:
   automated:
