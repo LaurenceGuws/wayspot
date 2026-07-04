@@ -171,7 +171,7 @@ implementation_slices:
       - git diff --check
       - banned active Zig pattern scan over touched Zig files
   - id: 02_form_owner_no_effect
-    state: next
+    state: completed
     files:
       - src/ui/sunglasses_form.zig
       - src/ui/sdl_shell.zig
@@ -182,6 +182,17 @@ implementation_slices:
       - /sunglasses mode opens form
       - form controls mutate bounded state in memory
       - default app search remains app list
+    receipts:
+      - zigup run 0.16.0 fmt --check src/sunglasses/state.zig src/ui/sunglasses_form.zig src/ui/sdl_shell.zig src/providers/modes.zig src/search/query.zig src/search/rank.zig src/app/search_service.zig
+      - zigup run 0.16.0 build test --summary all
+      - git diff --check
+      - 'rg -n "(_ =|\busize\b|\banytype\b|\banyopaque\b)" src/sunglasses/state.zig src/ui/sunglasses_form.zig src/ui/sdl_shell.zig src/providers/modes.zig src/search/query.zig src/search/rank.zig src/app/search_service.zig'
+      - click pointer support included for toggles and slider set
+      - active form text input is ignored because this slice has no text field
+      - pointer drag capture deferred to avoid broadening the no-effect form slice
+    note:
+      - src/app/search_service.zig test assertion updated because adding the third slash mode changed the existing service mode-count expectation
+      - src/sunglasses/state.zig gained indexed monitor accessors so the form does not own retained array layout
   - id: 03_overlay_surface_proof
     files:
       - src/ui/sdl_sunglasses_surface.zig

@@ -35,8 +35,9 @@ current_scope:
 progress:
   completed:
     - 01_state_owner
+    - 02_form_owner_no_effect
   current:
-    - ready_for_02_form_owner_no_effect
+    - ready_for_03_overlay_surface_proof
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all

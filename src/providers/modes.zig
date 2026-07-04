@@ -17,6 +17,7 @@ pub const ModesProvider = struct {
     ) !void {
         if (!self.enabled) return;
         try out.append(allocator, search.Candidate.init(.mode, "/notifications", "Daemon mode", "/notifications"));
+        try out.append(allocator, search.Candidate.init(.mode, "/sunglasses", "Filter form", "/sunglasses"));
         try out.append(allocator, search.Candidate.init(.mode, "/wallpapers", "Daemon mode", "/wallpapers"));
         try out.append(allocator, search.Candidate.init(.daemon, "Restart notifications daemon", "Runtime", notifications_restart));
         try out.append(allocator, search.Candidate.init(.daemon, "Restart wallpaper daemon", "Runtime", wallpapers_restart));
@@ -40,9 +41,10 @@ test "modes provider exposes slash modes and daemon restart commands" {
     var provider = ModesProvider{};
     try provider.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 4), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 5), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqual(search.CandidateKind.mode, list.items[0].kind);
     try std.testing.expectEqualStrings("/notifications", list.items[0].action);
-    try std.testing.expectEqual(search.CandidateKind.daemon, list.items[2].kind);
-    try std.testing.expect(resolveDaemonCommand(list.items[2].action) != null);
+    try std.testing.expectEqualStrings("/sunglasses", list.items[1].action);
+    try std.testing.expectEqual(search.CandidateKind.daemon, list.items[3].kind);
+    try std.testing.expect(resolveDaemonCommand(list.items[3].action) != null);
 }

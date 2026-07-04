@@ -8,8 +8,11 @@ const app = @import("../app/mod.zig");
 const app_icons = @import("app_icons.zig");
 const common_dispatch = @import("common/dispatch.zig");
 const picker_viewport = @import("picker_viewport.zig");
+const query_mod = @import("../search/query.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
+const sunglasses_form = @import("sunglasses_form.zig");
+const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
 
@@ -258,6 +261,8 @@ const SdlShell = struct {
     wake_event_type: u32 = 0,
     query: std.ArrayList(u8) = .empty,
     results: []@import("../search/mod.zig").ScoredCandidate = &.{},
+    sunglasses_state: sunglasses_state.State = sunglasses_state.defaultState(),
+    sunglasses_form: sunglasses_form.Form = .{},
     /// The viewport is the only owner of picker selection and scroll offset.
     viewport: picker_viewport.Viewport = picker_viewport.Viewport.init(),
     dirty: bool = true,
@@ -389,23 +394,30 @@ const SdlShell = struct {
                 try self.updateViewportForWindow();
             },
             c.SDL_EVENT_TEXT_INPUT => {
+                if (self.sunglassesActive()) return true;
                 const text = std.mem.span(event.text.text);
                 try self.query.appendSlice(self.allocator, text);
                 self.resetCursorBlink();
                 try self.refreshResults();
             },
             c.SDL_EVENT_MOUSE_WHEEL => {
+                if (self.sunglassesActive()) return true;
                 const wheel_y = event.wheel.integer_y;
                 const scroll_delta = if (wheel_y == std.math.minInt(i32)) std.math.maxInt(i32) else -wheel_y;
                 if (wheel_y != 0 and self.viewport.scrollLines(scroll_delta)) self.dirty = true;
             },
             c.SDL_EVENT_MOUSE_MOTION => {
+                if (self.sunglassesActive()) return true;
                 if (self.visibleRowAtPoint(event.motion.x, event.motion.y)) |visible_row| {
                     if (self.viewport.selectVisibleRow(visible_row)) self.dirty = true;
                 }
             },
             c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
                 if (event.button.button == c.SDL_BUTTON_LEFT) {
+                    if (self.sunglassesActive()) {
+                        try self.clickSunglassesForm(event.button.x, event.button.y);
+                        return true;
+                    }
                     if (self.visibleRowAtPoint(event.button.x, event.button.y)) |visible_row| {
                         if (self.viewport.resultAtVisibleRow(visible_row)) |result_index| {
                             try self.queueLaunchAtResult(result_index);
@@ -430,13 +442,37 @@ const SdlShell = struct {
                         self.resetCursorBlink();
                         try self.refreshResults();
                     },
+                    c.SDLK_TAB => {
+                        if (self.sunglassesActive()) {
+                            self.sunglasses_form.focusNext((event.key.mod & c.SDL_KMOD_SHIFT) != 0);
+                            self.dirty = true;
+                        }
+                    },
+                    c.SDLK_SPACE => {
+                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
+                            self.dirty = true;
+                        }
+                    },
+                    c.SDLK_LEFT => {
+                        if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, -sliderKeyboardStep())) {
+                            self.dirty = true;
+                        }
+                    },
+                    c.SDLK_RIGHT => {
+                        if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, sliderKeyboardStep())) {
+                            self.dirty = true;
+                        }
+                    },
                     c.SDLK_RETURN, c.SDLK_KP_ENTER => {
+                        if (self.sunglassesActive()) return true;
                         try self.queueSelectedLaunch();
                     },
                     c.SDLK_UP => {
+                        if (self.sunglassesActive()) return true;
                         if (self.viewport.moveSelection(-1)) self.dirty = true;
                     },
                     c.SDLK_DOWN => {
+                        if (self.sunglassesActive()) return true;
                         if (self.viewport.moveSelection(1)) self.dirty = true;
                     },
                     else => {},
@@ -503,8 +539,12 @@ const SdlShell = struct {
         const range = self.viewport.visibleRange();
         const layout = self.currentResultLayout(range.count);
         try self.drawChrome(layout);
-        try self.drawResults(range, layout);
-        try self.drawScrollbar(layout);
+        if (self.sunglassesActive()) {
+            try self.sunglasses_form.render(self.renderer, &self.text, layout, self.config.scale(), &self.sunglasses_state);
+        } else {
+            try self.drawResults(range, layout);
+            try self.drawScrollbar(layout);
+        }
 
         const presented = c.SDL_RenderPresent(self.renderer);
         if (!presented) return error.SdlRenderFailed;
@@ -516,6 +556,21 @@ const SdlShell = struct {
         const range = self.viewport.visibleRange();
         const layout = self.currentResultLayout(range.count);
         return layout.visibleRowAtPoint(x / scale, y / scale);
+    }
+
+    fn clickSunglassesForm(self: *SdlShell, x: f32, y: f32) !void {
+        const scale = self.config.scale();
+        std.debug.assert(scale > 0);
+        const layout = self.currentResultLayout(picker_viewport.max_visible_rows);
+        if (try self.sunglasses_form.click(&self.sunglasses_state, layout, x / scale, y / scale)) {
+            self.dirty = true;
+            return;
+        }
+        self.dirty = true;
+    }
+
+    fn sunglassesActive(self: *const SdlShell) bool {
+        return query_mod.parse(self.query.items).route == .sunglasses;
     }
 
     fn updateViewportForWindow(self: *SdlShell) !void {
@@ -722,6 +777,10 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
         .notification => .notification,
         .hint => .hint,
     };
+}
+
+fn sliderKeyboardStep() i32 {
+    return 5;
 }
 
 fn osEventFd() !std.posix.fd_t {

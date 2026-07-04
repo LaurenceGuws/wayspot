@@ -83,6 +83,7 @@ fn matchesRoute(route: query_mod.Route, candidate: types.Candidate) bool {
         .apps => candidate.kind == .app,
         .modes => candidate.kind == .mode,
         .notifications => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:notifications:restart"),
+        .sunglasses => false,
         .wallpapers => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:wallpapers:restart"),
         .run => true,
     };
@@ -245,6 +246,7 @@ test "route filter limits result kinds" {
 test "slash routes expose modes and daemon commands only" {
     const candidates = [_]types.Candidate{
         .init(.mode, "/notifications", "Runtime mode", "/notifications"),
+        .init(.mode, "/sunglasses", "Filter form", "/sunglasses"),
         .init(.mode, "/wallpapers", "Runtime mode", "/wallpapers"),
         .init(.daemon, "Restart notifications daemon", "Runtime", "daemon:notifications:restart"),
         .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
@@ -253,8 +255,12 @@ test "slash routes expose modes and daemon commands only" {
 
     const modes = try rankCandidates(std.testing.allocator, query_mod.parse("/"), &candidates);
     defer std.testing.allocator.free(modes);
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(modes.len)));
+    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(modes.len)));
     try std.testing.expectEqual(types.CandidateKind.mode, modes[0].candidate.kind);
+
+    const sunglasses = try rankCandidates(std.testing.allocator, query_mod.parse("/sunglasses"), &candidates);
+    defer std.testing.allocator.free(sunglasses);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(sunglasses.len)));
 
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);

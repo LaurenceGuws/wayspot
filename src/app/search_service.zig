@@ -122,7 +122,7 @@ test "search service exposes modes without hiding default app search" {
 
     const mode_results = try service.searchQuery(std.testing.allocator, "/");
     defer std.testing.allocator.free(mode_results);
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(mode_results.len)));
+    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(mode_results.len)));
     try std.testing.expectEqual(search.CandidateKind.mode, mode_results[0].candidate.kind);
 }
 

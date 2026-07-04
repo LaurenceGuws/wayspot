@@ -77,6 +77,16 @@ pub const State = struct {
         return null;
     }
 
+    pub fn monitorAt(self: *const State, index: u32) ?*const MonitorState {
+        if (index >= self.count) return null;
+        return &self.monitors[index];
+    }
+
+    pub fn monitorAtMutable(self: *State, index: u32) ?*MonitorState {
+        if (index >= self.count) return null;
+        return &self.monitors[index];
+    }
+
     pub fn getMutable(self: *State, name_text: []const u8) ?*MonitorState {
         var index: u32 = 0;
         while (index < self.count) : (index += 1) {
