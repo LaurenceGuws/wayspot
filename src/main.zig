@@ -45,8 +45,8 @@ const Runtime = struct {
     service: wayspot.app.SearchService,
 
     fn deinit(self: *Runtime, allocator: std.mem.Allocator) void {
-        self.apps.deinit(allocator);
         self.service.deinit(allocator);
+        self.apps.deinit(allocator);
         allocator.free(self.app_cache_path);
         allocator.free(self.history_path);
     }

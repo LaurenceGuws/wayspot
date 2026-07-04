@@ -25,13 +25,11 @@ pub const Shell = struct {
     }
 };
 
-const max_visible_result_rows: u32 = 8;
 const max_command_bytes = 4096;
 const base_window_width: i32 = 760;
 const base_window_height: i32 = 420;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
-const max_title_bytes = 160;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
@@ -45,10 +43,8 @@ const LaunchRunner = *const fn ([*:0]const u8) LaunchRunError!void;
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
-    std.debug.assert(max_visible_result_rows > 0);
     std.debug.assert(max_command_bytes > 0);
     std.debug.assert(max_launch_wait_interrupts > 0);
-    std.debug.assert(max_title_bytes > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
 }
@@ -227,7 +223,6 @@ const SdlShell = struct {
     viewport: picker_viewport.Viewport = picker_viewport.Viewport.init(),
     dirty: bool = true,
     launch_queue: LaunchQueue = .{},
-    title_buf: [max_title_bytes:0]u8 = undefined,
     shutdown_after_launch: bool = false,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
@@ -401,8 +396,10 @@ const SdlShell = struct {
     fn refreshResults(self: *SdlShell) !void {
         self.freeResults();
         self.results = try self.service.searchQuery(self.allocator, self.query.items);
-        const viewport_changed = self.viewport.resetResults(@intCast(self.results.len));
-        if (viewport_changed) self.dirty = true;
+        if (self.viewport.resetResults(@intCast(self.results.len))) {
+            self.dirty = true;
+            return;
+        }
         self.dirty = true;
     }
 
@@ -430,30 +427,6 @@ const SdlShell = struct {
         try drainLaunchQueue(&self.launch_queue, runDetachedCommand);
     }
 
-    fn activeResult(self: *SdlShell) ?@import("../search/mod.zig").ScoredCandidate {
-        const result_index = self.viewport.selected() orelse return null;
-        if (result_index >= self.results.len) return null;
-        return self.results[@intCast(result_index)];
-    }
-
-    fn setTitle(self: *SdlShell) !void {
-        const result = self.activeResult();
-        const title = self.titleZ(if (result) |item| item.candidate.title else "no results");
-        const title_set = c.SDL_SetWindowTitle(self.window, title.ptr);
-        if (!title_set) return error.SdlRenderFailed;
-    }
-
-    fn titleZ(self: *SdlShell, top: []const u8) [:0]u8 {
-        std.debug.assert(top.len > 0);
-        var out_len: u32 = 0;
-        out_len = writeTitlePart(&self.title_buf, out_len, "Wayspot | ");
-        out_len = writeTitlePart(&self.title_buf, out_len, self.query.items);
-        out_len = writeTitlePart(&self.title_buf, out_len, " | ");
-        out_len = writeTitlePart(&self.title_buf, out_len, top);
-        self.title_buf[out_len] = 0;
-        return self.title_buf[0..out_len :0];
-    }
-
     fn render(self: *SdlShell) !void {
         const scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
@@ -462,28 +435,27 @@ const SdlShell = struct {
         const cleared = c.SDL_RenderClear(self.renderer);
         if (!background_color or !cleared) return error.SdlRenderFailed;
 
+        const range = self.viewport.visibleRange();
+        const layout = picker_viewport.ResultLayout.default(range.count);
         try self.drawChrome();
-        try self.drawResults();
-        try self.drawScrollbar();
+        try self.drawResults(range, layout);
+        try self.drawScrollbar(layout);
 
         const presented = c.SDL_RenderPresent(self.renderer);
         if (!presented) return error.SdlRenderFailed;
     }
 
-    fn currentResultLayout(self: *const SdlShell) picker_viewport.ResultLayout {
-        return picker_viewport.ResultLayout.default(self.viewport.visibleRange().count);
-    }
-
     fn visibleRowAtPoint(self: *const SdlShell, x: f32, y: f32) ?u32 {
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
-        return self.currentResultLayout().visibleRowAtPoint(x / scale, y / scale);
+        const range = self.viewport.visibleRange();
+        const layout = picker_viewport.ResultLayout.default(range.count);
+        return layout.visibleRowAtPoint(x / scale, y / scale);
     }
 
     fn updateViewportForWindow(self: *SdlShell) !void {
-        var width: i32 = 0;
         var height: i32 = 0;
-        const size_read = c.SDL_GetWindowSize(self.window, &width, &height);
+        const size_read = c.SDL_GetWindowSize(self.window, null, &height);
         if (!size_read) return error.SdlResizeFailed;
         const window_height = @max(height, 1);
 
@@ -491,13 +463,10 @@ const SdlShell = struct {
         std.debug.assert(scale > 0);
         const base_height = @as(f32, @floatFromInt(window_height)) / scale;
         const available_height = @max(0, base_height - picker_viewport.default_result_list_top);
-        const visible_rows = @min(
-            max_visible_result_rows,
-            picker_viewport.visibleRowsForHeight(
-                available_height,
-                picker_viewport.default_result_row_height,
-                picker_viewport.default_result_row_gap,
-            ),
+        const visible_rows = picker_viewport.visibleRowsForHeight(
+            available_height,
+            picker_viewport.default_result_row_height,
+            picker_viewport.default_result_row_gap,
         );
         if (self.viewport.resize(visible_rows)) self.dirty = true;
     }
@@ -520,9 +489,7 @@ const SdlShell = struct {
         if (!line_color or !line_drawn) return error.SdlRenderFailed;
     }
 
-    fn drawResults(self: *SdlShell) !void {
-        const range = self.viewport.visibleRange();
-        const layout = self.currentResultLayout();
+    fn drawResults(self: *SdlShell, range: picker_viewport.VisibleRange, layout: picker_viewport.ResultLayout) !void {
         const selected_result = self.viewport.selected();
         var i: u32 = 0;
         while (i < range.count) : (i += 1) {
@@ -559,11 +526,6 @@ const SdlShell = struct {
                 .max_bytes = 82,
                 .font_size_px = 14,
             });
-            try self.text.draw(self.renderer, layout.status_x, layout.titleY(i), common_dispatch.kinds.statusLabel(uiKind(result.kind)), .{
-                .color = .{ .r = 128, .g = 182, .b = 160 },
-                .max_bytes = 12,
-                .font_size_px = 14,
-            });
         }
 
         if (range.count == 0) {
@@ -573,12 +535,9 @@ const SdlShell = struct {
                 .font_size_px = 17,
             });
         }
-
-        try self.setTitle();
     }
 
-    fn drawScrollbar(self: *SdlShell) !void {
-        const layout = self.currentResultLayout();
+    fn drawScrollbar(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
         const scrollbar = layout.scrollbar(&self.viewport);
         if (!scrollbar.needed) return;
 
@@ -635,26 +594,6 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
         .notification => .notification,
         .hint => .hint,
     };
-}
-
-fn writeTitlePart(buffer: *[max_title_bytes:0]u8, start_len: u32, text: []const u8) u32 {
-    std.debug.assert(start_len < max_title_bytes);
-    var out_len = start_len;
-    var truncated = false;
-    for (text) |byte| {
-        if (out_len + 1 >= max_title_bytes) {
-            truncated = true;
-            break;
-        }
-        buffer[out_len] = switch (byte) {
-            0...31 => ' ',
-            127...255 => '?',
-            else => byte,
-        };
-        out_len += 1;
-    }
-    if (truncated and out_len > start_len) buffer[out_len - 1] = '~';
-    return out_len;
 }
 
 fn osEventFd() !std.posix.fd_t {

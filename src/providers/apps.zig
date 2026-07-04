@@ -5,8 +5,7 @@ const search = @import("../search/mod.zig");
 
 pub const AppsProvider = struct {
     cache_path: []const u8,
-    owned_strings_current: std.ArrayListUnmanaged([]u8) = .empty,
-    owned_strings_previous: std.ArrayListUnmanaged([]u8) = .empty,
+    owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn init(cache_path: []const u8) AppsProvider {
         return .{
@@ -15,10 +14,8 @@ pub const AppsProvider = struct {
     }
 
     pub fn deinit(self: *AppsProvider, allocator: std.mem.Allocator) void {
-        self.freeOwnedStrings(allocator, &self.owned_strings_current);
-        self.freeOwnedStrings(allocator, &self.owned_strings_previous);
-        self.owned_strings_current.deinit(allocator);
-        self.owned_strings_previous.deinit(allocator);
+        self.freeOwnedStrings(allocator);
+        self.owned_strings.deinit(allocator);
     }
 
     /// collect appends launchable desktop application candidates.
@@ -27,7 +24,7 @@ pub const AppsProvider = struct {
         allocator: std.mem.Allocator,
         out: *search.CandidateList,
     ) !void {
-        self.rotateOwnedStringsForCollect(allocator);
+        self.freeOwnedStrings(allocator);
         const data = std.Io.Dir.cwd().readFileAlloc(
             std.Options.debug_io,
             self.cache_path,
@@ -90,24 +87,13 @@ pub const AppsProvider = struct {
 
     fn keepString(self: *AppsProvider, allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
         const copy = try allocator.dupe(u8, value);
-        try self.owned_strings_current.append(allocator, copy);
+        try self.owned_strings.append(allocator, copy);
         return copy;
     }
 
-    fn rotateOwnedStringsForCollect(self: *AppsProvider, allocator: std.mem.Allocator) void {
-        self.freeOwnedStrings(allocator, &self.owned_strings_previous);
-        std.mem.swap(
-            std.ArrayListUnmanaged([]u8),
-            &self.owned_strings_current,
-            &self.owned_strings_previous,
-        );
-        self.owned_strings_current.clearRetainingCapacity();
-    }
-
-    fn freeOwnedStrings(self: *AppsProvider, allocator: std.mem.Allocator, strings: *std.ArrayListUnmanaged([]u8)) void {
-        if (self.cache_path.len == 0) return;
-        for (strings.items) |item| allocator.free(item);
-        strings.clearRetainingCapacity();
+    fn freeOwnedStrings(self: *AppsProvider, allocator: std.mem.Allocator) void {
+        for (self.owned_strings.items) |item| allocator.free(item);
+        self.owned_strings.clearRetainingCapacity();
     }
 
     fn collectFromDesktopFiles(
@@ -500,7 +486,7 @@ test "apps provider returns no rows when cache has no valid rows" {
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
 }
 
-test "apps provider rotates owned strings across collects with bounded growth" {
+test "apps provider keeps one owned string set across collects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -524,18 +510,15 @@ test "apps provider rotates owned strings across collects with bounded growth" {
 
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
-    const first_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(first_total)));
+    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
 
     list.clearRetainingCapacity();
     try provider.collect(std.testing.allocator, &list);
-    const second_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(u32, 16), @as(u32, @intCast(second_total)));
+    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
 
     list.clearRetainingCapacity();
     try provider.collect(std.testing.allocator, &list);
-    const third_total = apps.owned_strings_current.items.len + apps.owned_strings_previous.items.len;
-    try std.testing.expectEqual(@as(u32, 16), @as(u32, @intCast(third_total)));
+    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
 }
 
 test "apps provider trims crlf and trailing whitespace from stored fields" {

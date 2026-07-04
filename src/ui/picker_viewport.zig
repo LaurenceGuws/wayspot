@@ -1,4 +1,4 @@
-//! Picker viewport owns bounded result selection, scroll offset, visible range, and row hit testing.
+//! Picker viewport owns foot-derived row math: selected result, scroll offset, visible range, and hit testing.
 
 const std = @import("std");
 
@@ -12,7 +12,6 @@ pub const default_result_row_gap: f32 = 6;
 pub const default_result_title_x: f32 = 34;
 pub const default_result_text_top_inset: f32 = 6;
 pub const default_result_subtitle_offset: f32 = 20;
-pub const default_result_status_x: f32 = 662;
 pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 394 };
 
 /// VisibleRange names the absolute result rows that may be rendered for the current frame.
@@ -62,6 +61,7 @@ pub const Scrollbar = struct {
     }
 };
 
+/// ResultLayout keeps foot-style base-coordinate row geometry shared by render and input hit testing.
 pub const ResultLayout = struct {
     result_top: f32,
     row_x: f32,
@@ -71,7 +71,6 @@ pub const ResultLayout = struct {
     title_x: f32,
     text_top_inset: f32,
     subtitle_offset: f32,
-    status_x: f32,
     scrollbar_track: Rect,
     visible_rows: u32,
 
@@ -85,7 +84,6 @@ pub const ResultLayout = struct {
             .title_x = default_result_title_x,
             .text_top_inset = default_result_text_top_inset,
             .subtitle_offset = default_result_subtitle_offset,
-            .status_x = default_result_status_x,
             .scrollbar_track = default_scrollbar_track,
             .visible_rows = @max(1, @min(visible_rows, max_visible_rows)),
         };
@@ -113,14 +111,12 @@ pub const ResultLayout = struct {
         const row_step = self.row_height + self.row_gap;
         if (row_step <= 0) return null;
 
-        var row: u32 = 0;
-        var top = self.result_top;
-        while (row < self.visible_rows) : (row += 1) {
-            if (y >= top and y < top + self.row_height) return row;
-            if (y < top + row_step) return null;
-            top += row_step;
-        }
-        return null;
+        const row_float = @floor((y - self.result_top) / row_step);
+        if (row_float >= @as(f32, @floatFromInt(self.visible_rows))) return null;
+
+        const row: u32 = @intFromFloat(row_float);
+        const top = self.result_top + row_step * @as(f32, @floatFromInt(row));
+        return if (y < top + self.row_height) row else null;
     }
 
     pub fn scrollbar(self: ResultLayout, viewport: *const Viewport) Scrollbar {
@@ -477,7 +473,6 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
         .title_x = 34,
         .text_top_inset = 6,
         .subtitle_offset = 20,
-        .status_x = 662,
         .scrollbar_track = .{ .x = 746, .y = 72, .w = 4, .h = 194 },
         .visible_rows = 4,
     };

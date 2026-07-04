@@ -27,16 +27,6 @@ pub fn tag(kind: UiKind) []const u8 {
     };
 }
 
-pub fn statusLabel(kind: UiKind) []const u8 {
-    return switch (kind) {
-        .app => "app",
-        .notification => "notification",
-        .action => "action",
-        .hint => "hint",
-        else => "result",
-    };
-}
-
 pub fn fromCandidateKind(kind: search.CandidateKind) UiKind {
     return switch (kind) {
         .app => .app,

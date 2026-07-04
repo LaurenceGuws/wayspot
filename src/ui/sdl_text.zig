@@ -1,8 +1,8 @@
 //! SDL text owns bounded shaped text drawing for Wayspot surfaces.
 //!
 //! This file copies Howl's useful text lessons into one small owner: FreeType
-//! owns face raster data, HarfBuzz owns glyph shaping, and SDL owns the final
-//! texture lifetime for one draw call.
+//! owns face raster data, HarfBuzz owns one shaping buffer, and SDL owns the
+//! final texture lifetime for one draw call.
 
 const std = @import("std");
 const sdl = @import("sdl_c");
@@ -76,6 +76,8 @@ pub const TextEngine = struct {
     ft_lib: c.FT_Library = null,
     face: c.FT_Face = null,
     hb_font: ?*c.hb_font_t = null,
+    hb_buffer: ?*c.hb_buffer_t = null,
+    pixels: std.ArrayListUnmanaged(u8) = .empty,
     active_font_size_px: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !TextEngine {
@@ -84,10 +86,15 @@ pub const TextEngine = struct {
         if (ft_rc != 0) return error.FreeTypeInitFailed;
         errdefer engine.deinit();
         try engine.loadPrimaryFace();
+        engine.hb_buffer = c.hb_buffer_create() orelse return error.ShapeBufferUnavailable;
         return engine;
     }
 
     pub fn deinit(self: *TextEngine) void {
+        if (self.hb_buffer) |buffer| {
+            c.hb_buffer_destroy(buffer);
+            self.hb_buffer = null;
+        }
         if (self.hb_font) |font| {
             c.hb_font_destroy(font);
             self.hb_font = null;
@@ -102,6 +109,7 @@ pub const TextEngine = struct {
             if (lib_done != 0) std.log.debug("freetype cleanup failed rc={d}", .{lib_done});
             self.ft_lib = null;
         }
+        self.pixels.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -126,11 +134,11 @@ pub const TextEngine = struct {
         if (bounds.width() == 0 or bounds.height() == 0) return;
         if (bounds.width() > max_texture_width or bounds.height() > max_texture_height) return error.TextTextureTooLarge;
 
-        const pixels = try self.allocator.alloc(u8, @intCast(@as(u32, bounds.width()) * @as(u32, bounds.height()) * 4));
-        defer self.allocator.free(pixels);
-        @memset(pixels, 0);
-        try self.rasterize(pixels, bounds, glyphs[0..glyph_count], style.color);
-        try renderTexture(renderer, pixels, bounds, x, y);
+        const pixel_bytes = @as(u32, bounds.width()) * @as(u32, bounds.height()) * 4;
+        try self.pixels.resize(self.allocator, @intCast(pixel_bytes));
+        @memset(self.pixels.items, 0);
+        try self.rasterize(self.pixels.items, bounds, glyphs[0..glyph_count], style.color);
+        try renderTexture(renderer, self.pixels.items, bounds, x, y);
     }
 
     fn loadPrimaryFace(self: *TextEngine) !void {
@@ -165,8 +173,8 @@ pub const TextEngine = struct {
         codepoints: []const u32,
         out: *[max_glyphs]GlyphPlacement,
     ) !u32 {
-        const buffer = c.hb_buffer_create() orelse return error.ShapeBufferUnavailable;
-        defer c.hb_buffer_destroy(buffer);
+        const buffer = self.hb_buffer orelse return error.ShapeBufferUnavailable;
+        c.hb_buffer_reset(buffer);
 
         c.hb_buffer_set_cluster_level(buffer, c.HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
         c.hb_buffer_add_utf32(buffer, codepoints.ptr, @intCast(codepoints.len), 0, @intCast(codepoints.len));

@@ -26,12 +26,9 @@ pub fn rankCandidatesWithHistory(
     var scored = std.ArrayList(ScoredCandidate).empty;
     defer scored.deinit(allocator);
 
-    const needle = try lowerAsciiLossyAlloc(allocator, query.term);
-    defer allocator.free(needle);
-
     for (candidates) |candidate| {
         if (!matchesRoute(query.route, candidate.kind)) continue;
-        const score = try candidateScore(allocator, query.route, needle, candidate, recent_actions);
+        const score = candidateScore(query.route, query.term, candidate, recent_actions);
         if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
     }
@@ -69,31 +66,26 @@ fn matchesRoute(route: query_mod.Route, kind: types.CandidateKind) bool {
 }
 
 fn candidateScore(
-    allocator: std.mem.Allocator,
     route: query_mod.Route,
     needle: []const u8,
     candidate: types.Candidate,
     recent_actions: []const []const u8,
-) !i32 {
+) i32 {
     var score: i32 = baseWeight(route, candidate.kind);
     if (needle.len == 0) {
         score += recencyBoost(candidate.action, recent_actions);
         return score;
     }
 
-    const title = try lowerAsciiLossyAlloc(allocator, candidate.title);
-    defer allocator.free(title);
-    const subtitle = try lowerAsciiLossyAlloc(allocator, candidate.subtitle);
-    defer allocator.free(subtitle);
+    const title_contains = indexOfAsciiFold(candidate.title, needle) != null;
+    const subtitle_contains = candidate.subtitle.len > 0 and indexOfAsciiFold(candidate.subtitle, needle) != null;
 
-    if (std.mem.eql(u8, needle, title)) score += 100;
-    if (std.mem.startsWith(u8, title, needle)) score += 60;
-    if (std.mem.indexOf(u8, title, needle) != null) score += 30;
-    if (subtitle.len > 0 and std.mem.indexOf(u8, subtitle, needle) != null) score += 10;
+    if (eqlAsciiFold(candidate.title, needle)) score += 100;
+    if (startsWithAsciiFold(candidate.title, needle)) score += 60;
+    if (title_contains) score += 30;
+    if (subtitle_contains) score += 10;
 
-    if (std.mem.indexOf(u8, title, needle) == null and
-        (subtitle.len == 0 or std.mem.indexOf(u8, subtitle, needle) == null))
-    {
+    if (!title_contains and !subtitle_contains) {
         return 0;
     }
     score += shortQueryBias(needle.len, candidate.kind);
@@ -101,14 +93,42 @@ fn candidateScore(
     return score;
 }
 
-fn lowerAsciiLossyAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, input.len);
+fn eqlAsciiFold(haystack: []const u8, needle: []const u8) bool {
+    if (haystack.len != needle.len) return false;
     var index: u32 = 0;
-    for (input) |ch| {
-        out[index] = if (std.ascii.isAscii(ch)) std.ascii.toLower(ch) else ch;
-        index += 1;
+    while (index < needle.len) : (index += 1) {
+        if (asciiFoldByte(haystack[index]) != asciiFoldByte(needle[index])) return false;
     }
-    return out;
+    return true;
+}
+
+fn startsWithAsciiFold(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    var index: u32 = 0;
+    while (index < needle.len) : (index += 1) {
+        if (asciiFoldByte(haystack[index]) != asciiFoldByte(needle[index])) return false;
+    }
+    return true;
+}
+
+fn indexOfAsciiFold(haystack: []const u8, needle: []const u8) ?u32 {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+    var start: u32 = 0;
+    const last_start: u32 = @intCast(haystack.len - needle.len);
+    while (start <= last_start) : (start += 1) {
+        var index: u32 = 0;
+        while (index < needle.len) : (index += 1) {
+            if (asciiFoldByte(haystack[start + index]) != asciiFoldByte(needle[index])) break;
+        } else {
+            return start;
+        }
+    }
+    return null;
+}
+
+fn asciiFoldByte(ch: u8) u8 {
+    return if (std.ascii.isAscii(ch)) std.ascii.toLower(ch) else ch;
 }
 
 fn shortQueryBias(needle_len: u64, kind: types.CandidateKind) i32 {
@@ -220,10 +240,12 @@ test "short blended query prefers actions over broad app matches" {
     try std.testing.expectEqualStrings("Settings", ranked[0].candidate.title);
 }
 
-test "rankCandidates propagates canonicalization alloc failure" {
+test "rankCandidates propagates scored result alloc failure" {
     var zero_buf: [0]u8 = .{};
     var fba = std.heap.FixedBufferAllocator.init(&zero_buf);
-    const candidates = [_]types.Candidate{};
+    const candidates = [_]types.Candidate{
+        .init(.app, "alpha", "subtitle", "alpha"),
+    };
 
     const query = query_mod.parse("a");
     try std.testing.expectError(
@@ -232,7 +254,7 @@ test "rankCandidates propagates canonicalization alloc failure" {
     );
 }
 
-test "rankCandidates propagates candidate canonicalization alloc failure" {
+test "rankCandidates reports failing allocator on scored result alloc" {
     var failing_state = std.testing.FailingAllocator.init(std.testing.allocator, .{
         .fail_index = 1,
     });
