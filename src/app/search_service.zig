@@ -31,14 +31,13 @@ pub const SearchService = struct {
     pub fn searchQuery(self: *SearchService, allocator: std.mem.Allocator, raw_query: []const u8) ![]search.ScoredCandidate {
         try self.loadCandidatesOnce(allocator);
 
-        const recent = try self.historySnapshotNewestFirstOwned(allocator);
-        defer history_access.freeSnapshot(allocator, recent);
-
-        const ranked = try search.rankCandidatesWithHistory(
+        self.query_mu.lockUncancelable(std.Options.debug_io);
+        defer self.query_mu.unlock(std.Options.debug_io);
+        const ranked = try search.rankCandidatesWithOldestFirstHistory(
             allocator,
             search.parseQuery(raw_query),
             self.candidates.items,
-            recent,
+            self.history.items,
         );
         return ranked;
     }
@@ -47,12 +46,6 @@ pub const SearchService = struct {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
         try history_access.recordLocked(&self.history, self.max_history, allocator, action);
-    }
-
-    pub fn historySnapshotNewestFirstOwned(self: *SearchService, allocator: std.mem.Allocator) ![]const []const u8 {
-        self.query_mu.lockUncancelable(std.Options.debug_io);
-        defer self.query_mu.unlock(std.Options.debug_io);
-        return history_access.snapshotNewestFirstOwnedLocked(self.history.items, allocator);
     }
 
     pub fn loadHistory(self: *SearchService, allocator: std.mem.Allocator) !void {
@@ -103,4 +96,19 @@ test "search service collects candidates once per service lifetime" {
     const second = try service.searchQuery(std.testing.allocator, "fire");
     defer std.testing.allocator.free(second);
     try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
+}
+
+test "search service ranks retained history without query history allocation" {
+    var provider_list = [_]providers.Provider{};
+    var service = SearchService.init(providers.ProviderRegistry.init(&provider_list));
+    defer service.deinit(std.testing.allocator);
+    service.candidates_loaded = true;
+    try history_access.recordLocked(&service.history, service.max_history, std.testing.allocator, "power");
+
+    var zero_buf: [0]u8 = .{};
+    var fba = std.heap.FixedBufferAllocator.init(&zero_buf);
+    const ranked = try service.searchQuery(fba.allocator(), "p");
+    defer fba.allocator().free(ranked);
+
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(ranked.len)));
 }

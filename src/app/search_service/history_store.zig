@@ -50,39 +50,6 @@ pub fn saveHistory(history: []const []u8, history_path: ?[]const u8, allocator: 
     try writeFileAnyPathAtomic(allocator, path, out.items);
 }
 
-pub fn historyViewNewestFirst(history: []const []u8, allocator: std.mem.Allocator) ![]const []const u8 {
-    var out = std.ArrayList([]const u8).empty;
-    defer out.deinit(allocator);
-
-    var idx = history.len;
-    while (idx > 0) : (idx -= 1) {
-        try out.append(allocator, history[idx - 1]);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-pub fn historySnapshotNewestFirstOwned(history: []const []u8, allocator: std.mem.Allocator) ![]const []const u8 {
-    var out = try allocator.alloc([]const u8, history.len);
-    errdefer allocator.free(out);
-
-    var out_idx: u32 = 0;
-    var idx = history.len;
-    while (idx > 0) : (idx -= 1) {
-        const dup = allocator.dupe(u8, history[idx - 1]) catch |err| {
-            for (out[0..out_idx]) |entry| allocator.free(@constCast(entry));
-            return err;
-        };
-        out[out_idx] = dup;
-        out_idx += 1;
-    }
-    return out;
-}
-
-pub fn freeOwnedHistorySnapshot(allocator: std.mem.Allocator, history_snapshot: []const []const u8) void {
-    for (history_snapshot) |entry| allocator.free(@constCast(entry));
-    allocator.free(history_snapshot);
-}
-
 fn readFileAnyPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: u32) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_bytes));
 }

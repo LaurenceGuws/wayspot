@@ -27,17 +27,6 @@ pub fn saveLocked(
     try history_store.saveHistory(history, history_path, allocator);
 }
 
-pub fn snapshotNewestFirstOwnedLocked(
-    history: []const []u8,
-    allocator: std.mem.Allocator,
-) ![]const []const u8 {
-    return history_store.historySnapshotNewestFirstOwned(history, allocator);
-}
-
-pub fn freeSnapshot(allocator: std.mem.Allocator, history_snapshot: []const []const u8) void {
-    history_store.freeOwnedHistorySnapshot(allocator, history_snapshot);
-}
-
 pub fn deinitHistory(
     history: *std.ArrayListUnmanaged([]u8),
     allocator: std.mem.Allocator,
