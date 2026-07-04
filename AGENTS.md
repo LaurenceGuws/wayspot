@@ -1,19 +1,15 @@
 # AGENTS.md
 
 ## Read This First
-- Before non-trivial work, read `/home/home/personal/projects/team/AGENTS.md`.
-- Then read the active project memory:
-  - `/home/home/personal/projects/team/.agent/history/artifacts.jsonl`
-  - `/home/home/personal/projects/team/.agent/history/external-review-bias-index.md`
-  - `/home/home/personal/projects/team/.agent/history/tigerbeetle-overnight-bar.md`
-  - `/home/home/personal/projects/team/.agent/history/qserver-zig-migration-map.yaml`
-- Treat those files as the local engineering bible: exact owners, bounded runtime behavior, accountable comments, no stale vocabulary, and no compatibility-shaped code.
-- Wayspot-local project memory lives in `.agent/history/`:
+- Before non-trivial work, read the Wayspot-local project memory:
   - `.agent/history/README.md`
-  - `.agent/history/artifacts.jsonl`
+  - `.agent/history/current.yaml`
+  - `.agent/history/sprint.yaml`
+  - `.agent/history/references.yaml`
   - `.agent/history/wayspot-scope-map.yaml`
   - `.agent/history/wayspot-surface-scale-index.yaml`
 - Treat the local memory surface as production artifacts. Comments are planned production code; planning and memory are production artifacts.
+- The qagent workflow under `/home/home/personal/projects/qagent` is provenance for this local workflow copy, not live authority for Wayspot.
 - Use `dev_references/` for local source-backed docs before browsing. It contains Zig 0.16 release notes, SDL wiki markdown, captured Hyprland docs, TigerBeetle, and foot references with provenance in `dev_references/manifests/SOURCES.md`.
 
 ## Wayspot Scope

@@ -1,0 +1,89 @@
+workspace:
+  name: wayspot
+  root: /home/home/personal/wayspot
+  version: local-dev
+
+product:
+  summary: >
+    Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
+    notification daemon.
+  active_focus: cold_path_picker_control_spine
+  flow:
+    launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
+    notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
+
+ownership:
+  main:
+    - CLI mode selection
+    - runtime provider wiring
+    - top-level cleanup order
+  search_service:
+    - retained candidate list for one picker service lifetime
+    - history load, snapshot, record, and save
+    - query ranking entry point
+  apps_provider:
+    - desktop application discovery
+    - app candidate string ownership
+    - app cache read, refresh, and invalidation
+  sdl_shell:
+    - one bounded picker lifecycle
+    - SDL window, renderer, event loop, dirty redraw, launch queue, and shutdown signal
+  picker_viewport:
+    - foot-derived base-coordinate row math
+    - selected row, scroll offset, visible range, hit testing, and passive scrollbar facts
+  sdl_text:
+    - UTF-8 admission
+    - HarfBuzz shaping buffer
+    - FreeType face/raster data
+    - per-draw SDL texture lifetime
+  notifications:
+    - freedesktop D-Bus notification interface
+    - bounded retained notification rows
+    - banner child process lifecycle
+
+boundaries:
+  - notification_daemon_is_the_only_long_lived_interface
+  - launcher_ipc_is_not_authorized
+  - sdl_shell_is_the_picker_control_spine
+  - picker_viewport_has_no_sdl_search_dispatch_config_or_allocator_dependency
+  - qagent_memory_is_not_a_runtime_or_planning_dependency
+
+design_law:
+  summary:
+    - shape_first
+    - measure_after_shape_is_worth_measuring
+  rules:
+    - keep direct owners before adding retained resources
+    - delete unearned helper shape before adding optimization shape
+    - model only the current product domain
+    - do not preserve old architecture as no-op compatibility
+    - prove behavior through bounded tests and manual receipts
+
+constraints:
+  runtime:
+    - every_loop_queue_buffer_command_result_page_wake_slot_and_notification_has_a_bound
+    - every_owner_cleans_up_once
+    - cpu_sleeps_unless_input_notification_work_or_deadline_exists
+  code:
+    - no_gtk_shell_modules_provider_registries_web_window_workspace_providers_or_runtime_vms
+    - no_resident_launcher_ipc_without_fresh_approved_design
+    - no_usize_anytype_anyopaque_or_discard_assignment_in_active_zig
+    - comments_are_production_assertions
+  review:
+    - passing_tests_are_not_acceptance
+    - stale_vocabulary_is_a_bug
+    - broad_buckets_are_rejected_until_they_have_a_single_real_owner
+
+memory_policy:
+  live_files:
+    - .agent/history/README.md
+    - .agent/history/current.yaml
+    - .agent/history/sprint.yaml
+    - .agent/history/references.yaml
+  live_rules:
+    - live_files_contain_current_wayspot_truth
+    - retired_material_stays_in_named_history_artifacts_or_archive
+    - external_project_memory_is_provenance_only
+  write_policy:
+    - user_and_coordinator_may_rewrite_live_memory
+    - workers_may_propose_memory_edits_unless_explicitly_authorized_to_write

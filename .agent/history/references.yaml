@@ -1,0 +1,78 @@
+read_order:
+  agents:
+    - /home/home/personal/wayspot/AGENTS.md
+    - /home/home/personal/wayspot/.agent/history/README.md
+    - /home/home/personal/wayspot/.agent/history/current.yaml
+    - /home/home/personal/wayspot/.agent/history/sprint.yaml
+    - /home/home/personal/wayspot/.agent/history/references.yaml
+    - /home/home/personal/wayspot/README.md
+  humans:
+    - /home/home/personal/wayspot/README.md
+    - /home/home/personal/wayspot/.agent/history/README.md
+    - /home/home/personal/wayspot/.agent/history/current.yaml
+    - /home/home/personal/wayspot/.agent/history/sprint.yaml
+
+active_files:
+  memory_manual: /home/home/personal/wayspot/.agent/history/README.md
+  current_worldview: /home/home/personal/wayspot/.agent/history/current.yaml
+  sprint_contract: /home/home/personal/wayspot/.agent/history/sprint.yaml
+  references: /home/home/personal/wayspot/.agent/history/references.yaml
+  scope_map: /home/home/personal/wayspot/.agent/history/wayspot-scope-map.yaml
+  surface_scale_index: /home/home/personal/wayspot/.agent/history/wayspot-surface-scale-index.yaml
+  picker_viewport_index: /home/home/personal/wayspot/.agent/history/wayspot-picker-viewport-index.yaml
+  control_spine_index: /home/home/personal/wayspot/.agent/history/wayspot-control-spine-shrink-index.yaml
+
+source_references:
+  provenance:
+    qagent_workflow_source: /home/home/personal/projects/qagent
+    rule: >
+      qagent provided the copied way-of-work framework. It is not live authority
+      for Wayspot planning or implementation.
+  tigerbeetle:
+    root: /home/home/personal/wayspot/dev_references/style/tigerbeetle
+    required_for_owner_claims:
+      - src/stdx/bounded_array.zig
+      - src/queue.zig
+  foot:
+    root: /home/home/personal/wayspot/dev_references/terminals/foot
+    required_for_picker_claims:
+      - input.c
+      - render.c
+      - selection.c
+  sdl:
+    docs: /home/home/personal/wayspot/dev_references/sdl
+  zig:
+    release_notes: /home/home/personal/wayspot/dev_references/zig/release-notes.html
+
+repo_entrypoints:
+  cli:
+    main: /home/home/personal/wayspot/src/main.zig
+  launcher:
+    shell: /home/home/personal/wayspot/src/ui/sdl_shell.zig
+    viewport: /home/home/personal/wayspot/src/ui/picker_viewport.zig
+    text: /home/home/personal/wayspot/src/ui/sdl_text.zig
+    surface_config: /home/home/personal/wayspot/src/ui/surface_config.zig
+  search:
+    service: /home/home/personal/wayspot/src/app/search_service.zig
+    apps_provider: /home/home/personal/wayspot/src/providers/apps.zig
+    rank: /home/home/personal/wayspot/src/search/rank.zig
+  notifications:
+    daemon: /home/home/personal/wayspot/src/notifications/dbus_daemon.zig
+    runtime: /home/home/personal/wayspot/src/notifications/runtime.zig
+    banner: /home/home/personal/wayspot/src/ui/sdl_banner.zig
+
+verification:
+  build:
+    - cd /home/home/personal/wayspot && zigup run 0.16.0 build test --summary all
+    - cd /home/home/personal/wayspot && zigup run 0.16.0 build
+  smoke:
+    - cd /home/home/personal/wayspot && ./re-run.sh
+    - cd /home/home/personal/wayspot && ./zig-out/bin/wayspot --notifications-daemon
+
+archive_policy:
+  retired_memory:
+    - .agent/history/artifacts.jsonl
+  rule: >
+    artifacts.jsonl remains historical Wayspot memory until explicitly
+    archived. New active worldview belongs in current.yaml, sprint.yaml, and
+    references.yaml.

@@ -1,0 +1,123 @@
+id: cold_path_control_spine
+
+goal:
+  completion_target: reviewer_approved_then_user_smoke
+  design_target:
+    - make launcher cold path direct enough that a text/render cache may be unnecessary
+    - shrink startup and first-render ownership before retaining new resources
+    - preserve picker behavior and notification daemon scope
+
+personas:
+  user:
+    role: product_owner
+    owns:
+      - product scope
+      - acceptance bar
+      - naming corrections
+      - manual btop and visual feedback
+  coordinator:
+    role: delegate workflow and maintain accountability
+    owns:
+      - handoffs
+      - artifact hygiene
+      - review sequencing
+      - memory continuity
+      - acceptance or rejection of worker proposals
+  worker:
+    role: propose and execute bounded slices after approval
+    must_do:
+      - read Wayspot-local memory first
+      - propose exact files, symbols, deletions, tests, and verification
+      - wait for coordinator approval before implementation unless explicitly authorized
+      - never treat qagent live memory as Wayspot authority
+  reviewer:
+    role: strict invariant enforcer
+    verdicts:
+      - accept
+      - reject
+      - user_needed
+    user_needed_rule: >
+      Allowed only when existing Wayspot decisions are missing, incorrect, or
+      contradictory, so local execution would invent architecture.
+
+workflow:
+  steps:
+    - worker proposes the best bounded cold-path slice and why
+    - coordinator approves, narrows, or rejects the proposal
+    - worker executes the approved slice
+    - coordinator reviews findings-first and either commits, rejects, or asks the user
+  review_bias:
+    - comments are production code
+    - naming and intentional structure matter as much as hot paths
+    - sdl_shell must remain a small swallowable control spine
+    - do not add a cache until cold-path shape is already direct
+    - reject retained resources without owner, key, invalidation, scale behavior, cleanup, and tests
+
+cold_path:
+  sequence:
+    - main parses CLI args and selects ui mode
+    - runtime wires action and app providers
+    - search service loads history
+    - sdl shell initializes config, SDL video, window, renderer, text engine, text input, and wake event
+    - sdl shell refreshes initial results
+    - search service loads candidates once and ranks them
+    - first render draws chrome, visible result rows, optional scrollbar, then sleeps in SDL_WaitEvent
+  pressure_points:
+    - app candidate discovery and retained strings
+    - history snapshot allocation per query
+    - text engine FreeType and HarfBuzz init before first useful render
+    - per-draw shape, raster, texture create, texture upload, texture destroy
+    - shutdown signal thread startup before first event wait
+
+current_rejected_path:
+  text_texture_cache:
+    reason: >
+      A bounded texture cache added large surface without proof of visual
+      equivalence, useful hits, invalidation, scale behavior, or SDL texture
+      lifecycle ownership.
+    rule: do_not_reintroduce_without_a_fresh_approved_slice
+
+active_slice:
+  id: 09_render_owner_shape_review
+  mode: review_first
+  goal: >
+    Make render/text/cold-path ownership cleaner before any cache or
+    performance tuning.
+  likely_files:
+    - src/main.zig
+    - src/app/search_service.zig
+    - src/providers/apps.zig
+    - src/search/rank.zig
+    - src/ui/sdl_shell.zig
+    - src/ui/sdl_text.zig
+    - src/ui/picker_viewport.zig
+  worker_output_required:
+    - exact cold path sequence from main to first useful picker render
+    - exact owners of each allocation or OS resource on that path
+    - proposed deletions before additions
+    - proposed changes with file, symbol, reason, non-goals, and tests
+    - high-risk changes to reject
+    - retained-resource proposals only with owner, key, invalidation, scale behavior, cleanup, and tests
+  stop_conditions:
+    - user_decision_needed
+    - no deletion or addition earns its place
+    - accepted implementation slice is explicit
+
+verification_floor:
+  automated:
+    - zigup run 0.16.0 build test --summary all
+    - git diff --check
+    - rg banned Zig patterns over touched active Zig files
+    - rg stale runtime-debt vocabulary over touched runtime files
+  manual:
+    - ./re-run.sh or RERUN_INSTALL_BIN=/tmp/wayspot-smoke ./re-run.sh when daemon owns installed binary
+    - user_btop_idle_cpu
+    - user_btop_mouse_motion_cpu
+    - user_btop_resize_cpu
+    - user_btop_init_rss
+
+done_definition:
+  - cold-path review is exact enough for a worker to execute without chat context
+  - accepted implementation slices leave runtime code smaller or more direct
+  - no cache or measurement architecture is added by default
+  - behavior receipts cover launcher open, query, scroll, hover, click launch, resize, idle sleep, and cleanup
