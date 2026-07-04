@@ -49,10 +49,18 @@ pub const Form = struct {
         self.focus = controlFromIndex(next);
     }
 
+    pub fn focusedControlChangesSavedState(self: *const Form) bool {
+        return switch (self.focus) {
+            .monitor => false,
+            .red_blue_toggle, .red_blue_slider, .dim_toggle, .dim_slider => true,
+        };
+    }
+
     pub fn activateFocused(self: *Form, state: *sunglasses_state.State) !bool {
         try self.ensureReady(state);
         const monitor = currentMonitorMutable(state, self.selected_monitor);
         switch (self.focus) {
+            .monitor => return self.selectNextMonitor(state),
             .red_blue_toggle => {
                 monitor.red_blue_enabled = !monitor.red_blue_enabled;
                 return true;
@@ -108,7 +116,7 @@ pub const Form = struct {
                 monitor.setDimValue(dimFromX(hit.row, x));
                 return monitor.dim_value != before;
             },
-            .monitor => return false,
+            .monitor => return self.selectNextMonitor(state),
         }
     }
 
@@ -161,6 +169,12 @@ pub const Form = struct {
             self.selected_monitor = @min(last, self.selected_monitor + @min(last - self.selected_monitor, amount));
         }
         return self.selected_monitor != before;
+    }
+
+    fn selectNextMonitor(self: *Form, state: *const sunglasses_state.State) bool {
+        if (state.count <= 1) return false;
+        self.selected_monitor = (self.selected_monitor + 1) % state.count;
+        return true;
     }
 };
 
@@ -403,4 +417,19 @@ test "form focus wraps in both directions" {
     try std.testing.expectEqual(Control.monitor, form.focus);
     form.focusNext(true);
     try std.testing.expectEqual(Control.dim_slider, form.focus);
+}
+
+test "monitor row activation and click cycle monitors" {
+    var state = sunglasses_state.defaultState();
+    try state.append(try sunglasses_state.MonitorState.init("HDMI-A-1"));
+    try state.append(try sunglasses_state.MonitorState.init("DP-1"));
+    var form = Form{};
+
+    form.focus = .monitor;
+    try std.testing.expect(try form.activateFocused(&state));
+    try std.testing.expectEqual(@as(u32, 1), form.selected_monitor);
+
+    const layout = picker_viewport.ResultLayout.default(5);
+    try std.testing.expect(try form.click(&state, layout, layout.row_x + 20, layout.result_top + 20));
+    try std.testing.expectEqual(@as(u32, 0), form.selected_monitor);
 }

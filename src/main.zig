@@ -7,6 +7,7 @@ pub fn main(init: std.process.Init) !void {
     const home = init.minimal.environ.getPosix("HOME") orelse ".";
 
     if (hasArg(args, "--notifications-daemon")) {
+        try wayspot.process_identity.set(wayspot.process_identity.notifications);
         try wayspot.notifications.run(allocator);
         return;
     }
@@ -128,6 +129,7 @@ fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.C
         std.process.exit(2);
     }
 
+    try wayspot.process_identity.set(wayspot.process_identity.wallpaper);
     try wayspot.wallpaper.Runtime.runWallpaper(allocator, hypr);
 }
 
@@ -137,6 +139,7 @@ fn runSunglassesDaemon(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyp
         std.process.exit(2);
     }
 
+    try wayspot.process_identity.set(wayspot.process_identity.sunglasses);
     try wayspot.sunglasses.Runtime.runDaemon(allocator, hypr);
 }
 
