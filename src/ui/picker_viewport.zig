@@ -6,15 +6,26 @@ pub const max_visible_rows: u32 = 64;
 pub const min_scrollbar_thumb_height: f32 = 12;
 pub const default_result_list_top: f32 = 66;
 pub const default_result_row_x: f32 = 20;
-pub const default_result_row_width: f32 = 720;
 pub const default_result_row_height: f32 = 44;
 pub const default_result_row_gap: f32 = 6;
+pub const default_result_right_margin: f32 = 10;
+pub const default_result_scrollbar_gap: f32 = 6;
+pub const default_result_bottom_margin: f32 = 10;
 pub const default_result_title_x: f32 = 34;
 pub const default_result_text_top_inset: f32 = 6;
 pub const default_result_subtitle_offset: f32 = 20;
 pub const default_result_icon_size: f32 = 28;
 pub const default_result_icon_right_inset: f32 = 14;
-pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 394 };
+pub const default_query_text_x: f32 = 24;
+pub const default_query_text_y: f32 = 40;
+pub const default_query_line_y: f32 = 58;
+pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 344 };
+pub const default_base_width: f32 = 760;
+pub const default_base_height: f32 = 420;
+pub const min_base_width_px: i32 = 220;
+pub const min_base_height_px: i32 = 180;
+pub const min_base_width: f32 = @floatFromInt(min_base_width_px);
+pub const min_base_height: f32 = @floatFromInt(min_base_height_px);
 
 /// VisibleRange names the absolute result rows that may be rendered for the current frame.
 pub const VisibleRange = struct {
@@ -75,24 +86,48 @@ pub const ResultLayout = struct {
     subtitle_offset: f32,
     icon_size: f32,
     icon_right_inset: f32,
+    query_text_x: f32,
+    query_text_y: f32,
+    query_line: Rect,
     scrollbar_track: Rect,
     visible_rows: u32,
 
     pub fn default(visible_rows: u32) ResultLayout {
+        return forWindow(default_base_width, default_base_height, visible_rows);
+    }
+
+    pub fn forWindow(base_width_raw: f32, base_height_raw: f32, visible_rows: u32) ResultLayout {
+        const base_width = @max(min_base_width, base_width_raw);
+        const base_height = @max(min_base_height, base_height_raw);
+        const left = @min(default_result_row_x, @max(0, base_width * 0.08));
+        const right = @min(default_result_right_margin, @max(0, base_width * 0.04));
+        const scrollbar_width = @min(default_scrollbar_track.w, @max(1, base_width - left - right));
+        const scrollbar_x = @max(left, base_width - right - scrollbar_width);
+        const row_right = @max(left + 1, scrollbar_x - default_result_scrollbar_gap);
+        const row_width = row_right - left;
+        const scrollbar_height = @max(0, base_height - default_result_list_top - default_result_bottom_margin);
+        const rows_fit = visibleRowsForHeight(scrollbar_height, default_result_row_height, default_result_row_gap);
         return .{
             .result_top = default_result_list_top,
-            .row_x = default_result_row_x,
-            .row_width = default_result_row_width,
+            .row_x = left,
+            .row_width = row_width,
             .row_height = default_result_row_height,
             .row_gap = default_result_row_gap,
-            .title_x = default_result_title_x,
+            .title_x = left + (default_result_title_x - default_result_row_x),
             .text_top_inset = default_result_text_top_inset,
             .subtitle_offset = default_result_subtitle_offset,
             .icon_size = default_result_icon_size,
             .icon_right_inset = default_result_icon_right_inset,
-            .scrollbar_track = default_scrollbar_track,
-            .visible_rows = @max(1, @min(visible_rows, max_visible_rows)),
+            .query_text_x = left + (default_query_text_x - default_result_row_x),
+            .query_text_y = default_query_text_y,
+            .query_line = .{ .x = left, .y = default_query_line_y, .w = row_width, .h = 1 },
+            .scrollbar_track = .{ .x = scrollbar_x, .y = default_result_list_top, .w = scrollbar_width, .h = scrollbar_height },
+            .visible_rows = @max(1, @min(@min(visible_rows, rows_fit), max_visible_rows)),
         };
+    }
+
+    pub fn resultAreaHeight(self: ResultLayout) f32 {
+        return self.scrollbar_track.h;
     }
 
     pub fn rowRect(self: ResultLayout, visible_row: u32) Rect {
@@ -492,6 +527,9 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
         .subtitle_offset = 20,
         .icon_size = 28,
         .icon_right_inset = 14,
+        .query_text_x = 24,
+        .query_text_y = 40,
+        .query_line = .{ .x = 20, .y = 58, .w = 720, .h = 1 },
         .scrollbar_track = .{ .x = 746, .y = 72, .w = 4, .h = 194 },
         .visible_rows = 4,
     };
@@ -513,6 +551,8 @@ test "default result layout preserves shell row geometry" {
     try testing.expectEqual(@as(f32, 72), layout.titleY(0));
     try testing.expectEqual(@as(f32, 92), layout.subtitleY(0));
     try testing.expectEqual(@as(f32, 116), second_row.y);
+    try testing.expectEqual(Rect{ .x = 20, .y = 58, .w = 720, .h = 1 }, layout.query_line);
+    try testing.expectEqual(default_scrollbar_track, layout.scrollbar_track);
     try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 112));
     try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 122));
 }
@@ -530,4 +570,54 @@ test "default result layout places icon inside row hit area" {
     try testing.expect(icon.x + icon.w <= row.x + row.w);
     try testing.expect(icon.y + icon.h <= row.y + row.h);
     try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(icon.x + 1, icon.y + 1));
+}
+
+test "window result layout keeps chrome rows icons and scrollbar inside bounds" {
+    const testing = std.testing;
+    const narrow = ResultLayout.forWindow(min_base_width, min_base_height, 3);
+    const wide = ResultLayout.forWindow(1180, 620, 9);
+
+    try expectLayoutFitsWindow(narrow, min_base_width, min_base_height);
+    try expectLayoutFitsWindow(wide, 1180, 620);
+    try testing.expect(wide.row_width > narrow.row_width);
+    try testing.expectEqual(wide.row_width, wide.query_line.w);
+    try testing.expectEqual(narrow.row_width, narrow.query_line.w);
+}
+
+test "window result layout clamps to supported minimum geometry" {
+    const layout = ResultLayout.forWindow(1, 1, 3);
+    try expectLayoutFitsWindow(layout, min_base_width, min_base_height);
+}
+
+test "dynamic layout hit testing follows rendered row geometry" {
+    const testing = std.testing;
+    const layout = ResultLayout.forWindow(260, 240, 4);
+    const first = layout.rowRect(0);
+    const second = layout.rowRect(1);
+
+    try testing.expectEqual(@as(?u32, 0), layout.visibleRowAtPoint(first.x + 1, first.y + 1));
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(second.x + second.w - 1, second.y + second.h - 1));
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(layout.scrollbar_track.x, first.y + 1));
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(second.x + 1, first.y + first.h + 1));
+}
+
+fn expectLayoutFitsWindow(layout: ResultLayout, width: f32, height: f32) !void {
+    try expectRectInside(layout.query_line, width, height);
+    try expectRectInside(layout.scrollbar_track, width, height);
+
+    var row: u32 = 0;
+    while (row < layout.visible_rows) : (row += 1) {
+        try expectRectInside(layout.rowRect(row), width, height);
+        try expectRectInside(layout.iconRect(row), width, height);
+    }
+}
+
+fn expectRectInside(rect: Rect, width: f32, height: f32) !void {
+    const testing = std.testing;
+    try testing.expect(rect.x >= 0);
+    try testing.expect(rect.y >= 0);
+    try testing.expect(rect.w >= 0);
+    try testing.expect(rect.h >= 0);
+    try testing.expect(rect.x + rect.w <= width);
+    try testing.expect(rect.y + rect.h <= height);
 }

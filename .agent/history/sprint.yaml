@@ -206,6 +206,29 @@ svg_cache_receipt:
     - ./zig-out/bin/wayspot --icon-diag
     - timeout 8s ./zig-out/bin/wayspot --ui
 
+geometry_search_chrome_receipt:
+  id: picker_geometry_and_search_cursor
+  state: completed
+  behavior:
+    - picker row, icon, scrollbar, query line, and mouse hit geometry derive from current SDL window size and zoom scale.
+    - SDL enforces the scaled minimum window size supported by picker geometry.
+    - zoom updates the minimum window size before resizing the picker surface.
+    - the fixed Wayspot heading was removed from content chrome.
+    - empty query renders Search as ghost text.
+    - the query cursor blinks from an event deadline and resets visible after text input and backspace.
+  changed_files:
+    - src/ui/picker_viewport.zig
+    - src/ui/sdl_shell.zig
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - zigup run 0.16.0 build -Doptimize=ReleaseFast
+    - zigup run 0.16.0 fmt --check src/ui/picker_viewport.zig src/ui/sdl_shell.zig
+    - git diff --check
+    - banned pattern scan over changed active Zig files
+    - stale vocabulary scan over changed active Zig files
+    - timeout 8s ./zig-out/bin/wayspot --ui
+    - pgrep cleanup check for leftover wayspot UI processes
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all

@@ -34,6 +34,8 @@ const max_launch_wait_interrupts: u32 = 16;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
+const cursor_blink_interval_ms: u64 = 530;
+const max_cursor_query_bytes: u32 = 96;
 const LaunchRunError = error{
     CommandFailed,
     ForkFailed,
@@ -48,6 +50,8 @@ comptime {
     std.debug.assert(max_launch_wait_interrupts > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
+    std.debug.assert(cursor_blink_interval_ms > 0);
+    std.debug.assert(max_cursor_query_bytes > 0);
 }
 
 /// LaunchQueue owns one detached command intent between picker activation and controlled drain.
@@ -166,6 +170,38 @@ const ShutdownSignal = struct {
     }
 };
 
+const CursorBlink = struct {
+    visible: bool,
+    next_toggle_ms: u64,
+
+    fn init(now_ms: u64) CursorBlink {
+        return .{
+            .visible = true,
+            .next_toggle_ms = now_ms + cursor_blink_interval_ms,
+        };
+    }
+
+    fn reset(self: *CursorBlink, now_ms: u64) void {
+        self.visible = true;
+        self.next_toggle_ms = now_ms + cursor_blink_interval_ms;
+    }
+
+    fn advance(self: *CursorBlink, now_ms: u64) bool {
+        if (now_ms < self.next_toggle_ms) return false;
+        const was_visible = self.visible;
+        const toggles: u64 = ((now_ms - self.next_toggle_ms) / cursor_blink_interval_ms) + 1;
+        if ((toggles & 1) == 1) self.visible = !self.visible;
+        self.next_toggle_ms += toggles * cursor_blink_interval_ms;
+        return self.visible != was_visible;
+    }
+
+    fn waitTimeoutMs(self: *const CursorBlink, now_ms: u64) i32 {
+        if (now_ms >= self.next_toggle_ms) return 0;
+        const remaining = self.next_toggle_ms - now_ms;
+        return @intCast(@min(remaining, @as(u64, @intCast(std.math.maxInt(i32)))));
+    }
+};
+
 fn shutdownSignalHandler(signal: std.posix.SIG) callconv(.c) void {
     if (signal != .INT and signal != .TERM) return;
     const fd = shutdown_handler_fd.load(.acquire);
@@ -217,6 +253,9 @@ const SdlShell = struct {
     text: sdl_text.TextEngine,
     icons: app_icons.AppIconStore = app_icons.AppIconStore.init(),
     config: surface_config.SurfaceConfig,
+    base_width: f32 = @floatFromInt(base_window_width),
+    base_height: f32 = @floatFromInt(base_window_height),
+    cursor: CursorBlink = CursorBlink.init(0),
     shutdown_signal: ?*ShutdownSignal = null,
     wake_event_type: u32 = 0,
     query: std.ArrayList(u8) = .empty,
@@ -261,7 +300,9 @@ const SdlShell = struct {
             .text = text,
             .config = config,
             .wake_event_type = wake_event_type,
+            .cursor = CursorBlink.init(sdlNowMs()),
         };
+        try self.applyMinimumWindowSize();
         try self.updateViewportForWindow();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
@@ -302,8 +343,17 @@ const SdlShell = struct {
             try self.drainPendingLaunch();
             if (self.shutdown_after_launch) break;
 
+            const before_wait_ms = sdlNowMs();
+            if (self.cursor.advance(before_wait_ms)) {
+                self.dirty = true;
+                continue;
+            }
+
             var event: c.SDL_Event = undefined;
-            if (!c.SDL_WaitEvent(&event)) return error.SdlEventWaitFailed;
+            if (!c.SDL_WaitEventTimeout(&event, self.cursor.waitTimeoutMs(before_wait_ms))) {
+                if (self.cursor.advance(sdlNowMs())) self.dirty = true;
+                continue;
+            }
             running = try self.handleEvent(&event);
             while (c.SDL_PollEvent(&event)) {
                 if (!try self.handleEvent(&event)) {
@@ -342,6 +392,7 @@ const SdlShell = struct {
             c.SDL_EVENT_TEXT_INPUT => {
                 const text = std.mem.span(event.text.text);
                 try self.query.appendSlice(self.allocator, text);
+                self.resetCursorBlink();
                 try self.refreshResults();
             },
             c.SDL_EVENT_MOUSE_WHEEL => {
@@ -377,6 +428,7 @@ const SdlShell = struct {
                     },
                     c.SDLK_BACKSPACE => {
                         trimLastUtf8(&self.query);
+                        self.resetCursorBlink();
                         try self.refreshResults();
                     },
                     c.SDLK_RETURN, c.SDLK_KP_ENTER => {
@@ -439,8 +491,8 @@ const SdlShell = struct {
         if (!background_color or !cleared) return error.SdlRenderFailed;
 
         const range = self.viewport.visibleRange();
-        const layout = picker_viewport.ResultLayout.default(range.count);
-        try self.drawChrome();
+        const layout = self.currentResultLayout(range.count);
+        try self.drawChrome(layout);
         try self.drawResults(range, layout);
         try self.drawScrollbar(layout);
 
@@ -452,44 +504,100 @@ const SdlShell = struct {
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
         const range = self.viewport.visibleRange();
-        const layout = picker_viewport.ResultLayout.default(range.count);
+        const layout = self.currentResultLayout(range.count);
         return layout.visibleRowAtPoint(x / scale, y / scale);
     }
 
     fn updateViewportForWindow(self: *SdlShell) !void {
+        var width: i32 = 0;
         var height: i32 = 0;
-        const size_read = c.SDL_GetWindowSize(self.window, null, &height);
+        const size_read = c.SDL_GetWindowSize(self.window, &width, &height);
         if (!size_read) return error.SdlResizeFailed;
+        const window_width = @max(width, 1);
         const window_height = @max(height, 1);
 
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
+        const base_width = @as(f32, @floatFromInt(window_width)) / scale;
         const base_height = @as(f32, @floatFromInt(window_height)) / scale;
-        const available_height = @max(0, base_height - picker_viewport.default_result_list_top);
+        if (self.base_width != base_width or self.base_height != base_height) {
+            self.base_width = base_width;
+            self.base_height = base_height;
+            self.dirty = true;
+        }
+        const layout = self.currentResultLayout(picker_viewport.max_visible_rows);
         const visible_rows = picker_viewport.visibleRowsForHeight(
-            available_height,
+            layout.resultAreaHeight(),
             picker_viewport.default_result_row_height,
             picker_viewport.default_result_row_gap,
         );
         if (self.viewport.resize(visible_rows)) self.dirty = true;
     }
 
-    fn drawChrome(self: *SdlShell) !void {
-        try self.text.draw(self.renderer, 24, 18, "Wayspot", .{
-            .color = .{ .r = 210, .g = 226, .b = 245 },
-            .max_bytes = 64,
-            .font_size_px = 20,
-        });
-        try self.text.draw(self.renderer, 24, 40, self.query.items, .{
-            .color = .{ .r = 168, .g = 185, .b = 204 },
-            .max_bytes = 84,
-            .font_size_px = 17,
-        });
+    fn currentResultLayout(self: *const SdlShell, visible_rows: u32) picker_viewport.ResultLayout {
+        return picker_viewport.ResultLayout.forWindow(self.base_width, self.base_height, visible_rows);
+    }
 
-        const query_rect = c.SDL_FRect{ .x = 20, .y = 58, .w = 720, .h = 1 };
+    fn resetCursorBlink(self: *SdlShell) void {
+        self.cursor.reset(sdlNowMs());
+        self.dirty = true;
+    }
+
+    fn applyMinimumWindowSize(self: *SdlShell) !void {
+        const size = self.config.scaledDimensions(
+            picker_viewport.min_base_width_px,
+            picker_viewport.min_base_height_px,
+        );
+        const resized = c.SDL_SetWindowMinimumSize(self.window, @intCast(size.width), @intCast(size.height));
+        if (!resized) return error.SdlResizeFailed;
+    }
+
+    fn drawChrome(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
+        if (self.query.items.len == 0) {
+            try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, "Search", .{
+                .color = .{ .r = 96, .g = 108, .b = 124 },
+                .max_bytes = 16,
+                .font_size_px = 17,
+            });
+        } else {
+            try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, self.query.items, .{
+                .color = .{ .r = 168, .g = 185, .b = 204 },
+                .max_bytes = 84,
+                .font_size_px = 17,
+            });
+        }
+        if (self.cursor.visible) try self.drawQueryCursor(layout);
+
+        const query_rect = c.SDL_FRect{
+            .x = layout.query_line.x,
+            .y = layout.query_line.y,
+            .w = layout.query_line.w,
+            .h = layout.query_line.h,
+        };
         const line_color = c.SDL_SetRenderDrawColor(self.renderer, 64, 74, 84, 255);
         const line_drawn = c.SDL_RenderFillRect(self.renderer, &query_rect);
         if (!line_color or !line_drawn) return error.SdlRenderFailed;
+    }
+
+    fn drawQueryCursor(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
+        const cursor_color = c.SDL_SetRenderDrawColor(self.renderer, 214, 226, 244, 255);
+        const cursor_rect = c.SDL_FRect{
+            .x = self.queryCursorX(layout),
+            .y = layout.query_text_y - 2,
+            .w = 1.5,
+            .h = 19,
+        };
+        const cursor_drawn = c.SDL_RenderFillRect(self.renderer, &cursor_rect);
+        if (!cursor_color or !cursor_drawn) return error.SdlRenderFailed;
+    }
+
+    fn queryCursorX(self: *const SdlShell, layout: picker_viewport.ResultLayout) f32 {
+        const byte_count: u32 = @intCast(@min(self.query.items.len, max_cursor_query_bytes));
+        const text_advance = @as(f32, @floatFromInt(byte_count)) * 8.5;
+        const line_left = layout.query_line.x;
+        const line_right = layout.query_line.x + @max(1, layout.query_line.w) - 1;
+        const raw_x = layout.query_text_x + text_advance;
+        return @min(line_right, @max(line_left, raw_x));
     }
 
     fn drawResults(self: *SdlShell, range: picker_viewport.VisibleRange, layout: picker_viewport.ResultLayout) !void {
@@ -586,6 +694,7 @@ const SdlShell = struct {
     }
 
     fn applySurfaceScale(self: *SdlShell) !void {
+        try self.applyMinimumWindowSize();
         const size = self.config.scaledDimensions(base_window_width, base_window_height);
         const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
         if (!resized) return error.SdlResizeFailed;
@@ -601,6 +710,10 @@ fn trimLastUtf8(query: *std.ArrayList(u8)) void {
     var idx = query.items.len - 1;
     while (idx > 0 and (query.items[idx] & 0b1100_0000) == 0b1000_0000) : (idx -= 1) {}
     query.shrinkRetainingCapacity(idx);
+}
+
+fn sdlNowMs() u64 {
+    return c.SDL_GetTicks();
 }
 
 fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kinds.UiKind {
@@ -761,6 +874,31 @@ fn launchRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
 fn launchRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
     if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
     return error.CommandFailed;
+}
+
+test "cursor blink advances only at its deadline" {
+    var cursor = CursorBlink.init(100);
+
+    try std.testing.expect(cursor.visible);
+    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(100));
+    try std.testing.expect(!cursor.advance(629));
+    try std.testing.expect(cursor.visible);
+    try std.testing.expect(cursor.advance(630));
+    try std.testing.expect(!cursor.visible);
+    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(630));
+}
+
+test "cursor reset shows cursor and restarts deadline" {
+    var cursor = CursorBlink.init(0);
+
+    try std.testing.expect(cursor.advance(530));
+    try std.testing.expect(!cursor.visible);
+    cursor.reset(900);
+    try std.testing.expect(cursor.visible);
+    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(900));
+    try std.testing.expect(!cursor.advance(1429));
+    try std.testing.expect(cursor.advance(1430));
+    try std.testing.expect(!cursor.visible);
 }
 
 test "launch queue clears after successful drain" {
