@@ -1,5 +1,5 @@
 id: wallpaper_v1
-state: active
+state: complete
 
 source:
   detailed_index: .agent/history/wallpaper-v1-sprint-contract.yaml
@@ -64,8 +64,16 @@ progress:
           - event_loop_sleeps_on_sdl_wait_timeout_until_event_or_deadline
           - sigterm_wakes_daemon_and_runtime_cleanup_removes_layers
           - cleanup_remains_runtime_owned
-  current:
-    - wallpaper_monitor_change_events
+    - wallpaper_monitor_change_events:
+        receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
+        facts:
+          - socket2_is_owned_by_one_wallpaper_monitor_watcher
+          - monitor_added_and_removed_events_wake_the_sdl_loop
+          - add_remove_rebuilds_surface_slots_from_a_fresh_monitor_query
+          - focused_monitor_events_wake_and_drain_without_rebuilding_per_monitor_wallpaper_surfaces
+          - runtime_still_sleeps_until_sdl_event_monitor_event_shutdown_or_timer_deadline
+          - configured_daemon_smoke_removed_all_layers_after_sigterm
+  current: []
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -75,6 +83,7 @@ verification_floor:
   - banned active Zig pattern scan
   - stale runtime vocabulary scan
   - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
+  - configured wallpaper smoke receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
 
 next_candidates: []
 

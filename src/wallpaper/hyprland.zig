@@ -1,4 +1,4 @@
-//! Hyprland access is short-lived request I/O for monitor facts.
+//! Hyprland access owns bounded monitor facts and the socket2 monitor event stream.
 
 const std = @import("std");
 
@@ -6,6 +6,8 @@ pub const max_monitors: u32 = 8;
 pub const max_hypr_response_bytes: u32 = 1024 * 1024;
 pub const max_monitor_name_bytes: u32 = 96;
 const socket_path_bytes: u32 = 160;
+const max_event_line_bytes: u32 = 512;
+const event_read_bytes: u32 = 1024;
 
 pub const Connection = struct {
     runtime_dir: []const u8,
@@ -43,6 +45,100 @@ pub fn queryMonitors(allocator: std.mem.Allocator, hypr: Connection) !MonitorLis
     defer allocator.free(response);
     return parseMonitors(allocator, response);
 }
+
+pub const MonitorEvent = enum {
+    monitor_changed,
+    focused_monitor,
+    stopped,
+};
+
+pub const EventStream = struct {
+    fd: std.posix.fd_t = -1,
+    pending: [max_event_line_bytes]u8 = undefined,
+    pending_len: u32 = 0,
+
+    pub fn init(allocator: std.mem.Allocator, hypr: Connection) !EventStream {
+        const socket_path = try std.fmt.allocPrint(allocator, "{s}/hypr/{s}/.socket2.sock", .{ hypr.runtime_dir, hypr.signature });
+        defer allocator.free(socket_path);
+        return .{
+            .fd = try connectRequestSocket(socket_path),
+        };
+    }
+
+    pub fn deinit(self: *EventStream) void {
+        if (self.fd != -1) {
+            closeFd(self.fd);
+            self.fd = -1;
+        }
+    }
+
+    /// Poll socket2 with a stop fd so monitor events wake SDL without polling the CPU.
+    pub fn wait(self: *EventStream, stop_fd: std.posix.fd_t) !MonitorEvent {
+        while (true) {
+            if (self.nextPendingEvent()) |event| return event;
+
+            var poll_fds = [_]std.posix.pollfd{
+                .{
+                    .fd = self.fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+                .{
+                    .fd = stop_fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+            };
+            const ready = pollFdSet(&poll_fds, -1) catch |err| switch (err) {
+                error.SignalInterrupted => continue,
+                else => return err,
+            };
+            if (ready == 0) continue;
+            if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) return .stopped;
+            if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
+            try self.readAvailable();
+        }
+    }
+
+    fn readAvailable(self: *EventStream) !void {
+        var buf: [event_read_bytes]u8 = undefined;
+        const read_count = readFd(self.fd, &buf) catch |err| switch (err) {
+            error.SignalInterrupted => return,
+            else => return err,
+        };
+        if (read_count == 0) return error.HyprlandEventSocketClosed;
+
+        var index: u32 = 0;
+        while (index < read_count) : (index += 1) {
+            if (self.pending_len >= max_event_line_bytes) {
+                self.pending_len = 0;
+                return error.HyprlandEventLineTooLong;
+            }
+            self.pending[self.pending_len] = buf[index];
+            self.pending_len += 1;
+        }
+    }
+
+    fn nextPendingEvent(self: *EventStream) ?MonitorEvent {
+        while (true) {
+            var newline_index: u32 = 0;
+            while (newline_index < self.pending_len) : (newline_index += 1) {
+                if (self.pending[newline_index] != '\n') continue;
+
+                const line = self.pending[0..newline_index];
+                const remaining_start = newline_index + 1;
+                const remaining_len = self.pending_len - remaining_start;
+                if (remaining_len > 0) {
+                    std.mem.copyForwards(u8, self.pending[0..remaining_len], self.pending[remaining_start..self.pending_len]);
+                }
+                self.pending_len = remaining_len;
+                if (classifyEventLine(line)) |event| return event;
+                break;
+            }
+            if (newline_index >= self.pending_len) return null;
+        }
+    }
+};
 
 /// Open, write, read, and close each Hyprland request without retaining the synchronous socket.
 fn request(allocator: std.mem.Allocator, hypr: Connection, command: []const u8) ![]u8 {
@@ -122,6 +218,40 @@ fn closeFd(fd: i32) void {
     if (std.os.linux.errno(rc) != .SUCCESS) {
         std.log.debug("hyprland request socket close failed fd={d}", .{fd});
     }
+}
+
+fn pollFdSet(fds: []std.posix.pollfd, timeout_ms: i32) !u32 {
+    const rc = std.os.linux.poll(fds.ptr, @intCast(fds.len), timeout_ms);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => error.SignalInterrupted,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn readFd(fd: std.posix.fd_t, buf: []u8) !u32 {
+    const rc = std.os.linux.read(fd, buf.ptr, buf.len);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .INTR => error.SignalInterrupted,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn classifyEventLine(line: []const u8) ?MonitorEvent {
+    const marker = std.mem.indexOf(u8, line, ">>") orelse return null;
+    const name = line[0..marker];
+    if (std.mem.eql(u8, name, "monitoradded") or
+        std.mem.eql(u8, name, "monitoraddedv2") or
+        std.mem.eql(u8, name, "monitorremoved") or
+        std.mem.eql(u8, name, "monitorremovedv2"))
+    {
+        return .monitor_changed;
+    }
+    if (std.mem.eql(u8, name, "focusedmon") or std.mem.eql(u8, name, "focusedmonv2")) {
+        return .focused_monitor;
+    }
+    return null;
 }
 
 fn parseMonitors(allocator: std.mem.Allocator, response: []const u8) !MonitorList {
@@ -206,4 +336,21 @@ test "monitor JSON parser rejects oversized and malformed responses" {
     @memset(oversized, ' ');
     try std.testing.expectError(error.HyprlandResponseTooLarge, parseMonitors(std.testing.allocator, oversized));
     try std.testing.expectError(error.InvalidMonitorJson, parseMonitors(std.testing.allocator, "{}"));
+}
+
+test "socket2 event classifier accepts only monitor events" {
+    try std.testing.expectEqual(@as(?MonitorEvent, .monitor_changed), classifyEventLine("monitoradded>>DP-1"));
+    try std.testing.expectEqual(@as(?MonitorEvent, .monitor_changed), classifyEventLine("monitorremovedv2>>1,DP-1,desc"));
+    try std.testing.expectEqual(@as(?MonitorEvent, .focused_monitor), classifyEventLine("focusedmon>>DP-1,1"));
+    try std.testing.expectEqual(@as(?MonitorEvent, null), classifyEventLine("openwindow>>addr,ws,class,title"));
+    try std.testing.expectEqual(@as(?MonitorEvent, null), classifyEventLine("focusedmon"));
+}
+
+test "socket2 pending parser skips ignored lines before monitor event" {
+    var stream = EventStream{};
+    const bytes = "openwindow>>addr,ws,class,title\nfocusedmonv2>>DP-1,1\n";
+    @memcpy(stream.pending[0..bytes.len], bytes);
+    stream.pending_len = @intCast(bytes.len);
+    try std.testing.expectEqual(@as(?MonitorEvent, .focused_monitor), stream.nextPendingEvent());
+    try std.testing.expectEqual(@as(u32, 0), stream.pending_len);
 }

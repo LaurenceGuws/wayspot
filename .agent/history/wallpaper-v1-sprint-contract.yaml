@@ -81,8 +81,9 @@ hyprland_contract:
   event_socket:
     source_doc: dev_references/hyprland/pages/ipc.md
     v1_policy: >
-      Do not hold socket2 open in the first lifecycle proof. Add socket2 only in
-      the monitor-change slice after the static lifecycle is proven.
+      Hold socket2 open only in wallpaper daemon mode through one
+      Runtime-owned monitor watcher after the static lifecycle, image index,
+      decode, and cleanup paths are proven.
     accepted_events_when_added:
       - monitoradded
       - monitoraddedv2
@@ -304,10 +305,27 @@ later_slices:
         - no playlist_or_mode_model
         - no broad_surface_framework
   - id: wallpaper_monitor_change_events
-    status: current
+    status: completed
     result: >
-      Add socket2 only for bounded monitor add/remove handling after static
-      lifecycle, image index, and cleanup are already accepted.
+      Added one bounded socket2 monitor watcher. Monitor add/remove wakes the
+      SDL loop and rebuilds surface slots from a fresh monitor query. Focused
+      monitor events wake and drain without rebuilding because wallpaper v1
+      already owns one background surface per monitor.
+    accepted_runtime:
+      receipt: /tmp/wayspot-wallpaper-final-smoke-20260704-205941
+      owner: src/wallpaper/runtime.zig:MonitorWatcher
+      event_stream: src/wallpaper/hyprland.zig:EventStream
+      wake_policy:
+        - socket2_monitor_events_push_one_sdl_user_event
+        - runtime_sleeps_until_sdl_event_shutdown_timer_deadline_or_monitor_event
+        - socket2_unavailable_prevents_wallpaper_daemon_start
+      rebuild_policy:
+        - monitoradded_monitoraddedv2_monitorremoved_monitorremovedv2_rebuild_surface_slots
+        - focusedmon_focusedmonv2_do_not_rebuild_per_monitor_wallpaper_surfaces
+      rejected_runtime_shape:
+        - no_event_bus
+        - no_monitor_glasses
+        - no_cache
 
 invariants:
   - every monitor surface has exactly one Runtime-owned SurfaceSlot
@@ -315,7 +333,7 @@ invariants:
   - every wallpaper proof surface is a Wayland layer-shell background surface, not an XDG toplevel window
   - every loop has a bound or sleeps on an explicit event/deadline
   - Hyprland request sockets are never retained across operations
-  - socket2 is not part of the first lifecycle proof
+  - socket2 is owned only by wallpaper daemon monitor-change handling
   - no runtime path invokes hyprpaper
   - no runtime path uses kitty or any stand-in terminal
   - monitor_glasses remains a named future noun only

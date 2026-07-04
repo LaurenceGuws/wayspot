@@ -12,11 +12,15 @@ const proof_runtime_ms: u64 = 10_000;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
+const monitor_eventfd_stop_value: u64 = 1;
+const monitor_changed_event_type: u32 = @intCast(c.SDL_EVENT_USER + 31);
+const monitor_focused_event_type: u32 = @intCast(c.SDL_EVENT_USER + 32);
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
+    std.debug.assert(monitor_eventfd_stop_value > 0);
 }
 
 pub const Runtime = struct {
@@ -69,16 +73,52 @@ pub const Runtime = struct {
     }
 
     fn startWallpaper(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, interval_seconds: u32) !void {
-        const monitors = try hyprland.queryMonitors(self.allocator, hypr);
-        if (monitors.count == 0) return error.NoHyprlandMonitors;
-
         try self.startSdl();
         var shutdown_signal = try ShutdownSignal.init();
         defer shutdown_signal.deinit();
         try shutdown_signal.start();
 
+        var monitor_watcher = try MonitorWatcher.init(self.allocator, hypr);
+        defer monitor_watcher.deinit();
+        try monitor_watcher.start();
+
         var prng = std.Random.DefaultPrng.init(c.SDL_GetTicks());
         const random = prng.random();
+        try self.rebuildSurfaceSlots(hypr, library, random);
+
+        try self.runRandomTimer(hypr, library, random, interval_seconds);
+    }
+
+    fn startSdl(self: *Runtime) !void {
+        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sdl_wallpaper_surface.class_name);
+        if (!hint_set) return error.SdlHintFailed;
+        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
+        self.sdl_started = true;
+    }
+
+    fn runRandomTimer(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
+        const interval_ms = @as(u64, interval_seconds) * 1000;
+        var next_deadline = c.SDL_GetTicks() + interval_ms;
+        while (true) {
+            switch (waitForRuntimeWake(next_deadline)) {
+                .shutdown => return,
+                .deadline => {
+                    try self.drawRandomImages(library, random);
+                    next_deadline = c.SDL_GetTicks() + interval_ms;
+                },
+                .monitor_changed => {
+                    try self.rebuildSurfaceSlots(hypr, library, random);
+                },
+                .monitor_focused => {},
+            }
+        }
+    }
+
+    fn rebuildSurfaceSlots(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, random: std.Random) !void {
+        const monitors = try hyprland.queryMonitors(self.allocator, hypr);
+        if (monitors.count == 0) return error.NoHyprlandMonitors;
+
+        self.clearSurfaceSlots();
         var index: u32 = 0;
         while (index < monitors.count) : (index += 1) {
             const monitor = monitors.items[index];
@@ -90,25 +130,6 @@ pub const Runtime = struct {
             self.slot_count += 1;
             try self.slots[self.slot_count - 1].drawRandomImage(library, random);
         }
-
-        try self.runRandomTimer(library, random, interval_seconds);
-    }
-
-    fn startSdl(self: *Runtime) !void {
-        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sdl_wallpaper_surface.class_name);
-        if (!hint_set) return error.SdlHintFailed;
-        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
-        self.sdl_started = true;
-    }
-
-    fn runRandomTimer(self: *Runtime, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
-        const interval_ms = @as(u64, interval_seconds) * 1000;
-        var next_deadline = c.SDL_GetTicks() + interval_ms;
-        while (true) {
-            if (waitForShutdownOrDeadline(next_deadline)) return;
-            try self.drawRandomImages(library, random);
-            next_deadline = c.SDL_GetTicks() + interval_ms;
-        }
     }
 
     fn drawRandomImages(self: *Runtime, library: *const library_owner.Library, random: std.Random) !void {
@@ -118,13 +139,17 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn deinit(self: *Runtime) void {
+    fn clearSurfaceSlots(self: *Runtime) void {
         var index = self.slot_count;
         while (index > 0) {
             index -= 1;
             self.slots[index].deinit();
         }
         self.slot_count = 0;
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.clearSurfaceSlots();
         if (self.sdl_started) {
             c.SDL_Quit();
             self.sdl_started = false;
@@ -179,6 +204,115 @@ fn waitForShutdownOrDeadline(deadline: u64) bool {
                 }
             }
         }
+    }
+}
+
+const RuntimeWake = enum {
+    shutdown,
+    deadline,
+    monitor_changed,
+    monitor_focused,
+};
+
+fn waitForRuntimeWake(deadline: u64) RuntimeWake {
+    while (true) {
+        const now = c.SDL_GetTicks();
+        if (now >= deadline) return .deadline;
+        const remaining = deadline - now;
+        const timeout: i32 = @intCast(@min(remaining, @as(u64, @intCast(std.math.maxInt(i32)))));
+        var event: c.SDL_Event = undefined;
+        if (c.SDL_WaitEventTimeout(&event, timeout)) {
+            if (eventIsShutdown(event)) return .shutdown;
+            if (event.type == monitor_changed_event_type) return .monitor_changed;
+            if (event.type == monitor_focused_event_type) return .monitor_focused;
+            while (c.SDL_PollEvent(&event)) {
+                if (eventIsShutdown(event)) return .shutdown;
+                if (event.type == monitor_changed_event_type) return .monitor_changed;
+                if (event.type == monitor_focused_event_type) return .monitor_focused;
+            }
+        }
+    }
+}
+
+fn eventIsShutdown(event: c.SDL_Event) bool {
+    return event.type == c.SDL_EVENT_QUIT or
+        event.type == c.SDL_EVENT_TERMINATING or
+        event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+}
+
+/// MonitorWatcher converts Hyprland socket2 monitor events into SDL wake events owned by Runtime.
+const MonitorWatcher = struct {
+    stream: hyprland.EventStream,
+    stop_fd: std.posix.fd_t = -1,
+    thread: ?std.Thread = null,
+    stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn init(allocator: std.mem.Allocator, hypr: hyprland.Connection) !MonitorWatcher {
+        var stream = try hyprland.EventStream.init(allocator, hypr);
+        errdefer stream.deinit();
+        return .{
+            .stream = stream,
+            .stop_fd = try osEventFd(),
+        };
+    }
+
+    fn start(self: *MonitorWatcher) !void {
+        std.debug.assert(self.stop_fd != -1);
+        self.thread = try std.Thread.spawn(.{}, monitorWatcherMain, .{self});
+    }
+
+    fn stop(self: *MonitorWatcher) void {
+        self.stop_requested.store(true, .release);
+        if (self.thread) |thread| {
+            signalEventFd(self.stop_fd, monitor_eventfd_stop_value);
+            thread.join();
+            self.thread = null;
+        }
+        if (self.stop_fd != -1) {
+            osClose(self.stop_fd);
+            self.stop_fd = -1;
+        }
+    }
+
+    fn deinit(self: *MonitorWatcher) void {
+        self.stop();
+        self.stream.deinit();
+    }
+};
+
+fn monitorWatcherMain(watcher: *MonitorWatcher) void {
+    while (!watcher.stop_requested.load(.acquire)) {
+        const event = watcher.stream.wait(watcher.stop_fd) catch |err| {
+            if (watcher.stop_requested.load(.acquire)) return;
+            std.log.warn("wallpaper monitor event stream failed err={s}", .{@errorName(err)});
+            pushSdlQuit();
+            return;
+        };
+        switch (event) {
+            .stopped => return,
+            .monitor_changed => pushSdlUserEvent(monitor_changed_event_type),
+            .focused_monitor => pushSdlUserEvent(monitor_focused_event_type),
+        }
+    }
+}
+
+fn pushSdlUserEvent(event_type: u32) void {
+    var event = c.SDL_Event{ .user = .{
+        .type = event_type,
+    } };
+    const pushed = c.SDL_PushEvent(&event);
+    if (!pushed) {
+        std.log.warn("wallpaper monitor event wake failed type={d}", .{event_type});
+    }
+}
+
+fn pushSdlQuit() void {
+    var event = c.SDL_Event{ .quit = .{
+        .type = c.SDL_EVENT_QUIT,
+    } };
+    const pushed = c.SDL_PushEvent(&event);
+    if (!pushed) {
+        std.log.warn("wallpaper quit wake failed", .{});
     }
 }
 
