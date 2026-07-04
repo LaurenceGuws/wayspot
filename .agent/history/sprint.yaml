@@ -70,6 +70,7 @@ cold_path:
   accepted_improvements:
     - search service ranks against retained oldest-first history without duplicating history strings per query.
     - apps provider cache-file candidates slice into one retained cache buffer instead of duplicating every row field.
+    - apps provider parses cache rows without icon metadata directly instead of triggering a cold-path desktop scan migration.
 
 current_rejected_path:
   text_texture_cache:
