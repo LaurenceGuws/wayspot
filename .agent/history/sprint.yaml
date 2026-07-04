@@ -69,6 +69,7 @@ cold_path:
     - shutdown signal thread startup before first event wait
   accepted_improvements:
     - search service ranks against retained oldest-first history without duplicating history strings per query.
+    - apps provider cache-file candidates slice into one retained cache buffer instead of duplicating every row field.
 
 current_rejected_path:
   text_texture_cache:
