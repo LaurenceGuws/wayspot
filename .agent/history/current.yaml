@@ -7,7 +7,7 @@ product:
   summary: >
     Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
     notification daemon.
-  active_focus: cold_path_picker_control_spine
+  active_focus: app_icon_resolution_and_row_image
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
@@ -36,6 +36,10 @@ ownership:
     - HarfBuzz shaping buffer
     - FreeType face/raster data
     - per-draw SDL texture lifetime
+  app_icon_rendering:
+    - app icon name resolution for launcher candidates
+    - bounded icon image decode and SDL texture lifetime
+    - right-side icon drawing inside visible app rows
   notifications:
     - freedesktop D-Bus notification interface
     - bounded retained notification rows

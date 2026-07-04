@@ -1,21 +1,21 @@
-id: cold_path_control_spine
-state: code_complete_user_smoke_needed
+id: app_icon_resolution_and_row_image
+state: indexing_needed
 
 goal:
   completion_target: reviewer_approved_then_user_smoke
   design_target:
-    - make launcher cold path direct enough that a text/render cache may be unnecessary
-    - shrink startup and first-render ownership before retaining new resources
-    - preserve picker behavior and notification daemon scope
+    - resolve app candidate icon names pragmatically
+    - draw a simple image layer in the right side of app result rows
+    - keep the picker control spine small and direct
+    - avoid a theme engine, asset framework, or broad image cache
 
 personas:
   user:
     role: product_owner
     owns:
-      - product scope
-      - acceptance bar
-      - naming corrections
-      - manual btop and visual feedback
+      - visual acceptance
+      - scope corrections
+      - manual smoke feedback
   coordinator:
     role: delegate workflow and maintain accountability
     owns:
@@ -30,91 +30,80 @@ personas:
       - read Wayspot-local memory first
       - propose exact files, symbols, deletions, tests, and verification
       - wait for coordinator approval before implementation unless explicitly authorized
-      - never treat qagent live memory as Wayspot authority
+      - keep qagent as provenance only, never live authority
   reviewer:
     role: strict invariant enforcer
     verdicts:
       - accept
       - reject
       - user_needed
-    user_needed_rule: >
-      Allowed only when existing Wayspot decisions are missing, incorrect, or
-      contradictory, so local execution would invent architecture.
 
 workflow:
   steps:
-    - worker proposes the best bounded cold-path slice and why
+    - worker proposes exact app-icon implementation index
     - coordinator approves, narrows, or rejects the proposal
-    - worker executes the approved slice
-    - coordinator reviews findings-first and either commits, rejects, or asks the user
+    - worker executes approved slices
+    - coordinator reviews findings-first and commits healthy checkpoints
   review_bias:
     - comments are production code
     - naming and intentional structure matter as much as hot paths
-    - sdl_shell must remain a small swallowable control spine
-    - do not add a cache until cold-path shape is already direct
-    - reject retained resources without owner, key, invalidation, scale behavior, cleanup, and tests
+    - sdl_shell remains the picker control spine
+    - retained image resources need owner, key, invalidation, scale behavior, cleanup, and tests
+    - prefer a small direct resolver over a theme system
 
-cold_path:
-  sequence:
-    - main parses CLI args and selects ui mode
-    - runtime wires action and app providers
-    - search service loads history
-    - sdl shell initializes config, SDL video, window, renderer, text engine, text input, and wake event
-    - sdl shell refreshes initial results
-    - search service loads candidates once and ranks them
-    - first render draws chrome, visible result rows, optional scrollbar, then sleeps in SDL_WaitEvent
-  pressure_points:
-    - app candidate discovery and retained strings
-    - text engine FreeType and HarfBuzz init before first useful render
-    - per-draw shape, raster, texture create, texture upload, texture destroy
-    - shutdown signal thread startup before first event wait
-  accepted_improvements:
-    - search service ranks against retained oldest-first history without duplicating history strings per query.
-    - apps provider cache-file candidates slice into one retained cache buffer instead of duplicating every row field.
-    - apps provider parses cache rows without icon metadata directly instead of triggering a cold-path desktop scan migration.
-    - sdl shell init sizes the viewport from the created window instead of immediately resizing the already-scaled window.
-  rejected_slices:
-    - runtime path fixed buffers were rejected because they create self-referential Runtime shape to remove two clear startup allocations.
-    - text single-load rendering was rejected because correct no-cache behavior requires per-draw bitmap retention and more metadata than it removes.
-    - delaying shutdown signal startup was rejected because it creates a signal cleanup gap or requires extra lifecycle machinery.
-  final_automated_receipts:
-    - zigup run 0.16.0 build test --summary all passed.
-    - git diff --check passed.
-    - banned Zig pattern scan over src/main.zig src/app src/providers src/search src/ui passed with no hits.
-    - stale runtime-debt scan passed with only existing sdl_banner role-comment ownership hits for notification daemon and Hyprland placement.
+product_scope:
+  in_scope:
+    - resolve candidate icon names from app cache and desktop scan data
+    - support common local icon paths and common icon theme directories if pragmatic
+    - render a bounded icon image at the right side of app rows
+    - draw no icon for missing or unsupported images
+    - keep row hit testing and launch behavior unchanged
+  out_of_scope:
+    - theme selection UI
+    - icon theme inheritance engine unless a tiny direct subset is required
+    - network icons
+    - SVG rendering unless already available through a tiny proven path
+    - broad image cache
+    - notification icon changes
+    - Hyprland changes
+    - provider registry changes
 
-current_rejected_path:
-  text_texture_cache:
-    reason: >
-      A bounded texture cache added large surface without proof of visual
-      equivalence, useful hits, invalidation, scale behavior, or SDL texture
-      lifecycle ownership.
-    rule: do_not_reintroduce_without_a_fresh_approved_slice
+current_facts:
+  candidate_icon_field:
+    - src/search/types.zig Candidate.icon already exists.
+    - src/providers/apps.zig stores desktop Icon fields in app candidates.
+    - src/providers/actions.zig stores symbolic action icon names.
+  picker_rendering:
+    - src/ui/sdl_shell.zig draws row background, title, subtitle, and scrollbar.
+    - row right side is available after status badge removal.
+    - picker_viewport owns row geometry but not image loading.
+  known_gap:
+    - no current app icon path resolver exists.
+    - no current image decode/upload owner exists for picker row icons.
 
 active_slice:
-  id: 09_render_owner_shape_review
-  mode: review_first
+  id: 01_app_icon_resolution_index
+  mode: proposal_first
   goal: >
-    Make render/text/cold-path ownership cleaner before any cache or
-    performance tuning.
+    Produce an exact implementation index for pragmatic app icon resolution and
+    right-side row image drawing before any runtime code changes.
   likely_files:
-    - src/main.zig
-    - src/app/search_service.zig
-    - src/providers/apps.zig
-    - src/search/rank.zig
     - src/ui/sdl_shell.zig
-    - src/ui/sdl_text.zig
     - src/ui/picker_viewport.zig
+    - src/search/types.zig
+    - src/providers/apps.zig
+    - build.zig
+    - build.zig.zon
   worker_output_required:
-    - exact cold path sequence from main to first useful picker render
-    - exact owners of each allocation or OS resource on that path
-    - proposed deletions before additions
-    - proposed changes with file, symbol, reason, non-goals, and tests
-    - high-risk changes to reject
-    - retained-resource proposals only with owner, key, invalidation, scale behavior, cleanup, and tests
+    - exact icon resolution strategy
+    - exact image formats supported and why
+    - dependency decision, including whether SDL_image or another local dependency is justified
+    - retained resource owner, key, invalidation, scale behavior, cleanup, and tests
+    - fallback behavior for missing, symbolic, SVG-only, oversized, and unreadable icons
+    - exact files, symbols, comments, tests, and verification commands
   stop_conditions:
-    - user_decision_needed
-    - no deletion or addition earns its place
+    - user_decision_needed_for_dependency_or_format_scope
+    - no implementation shape earns its place
     - accepted implementation slice is explicit
 
 verification_floor:
@@ -125,13 +114,12 @@ verification_floor:
     - rg stale runtime-debt vocabulary over touched runtime files
   manual:
     - ./re-run.sh or RERUN_INSTALL_BIN=/tmp/wayspot-smoke ./re-run.sh when daemon owns installed binary
-    - user_btop_idle_cpu
-    - user_btop_mouse_motion_cpu
-    - user_btop_resize_cpu
-    - user_btop_init_rss
+    - app rows show icons on the right when icon files are available
+    - missing icons do not disrupt layout, input, scrolling, hover, click, or launch
+    - btop idle and mouse-motion CPU remain acceptable
 
 done_definition:
-  - cold-path review is exact enough for a worker to execute without chat context
-  - accepted implementation slices leave runtime code smaller or more direct
-  - no cache or measurement architecture is added by default
-  - behavior receipts cover launcher open, query, scroll, hover, click launch, resize, idle sleep, and cleanup
+  - implementation index is exact enough for a worker to execute without chat context
+  - accepted implementation draws bounded right-side app icons without broad UI architecture
+  - icon resources are cleaned up exactly once by their owner
+  - missing or unsupported icons fail closed with no layout or launch regression
