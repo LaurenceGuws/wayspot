@@ -12,7 +12,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("Usage: wayspot --ui | --notifications-daemon | --icon-diag | --icon-cache-refresh | --wallpaper\n", .{});
+    try stdout.print("Usage: wayspot --ui | --notifications-daemon | --icon-diag | --icon-cache-refresh | --wallpaper | --next-wallpaper | --wallpaper-rotate-now\n", .{});
 
     try stdout.flush();
 }

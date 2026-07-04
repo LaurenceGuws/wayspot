@@ -11,9 +11,16 @@ const c = @import("sdl_c");
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
+const rotate_eventfd_signal_value: u64 = 1;
 const monitor_eventfd_stop_value: u64 = 1;
 const monitor_changed_event_type: u32 = @intCast(c.SDL_EVENT_USER + 31);
-var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
+const wallpaper_rotate_event_type: u32 = @intCast(c.SDL_EVENT_USER + 32);
+const pid_dir_name = "wayspot";
+const pid_file_name = "wallpaper.pid";
+const max_pid_file_bytes: u32 = 32;
+const max_proc_cmdline_bytes: u32 = 4096;
+var runtime_signal_shutdown_fd = std.atomic.Value(std.posix.fd_t).init(-1);
+var runtime_signal_rotate_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -34,11 +41,24 @@ pub const Runtime = struct {
         try runtime.startWallpaper(hypr, &library, config.interval_seconds);
     }
 
+    pub fn rotateNow(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
+        const pid_path = try wallpaperPidPath(allocator, runtime_dir);
+        defer allocator.free(pid_path);
+        const pid = try readWallpaperPid(pid_path);
+        if (!processLooksLikeWallpaper(pid)) {
+            removePidFile(pid_path);
+            return error.WallpaperDaemonNotRunning;
+        }
+        try sendSignal(pid, .USR1);
+    }
+
     fn startWallpaper(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, interval_seconds: u32) !void {
         try self.startSdl();
-        var shutdown_signal = try ShutdownSignal.init();
-        defer shutdown_signal.deinit();
-        try shutdown_signal.start();
+        var runtime_signals = try RuntimeSignals.init();
+        defer runtime_signals.deinit();
+        try runtime_signals.start();
+        var pid_file = try PidFile.create(self.allocator, hypr.runtime_dir);
+        defer pid_file.deinit(self.allocator);
 
         var monitor_watcher = try MonitorWatcher.init(self.allocator, hypr);
         defer monitor_watcher.deinit();
@@ -65,6 +85,11 @@ pub const Runtime = struct {
             switch (waitForRuntimeWake(next_deadline)) {
                 .shutdown => return,
                 .deadline => {
+                    try self.drawRandomImages(library, random);
+                    next_deadline = c.SDL_GetTicks() + interval_ms;
+                },
+                .rotate_now => {
+                    std.log.info("wallpaper rotate now", .{});
                     try self.drawRandomImages(library, random);
                     next_deadline = c.SDL_GetTicks() + interval_ms;
                 },
@@ -135,6 +160,7 @@ pub const SurfaceSlot = struct {
 const RuntimeWake = enum {
     shutdown,
     deadline,
+    rotate_now,
     monitor_changed,
 };
 
@@ -147,9 +173,11 @@ fn waitForRuntimeWake(deadline: u64) RuntimeWake {
         var event: c.SDL_Event = undefined;
         if (c.SDL_WaitEventTimeout(&event, timeout)) {
             if (eventIsShutdown(event)) return .shutdown;
+            if (event.type == wallpaper_rotate_event_type) return .rotate_now;
             if (event.type == monitor_changed_event_type) return .monitor_changed;
             while (c.SDL_PollEvent(&event)) {
                 if (eventIsShutdown(event)) return .shutdown;
+                if (event.type == wallpaper_rotate_event_type) return .rotate_now;
                 if (event.type == monitor_changed_event_type) return .monitor_changed;
             }
         }
@@ -237,64 +265,79 @@ fn pushSdlQuit() void {
     }
 }
 
-/// ShutdownSignal turns SIGINT and SIGTERM into one SDL quit event owned by wallpaper runtime.
-const ShutdownSignal = struct {
-    event_fd: std.posix.fd_t = -1,
+/// RuntimeSignals converts process signals into SDL events owned by the wallpaper loop.
+const RuntimeSignals = struct {
+    shutdown_fd: std.posix.fd_t = -1,
+    rotate_fd: std.posix.fd_t = -1,
     old_int_action: std.posix.Sigaction = undefined,
     old_term_action: std.posix.Sigaction = undefined,
+    old_usr1_action: std.posix.Sigaction = undefined,
     thread: ?std.Thread = null,
     installed: bool = false,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init() !ShutdownSignal {
+    fn init() !RuntimeSignals {
+        const shutdown_fd = try osEventFd();
+        errdefer osClose(shutdown_fd);
+        const rotate_fd = try osEventFd();
         return .{
-            .event_fd = try osEventFd(),
+            .shutdown_fd = shutdown_fd,
+            .rotate_fd = rotate_fd,
         };
     }
 
-    fn start(self: *ShutdownSignal) !void {
-        std.debug.assert(self.event_fd != -1);
-        shutdown_handler_fd.store(self.event_fd, .release);
+    fn start(self: *RuntimeSignals) !void {
+        std.debug.assert(self.shutdown_fd != -1);
+        std.debug.assert(self.rotate_fd != -1);
+        runtime_signal_shutdown_fd.store(self.shutdown_fd, .release);
+        runtime_signal_rotate_fd.store(self.rotate_fd, .release);
         self.installHandlers();
-        self.thread = try std.Thread.spawn(.{}, shutdownSignalMain, .{self});
+        self.thread = try std.Thread.spawn(.{}, runtimeSignalsMain, .{self});
     }
 
-    fn stop(self: *ShutdownSignal) void {
+    fn stop(self: *RuntimeSignals) void {
         self.stop_requested.store(true, .release);
         if (self.installed) {
             self.restoreHandlers();
             self.installed = false;
         }
-        shutdown_handler_fd.store(-1, .release);
+        runtime_signal_shutdown_fd.store(-1, .release);
+        runtime_signal_rotate_fd.store(-1, .release);
         if (self.thread) |thread| {
-            signalEventFd(self.event_fd, shutdown_eventfd_stop_value);
+            signalEventFd(self.shutdown_fd, shutdown_eventfd_stop_value);
             thread.join();
             self.thread = null;
         }
-        if (self.event_fd != -1) {
-            osClose(self.event_fd);
-            self.event_fd = -1;
+        if (self.shutdown_fd != -1) {
+            osClose(self.shutdown_fd);
+            self.shutdown_fd = -1;
+        }
+        if (self.rotate_fd != -1) {
+            osClose(self.rotate_fd);
+            self.rotate_fd = -1;
         }
     }
 
-    fn deinit(self: *ShutdownSignal) void {
+    fn deinit(self: *RuntimeSignals) void {
         self.stop();
     }
 
-    fn installHandlers(self: *ShutdownSignal) void {
+    fn installHandlers(self: *RuntimeSignals) void {
         var action = std.posix.Sigaction{
-            .handler = .{ .handler = shutdownSignalHandler },
+            .handler = .{ .handler = runtimeSignalHandler },
             .mask = std.posix.sigemptyset(),
             .flags = 0,
         };
         std.posix.sigaction(.INT, &action, &self.old_int_action);
         std.posix.sigaction(.TERM, &action, &self.old_term_action);
+        std.posix.sigaction(.USR1, &action, &self.old_usr1_action);
         self.installed = true;
     }
 
-    fn restoreHandlers(self: *ShutdownSignal) void {
+    fn restoreHandlers(self: *RuntimeSignals) void {
         std.posix.sigaction(.INT, &self.old_int_action, null);
         std.posix.sigaction(.TERM, &self.old_term_action, null);
+        std.posix.sigaction(.USR1, &self.old_usr1_action, null);
     }
 
     fn pushShutdownWake() void {
@@ -306,48 +349,146 @@ const ShutdownSignal = struct {
             std.log.warn("wallpaper shutdown wake failed", .{});
         }
     }
+
+    fn pushRotateWake() void {
+        var event = c.SDL_Event{ .user = .{
+            .type = wallpaper_rotate_event_type,
+        } };
+        const pushed = c.SDL_PushEvent(&event);
+        if (!pushed) {
+            std.log.warn("wallpaper rotate wake failed", .{});
+        }
+    }
 };
 
-fn shutdownSignalHandler(signal: std.posix.SIG) callconv(.c) void {
-    if (signal != .INT and signal != .TERM) return;
-    const fd = shutdown_handler_fd.load(.acquire);
+fn runtimeSignalHandler(signal: std.posix.SIG) callconv(.c) void {
+    const fd = switch (signal) {
+        .INT, .TERM => runtime_signal_shutdown_fd.load(.acquire),
+        .USR1 => runtime_signal_rotate_fd.load(.acquire),
+        else => return,
+    };
     if (fd == -1) return;
-    var value: u64 = shutdown_eventfd_signal_value;
+    var value: u64 = if (signal == .USR1) rotate_eventfd_signal_value else shutdown_eventfd_signal_value;
     const written = std.os.linux.write(fd, std.mem.asBytes(&value).ptr, @sizeOf(u64));
     if (std.os.linux.errno(written) != .SUCCESS) return;
 }
 
-fn shutdownSignalMain(shutdown_signal: *ShutdownSignal) void {
+fn runtimeSignalsMain(runtime_signals: *RuntimeSignals) void {
     var poll_fds = [_]std.posix.pollfd{
         .{
-            .fd = shutdown_signal.event_fd,
+            .fd = runtime_signals.shutdown_fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        },
+        .{
+            .fd = runtime_signals.rotate_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         },
     };
 
-    while (!shutdown_signal.stop_requested.load(.acquire)) {
+    while (!runtime_signals.stop_requested.load(.acquire)) {
         poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
         const ready = osPoll(&poll_fds, shutdown_signal_poll_timeout_ms) catch |err| {
-            std.log.warn("wallpaper shutdown poll failed err={s}", .{@errorName(err)});
+            std.log.warn("wallpaper signal poll failed err={s}", .{@errorName(err)});
             return;
         };
         if (ready == 0) continue;
+        if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
+            drainEventFd(runtime_signals.rotate_fd) catch |err| {
+                std.log.warn("wallpaper rotate read failed err={s}", .{@errorName(err)});
+                return;
+            };
+            if (runtime_signals.stop_requested.load(.acquire)) return;
+            RuntimeSignals.pushRotateWake();
+        }
         if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
 
-        var event_count: u64 = 0;
-        const event_bytes = osRead(shutdown_signal.event_fd, std.mem.asBytes(&event_count)) catch |err| {
+        drainEventFd(runtime_signals.shutdown_fd) catch |err| {
             if (err == error.WouldBlock) continue;
             std.log.warn("wallpaper shutdown read failed err={s}", .{@errorName(err)});
             return;
         };
-        if (event_bytes != @as(u32, @intCast(@sizeOf(u64)))) {
-            std.log.warn("wallpaper shutdown short read bytes={d}", .{event_bytes});
-            return;
-        }
-        if (shutdown_signal.stop_requested.load(.acquire)) return;
-        ShutdownSignal.pushShutdownWake();
+        if (runtime_signals.stop_requested.load(.acquire)) return;
+        RuntimeSignals.pushShutdownWake();
         return;
+    }
+}
+
+const PidFile = struct {
+    path: []u8,
+
+    fn create(allocator: std.mem.Allocator, runtime_dir: []const u8) !PidFile {
+        const dir_path = try wallpaperPidDirPath(allocator, runtime_dir);
+        defer allocator.free(dir_path);
+        try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir_path);
+
+        const pid_path = try wallpaperPidPath(allocator, runtime_dir);
+        errdefer allocator.free(pid_path);
+
+        const io = std.Options.debug_io;
+        const file = try std.Io.Dir.createFileAbsolute(io, pid_path, .{ .truncate = true });
+        defer file.close(io);
+
+        var buf: [max_pid_file_bytes]u8 = undefined;
+        const pid_text = try std.fmt.bufPrint(&buf, "{d}\n", .{std.os.linux.getpid()});
+        try file.writeStreamingAll(io, pid_text);
+        try file.sync(io);
+        return .{ .path = pid_path };
+    }
+
+    fn deinit(self: *PidFile, allocator: std.mem.Allocator) void {
+        removePidFile(self.path);
+        allocator.free(self.path);
+    }
+};
+
+fn wallpaperPidDirPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ runtime_dir, pid_dir_name });
+}
+
+fn wallpaperPidPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, pid_file_name });
+}
+
+fn readWallpaperPid(pid_path: []const u8) !std.os.linux.pid_t {
+    var buf: [max_pid_file_bytes]u8 = undefined;
+    const bytes = try std.Io.Dir.cwd().readFile(std.Options.debug_io, pid_path, &buf);
+    const text = std.mem.trim(u8, bytes, " \n\r\t");
+    return std.fmt.parseInt(std.os.linux.pid_t, text, 10);
+}
+
+fn processLooksLikeWallpaper(pid: std.os.linux.pid_t) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
+    var cmdline_buf: [max_proc_cmdline_bytes]u8 = undefined;
+    const cmdline = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, &cmdline_buf) catch return false;
+    return std.mem.indexOf(u8, cmdline, "wayspot") != null and
+        std.mem.indexOf(u8, cmdline, "--wallpaper") != null;
+}
+
+fn removePidFile(pid_path: []const u8) void {
+    std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, pid_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => std.log.debug("wallpaper pid file remove failed err={s}", .{@errorName(err)}),
+    };
+}
+
+fn sendSignal(pid: std.os.linux.pid_t, signal: std.os.linux.SIG) !void {
+    const rc = std.os.linux.kill(pid, signal);
+    return switch (std.os.linux.errno(rc)) {
+        .SUCCESS => {},
+        .SRCH => error.WallpaperDaemonNotRunning,
+        else => error.SystemCallFailed,
+    };
+}
+
+fn drainEventFd(fd: std.posix.fd_t) !void {
+    var event_count: u64 = 0;
+    const event_bytes = try osRead(fd, std.mem.asBytes(&event_count));
+    if (event_bytes != @as(u32, @intCast(@sizeOf(u64)))) {
+        return error.SystemCallFailed;
     }
 }
 

@@ -18,6 +18,7 @@ scope:
     - remove stale proof vocabulary and public proof CLI
     - inspect wallpaper runtime, Hyprland IPC, and layer-shell surface owners
     - shrink helpers where the call site stays clear
+    - add the final wallpaper rotate-now CLI request
     - verify no stale proof, inert-fallback, or old-roadmap text remains in active code
   out:
     - new wallpaper modes
@@ -72,8 +73,22 @@ slices:
           - shutdown wake no longer retains unread request state
           - wallpaper public module exports only live call-site nouns
           - refreshed wallpaper daemon retained one background layer per monitor
+    - wallpaper_rotate_now_cli:
+        receipt: /tmp/wayspot-wallpaper-rotate-single-20260704-213643
+        files:
+          - src/main.zig
+          - src/root.zig
+          - src/wallpaper/runtime.zig
+        facts:
+          - --next-wallpaper stays compatible with the live Hyprland binding
+          - --wallpaper-rotate-now is accepted as the explicit CLI spelling
+          - daemon writes and removes one bounded pid file in XDG_RUNTIME_DIR
+          - CLI checks /proc cmdline before signaling the pid
+          - SIGUSR1 is converted into an SDL rotate event
+          - rotate redraws every monitor surface and resets the timer deadline
+          - one CLI request produced one daemon rotate receipt
   current:
-    - remaining_wallpaper_surface_audit_for_one_more_small_cut
+    - final_verification_before_commit
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all

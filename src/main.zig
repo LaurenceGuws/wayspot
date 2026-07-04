@@ -26,6 +26,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (hasArg(args, "--next-wallpaper") or hasArg(args, "--wallpaper-rotate-now")) {
+        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        try wayspot.wallpaper.Runtime.rotateNow(allocator, runtime_dir);
+        return;
+    }
+
     if (hasArg(args, "--wallpaper")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;

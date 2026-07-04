@@ -22,6 +22,7 @@ current_scope:
     - shrink wallpaper runtime, Hyprland IPC, and layer-shell surface code where clarity survives
     - keep startup/config memory aligned with the installed two-daemon Hyprland path
     - preserve wallpaper daemon behavior that is already visually proven
+    - expose one CLI rotate-now request for the running wallpaper daemon
   out:
     - new wallpaper features
     - monitor_glasses implementation
@@ -50,8 +51,18 @@ progress:
           - unused_shutdown_requested_state_removed
           - wallpaper_module_reexports_narrowed_to_runtime_config_and_hyprland
           - refreshed_wallpaper_daemon_retained_one_background_layer_per_monitor
+    - wallpaper_rotate_now_cli:
+        receipt: /tmp/wayspot-wallpaper-rotate-single-20260704-213643
+        facts:
+          - --next-wallpaper remains the Hyprland binding flag
+          - --wallpaper-rotate-now is a readable alias
+          - daemon owns one pid receipt under XDG_RUNTIME_DIR
+          - CLI verifies pid command line before SIGUSR1
+          - SIGUSR1 wakes the sleeping SDL loop
+          - rotate redraws all monitor surfaces and resets the timer
+          - one CLI request produced one daemon rotate receipt
   current:
-    - audit_remaining_wallpaper_expansion_surface_for_one_more_small_cut
+    - final_verification_before_commit
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
