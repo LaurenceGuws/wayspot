@@ -7,10 +7,11 @@ product:
   summary: >
     Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
     notification daemon.
-  active_focus: pre_expansion_foot_it_up
+  active_focus: wallpaper_v1_sprint
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
+    wallpaper: cli_or_daemon -> hyprland_monitor_facts -> sdl_custom_wayland_surfaces -> wlr_layer_shell_background
 
 ownership:
   main:
@@ -44,6 +45,13 @@ ownership:
     - freedesktop D-Bus notification interface
     - bounded retained notification rows
     - banner child process lifecycle
+  wallpaper:
+    - one Wayspot-owned SDL surface per monitor
+    - Hyprland monitor discovery and wlr-layer-shell background output binding
+    - still-image random alternating timer after config, index, and decode are proven
+  future_monitor_glasses:
+    - named future noun for non-interactive per-monitor overlay and filter surfaces
+    - shares direct Hyprland window mechanics with wallpaper but uses explicit overlay placement
 
 boundaries:
   - notification_daemon_is_the_only_long_lived_interface
@@ -77,6 +85,16 @@ constraints:
     - passing_tests_are_not_acceptance
     - stale_vocabulary_is_a_bug
     - broad_buckets_are_rejected_until_they_have_a_single_real_owner
+
+accepted_discoveries:
+  hyprland_direct_surfaces:
+    memory: .agent/history/hyprland-direct-surface-discovery.yaml
+    wallpaper_path: sdl_custom_wayland_surface_plus_wlr_layer_shell_background
+    overlay_noun: monitor_glasses
+    rule: >
+      Wallpaper starts from direct Wayspot-owned SDL custom Wayland surfaces on
+      the background layer. Normal toplevel windows are preserved only for the
+      future monitor_glasses overlay noun.
 
 memory_policy:
   live_files:

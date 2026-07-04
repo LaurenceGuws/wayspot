@@ -19,6 +19,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sdl_c.addIncludePath(sdl_include);
+    const layer_shell_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    layer_shell_mod.addIncludePath(sdl_include);
+    layer_shell_mod.addCSourceFile(.{ .file = b.path("src/c/wayspot_layer_shell.c") });
+    const layer_shell = b.addLibrary(.{
+        .name = "wayspot_layer_shell",
+        .root_module = layer_shell_mod,
+    });
 
     const mod = b.addModule("wayspot", .{
         .root_source_file = b.path("src/root.zig"),
@@ -34,6 +45,8 @@ pub fn build(b: *std.Build) void {
     mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
+    mod.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
+    mod.linkLibrary(layer_shell);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -51,6 +64,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
+    exe_mod.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
     const exe = b.addExecutable(.{
         .name = "wayspot",
         .root_module = exe_mod,

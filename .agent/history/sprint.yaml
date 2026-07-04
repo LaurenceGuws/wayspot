@@ -1,12 +1,12 @@
-id: pre_expansion_foot_it_up
+id: wallpaper_v1
 state: active
 
 source:
-  detailed_index: .agent/history/pre-expansion-foot-it-up-sprint.yaml
+  detailed_index: .agent/history/wallpaper-v1-sprint-contract.yaml
 
 purpose: >
-  Prepare Wayspot for a future Hyprland IPC wallpaper daemon expansion by
-  shrinking and flattening the current launcher and notification code first.
+  Add the minimal Wayspot-owned wallpaper daemon path after proving direct
+  Hyprland layer surfaces, without restoring broad compositor abstractions.
 
 law:
   - foot_it_up: keep surface owners direct, shallow, and practical
@@ -16,17 +16,18 @@ law:
 
 current_scope:
   in:
-    - delete unreferenced runtime silhouettes
-    - flatten unearned provider/search layers
-    - reduce src character count
-    - keep production comments only where they prove ownership or invariants
-    - preserve CLI launcher and freedesktop notification daemon behavior
+    - one SDL custom Wayland background layer surface per active monitor
+    - one configured wallpaper library path
+    - bounded still-image index with resolution metadata only
+    - one random alternating timer mode
+    - exact cleanup for surface, image, and retained path owners
   out:
-    - Hyprland IPC wallpaper daemon implementation
+    - hyprpaper backend
     - resident launcher IPC
     - broad surface framework
-    - theme system
-    - provider framework expansion
+    - runtime scripting VM
+    - monitor_glasses overlay implementation
+    - animation, video, playlists, tags, ratings, or UI controls
 
 baseline:
   src_lines: 6742
@@ -34,10 +35,15 @@ baseline:
 
 progress:
   completed:
-    - remove_unreferenced_app_shell_silhouette
-    - provider_registry_flattening_review
+    - wallpaper_lifecycle_proof:
+        receipt: /tmp/wayspot-wallpaper-shm-proof-20260704-195903
+        facts:
+          - two_wayspot_wallpaper_layer_surfaces_during
+          - zero_wayspot_wallpaper_layers_after_cleanup
+          - zero_wayspot_wallpaper_xdg_clients
+          - no_wayland_protocol_errors
   current:
-    - update receipts and run full verification floor
+    - wallpaper_config_and_library_index
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -49,6 +55,12 @@ verification_floor:
   - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
 
 next_candidates:
-  - icon_tooling_boundary_review
-  - notification_daemon_comment_and_boundary_review
-  - picker_surface_owner_review
+  - wallpaper_decode_and_draw
+  - wallpaper_random_timer
+  - wallpaper_monitor_change_events
+
+accepted_discoveries:
+  - hyprland_direct_surface_discovery:
+      memory: .agent/history/hyprland-direct-surface-discovery.yaml
+      wallpaper_backend: Wayspot_owned_SDL_custom_Wayland_surfaces_with_wlr_layer_shell_background
+      future_noun: monitor_glasses
