@@ -45,6 +45,11 @@ pub const MonitorState = struct {
     pub fn setDimValue(self: *MonitorState, value: i32) void {
         self.dim_value = clampDim(value);
     }
+
+    pub fn hasEffectiveFilter(self: *const MonitorState) bool {
+        return (self.red_blue_enabled and self.red_blue_value != red_blue_zero) or
+            (self.dim_enabled and self.dim_value != dim_zero);
+    }
 };
 
 pub const State = struct {
@@ -121,6 +126,14 @@ pub const State = struct {
             offset += @intCast(segment.len);
         }
         return out[0..offset];
+    }
+
+    pub fn needsDaemon(self: *const State) bool {
+        var index: u32 = 0;
+        while (index < self.count) : (index += 1) {
+            if (self.monitors[index].hasEffectiveFilter()) return true;
+        }
+        return false;
     }
 };
 
@@ -299,6 +312,30 @@ test "clamp min max and zero semantics" {
     monitor.setDimValue(250);
     try std.testing.expectEqual(red_blue_min, monitor.red_blue_value);
     try std.testing.expectEqual(dim_max, monitor.dim_value);
+}
+
+test "effective filter predicate ignores disabled and zero-value controls" {
+    var state = defaultState();
+    try std.testing.expect(!state.needsDaemon());
+
+    var monitor = try MonitorState.init("DP-1");
+    monitor.red_blue_enabled = true;
+    monitor.red_blue_value = red_blue_zero;
+    monitor.dim_enabled = true;
+    monitor.dim_value = dim_zero;
+    try state.append(monitor);
+    try std.testing.expect(!state.monitors[0].hasEffectiveFilter());
+    try std.testing.expect(!state.needsDaemon());
+
+    state.monitors[0].red_blue_value = 20;
+    try std.testing.expect(state.monitors[0].hasEffectiveFilter());
+    try std.testing.expect(state.needsDaemon());
+
+    state.monitors[0].red_blue_enabled = false;
+    state.monitors[0].dim_enabled = false;
+    state.monitors[0].dim_value = 50;
+    try std.testing.expect(!state.monitors[0].hasEffectiveFilter());
+    try std.testing.expect(!state.needsDaemon());
 }
 
 test "parse valid multi-monitor state" {

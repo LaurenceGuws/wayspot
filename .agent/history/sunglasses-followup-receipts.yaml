@@ -20,6 +20,26 @@ fixed_failures:
     assertion: >
       Picker result rows center the title/subtitle block inside row geometry,
       and sunglasses form rows center their single-line labels inside the row.
+  - name: runtime_lifecycle_followed_effective_state
+    assertion: >
+      Sunglasses state owns the pure effective-filter predicate, and runtime
+      reconciliation starts or wakes the daemon when any saved filter is
+      effective, stops it when none are effective, and removes stale pid files.
+  - name: reconcile_start_gap_was_serialized
+    assertion: >
+      Runtime reconciliation holds one runtime-dir lock while reading process
+      state, starting and waiting for pid publication, waking, or stopping, so
+      concurrent toggles cannot duplicate a daemon or miss a daemon still
+      booting.
+  - name: reconcile_state_read_moved_under_lock
+    assertion: >
+      Runtime reconciliation loads the saved sunglasses state after acquiring
+      the same runtime-dir lock that owns PID/process decisions, so a queued
+      stale enabled caller cannot restart a daemon after a later disabled save.
+  - name: reconcile_cli_kept_out_of_product_help
+    assertion: >
+      --sunglasses-reconcile remains a hidden repair and receipt hook; the
+      public usage line does not advertise it as product surface.
 
 automated_receipts:
   - command: zigup run 0.16.0 build test --summary all
@@ -32,6 +52,32 @@ automated_receipts:
     result: no hits
   - command: git diff --check
     result: passed
+  - command: zigup run 0.16.0 build test --summary all
+    result: passed_after_runtime_lifecycle_slice
+  - command: zigup run 0.16.0 build -Doptimize=ReleaseFast
+    result: passed_after_runtime_lifecycle_slice
+  - command: zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/sunglasses/state.zig src/sunglasses/runtime.zig src/ui/sdl_shell.zig
+    result: passed_after_runtime_lifecycle_slice
+  - command: git diff --check
+    result: passed_after_runtime_lifecycle_slice
+  - command: 'rg -n "(_\s*=|\busize\b|\banytype\b|\banyopaque\b)" src/main.zig src/root.zig src/sunglasses/state.zig src/sunglasses/runtime.zig src/ui/sdl_shell.zig'
+    result: no_hits_after_runtime_lifecycle_slice
+  - command: zigup run 0.16.0 build test --summary all
+    result: passed_after_reconcile_lock_review_fix
+  - command: zigup run 0.16.0 build -Doptimize=ReleaseFast
+    result: passed_after_reconcile_lock_review_fix
+  - command: zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/sunglasses/state.zig src/sunglasses/runtime.zig src/ui/sdl_shell.zig
+    result: passed_after_reconcile_lock_review_fix
+  - command: git diff --check
+    result: passed_after_reconcile_lock_review_fix
+  - command: 'rg -n "(_\s*=|\busize\b|\banytype\b|\banyopaque\b)" src/main.zig src/root.zig src/sunglasses/state.zig src/sunglasses/runtime.zig src/ui/sdl_shell.zig'
+    result: no_hits_after_reconcile_lock_review_fix
+  - command: ./zig-out/bin/wayspot
+    result: usage_does_not_advertise_sunglasses_reconcile
+  - command: zigup run 0.16.0 build test --summary all
+    result: passed_after_locked_state_read_review_fix
+  - command: zigup run 0.16.0 build -Doptimize=ReleaseFast
+    result: passed_after_locked_state_read_review_fix
 
 cli_receipts:
   - name: missing_daemon
@@ -46,6 +92,39 @@ cli_receipts:
   - name: enabled_overlay_layers
     command: hyprctl layers -j
     result: two wayspot-sunglasses layer namespaces while daemon is alive and zero after cleanup
+  - name: disabled_missing_daemon_reconcile
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile with disabled saved state and no sunglasses.pid
+    result: status_0_no_pid_no_layers_no_stderr
+  - name: disabled_stale_pid_reconcile
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile with disabled saved state and sunglasses.pid containing 1
+    result: status_0_pid_file_removed_no_stderr
+  - name: enabled_state_reconcile
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile with dim enabled on HDMI-A-1 and red_blue enabled on DP-1
+    result: status_0_pid_3818738_two_wayspot_sunglasses_layers_no_stderr
+  - name: disabled_state_stops_live_daemon
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile after writing disabled saved state
+    result: status_0_pid_removed_zero_wayspot_sunglasses_layers_no_stderr
+  - name: restored_enabled_state_reconciled
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile after restoring original saved state
+    result: status_0_pid_3818886_two_wayspot_sunglasses_layers_no_stderr
+  - name: enabled_live_daemon_reconcile_wakes
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile with restored enabled state and live daemon
+    result: status_0_pid_before_3818886_pid_after_3818886_two_wayspot_sunglasses_layers_no_stderr
+  - name: concurrent_enabled_reconcile_does_not_duplicate_daemon
+    command: three concurrent ./zig-out/bin/wayspot --sunglasses-reconcile processes with enabled saved state and no pid file
+    result: statuses_0_0_0_daemon_count_1_pid_3820324_two_wayspot_sunglasses_layers_no_stderr
+  - name: enabled_start_then_disabled_reconcile_stops_booting_daemon
+    command: start enabled ./zig-out/bin/wayspot --sunglasses-reconcile, then 10ms later write disabled state and run a second reconcile
+    result: start_status_0_stop_status_0_daemon_count_0_pid_absent_zero_wayspot_sunglasses_layers_no_stderr
+  - name: restored_enabled_state_after_review_fix
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile after restoring original saved state
+    result: status_0_daemon_count_1_pid_3820561_two_wayspot_sunglasses_layers_no_stderr
+  - name: stale_enabled_snapshot_cannot_start_after_disabled_save
+    command: hold sunglasses.reconcile.lock, write enabled state, launch blocked reconcile, write disabled state, release lock
+    result: status_0_daemon_count_0_pid_absent_zero_wayspot_sunglasses_layers_no_stderr
+  - name: restored_enabled_state_after_locked_state_read
+    command: ./zig-out/bin/wayspot --sunglasses-reconcile after restoring original saved state
+    result: status_0_daemon_count_1_pid_3822327_two_wayspot_sunglasses_layers_no_stderr
 
 visual_receipts:
   - /tmp/wayspot-row-alignment-after.png

@@ -51,6 +51,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (hasArg(args, "--sunglasses-reconcile")) {
+        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        try wayspot.sunglasses.Runtime.reconcileSavedState(allocator, runtime_dir);
+        return;
+    }
+
     if (hasArg(args, "--sunglasses-daemon")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;

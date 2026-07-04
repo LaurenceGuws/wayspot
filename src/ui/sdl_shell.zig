@@ -583,12 +583,7 @@ const SdlShell = struct {
             std.mem.span(runtime_dir_z)
         else
             return error.HyprlandRuntimeDirMissing;
-        sunglasses_runtime.Runtime.applyNow(self.allocator, runtime_dir) catch |err| switch (err) {
-            error.SunglassesDaemonNotRunning,
-            error.FileNotFound,
-            => std.log.warn("sunglasses daemon apply wake skipped err={s}", .{@errorName(err)}),
-            else => return err,
-        };
+        try sunglasses_runtime.Runtime.reconcileSavedState(self.allocator, runtime_dir);
     }
 
     fn sunglassesActive(self: *const SdlShell) bool {

@@ -16,8 +16,15 @@ const monitor_changed_event_type: u32 = @intCast(c.SDL_EVENT_USER + 41);
 const sunglasses_apply_event_type: u32 = @intCast(c.SDL_EVENT_USER + 42);
 const pid_dir_name = "wayspot";
 const pid_file_name = "sunglasses.pid";
+const reconcile_lock_file_name = "sunglasses.reconcile.lock";
 const max_pid_file_bytes: u32 = 32;
 const max_proc_cmdline_bytes: u32 = 4096;
+const daemon_stop_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
+const daemon_start_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
+const max_daemon_stop_polls: u32 = 100;
+const max_daemon_start_polls: u32 = 100;
+const daemon_child_fail_code: i32 = 127;
+const max_daemon_wait_interrupts: u32 = 8;
 var runtime_signal_shutdown_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 var runtime_signal_apply_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
@@ -44,7 +51,33 @@ pub const Runtime = struct {
         try sendSignal(pid, .USR1);
     }
 
+    pub fn reconcileSavedState(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
+        var lock = try ReconcileLock.acquire(allocator, runtime_dir);
+        defer lock.deinit(allocator);
+
+        const state = try sunglasses_state.load(allocator);
+        const pid_path = try sunglassesPidPath(allocator, runtime_dir);
+        defer allocator.free(pid_path);
+
+        const process_state = daemonProcessState(pid_path);
+        switch (process_state) {
+            .stale => removePidFile(pid_path),
+            else => {},
+        }
+
+        const process_live = process_state == .live;
+        switch (reconcileAction(state.needsDaemon(), process_live)) {
+            .idle => {},
+            .wake => try sendSignal(process_state.live, .USR1),
+            .start => try startDaemonAndWait(allocator, pid_path),
+            .stop => try stopDaemon(pid_path, process_state.live),
+        }
+    }
+
     fn startDaemon(self: *Runtime, hypr: hyprland.Connection) !void {
+        var state = try sunglasses_state.load(self.allocator);
+        if (!state.needsDaemon()) return;
+
         try self.startSdl();
         var runtime_signals = try RuntimeSignals.init();
         defer runtime_signals.deinit();
@@ -56,7 +89,6 @@ pub const Runtime = struct {
         defer monitor_watcher.deinit();
         try monitor_watcher.start();
 
-        var state = try sunglasses_state.load(self.allocator);
         try self.rebuildSurfaceSlots(hypr, &state);
         try self.runApplyLoop(hypr, &state);
     }
@@ -74,10 +106,12 @@ pub const Runtime = struct {
                 .shutdown => return,
                 .apply => {
                     state.* = try sunglasses_state.load(self.allocator);
+                    if (!state.needsDaemon()) return;
                     try self.redrawSurfaceSlots(state);
                 },
                 .monitor_changed => {
                     state.* = try sunglasses_state.load(self.allocator);
+                    if (!state.needsDaemon()) return;
                     try self.rebuildSurfaceSlots(hypr, state);
                 },
             }
@@ -142,6 +176,24 @@ const RuntimeWake = enum {
     apply,
     monitor_changed,
 };
+
+const DaemonProcessState = union(enum) {
+    absent,
+    stale,
+    live: std.os.linux.pid_t,
+};
+
+const ReconcileAction = enum {
+    idle,
+    wake,
+    start,
+    stop,
+};
+
+fn reconcileAction(needs_daemon: bool, process_live: bool) ReconcileAction {
+    if (needs_daemon) return if (process_live) .wake else .start;
+    return if (process_live) .stop else .idle;
+}
 
 fn waitForRuntimeWake() !RuntimeWake {
     while (true) {
@@ -421,6 +473,32 @@ const PidFile = struct {
     }
 };
 
+const ReconcileLock = struct {
+    path: []u8,
+    file: std.Io.File,
+
+    fn acquire(allocator: std.mem.Allocator, runtime_dir: []const u8) !ReconcileLock {
+        const dir_path = try sunglassesPidDirPath(allocator, runtime_dir);
+        defer allocator.free(dir_path);
+        try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir_path);
+
+        const lock_path = try sunglassesReconcileLockPath(allocator, runtime_dir);
+        errdefer allocator.free(lock_path);
+
+        const io = std.Options.debug_io;
+        const file = try std.Io.Dir.createFileAbsolute(io, lock_path, .{ .truncate = false });
+        errdefer file.close(io);
+        try flockExclusive(file.handle);
+        return .{ .path = lock_path, .file = file };
+    }
+
+    fn deinit(self: *ReconcileLock, allocator: std.mem.Allocator) void {
+        unlockFile(self.file.handle);
+        self.file.close(std.Options.debug_io);
+        allocator.free(self.path);
+    }
+};
+
 fn sunglassesPidDirPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ runtime_dir, pid_dir_name });
 }
@@ -429,11 +507,24 @@ fn sunglassesPidPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, pid_file_name });
 }
 
+fn sunglassesReconcileLockPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, reconcile_lock_file_name });
+}
+
 fn readSunglassesPid(pid_path: []const u8) !std.os.linux.pid_t {
     var buf: [max_pid_file_bytes]u8 = undefined;
     const bytes = try std.Io.Dir.cwd().readFile(std.Options.debug_io, pid_path, &buf);
     const text = std.mem.trim(u8, bytes, " \n\r\t");
     return std.fmt.parseInt(std.os.linux.pid_t, text, 10);
+}
+
+fn daemonProcessState(pid_path: []const u8) DaemonProcessState {
+    const pid = readSunglassesPid(pid_path) catch |err| switch (err) {
+        error.FileNotFound => return .absent,
+        else => return .stale,
+    };
+    if (!processLooksLikeSunglassesDaemon(pid)) return .stale;
+    return .{ .live = pid };
 }
 
 fn processLooksLikeSunglassesDaemon(pid: std.os.linux.pid_t) bool {
@@ -475,6 +566,157 @@ fn sendSignal(pid: std.os.linux.pid_t, signal: std.os.linux.SIG) !void {
         .SRCH => error.SunglassesDaemonNotRunning,
         else => error.SystemCallFailed,
     };
+}
+
+fn stopDaemon(pid_path: []const u8, pid: std.os.linux.pid_t) !void {
+    sendSignal(pid, .TERM) catch |err| switch (err) {
+        error.SunglassesDaemonNotRunning => {
+            removePidFile(pid_path);
+            return;
+        },
+        else => return err,
+    };
+
+    var polls: u32 = 0;
+    while (polls < max_daemon_stop_polls) : (polls += 1) {
+        if (!processLooksLikeSunglassesDaemon(pid)) {
+            removePidFile(pid_path);
+            return;
+        }
+        sleepNs(daemon_stop_poll_sleep_ns);
+    }
+    return error.SunglassesDaemonStillRunning;
+}
+
+fn startDaemonAndWait(allocator: std.mem.Allocator, pid_path: []const u8) !void {
+    try startDaemonDetached(allocator);
+    var polls: u32 = 0;
+    while (polls < max_daemon_start_polls) : (polls += 1) {
+        switch (daemonProcessState(pid_path)) {
+            .live => return,
+            .stale => {
+                removePidFile(pid_path);
+                return error.SunglassesDaemonStartFailed;
+            },
+            .absent => sleepNs(daemon_start_poll_sleep_ns),
+        }
+    }
+    return error.SunglassesDaemonStartTimedOut;
+}
+
+fn startDaemonDetached(allocator: std.mem.Allocator) !void {
+    const exe_path_z = try selfExePathZ(allocator);
+    defer allocator.free(exe_path_z);
+
+    const wrapper_pid = try forkProcess();
+    if (wrapper_pid == 0) daemonWrapperChild(exe_path_z);
+    try waitProcess(wrapper_pid);
+}
+
+fn selfExePathZ(allocator: std.mem.Allocator) ![:0]u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try std.Io.Dir.readLinkAbsolute(std.Options.debug_io, "/proc/self/exe", &path_buf);
+    return try allocator.dupeZ(u8, path_buf[0..path_len]);
+}
+
+fn daemonWrapperChild(exe_path_z: [:0]const u8) noreturn {
+    const stdio_ok = redirectStdioToNull();
+    if (!stdio_ok) std.c._exit(daemon_child_fail_code);
+
+    const session_id = std.c.setsid();
+    if (session_id == -1) std.c._exit(daemon_child_fail_code);
+
+    const daemon_pid = forkProcess() catch std.c._exit(daemon_child_fail_code);
+    if (daemon_pid == 0) execSunglassesDaemon(exe_path_z);
+
+    std.c._exit(0);
+}
+
+fn execSunglassesDaemon(exe_path_z: [:0]const u8) noreturn {
+    const daemon_arg = "--sunglasses-daemon";
+    const argv: [3:null]?[*:0]const u8 = .{
+        exe_path_z.ptr,
+        daemon_arg,
+        null,
+    };
+    const exec_rc = std.c.execve(exe_path_z.ptr, &argv, std.c.environ);
+    if (exec_rc == -1) std.c._exit(daemon_child_fail_code);
+    std.c._exit(daemon_child_fail_code);
+}
+
+fn redirectStdioToNull() bool {
+    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = false });
+    if (dev_null == -1) return false;
+
+    const stdin_rc = std.c.dup2(dev_null, 0);
+    const stdout_rc = std.c.dup2(dev_null, 1);
+    const stderr_rc = std.c.dup2(dev_null, 2);
+    const close_rc = std.c.close(dev_null);
+    if (stdin_rc == -1) return false;
+    if (stdout_rc == -1) return false;
+    if (stderr_rc == -1) return false;
+    if (close_rc == -1) return false;
+    return true;
+}
+
+fn forkProcess() !std.c.pid_t {
+    const pid = std.c.fork();
+    if (pid == -1) return error.ForkFailed;
+    return pid;
+}
+
+fn waitProcess(pid: std.c.pid_t) !void {
+    var status: i32 = 0;
+    var interrupts: u32 = 0;
+    while (interrupts < max_daemon_wait_interrupts) {
+        const waited = std.c.waitpid(pid, &status, 0);
+        if (waited == pid) break;
+        if (waited == -1) {
+            const errno = std.c._errno().*;
+            if (errno == @intFromEnum(std.c.E.INTR)) {
+                interrupts += 1;
+                continue;
+            }
+            return error.WaitFailed;
+        }
+        return error.WaitFailed;
+    } else {
+        return error.WaitInterruptedTooOften;
+    }
+    const status_bits: u32 = @bitCast(status);
+    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
+    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
+}
+
+fn flockExclusive(fd: std.c.fd_t) !void {
+    while (true) switch (std.c.errno(std.c.flock(fd, std.c.LOCK.EX))) {
+        .SUCCESS => return,
+        .INTR => {},
+        .BADF => return error.SystemCallFailed,
+        .INVAL => return error.SystemCallFailed,
+        .NOLCK => return error.SystemCallFailed,
+        .OPNOTSUPP => return error.SystemCallFailed,
+        else => return error.SystemCallFailed,
+    };
+}
+
+fn unlockFile(fd: std.c.fd_t) void {
+    while (true) switch (std.c.errno(std.c.flock(fd, std.c.LOCK.UN))) {
+        .SUCCESS => return,
+        .INTR => {},
+        else => return,
+    };
+}
+
+fn sleepNs(ns: u64) void {
+    var request = std.c.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    while (std.c.nanosleep(&request, &request) == -1) {
+        const errno = std.c._errno().*;
+        if (errno != @intFromEnum(std.c.E.INTR)) return;
+    }
 }
 
 fn drainEventFd(fd: std.posix.fd_t) !void {
@@ -545,4 +787,17 @@ test "sunglasses daemon cmdline check requires exact argv entries" {
     try std.testing.expect(cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-daemon\x00"));
     try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("bash\x00-c\x00wayspot --sunglasses-daemon\x00"));
     try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-apply\x00"));
+}
+
+test "sunglasses runtime reconciliation action follows saved state need and live process" {
+    try std.testing.expectEqual(ReconcileAction.idle, reconcileAction(false, false));
+    try std.testing.expectEqual(ReconcileAction.stop, reconcileAction(false, true));
+    try std.testing.expectEqual(ReconcileAction.start, reconcileAction(true, false));
+    try std.testing.expectEqual(ReconcileAction.wake, reconcileAction(true, true));
+}
+
+test "sunglasses reconcile lock path stays beside pid file" {
+    const path = try sunglassesReconcileLockPath(std.testing.allocator, "/run/user/1000");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/run/user/1000/wayspot/sunglasses.reconcile.lock", path);
 }
