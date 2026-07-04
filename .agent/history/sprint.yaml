@@ -292,6 +292,21 @@ dense_surface_pane_receipt:
     - .agent/history/screenshots/picker-dense-pane.png
     - .agent/history/screenshots/notification-dense-pane.png
 
+searchbar_alignment_receipt:
+  id: picker_searchbar_and_list_edge_alignment
+  state: completed
+  behavior:
+    - picker result top is derived from the query rule plus one pane gap.
+    - search ghost text is rendered higher in the query strip.
+    - first result row no longer visually overlaps the search rule.
+  changed_files:
+    - src/ui/picker_viewport.zig
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - hyprland-screenshot title Wayspot geometry 2683,434 874x483
+  screenshots:
+    - .agent/history/screenshots/picker-searchbar-aligned.png
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all

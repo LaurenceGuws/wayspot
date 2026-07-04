@@ -4,7 +4,7 @@ const std = @import("std");
 
 pub const max_visible_rows: u32 = 64;
 pub const min_scrollbar_thumb_height: f32 = 12;
-pub const default_result_list_top: f32 = 42;
+pub const default_result_list_gap: f32 = 2;
 pub const default_result_row_x: f32 = 8;
 pub const default_result_row_height: f32 = 38;
 pub const default_result_row_gap: f32 = 2;
@@ -17,9 +17,9 @@ pub const default_result_subtitle_offset: f32 = 18;
 pub const default_result_icon_size: f32 = 26;
 pub const default_result_icon_right_inset: f32 = 8;
 pub const default_query_text_x: f32 = 10;
-pub const default_query_text_y: f32 = 20;
-pub const default_query_line_y: f32 = 36;
-pub const default_scrollbar_track = Rect{ .x = 752, .y = 42, .w = 4, .h = 374 };
+pub const default_query_text_y: f32 = 8;
+pub const default_query_line_y: f32 = 28;
+pub const default_scrollbar_track = Rect{ .x = 752, .y = 30, .w = 4, .h = 386 };
 pub const default_base_width: f32 = 760;
 pub const default_base_height: f32 = 420;
 pub const min_base_width_px: i32 = 220;
@@ -105,10 +105,11 @@ pub const ResultLayout = struct {
         const scrollbar_x = @max(left, base_width - right - scrollbar_width);
         const row_right = @max(left + 1, scrollbar_x - default_result_scrollbar_gap);
         const row_width = row_right - left;
-        const scrollbar_height = @max(0, base_height - default_result_list_top - default_result_bottom_margin);
+        const result_top = default_query_line_y + default_result_list_gap;
+        const scrollbar_height = @max(0, base_height - result_top - default_result_bottom_margin);
         const rows_fit = visibleRowsForHeight(scrollbar_height, default_result_row_height, default_result_row_gap);
         return .{
-            .result_top = default_result_list_top,
+            .result_top = result_top,
             .row_x = left,
             .row_width = row_width,
             .row_height = default_result_row_height,
@@ -121,7 +122,7 @@ pub const ResultLayout = struct {
             .query_text_x = left + (default_query_text_x - default_result_row_x),
             .query_text_y = default_query_text_y,
             .query_line = .{ .x = left, .y = default_query_line_y, .w = row_width, .h = 1 },
-            .scrollbar_track = .{ .x = scrollbar_x, .y = default_result_list_top, .w = scrollbar_width, .h = scrollbar_height },
+            .scrollbar_track = .{ .x = scrollbar_x, .y = result_top, .w = scrollbar_width, .h = scrollbar_height },
             .visible_rows = @max(1, @min(@min(visible_rows, rows_fit), max_visible_rows)),
         };
     }
@@ -547,14 +548,14 @@ test "default result layout preserves shell row geometry" {
     const first_row = layout.rowRect(0);
     const second_row = layout.rowRect(1);
 
-    try testing.expectEqual(Rect{ .x = 8, .y = 42, .w = 741, .h = 38 }, first_row);
-    try testing.expectEqual(@as(f32, 46), layout.titleY(0));
-    try testing.expectEqual(@as(f32, 64), layout.subtitleY(0));
-    try testing.expectEqual(@as(f32, 82), second_row.y);
-    try testing.expectEqual(Rect{ .x = 8, .y = 36, .w = 741, .h = 1 }, layout.query_line);
+    try testing.expectEqual(Rect{ .x = 8, .y = 30, .w = 741, .h = 38 }, first_row);
+    try testing.expectEqual(@as(f32, 34), layout.titleY(0));
+    try testing.expectEqual(@as(f32, 52), layout.subtitleY(0));
+    try testing.expectEqual(@as(f32, 70), second_row.y);
+    try testing.expectEqual(Rect{ .x = 8, .y = 28, .w = 741, .h = 1 }, layout.query_line);
     try testing.expectEqual(default_scrollbar_track, layout.scrollbar_track);
-    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 81));
-    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 83));
+    try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 69));
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 71));
 }
 
 test "default result layout places icon inside row hit area" {
