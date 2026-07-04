@@ -156,13 +156,22 @@ form_contract:
 
 implementation_slices:
   - id: 01_state_owner
+    state: completed
     files:
       - src/sunglasses/mod.zig
       - src/sunglasses/state.zig
       - src/root.zig
     proof:
       - unit tests for defaults, clamp, parse, malformed, oversized, serialize
+      - bounded ensure-monitor owner API for later form mutation
+    receipts:
+      - zigup run 0.16.0 fmt --check src/root.zig src/sunglasses/mod.zig src/sunglasses/state.zig
+      - zigup run 0.16.0 build test --summary all
+      - zigup run 0.16.0 build -Doptimize=ReleaseFast
+      - git diff --check
+      - banned active Zig pattern scan over touched Zig files
   - id: 02_form_owner_no_effect
+    state: next
     files:
       - src/ui/sunglasses_form.zig
       - src/ui/sdl_shell.zig

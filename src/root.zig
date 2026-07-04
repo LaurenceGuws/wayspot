@@ -6,6 +6,7 @@ pub const search = @import("search/mod.zig");
 pub const ui = @import("ui/mod.zig");
 pub const notifications = @import("notifications/mod.zig");
 pub const wallpaper = @import("wallpaper/mod.zig");
+pub const sunglasses = @import("sunglasses/mod.zig");
 
 pub fn bufferedPrint() !void {
     var stdout_buffer: [1024]u8 = undefined;

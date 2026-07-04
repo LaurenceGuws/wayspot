@@ -33,9 +33,10 @@ current_scope:
     - scripting VM
 
 progress:
-  completed: []
+  completed:
+    - 01_state_owner
   current:
-    - ready_for_01_state_owner
+    - ready_for_02_form_owner_no_effect
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
