@@ -36,6 +36,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (hasArg(args, "--wallpaper")) {
+        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
+        runWallpaper(allocator, .{
+            .runtime_dir = runtime_dir,
+            .signature = signature,
+        }) catch |err| {
+            std.log.err("wallpaper daemon failed: {s}", .{@errorName(err)});
+            std.process.exit(2);
+        };
+        return;
+    }
+
     try wayspot.bufferedPrint();
 }
 
@@ -95,6 +108,15 @@ fn runWallpaperLifecycleProof(allocator: std.mem.Allocator, hypr: wayspot.wallpa
     }
 
     try wayspot.wallpaper.Runtime.runLifecycleProof(allocator, hypr);
+}
+
+fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+    if (!wayspot.ui.sdl_enabled) {
+        std.log.err("wallpaper daemon requires SDL build", .{});
+        std.process.exit(2);
+    }
+
+    try wayspot.wallpaper.Runtime.runWallpaper(allocator, hypr);
 }
 
 const Runtime = struct {

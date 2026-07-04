@@ -49,8 +49,23 @@ progress:
           - library_scan_indexes_png_and_bmp_headers_without_full_decode
           - records_store_path_byte_size_mtime_format_width_and_height
           - scan_bounds_max_images_paths_directory_entries_and_header_bytes
+    - wallpaper_decode_and_draw:
+        receipt: /tmp/wayspot-wallpaper-decode-slice-proof-20260704-204359
+        facts:
+          - image_decode_uses_wallpaper_surface_shm_path
+          - no_sdl_renderer_texture_path_added
+          - layer_surface_count_remained_bounded
+    - wallpaper_random_timer:
+        receipt: /tmp/wayspot-wallpaper-daemon-smoke-20260704-205249
+        facts:
+          - wallpaper_mode_loads_config_and_library_before_starting_sdl
+          - empty_library_exits_before_surface_retention
+          - one_random_timer_redraws_all_monitor_surfaces
+          - event_loop_sleeps_on_sdl_wait_timeout_until_event_or_deadline
+          - sigterm_wakes_daemon_and_runtime_cleanup_removes_layers
+          - cleanup_remains_runtime_owned
   current:
-    - wallpaper_decode_and_draw
+    - wallpaper_monitor_change_events
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
@@ -61,9 +76,7 @@ verification_floor:
   - stale runtime vocabulary scan
   - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
 
-next_candidates:
-  - wallpaper_random_timer
-  - wallpaper_monitor_change_events
+next_candidates: []
 
 accepted_discoveries:
   - hyprland_direct_surface_discovery:

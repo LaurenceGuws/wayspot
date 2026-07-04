@@ -270,7 +270,7 @@ later_slices:
       max_directory_entries: 16384
       max_header_read_bytes: 65536
   - id: wallpaper_decode_and_draw
-    status: current
+    status: completed
     result: >
       Decode one chosen still image per monitor, copy cover-cropped pixels into
       the Wayspot-owned shm buffer, and commit the existing layer surface.
@@ -280,11 +280,31 @@ later_slices:
       SDL may decode image files, but layer-shell presentation stays owned by
       WallpaperSurface through one shm buffer per monitor surface.
   - id: wallpaper_random_timer
+    status: completed
     result: >
       Replace images on one bounded random alternating timer while CPU sleeps
-      between timer deadlines, SDL events, monitor events if enabled, and
-      shutdown.
+      between timer deadlines, SDL events, and shutdown.
+    accepted_runtime:
+      cli: --wallpaper
+      receipt: /tmp/wayspot-wallpaper-daemon-smoke-20260704-205249
+      config_source: ~/.config/wayspot/wallpaper.conf
+      mode: one random alternating timer
+      startup_order:
+        - load wallpaper config
+        - scan configured library
+        - reject empty library before starting SDL
+        - query Hyprland monitors
+        - create one background layer surface per monitor
+        - draw one random image per surface
+        - sleep until SDL event, shutdown, or next interval deadline
+        - wake on SIGINT or SIGTERM and clean up through Runtime.deinit
+      rejected_runtime_shape:
+        - no cache
+        - no socket2 monitor-change handling
+        - no playlist_or_mode_model
+        - no broad_surface_framework
   - id: wallpaper_monitor_change_events
+    status: current
     result: >
       Add socket2 only for bounded monitor add/remove handling after static
       lifecycle, image index, and cleanup are already accepted.
