@@ -12,6 +12,8 @@ pub const default_result_row_gap: f32 = 6;
 pub const default_result_title_x: f32 = 34;
 pub const default_result_text_top_inset: f32 = 6;
 pub const default_result_subtitle_offset: f32 = 20;
+pub const default_result_icon_size: f32 = 28;
+pub const default_result_icon_right_inset: f32 = 14;
 pub const default_scrollbar_track = Rect{ .x = 746, .y = 66, .w = 4, .h = 394 };
 
 /// VisibleRange names the absolute result rows that may be rendered for the current frame.
@@ -71,6 +73,8 @@ pub const ResultLayout = struct {
     title_x: f32,
     text_top_inset: f32,
     subtitle_offset: f32,
+    icon_size: f32,
+    icon_right_inset: f32,
     scrollbar_track: Rect,
     visible_rows: u32,
 
@@ -84,6 +88,8 @@ pub const ResultLayout = struct {
             .title_x = default_result_title_x,
             .text_top_inset = default_result_text_top_inset,
             .subtitle_offset = default_result_subtitle_offset,
+            .icon_size = default_result_icon_size,
+            .icon_right_inset = default_result_icon_right_inset,
             .scrollbar_track = default_scrollbar_track,
             .visible_rows = @max(1, @min(visible_rows, max_visible_rows)),
         };
@@ -102,6 +108,17 @@ pub const ResultLayout = struct {
 
     pub fn subtitleY(self: ResultLayout, visible_row: u32) f32 {
         return self.titleY(visible_row) + self.subtitle_offset;
+    }
+
+    pub fn iconRect(self: ResultLayout, visible_row: u32) Rect {
+        const row = self.rowRect(visible_row);
+        const icon_size = @min(self.icon_size, row.h);
+        return .{
+            .x = row.x + row.w - self.icon_right_inset - icon_size,
+            .y = row.y + (row.h - icon_size) / 2,
+            .w = icon_size,
+            .h = icon_size,
+        };
     }
 
     pub fn visibleRowAtPoint(self: ResultLayout, x: f32, y: f32) ?u32 {
@@ -473,6 +490,8 @@ test "visible row point mapping rejects chrome gaps and scrollbar" {
         .title_x = 34,
         .text_top_inset = 6,
         .subtitle_offset = 20,
+        .icon_size = 28,
+        .icon_right_inset = 14,
         .scrollbar_track = .{ .x = 746, .y = 72, .w = 4, .h = 194 },
         .visible_rows = 4,
     };
@@ -496,4 +515,19 @@ test "default result layout preserves shell row geometry" {
     try testing.expectEqual(@as(f32, 116), second_row.y);
     try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 112));
     try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 122));
+}
+
+test "default result layout places icon inside row hit area" {
+    const testing = std.testing;
+    const layout = ResultLayout.default(3);
+    const icon = layout.iconRect(1);
+    const row = layout.rowRect(1);
+
+    try testing.expectEqual(@as(f32, 28), icon.w);
+    try testing.expectEqual(@as(f32, 28), icon.h);
+    try testing.expect(icon.x >= row.x);
+    try testing.expect(icon.y >= row.y);
+    try testing.expect(icon.x + icon.w <= row.x + row.w);
+    try testing.expect(icon.y + icon.h <= row.y + row.h);
+    try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(icon.x + 1, icon.y + 1));
 }

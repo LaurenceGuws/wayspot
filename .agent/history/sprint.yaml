@@ -1,5 +1,5 @@
 id: app_icon_resolution_and_row_image
-state: implementation_in_progress
+state: completed
 
 goal:
   completion_target: reviewer_approved_then_user_smoke
@@ -91,7 +91,7 @@ current_facts:
 
 active_slice:
   id: 02_app_icon_resolution_and_row_texture
-  mode: worker_implementation
+  mode: completed
   goal: >
     Implement pragmatic app icon resolution and right-side row image drawing
     using the accepted SDL 3.4 PNG/BMP surface loaders.
@@ -111,6 +111,32 @@ active_slice:
     - icon owner needs a broader cache or theme engine
     - no implementation shape earns its place
     - user visual decision required
+
+completion_receipt:
+  commits:
+    dependency: 89bb07a Bump SDL vendor for app icons
+  implemented_files:
+    - src/ui/app_icons.zig
+    - src/ui/picker_viewport.zig
+    - src/ui/sdl_shell.zig
+    - src/ui/mod.zig
+  behavior:
+    - app rows resolve icons through a bounded picker-lifetime AppIconStore.
+    - SDL_LoadPNG and SDL_LoadBMP are the only image decoders used.
+    - missing and unsupported icons are retained as missing entries and do not retry every frame.
+    - SDL_Surface values are destroyed immediately after texture upload.
+    - retained SDL_Texture values are destroyed once by AppIconStore.deinit before renderer teardown.
+    - non-app rows do not resolve or draw icons.
+    - row hit testing and launch behavior remain row-based and unchanged.
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - zigup run 0.16.0 build -Doptimize=ReleaseFast
+    - zigup run 0.16.0 fmt --check src/ui/app_icons.zig src/ui/picker_viewport.zig src/ui/sdl_shell.zig src/ui/mod.zig
+    - git diff --check
+    - banned pattern scan over changed active Zig files
+    - stale vocabulary scan over changed active Zig files
+    - timeout 8s ./zig-out/bin/wayspot --ui
+    - pgrep cleanup check for leftover wayspot UI processes
 
 verification_floor:
   automated:

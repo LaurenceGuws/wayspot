@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const app = @import("../app/mod.zig");
+const app_icons = @import("app_icons.zig");
 const common_dispatch = @import("common/dispatch.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const surface_config = @import("surface_config.zig");
@@ -214,6 +215,7 @@ const SdlShell = struct {
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     text: sdl_text.TextEngine,
+    icons: app_icons.AppIconStore = app_icons.AppIconStore.init(),
     config: surface_config.SurfaceConfig,
     shutdown_signal: ?*ShutdownSignal = null,
     wake_event_type: u32 = 0,
@@ -283,6 +285,7 @@ const SdlShell = struct {
         const stopped_text_input = c.SDL_StopTextInput(self.window);
         if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
         self.text.deinit();
+        self.icons.deinit();
         c.SDL_DestroyRenderer(self.renderer);
         c.SDL_DestroyWindow(self.window);
         c.SDL_Quit();
@@ -526,6 +529,7 @@ const SdlShell = struct {
                 .max_bytes = 82,
                 .font_size_px = 14,
             });
+            if (result.kind == .app) try self.drawResultIcon(layout.iconRect(i), result.icon);
         }
 
         if (range.count == 0) {
@@ -535,6 +539,18 @@ const SdlShell = struct {
                 .font_size_px = 17,
             });
         }
+    }
+
+    fn drawResultIcon(self: *SdlShell, icon_rect: picker_viewport.Rect, icon_name: []const u8) !void {
+        const texture = self.icons.textureFor(self.renderer, icon_name) orelse return;
+        const rect = c.SDL_FRect{
+            .x = icon_rect.x,
+            .y = icon_rect.y,
+            .w = icon_rect.w,
+            .h = icon_rect.h,
+        };
+        const drawn = c.SDL_RenderTexture(self.renderer, texture, null, &rect);
+        if (!drawn) return error.SdlRenderFailed;
     }
 
     fn drawScrollbar(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
