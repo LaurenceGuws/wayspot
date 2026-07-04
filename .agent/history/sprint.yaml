@@ -1,4 +1,5 @@
 id: cold_path_control_spine
+state: code_complete_user_smoke_needed
 
 goal:
   completion_target: reviewer_approved_then_user_smoke
@@ -72,6 +73,15 @@ cold_path:
     - apps provider cache-file candidates slice into one retained cache buffer instead of duplicating every row field.
     - apps provider parses cache rows without icon metadata directly instead of triggering a cold-path desktop scan migration.
     - sdl shell init sizes the viewport from the created window instead of immediately resizing the already-scaled window.
+  rejected_slices:
+    - runtime path fixed buffers were rejected because they create self-referential Runtime shape to remove two clear startup allocations.
+    - text single-load rendering was rejected because correct no-cache behavior requires per-draw bitmap retention and more metadata than it removes.
+    - delaying shutdown signal startup was rejected because it creates a signal cleanup gap or requires extra lifecycle machinery.
+  final_automated_receipts:
+    - zigup run 0.16.0 build test --summary all passed.
+    - git diff --check passed.
+    - banned Zig pattern scan over src/main.zig src/app src/providers src/search src/ui passed with no hits.
+    - stale runtime-debt scan passed with only existing sdl_banner role-comment ownership hits for notification daemon and Hyprland placement.
 
 current_rejected_path:
   text_texture_cache:
