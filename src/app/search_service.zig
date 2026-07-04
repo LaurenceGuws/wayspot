@@ -91,11 +91,13 @@ test "search service collects candidates once per service lifetime" {
 
     const first = try service.searchQuery(std.testing.allocator, "kit");
     defer std.testing.allocator.free(first);
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
 
     const second = try service.searchQuery(std.testing.allocator, "fire");
     defer std.testing.allocator.free(second);
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
 }
 
 test "search service ranks retained history without query history allocation" {

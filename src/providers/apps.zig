@@ -5,6 +5,7 @@ const search = @import("../search/mod.zig");
 
 pub const AppsProvider = struct {
     cache_path: []const u8,
+    cache_data: ?[]u8 = null,
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn init(cache_path: []const u8) AppsProvider {
@@ -14,6 +15,7 @@ pub const AppsProvider = struct {
     }
 
     pub fn deinit(self: *AppsProvider, allocator: std.mem.Allocator) void {
+        self.freeCacheData(allocator);
         self.freeOwnedStrings(allocator);
         self.owned_strings.deinit(allocator);
     }
@@ -24,6 +26,7 @@ pub const AppsProvider = struct {
         allocator: std.mem.Allocator,
         out: *search.CandidateList,
     ) !void {
+        self.freeCacheData(allocator);
         self.freeOwnedStrings(allocator);
         const data = std.Io.Dir.cwd().readFileAlloc(
             std.Options.debug_io,
@@ -44,7 +47,6 @@ pub const AppsProvider = struct {
                 return;
             },
         };
-        defer allocator.free(data);
 
         if (cacheContainsThreeColumnRows(data)) {
             std.log.info("apps provider detected three-column cache rows; attempting desktop refresh", .{});
@@ -53,12 +55,14 @@ pub const AppsProvider = struct {
                 break :blk 0;
             };
             if (added > 0) {
+                allocator.free(data);
                 return;
             }
         }
 
+        self.cache_data = data;
         var count: u32 = 0;
-        var lines = std.mem.splitScalar(u8, data, '\n');
+        var lines = std.mem.splitScalar(u8, self.cache_data.?, '\n');
         while (lines.next()) |line| {
             const normalized_line = std.mem.trimEnd(u8, line, "\r");
             if (normalized_line.len == 0) continue;
@@ -68,18 +72,15 @@ pub const AppsProvider = struct {
             const exec_cmd = std.mem.trimEnd(u8, fields.next() orelse continue, " \t\r");
             const icon_name = std.mem.trimEnd(u8, fields.next() orelse "", " \t\r");
 
-            const kept_name = try self.keepString(allocator, name);
-            const kept_category = try self.keepString(allocator, category);
-            const kept_exec = try self.keepString(allocator, exec_cmd);
-            const kept_icon = try self.keepString(allocator, icon_name);
             try out.append(
                 allocator,
-                search.Candidate.initWithIcon(.app, kept_name, kept_category, kept_exec, kept_icon),
+                search.Candidate.initWithIcon(.app, name, category, exec_cmd, icon_name),
             );
             count += 1;
         }
 
         if (count == 0) {
+            self.freeCacheData(allocator);
             std.log.warn("apps provider cache contained no parsable rows path={s}", .{self.cache_path});
             return;
         }
@@ -94,6 +95,13 @@ pub const AppsProvider = struct {
     fn freeOwnedStrings(self: *AppsProvider, allocator: std.mem.Allocator) void {
         for (self.owned_strings.items) |item| allocator.free(item);
         self.owned_strings.clearRetainingCapacity();
+    }
+
+    fn freeCacheData(self: *AppsProvider, allocator: std.mem.Allocator) void {
+        if (self.cache_data) |data| {
+            allocator.free(data);
+            self.cache_data = null;
+        }
     }
 
     fn collectFromDesktopFiles(
@@ -397,6 +405,8 @@ test "apps provider collects rows from cache file" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
     try std.testing.expectEqualStrings("kitty", list.items[0].action);
@@ -484,9 +494,10 @@ test "apps provider returns no rows when cache has no valid rows" {
     try provider.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
+    try std.testing.expect(apps.cache_data == null);
 }
 
-test "apps provider keeps one owned string set across collects" {
+test "apps provider replaces cache data across cache collects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -510,15 +521,29 @@ test "apps provider keeps one owned string set across collects" {
 
     const provider = apps.provider();
     try provider.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expectEqualStrings("Kitty", list.items[0].title);
+
+    list.clearRetainingCapacity();
+    try tmp.dir.writeFile(.{
+        .sub_path = "apps.tsv",
+        .data =
+        \\Graphics\tGimp\tgimp\tgimp
+        \\
+        ,
+    });
+    try provider.collect(std.testing.allocator, &list);
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqualStrings("Gimp", list.items[0].title);
 
     list.clearRetainingCapacity();
     try provider.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
-
-    list.clearRetainingCapacity();
-    try provider.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(u32, 8), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.cache_data != null);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expectEqualStrings("Gimp", list.items[0].title);
 }
 
 test "apps provider trims crlf and trailing whitespace from stored fields" {
@@ -608,6 +633,8 @@ test "apps provider can scan desktop root and rebuild cache rows" {
 
     try apps.collectFromDesktopRoot(std.testing.allocator, &list, &scan, root_path);
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
+    try std.testing.expect(apps.cache_data == null);
+    try std.testing.expectEqual(@as(u32, 4), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Test App", list.items[0].title);
     try std.testing.expectEqualStrings("Utility", list.items[0].subtitle);
     try std.testing.expectEqualStrings("test-app", list.items[0].action);
