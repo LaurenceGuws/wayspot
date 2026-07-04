@@ -115,6 +115,7 @@ active_slice:
 completion_receipt:
   commits:
     dependency: 89bb07a Bump SDL vendor for app icons
+    row_icons: c88278c Render app icons in picker rows
   implemented_files:
     - src/ui/app_icons.zig
     - src/ui/picker_viewport.zig
@@ -137,6 +138,34 @@ completion_receipt:
     - stale vocabulary scan over changed active Zig files
     - timeout 8s ./zig-out/bin/wayspot --ui
     - pgrep cleanup check for leftover wayspot UI processes
+
+follow_up_receipt:
+  id: icon_diag_surface_proof
+  state: completed
+  command: ./zig-out/bin/wayspot --icon-diag
+  receipt_file: .agent/history/icon-diag.receipt.tsv
+  behavior:
+    - app icon diagnostics collect app candidates only.
+    - each app row is written as resolved, iconless, or unsupported.
+    - resolved PNG/BMP icons run through the same SDL load-scale-upload path as picker row icons.
+    - oversized source icons are scaled to a bounded retained texture dimension before upload.
+    - true missing icon names remain explicit iconless rows in the receipt.
+  local_counts:
+    app_rows: 105
+    resolved: 59
+    surface_ok: 59
+    surface_failed: 0
+    iconless: 44
+    unsupported: 2
+    skipped: 0
+  verification:
+    - zigup run 0.16.0 build test --summary all
+    - zigup run 0.16.0 build -Doptimize=ReleaseFast
+    - zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/ui/app_icons.zig src/ui/app_icon_diag.zig src/ui/mod.zig
+    - git diff --check
+    - banned pattern scan over changed active Zig files
+    - stale vocabulary scan over changed active Zig files
+    - ./zig-out/bin/wayspot --icon-diag
 
 verification_floor:
   automated:

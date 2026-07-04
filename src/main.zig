@@ -16,6 +16,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (hasArg(args, "--icon-diag")) {
+        try runIconDiag(allocator, home);
+        return;
+    }
+
     try wayspot.bufferedPrint();
 }
 
@@ -34,6 +39,24 @@ fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
     };
 
     try wayspot.ui.Shell.run(allocator, &runtime.service);
+}
+
+fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
+    if (!wayspot.ui.sdl_enabled) {
+        std.log.err("icon diagnostic requires SDL build", .{});
+        std.process.exit(2);
+    }
+
+    const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
+    defer allocator.free(app_cache);
+
+    var apps = wayspot.providers.AppsProvider.init(app_cache);
+    defer apps.deinit(allocator);
+    var candidates = wayspot.search.CandidateList.empty;
+    defer candidates.deinit(allocator);
+
+    try apps.collect(allocator, &candidates);
+    try wayspot.ui.app_icon_diag.writeReceipt(candidates.items);
 }
 
 const Runtime = struct {

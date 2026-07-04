@@ -1,4 +1,4 @@
-//! Wayspot owns the CLI launcher, notification daemon, and UI modules.
+//! Wayspot owns the CLI launcher, notifications, and UI modules.
 const std = @import("std");
 pub const app = @import("app/mod.zig");
 pub const providers = @import("providers/mod.zig");
@@ -11,7 +11,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("Usage: wayspot --ui | --notifications-daemon\n", .{});
+    try stdout.print("Usage: wayspot --ui | --notifications-daemon | --icon-diag\n", .{});
 
     try stdout.flush();
 }

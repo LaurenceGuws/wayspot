@@ -8,7 +8,8 @@ pub const max_icon_entries = 128;
 pub const max_icon_name_bytes = 192;
 pub const max_icon_path_bytes = 768;
 pub const max_icon_file_bytes: u64 = 2 * 1024 * 1024;
-pub const max_icon_source_dimension: i32 = 512;
+pub const max_icon_source_dimension: i32 = 4096;
+pub const max_icon_texture_dimension: i32 = 64;
 pub const max_icon_roots: u32 = 8;
 pub const max_icon_probes: u32 = 96;
 
@@ -22,13 +23,45 @@ pub const ResolveRoots = struct {
     xdg_data_home: ?[]const u8 = null,
     xdg_data_dirs: ?[]const u8 = null,
 
-    fn fromEnv() ResolveRoots {
+    pub fn fromEnv() ResolveRoots {
         return .{
             .home = envBytes("HOME"),
             .xdg_data_home = envBytes("XDG_DATA_HOME"),
             .xdg_data_dirs = envBytes("XDG_DATA_DIRS"),
         };
     }
+};
+
+pub const IconResolveStatus = enum {
+    empty,
+    name_too_long,
+    relative_path,
+    unsupported,
+    symbolic,
+    missing,
+    resolved,
+};
+
+pub const IconResolution = struct {
+    status: IconResolveStatus,
+    path: []const u8 = "",
+
+    pub fn format(resolution: IconResolution) []const u8 {
+        return if (endsWithIgnoreCase(resolution.path, ".png")) "png" else "bmp";
+    }
+};
+
+pub const IconSurfaceStatus = enum {
+    loaded_texture,
+    load_failed,
+    scale_failed,
+    dimensions_rejected,
+    texture_failed,
+};
+
+pub const IconTextureResult = struct {
+    status: IconSurfaceStatus,
+    texture: [*c]c.SDL_Texture = null,
 };
 
 const EntryState = enum {
@@ -79,17 +112,12 @@ pub const AppIconStore = struct {
         const entry = store.reserve(icon_name) orelse return null;
         var path_buffer: [max_icon_path_bytes + 1]u8 = undefined;
         const path = resolveIconPath(icon_name, roots, &path_buffer) orelse return null;
-        const surface = loadSurface(path);
-        if (surface == null) return null;
-        defer c.SDL_DestroySurface(surface);
+        const loaded = loadTexturePath(renderer, path);
+        if (loaded.status != .loaded_texture) return null;
 
-        if (!surfaceDimensionsAccepted(surface)) return null;
-        const texture = c.SDL_CreateTextureFromSurface(renderer, surface);
-        if (texture == null) return null;
-
-        entry.texture = texture;
+        entry.texture = loaded.texture;
         entry.state = .loaded;
-        return texture;
+        return loaded.texture;
     }
 
     fn find(store: *AppIconStore, icon_name: []const u8) ?*Entry {
@@ -113,6 +141,35 @@ pub const AppIconStore = struct {
         return entry;
     }
 };
+
+pub fn diagnoseIcon(icon_name: []const u8, roots: ResolveRoots, out: []u8) IconResolution {
+    if (icon_name.len == 0) return .{ .status = .empty };
+    if (icon_name.len > max_icon_name_bytes) return .{ .status = .name_too_long };
+    if (!std.fs.path.isAbsolute(icon_name) and std.mem.indexOfScalar(u8, icon_name, '/') != null) return .{ .status = .relative_path };
+    if (hasUnsupportedImageExtension(icon_name)) return .{ .status = .unsupported };
+
+    const base_name = iconNameBase(icon_name) orelse return .{ .status = .unsupported };
+    if (base_name.len == 0) return .{ .status = .empty };
+    if (endsWithIgnoreCase(base_name, "-symbolic")) return .{ .status = .symbolic };
+
+    const path = resolveIconPath(icon_name, roots, out) orelse return .{ .status = .missing };
+    return .{ .status = .resolved, .path = path };
+}
+
+pub fn loadTexturePath(renderer: *c.SDL_Renderer, path: [:0]const u8) IconTextureResult {
+    const surface = loadSurface(path);
+    if (surface == null) return .{ .status = .load_failed };
+    defer c.SDL_DestroySurface(surface);
+    if (!sourceDimensionsAccepted(surface)) return .{ .status = .dimensions_rejected };
+
+    const bounded = boundedSurfaceForTexture(surface);
+    if (bounded.surface == null) return .{ .status = .scale_failed };
+    defer if (bounded.scaled) c.SDL_DestroySurface(bounded.surface);
+
+    const texture = c.SDL_CreateTextureFromSurface(renderer, bounded.surface);
+    if (texture == null) return .{ .status = .texture_failed };
+    return .{ .status = .loaded_texture, .texture = texture };
+}
 
 pub fn resolveIconPathForTest(icon_name: []const u8, roots: ResolveRoots, out: []u8) ?[:0]const u8 {
     return resolveIconPath(icon_name, roots, out);
@@ -210,11 +267,48 @@ fn loadSurface(path: [:0]const u8) [*c]c.SDL_Surface {
     return c.SDL_LoadBMP(path.ptr);
 }
 
-fn surfaceDimensionsAccepted(surface: [*c]c.SDL_Surface) bool {
+fn sourceDimensionsAccepted(surface: [*c]c.SDL_Surface) bool {
     return surface.*.w > 0 and
         surface.*.h > 0 and
         surface.*.w <= max_icon_source_dimension and
         surface.*.h <= max_icon_source_dimension;
+}
+
+const BoundedSurface = struct {
+    surface: [*c]c.SDL_Surface,
+    scaled: bool,
+};
+
+fn boundedSurfaceForTexture(surface: [*c]c.SDL_Surface) BoundedSurface {
+    const dimensions = textureDimensions(surface.*.w, surface.*.h);
+    if (dimensions.w == surface.*.w and dimensions.h == surface.*.h) {
+        return .{ .surface = surface, .scaled = false };
+    }
+    const scaled = c.SDL_ScaleSurface(surface, dimensions.w, dimensions.h, c.SDL_SCALEMODE_LINEAR);
+    return .{ .surface = scaled, .scaled = scaled != null };
+}
+
+const TextureDimensions = struct {
+    w: i32,
+    h: i32,
+};
+
+fn textureDimensions(width: i32, height: i32) TextureDimensions {
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+    if (width <= max_icon_texture_dimension and height <= max_icon_texture_dimension) {
+        return .{ .w = width, .h = height };
+    }
+    if (width >= height) {
+        return .{
+            .w = max_icon_texture_dimension,
+            .h = @max(1, @divTrunc(height * max_icon_texture_dimension, width)),
+        };
+    }
+    return .{
+        .w = @max(1, @divTrunc(width * max_icon_texture_dimension, height)),
+        .h = max_icon_texture_dimension,
+    };
 }
 
 fn iconNameBase(icon_name: []const u8) ?[]const u8 {
@@ -259,6 +353,24 @@ test "icon resolver rejects unsupported and unbounded names" {
     var long_name: [max_icon_name_bytes + 1]u8 = undefined;
     @memset(&long_name, 'a');
     try std.testing.expect(resolveIconPathForTest(&long_name, roots, &buffer) == null);
+}
+
+test "icon diagnostic classifies icon fields without SDL" {
+    var buffer: [max_icon_path_bytes + 1]u8 = undefined;
+    const roots = ResolveRoots{ .xdg_data_home = "/wayspot-test-empty", .xdg_data_dirs = "/wayspot-test-empty" };
+
+    try std.testing.expectEqual(IconResolveStatus.empty, diagnoseIcon("", roots, &buffer).status);
+    try std.testing.expectEqual(IconResolveStatus.relative_path, diagnoseIcon("nested/icon", roots, &buffer).status);
+    try std.testing.expectEqual(IconResolveStatus.symbolic, diagnoseIcon("edit-copy-symbolic", roots, &buffer).status);
+    try std.testing.expectEqual(IconResolveStatus.unsupported, diagnoseIcon("app.svg", roots, &buffer).status);
+    try std.testing.expectEqual(IconResolveStatus.missing, diagnoseIcon("not-installed", roots, &buffer).status);
+}
+
+test "oversized icon dimensions scale into retained texture bound" {
+    try std.testing.expectEqual(TextureDimensions{ .w = 64, .h = 64 }, textureDimensions(1024, 1024));
+    try std.testing.expectEqual(TextureDimensions{ .w = 55, .h = 64 }, textureDimensions(2269, 2620));
+    try std.testing.expectEqual(TextureDimensions{ .w = 64, .h = 36 }, textureDimensions(1920, 1080));
+    try std.testing.expectEqual(TextureDimensions{ .w = 32, .h = 32 }, textureDimensions(32, 32));
 }
 
 test "icon resolver accepts bounded absolute png path" {
