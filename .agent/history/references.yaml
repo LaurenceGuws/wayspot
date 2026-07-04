@@ -41,6 +41,13 @@ source_references:
       - selection.c
   sdl:
     docs: /home/home/personal/wayspot/dev_references/sdl
+    vendor:
+      root: /home/home/personal/projects/howl-sdl
+      branch: release-3.4.x
+      commit: c5ba24c694b5d520cdc1d029d8def398690d6894
+      icon_loader_apis:
+        - include/SDL3/SDL_surface.h:SDL_LoadPNG
+        - include/SDL3/SDL_surface.h:SDL_LoadBMP
   zig:
     release_notes: /home/home/personal/wayspot/dev_references/zig/release-notes.html
 

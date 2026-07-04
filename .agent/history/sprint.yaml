@@ -1,5 +1,5 @@
 id: app_icon_resolution_and_row_image
-state: indexing_needed
+state: implementation_in_progress
 
 goal:
   completion_target: reviewer_approved_then_user_smoke
@@ -62,7 +62,9 @@ product_scope:
     - theme selection UI
     - icon theme inheritance engine unless a tiny direct subset is required
     - network icons
-    - SVG rendering unless already available through a tiny proven path
+    - SVG rendering
+    - SDL_image
+    - stb or another image decoder vendor
     - broad image cache
     - notification icon changes
     - Hyprland changes
@@ -80,31 +82,35 @@ current_facts:
   known_gap:
     - no current app icon path resolver exists.
     - no current image decode/upload owner exists for picker row icons.
+  accepted_dependency:
+    - build.zig.zon now targets git+https://github.com/LaurenceGuws/howl-sdl#release-3.4.x.
+    - The resolved package hash is sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6.
+    - The vendor source is cloned at /home/home/personal/projects/howl-sdl on release-3.4.x.
+    - Vendor commit c5ba24c694b5d520cdc1d029d8def398690d6894 exposes SDL_LoadPNG and SDL_LoadBMP in include/SDL3/SDL_surface.h.
+    - zigup run 0.16.0 build test --summary all passed after the SDL bump.
 
 active_slice:
-  id: 01_app_icon_resolution_index
-  mode: proposal_first
+  id: 02_app_icon_resolution_and_row_texture
+  mode: worker_implementation
   goal: >
-    Produce an exact implementation index for pragmatic app icon resolution and
-    right-side row image drawing before any runtime code changes.
+    Implement pragmatic app icon resolution and right-side row image drawing
+    using the accepted SDL 3.4 PNG/BMP surface loaders.
   likely_files:
+    - src/ui/app_icons.zig
     - src/ui/sdl_shell.zig
     - src/ui/picker_viewport.zig
-    - src/search/types.zig
-    - src/providers/apps.zig
-    - build.zig
-    - build.zig.zon
+    - src/ui/mod.zig
   worker_output_required:
-    - exact icon resolution strategy
-    - exact image formats supported and why
-    - dependency decision, including whether SDL_image or another local dependency is justified
-    - retained resource owner, key, invalidation, scale behavior, cleanup, and tests
+    - app-only candidate icon resolution
+    - SDL_LoadPNG and SDL_LoadBMP only
+    - bounded retained texture owner with negative missing entries
     - fallback behavior for missing, symbolic, SVG-only, oversized, and unreadable icons
     - exact files, symbols, comments, tests, and verification commands
   stop_conditions:
-    - user_decision_needed_for_dependency_or_format_scope
+    - SDL 3.4 bump regression
+    - icon owner needs a broader cache or theme engine
     - no implementation shape earns its place
-    - accepted implementation slice is explicit
+    - user visual decision required
 
 verification_floor:
   automated:
