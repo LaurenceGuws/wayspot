@@ -194,6 +194,7 @@ implementation_slices:
       - src/app/search_service.zig test assertion updated because adding the third slash mode changed the existing service mode-count expectation
       - src/sunglasses/state.zig gained indexed monitor accessors so the form does not own retained array layout
   - id: 03_overlay_surface_proof
+    state: completed
     files:
       - src/ui/sdl_sunglasses_surface.zig
       - src/c/sdl.h
@@ -203,7 +204,20 @@ implementation_slices:
       - hyprctl layers shows one wayspot-sunglasses overlay per monitor
       - pointer and keyboard remain usable through overlay
       - daemon cleanup removes all overlay layers
+    receipts:
+      - zigup run 0.16.0 fmt --check src/ui/sdl_sunglasses_surface.zig src/sunglasses/runtime.zig src/sunglasses/mod.zig src/main.zig src/root.zig
+      - zigup run 0.16.0 build test --summary all
+      - zigup run 0.16.0 build -Doptimize=ReleaseFast
+      - git diff --check
+      - banned active Zig pattern scan over touched Zig files
+      - ./zig-out/bin/wayspot --sunglasses-proof
+      - hyprctl layers -j showed wayspot-sunglasses count 0 before, 2 during, 0 after process exit
+      - active Hyprland window stayed the same before, during, and after proof overlay
+      - /tmp/wayspot-sunglasses-proof.png captured visible overlay proof
+    note:
+      - src/main.zig and src/root.zig were touched only to expose the bounded CLI proof command
   - id: 04_apply_path
+    state: next
     files:
       - src/sunglasses/runtime.zig
       - src/ui/sdl_shell.zig

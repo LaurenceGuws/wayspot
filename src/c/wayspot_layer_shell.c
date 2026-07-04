@@ -104,14 +104,14 @@ static int wayspot_cover_source_rect(int source_width, int source_height, int ta
     return rect->w <= 0 || rect->h <= 0 ? -1 : 0;
 }
 
-static int wayspot_shm_buffer_create_empty(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height)
+static int wayspot_shm_buffer_create_empty(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t format, const char *name)
 {
     if (width == 0 || height == 0 || width > UINT32_MAX / 4 || height > UINT32_MAX / (width * 4)) {
         return -1;
     }
     uint32_t stride = width * 4;
     uint32_t byte_len = stride * height;
-    int fd = memfd_create("wayspot-wallpaper", MFD_CLOEXEC);
+    int fd = memfd_create(name, MFD_CLOEXEC);
     if (fd < 0) {
         return -1;
     }
@@ -130,7 +130,7 @@ static int wayspot_shm_buffer_create_empty(struct wayspot_layer_globals *globals
         close(fd);
         return -1;
     }
-    struct wl_buffer *wl_buffer = wl_shm_pool_create_buffer(pool, 0, (int32_t)width, (int32_t)height, (int32_t)stride, WL_SHM_FORMAT_XRGB8888);
+    struct wl_buffer *wl_buffer = wl_shm_pool_create_buffer(pool, 0, (int32_t)width, (int32_t)height, (int32_t)stride, format);
     wl_shm_pool_destroy(pool);
     close(fd);
     if (wl_buffer == NULL) {
@@ -217,6 +217,11 @@ static void wayspot_registry_global(void *data, struct wl_registry *registry, ui
         globals->layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface, bind_version);
         return;
     }
+    if (strcmp(interface, "wl_compositor") == 0) {
+        uint32_t bind_version = wayspot_min_u32(version, 4);
+        globals->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, bind_version);
+        return;
+    }
     if (strcmp(interface, "wl_shm") == 0) {
         uint32_t bind_version = wayspot_min_u32(version, 2);
         globals->shm = wl_registry_bind(registry, name, &wl_shm_interface, bind_version);
@@ -290,7 +295,7 @@ int wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_
     if (wl_display_roundtrip(display) < 0) {
         return -1;
     }
-    return globals->layer_shell == NULL || globals->shm == NULL ? -1 : 0;
+    return globals->layer_shell == NULL || globals->compositor == NULL || globals->shm == NULL ? -1 : 0;
 }
 
 void wayspot_layer_globals_deinit(struct wayspot_layer_globals *globals)
@@ -307,6 +312,10 @@ void wayspot_layer_globals_deinit(struct wayspot_layer_globals *globals)
     if (globals->layer_shell != NULL) {
         wl_proxy_marshal_flags((struct wl_proxy *)globals->layer_shell, 1, NULL, wl_proxy_get_version((struct wl_proxy *)globals->layer_shell), WL_MARSHAL_FLAG_DESTROY);
         globals->layer_shell = NULL;
+    }
+    if (globals->compositor != NULL) {
+        wl_compositor_destroy(globals->compositor);
+        globals->compositor = NULL;
     }
     if (globals->shm != NULL) {
         wl_shm_destroy(globals->shm);
@@ -334,6 +343,11 @@ struct wl_output *wayspot_layer_find_output(struct wayspot_layer_globals *global
 struct zwlr_layer_surface_v1 *wayspot_layer_get_surface(struct wayspot_layer_globals *globals, struct wl_surface *surface, struct wl_output *output, const char *namespace_name)
 {
     return (struct zwlr_layer_surface_v1 *)wl_proxy_marshal_flags((struct wl_proxy *)globals->layer_shell, 0, &zwlr_layer_surface_v1_interface, wl_proxy_get_version((struct wl_proxy *)globals->layer_shell), 0, NULL, surface, output, (uint32_t)0, namespace_name);
+}
+
+struct zwlr_layer_surface_v1 *wayspot_layer_get_surface_on_layer(struct wayspot_layer_globals *globals, struct wl_surface *surface, struct wl_output *output, uint32_t layer, const char *namespace_name)
+{
+    return (struct zwlr_layer_surface_v1 *)wl_proxy_marshal_flags((struct wl_proxy *)globals->layer_shell, 0, &zwlr_layer_surface_v1_interface, wl_proxy_get_version((struct wl_proxy *)globals->layer_shell), 0, NULL, surface, output, layer, namespace_name);
 }
 
 void wayspot_layer_surface_add_listener(struct zwlr_layer_surface_v1 *surface, struct wayspot_layer_configure_state *state)
@@ -388,7 +402,7 @@ void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display)
 
 int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path)
 {
-    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height) != 0) {
+    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height, WL_SHM_FORMAT_XRGB8888, "wayspot-wallpaper") != 0) {
         return -1;
     }
 
@@ -431,6 +445,22 @@ int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struc
     return 0;
 }
 
+int wayspot_shm_buffer_create_tint(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t argb)
+{
+    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height, WL_SHM_FORMAT_ARGB8888, "wayspot-sunglasses") != 0) {
+        return -1;
+    }
+
+    uint32_t pixel_count = width * height;
+    uint32_t *pixels = buffer->data;
+    uint32_t index = 0;
+    while (index < pixel_count) {
+        pixels[index] = argb;
+        index += 1;
+    }
+    return 0;
+}
+
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer)
 {
     if (buffer->buffer != NULL) {
@@ -453,4 +483,15 @@ void wayspot_wl_surface_attach_buffer(struct wl_surface *surface, struct wayspot
 void wayspot_wl_surface_detach_buffer(struct wl_surface *surface)
 {
     wl_surface_attach(surface, NULL, 0, 0);
+}
+
+int wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface)
+{
+    struct wl_region *region = wl_compositor_create_region(globals->compositor);
+    if (region == NULL) {
+        return -1;
+    }
+    wl_surface_set_input_region(surface, region);
+    wl_region_destroy(region);
+    return 0;
 }

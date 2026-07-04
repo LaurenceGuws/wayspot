@@ -16,6 +16,7 @@ struct wayspot_layer_output {
 struct wayspot_layer_globals {
     struct wl_display *display;
     struct wl_registry *registry;
+    struct wl_compositor *compositor;
     struct wl_shm *shm;
     void *layer_shell;
     struct wayspot_layer_output outputs[WAYSPOT_LAYER_MAX_OUTPUTS];
@@ -40,6 +41,7 @@ int wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_
 void wayspot_layer_globals_deinit(struct wayspot_layer_globals *globals);
 struct wl_output *wayspot_layer_find_output(struct wayspot_layer_globals *globals, const char *name);
 struct zwlr_layer_surface_v1 *wayspot_layer_get_surface(struct wayspot_layer_globals *globals, struct wl_surface *surface, struct wl_output *output, const char *namespace_name);
+struct zwlr_layer_surface_v1 *wayspot_layer_get_surface_on_layer(struct wayspot_layer_globals *globals, struct wl_surface *surface, struct wl_output *output, uint32_t layer, const char *namespace_name);
 void wayspot_layer_surface_add_listener(struct zwlr_layer_surface_v1 *surface, struct wayspot_layer_configure_state *state);
 void wayspot_layer_surface_set_size(struct zwlr_layer_surface_v1 *surface, uint32_t width, uint32_t height);
 void wayspot_layer_surface_set_anchor(struct zwlr_layer_surface_v1 *surface, uint32_t anchor);
@@ -51,6 +53,8 @@ void wayspot_wl_surface_commit(struct wl_surface *surface);
 int wayspot_wl_display_roundtrip(struct wl_display *display);
 void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display);
 int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path);
+int wayspot_shm_buffer_create_tint(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t argb);
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer);
 void wayspot_wl_surface_attach_buffer(struct wl_surface *surface, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height);
 void wayspot_wl_surface_detach_buffer(struct wl_surface *surface);
+int wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface);
