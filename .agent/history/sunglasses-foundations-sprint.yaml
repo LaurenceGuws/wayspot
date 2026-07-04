@@ -1,5 +1,5 @@
 id: sunglasses_foundations
-state: approved
+state: completed
 
 purpose: >
   Build /sunglasses v1 without reviving the old personal shell platform.
@@ -240,12 +240,21 @@ implementation_slices:
       - apply redraw currently redraws all retained slots because the persisted state file has no changed-monitor delta; this keeps v1 direct and bounded without polling.
       - red/blue tint and dim are composited into one uniform ARGB buffer so dim remains a dimming effect when tint is also enabled.
   - id: 05_session_cutover
+    state: completed
     files:
       - /home/home/.config/hypr/modules/session.lua
       - /home/home/personal/bash_engine/dots/hypr/modules/session.lua
     proof:
       - sunglasses daemon starts on Hyprland session init
       - hyprsunset is removed only after visual proof
+    receipts:
+      - /home/home/.config/hypr/modules/session.lua starts wayspot --sunglasses-daemon under sunglasses.lock
+      - /home/home/personal/bash_engine/dots/hypr/modules/session.lua mirrors the same startup command
+      - hyprsunset startup line removed from both session files
+      - RERUN_UI=false RERUN_NOTIFICATIONS=false ./re-run.sh installed the current binary to ~/.local/bin/wayspot
+      - pkill -TERM hyprsunset; started ~/.local/bin/wayspot --sunglasses-daemon under flock
+      - ~/.local/bin/wayspot --sunglasses-apply succeeded after daemon PID file appeared
+      - hyprctl layers -j showed wayspot-sunglasses count 2 after daemon start and 2 after apply
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all

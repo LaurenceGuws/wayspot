@@ -1,5 +1,5 @@
 id: sunglasses_foundations
-state: approved
+state: completed
 
 source:
   detailed_index: .agent/history/sunglasses-foundations-sprint.yaml
@@ -38,8 +38,9 @@ progress:
     - 02_form_owner_no_effect
     - 03_overlay_surface_proof
     - 04_apply_path
+    - 05_session_cutover
   current:
-    - ready_for_05_session_cutover
+    - sunglasses_foundations_complete
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
