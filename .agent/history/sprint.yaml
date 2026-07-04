@@ -1,326 +1,54 @@
-id: app_icon_resolution_and_row_image
-state: completed
+id: pre_expansion_foot_it_up
+state: active
 
-goal:
-  completion_target: reviewer_approved_then_user_smoke
-  design_target:
-    - resolve app candidate icon names pragmatically
-    - draw a simple image layer in the right side of app result rows
-    - keep the picker control spine small and direct
-    - avoid a theme engine, asset framework, or broad image cache
+source:
+  detailed_index: .agent/history/pre-expansion-foot-it-up-sprint.yaml
 
-personas:
-  user:
-    role: product_owner
-    owns:
-      - visual acceptance
-      - scope corrections
-      - manual smoke feedback
-  coordinator:
-    role: delegate workflow and maintain accountability
-    owns:
-      - handoffs
-      - artifact hygiene
-      - review sequencing
-      - memory continuity
-      - acceptance or rejection of worker proposals
-  worker:
-    role: propose and execute bounded slices after approval
-    must_do:
-      - read Wayspot-local memory first
-      - propose exact files, symbols, deletions, tests, and verification
-      - wait for coordinator approval before implementation unless explicitly authorized
-      - keep qagent as provenance only, never live authority
-  reviewer:
-    role: strict invariant enforcer
-    verdicts:
-      - accept
-      - reject
-      - user_needed
+purpose: >
+  Prepare Wayspot for a future Hyprland IPC wallpaper daemon expansion by
+  shrinking and flattening the current launcher and notification code first.
 
-workflow:
-  steps:
-    - worker proposes exact app-icon implementation index
-    - coordinator approves, narrows, or rejects the proposal
-    - worker executes approved slices
-    - coordinator reviews findings-first and commits healthy checkpoints
-  review_bias:
-    - comments are production code
-    - naming and intentional structure matter as much as hot paths
-    - sdl_shell remains the picker control spine
-    - retained image resources need owner, key, invalidation, scale behavior, cleanup, and tests
-    - prefer a small direct resolver over a theme system
+law:
+  - foot_it_up: keep surface owners direct, shallow, and practical
+  - tigerbeetle_pressure: every owner has bounded state and exact cleanup
+  - no_architecture_astronautics: abstractions earn their file, name, and call site
+  - character_reduction_is_good_only_when_behavior_and_ownership_stay_clear
 
-product_scope:
-  in_scope:
-    - resolve candidate icon names from app cache and desktop scan data
-    - support common local icon paths and common icon theme directories if pragmatic
-    - render a bounded icon image at the right side of app rows
-    - draw no icon for missing or unsupported images
-    - keep row hit testing and launch behavior unchanged
-  out_of_scope:
-    - theme selection UI
-    - icon theme inheritance engine unless a tiny direct subset is required
-    - network icons
-    - SVG rendering
-    - SDL_image
-    - stb or another image decoder vendor
-    - broad image cache
-    - notification icon changes
-    - Hyprland changes
-    - provider registry changes
+current_scope:
+  in:
+    - delete unreferenced runtime silhouettes
+    - flatten unearned provider/search layers
+    - reduce src character count
+    - keep production comments only where they prove ownership or invariants
+    - preserve CLI launcher and freedesktop notification daemon behavior
+  out:
+    - Hyprland IPC wallpaper daemon implementation
+    - resident launcher IPC
+    - broad surface framework
+    - theme system
+    - provider framework expansion
 
-current_facts:
-  candidate_icon_field:
-    - src/search/types.zig Candidate.icon already exists.
-    - src/providers/apps.zig stores desktop Icon fields in app candidates.
-    - src/providers/actions.zig stores symbolic action icon names.
-  picker_rendering:
-    - src/ui/sdl_shell.zig draws row background, title, subtitle, and scrollbar.
-    - row right side is available after status badge removal.
-    - picker_viewport owns row geometry but not image loading.
-  known_gap:
-    - no current app icon path resolver exists.
-    - no current image decode/upload owner exists for picker row icons.
-  accepted_dependency:
-    - build.zig.zon now targets git+https://github.com/LaurenceGuws/howl-sdl#release-3.4.x.
-    - The resolved package hash is sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6.
-    - The vendor source is cloned at /home/home/personal/projects/howl-sdl on release-3.4.x.
-    - Vendor commit c5ba24c694b5d520cdc1d029d8def398690d6894 exposes SDL_LoadPNG and SDL_LoadBMP in include/SDL3/SDL_surface.h.
-    - zigup run 0.16.0 build test --summary all passed after the SDL bump.
+baseline:
+  src_lines: 6742
+  src_zig_chars: 250448
 
-active_slice:
-  id: 02_app_icon_resolution_and_row_texture
-  mode: completed
-  goal: >
-    Implement pragmatic app icon resolution and right-side row image drawing
-    using the accepted SDL 3.4 PNG/BMP surface loaders.
-  likely_files:
-    - src/ui/app_icons.zig
-    - src/ui/sdl_shell.zig
-    - src/ui/picker_viewport.zig
-    - src/ui/mod.zig
-  worker_output_required:
-    - app-only candidate icon resolution
-    - SDL_LoadPNG and SDL_LoadBMP only
-    - bounded retained texture owner with negative missing entries
-    - fallback behavior for missing, symbolic, SVG-only, oversized, and unreadable icons
-    - exact files, symbols, comments, tests, and verification commands
-  stop_conditions:
-    - SDL 3.4 bump regression
-    - icon owner needs a broader cache or theme engine
-    - no implementation shape earns its place
-    - user visual decision required
-
-completion_receipt:
-  commits:
-    dependency: 89bb07a Bump SDL vendor for app icons
-    row_icons: c88278c Render app icons in picker rows
-  implemented_files:
-    - src/ui/app_icons.zig
-    - src/ui/picker_viewport.zig
-    - src/ui/sdl_shell.zig
-    - src/ui/mod.zig
-  behavior:
-    - app rows resolve icons through a bounded picker-lifetime AppIconStore.
-    - SDL_LoadPNG and SDL_LoadBMP are the only image decoders used.
-    - missing and unsupported icons are retained as missing entries and do not retry every frame.
-    - SDL_Surface values are destroyed immediately after texture upload.
-    - retained SDL_Texture values are destroyed once by AppIconStore.deinit before renderer teardown.
-    - non-app rows do not resolve or draw icons.
-    - row hit testing and launch behavior remain row-based and unchanged.
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - zigup run 0.16.0 build -Doptimize=ReleaseFast
-    - zigup run 0.16.0 fmt --check src/ui/app_icons.zig src/ui/picker_viewport.zig src/ui/sdl_shell.zig src/ui/mod.zig
-    - git diff --check
-    - banned pattern scan over changed active Zig files
-    - stale vocabulary scan over changed active Zig files
-    - timeout 8s ./zig-out/bin/wayspot --ui
-    - pgrep cleanup check for leftover wayspot UI processes
-
-follow_up_receipt:
-  id: icon_diag_surface_proof
-  state: completed
-  command: ./zig-out/bin/wayspot --icon-diag
-  receipt_file: .agent/history/icon-diag.receipt.tsv
-  behavior:
-    - app icon diagnostics collect app candidates only.
-    - each app row is written as resolved, iconless, or unsupported.
-    - resolved PNG/BMP icons run through the same SDL load-scale-upload path as picker row icons.
-    - oversized source icons are scaled to a bounded retained texture dimension before upload.
-    - true missing icon names remain explicit iconless rows in the receipt.
-  local_counts:
-    app_rows: 105
-    resolved: 59
-    surface_ok: 59
-    surface_failed: 0
-    iconless: 44
-    unsupported: 2
-    skipped: 0
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - zigup run 0.16.0 build -Doptimize=ReleaseFast
-    - zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/ui/app_icons.zig src/ui/app_icon_diag.zig src/ui/mod.zig
-    - git diff --check
-    - banned pattern scan over changed active Zig files
-    - stale vocabulary scan over changed active Zig files
-    - ./zig-out/bin/wayspot --icon-diag
-
-svg_cache_receipt:
-  id: manual_svg_to_png_icon_cache
-  state: completed
-  command: ./zig-out/bin/wayspot --icon-cache-refresh
-  cache_dir: ~/.cache/wayspot/icons
-  index_file: ~/.cache/wayspot/icons/index.tsv
-  behavior:
-    - SVG conversion is manual-only and never runs during picker rendering.
-    - The binary owns candidate discovery, SVG source lookup, output paths, index writing, and child process execution.
-    - rsvg-convert is invoked from PATH; librsvg is not linked or vendored into Wayspot.
-    - cached SVG PNGs are resolved through the normal app icon texture path after refresh.
-  local_counts:
-    refresh:
-      app_rows: 105
-      converted: 15
-      already_raster: 59
-      missing_svg: 31
-      unsupported: 0
-      failed: 0
-      skipped: 0
-    diag_after_refresh:
-      app_rows: 105
-      resolved: 74
-      surface_ok: 74
-      surface_failed: 0
-      iconless: 31
-      unsupported: 0
-      skipped: 0
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - zigup run 0.16.0 build -Doptimize=ReleaseFast
-    - zigup run 0.16.0 fmt --check src/main.zig src/root.zig src/ui/app_icons.zig src/ui/app_icon_cache.zig src/ui/app_icon_diag.zig src/ui/mod.zig
-    - git diff --check
-    - banned pattern scan over changed active Zig files
-    - stale vocabulary scan over changed active Zig files
-    - ./zig-out/bin/wayspot --icon-cache-refresh
-    - ./zig-out/bin/wayspot --icon-diag
-    - timeout 8s ./zig-out/bin/wayspot --ui
-
-geometry_search_chrome_receipt:
-  id: picker_geometry_and_search_cursor
-  state: completed
-  behavior:
-    - picker row, icon, scrollbar, query line, and mouse hit geometry derive from current SDL window size and zoom scale.
-    - picker geometry clamps internally to a supported minimum for calculations.
-    - SDL minimum-size hints are not used because Hyprland mapped the picker at the minimum instead of the intended default size.
-    - startup applies the scaled default window size before and after mapping so the first visible frame opens at the intended size.
-    - the fixed Wayspot heading was removed from content chrome.
-    - empty query renders Search as ghost text.
-    - the query cursor blinks from an event deadline and resets visible after text input and backspace.
-  changed_files:
-    - src/ui/picker_viewport.zig
-    - src/ui/sdl_shell.zig
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - zigup run 0.16.0 build -Doptimize=ReleaseFast
-    - zigup run 0.16.0 fmt --check src/ui/picker_viewport.zig src/ui/sdl_shell.zig
-    - git diff --check
-    - banned pattern scan over changed active Zig files
-    - stale vocabulary scan over changed active Zig files
-    - timeout 8s ./zig-out/bin/wayspot --ui
-    - pgrep cleanup check for leftover wayspot UI processes
-
-default_window_size_fix_receipt:
-  id: picker_default_size_after_wayland_map
-  state: completed
-  behavior:
-    - removed SDL minimum-size enforcement from picker startup and zoom handling.
-    - kept internal minimum layout clamp for geometry calculations.
-    - applied the configured default picker size before and after SDL window mapping.
-    - verified Hyprland maps the picker at 988x546 with local zoom_step=2 instead of the previous 286x234 minimum box.
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - zigup run 0.16.0 build -Doptimize=ReleaseFast
-    - zigup run 0.16.0 fmt --check src/ui/sdl_shell.zig src/ui/picker_viewport.zig
-    - git diff --check
-    - hyprctl clients receipt for class=wayspot size=[988,546]
-
-text_zoom_sharpness_receipt:
-  id: scale_aware_text_raster
-  state: completed
-  behavior:
-    - picker and banner text pass the active surface scale into the text owner.
-    - FreeType pixel size and HarfBuzz font state are changed when the effective scaled font size changes.
-    - text textures are rasterized at scaled pixel dimensions and rendered into base surface coordinates.
-    - no retained text texture store exists in the current code path.
-  changed_files:
-    - src/ui/sdl_text.zig
-    - src/ui/sdl_shell.zig
-    - src/ui/sdl_banner.zig
-  verification:
-    - zigup run 0.16.0 build test --summary all
-
-query_cursor_text_owner_receipt:
-  id: query_cursor_uses_shaped_text_advance
-  state: completed
-  behavior:
-    - sdl_shell no longer estimates query cursor x from byte count.
-    - sdl_text draws the query insertion cursor from the shaped glyph advance and active surface scale.
-    - empty query cursor placement is owned by the same text draw path as typed query cursor placement.
-  changed_files:
-    - src/ui/sdl_text.zig
-    - src/ui/sdl_shell.zig
-  verification:
-    - zigup run 0.16.0 build test --summary all
-
-dense_surface_pane_receipt:
-  id: compact_picker_and_notification_surfaces
-  state: completed
-  behavior:
-    - picker layout uses narrow pane gutters, a shorter query strip, tighter rows, and smaller row gaps.
-    - picker hit testing, scrollbar geometry, and icon bounds still derive from ResultLayout.
-    - notification banner uses a smaller borderless window, a thinner accent rail, and tighter text offsets.
-    - notification text byte admission is lower so long bodies fail closed less often under the text texture bound.
-  changed_files:
-    - src/ui/picker_viewport.zig
-    - src/ui/sdl_banner.zig
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - grim picker screenshot from Hyprland client geometry 523,299 874x483
-    - grim notification screenshot from Hyprland client geometry 1448,12 460x101
-  screenshots:
-    - .agent/history/screenshots/picker-dense-pane.png
-    - .agent/history/screenshots/notification-dense-pane.png
-
-searchbar_alignment_receipt:
-  id: picker_searchbar_and_list_edge_alignment
-  state: completed
-  behavior:
-    - picker result top is derived from the query rule plus one pane gap.
-    - search ghost text is rendered higher in the query strip.
-    - first result row no longer visually overlaps the search rule.
-  changed_files:
-    - src/ui/picker_viewport.zig
-  verification:
-    - zigup run 0.16.0 build test --summary all
-    - hyprland-screenshot title Wayspot geometry 2683,434 874x483
-  screenshots:
-    - .agent/history/screenshots/picker-searchbar-aligned.png
+progress:
+  completed:
+    - remove_unreferenced_app_shell_silhouette
+    - provider_registry_flattening_review
+  current:
+    - update receipts and run full verification floor
 
 verification_floor:
-  automated:
-    - zigup run 0.16.0 build test --summary all
-    - git diff --check
-    - rg banned Zig patterns over touched active Zig files
-    - rg stale runtime-debt vocabulary over touched runtime files
-  manual:
-    - ./re-run.sh or RERUN_INSTALL_BIN=/tmp/wayspot-smoke ./re-run.sh when daemon owns installed binary
-    - app rows show icons on the right when icon files are available
-    - missing icons do not disrupt layout, input, scrolling, hover, click, or launch
-    - btop idle and mouse-motion CPU remain acceptable
+  - zigup run 0.16.0 build test --summary all
+  - zigup run 0.16.0 build -Doptimize=ReleaseFast
+  - zigup run 0.16.0 fmt --check touched Zig files
+  - git diff --check
+  - banned active Zig pattern scan
+  - stale runtime vocabulary scan
+  - ./re-run.sh with RERUN_UI=false for daemon refresh when runtime files change
 
-done_definition:
-  - implementation index is exact enough for a worker to execute without chat context
-  - accepted implementation draws bounded right-side app icons without broad UI architecture
-  - icon resources are cleaned up exactly once by their owner
-  - missing or unsupported icons fail closed with no layout or launch regression
+next_candidates:
+  - icon_tooling_boundary_review
+  - notification_daemon_comment_and_boundary_review
+  - picker_surface_owner_review

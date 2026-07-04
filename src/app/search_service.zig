@@ -4,7 +4,8 @@ const search = @import("../search/mod.zig");
 const history_access = @import("search_service/history_access.zig");
 
 pub const SearchService = struct {
-    registry: providers.ProviderRegistry,
+    actions: ?*providers.ActionsProvider = null,
+    apps: ?*providers.AppsProvider = null,
     query_mu: std.Io.Mutex = .init,
     history_path: ?[]const u8 = null,
     candidates: search.CandidateList = .empty,
@@ -12,13 +13,21 @@ pub const SearchService = struct {
     history: std.ArrayListUnmanaged([]u8) = .empty,
     max_history: u32 = 32,
 
-    pub fn init(registry: providers.ProviderRegistry) SearchService {
-        return .{ .registry = registry };
+    pub fn init(actions: ?*providers.ActionsProvider, apps: ?*providers.AppsProvider) SearchService {
+        return .{
+            .actions = actions,
+            .apps = apps,
+        };
     }
 
-    pub fn initWithHistoryPath(registry: providers.ProviderRegistry, history_path: []const u8) SearchService {
+    pub fn initWithHistoryPath(
+        actions: ?*providers.ActionsProvider,
+        apps: ?*providers.AppsProvider,
+        history_path: []const u8,
+    ) SearchService {
         return .{
-            .registry = registry,
+            .actions = actions,
+            .apps = apps,
             .history_path = history_path,
         };
     }
@@ -62,7 +71,8 @@ pub const SearchService = struct {
 
     fn loadCandidatesOnce(self: *SearchService, allocator: std.mem.Allocator) !void {
         if (self.candidates_loaded) return;
-        try self.registry.collectAll(allocator, &self.candidates);
+        if (self.actions) |provider| try provider.collect(allocator, &self.candidates);
+        if (self.apps) |provider| try provider.collect(allocator, &self.candidates);
         self.candidates_loaded = true;
     }
 };
@@ -85,8 +95,7 @@ test "search service collects candidates once per service lifetime" {
 
     var apps = providers.AppsProvider.init(cache_path);
     defer apps.deinit(std.testing.allocator);
-    var provider_list = [_]providers.Provider{.{ .apps = &apps }};
-    var service = SearchService.init(providers.ProviderRegistry.init(&provider_list));
+    var service = SearchService.init(null, &apps);
     defer service.deinit(std.testing.allocator);
 
     const first = try service.searchQuery(std.testing.allocator, "kit");
@@ -101,8 +110,7 @@ test "search service collects candidates once per service lifetime" {
 }
 
 test "search service ranks retained history without query history allocation" {
-    var provider_list = [_]providers.Provider{};
-    var service = SearchService.init(providers.ProviderRegistry.init(&provider_list));
+    var service = SearchService.init(null, null);
     defer service.deinit(std.testing.allocator);
     service.candidates_loaded = true;
     try history_access.recordLocked(&service.history, service.max_history, std.testing.allocator, "power");

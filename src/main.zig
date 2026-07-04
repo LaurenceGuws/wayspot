@@ -83,7 +83,6 @@ const Runtime = struct {
     history_path: []u8,
     actions: wayspot.providers.ActionsProvider = .{},
     apps: wayspot.providers.AppsProvider,
-    provider_list: [2]wayspot.providers.Provider,
     service: wayspot.app.SearchService,
 
     fn deinit(self: *Runtime, allocator: std.mem.Allocator) void {
@@ -94,12 +93,7 @@ const Runtime = struct {
     }
 
     fn wireProviders(self: *Runtime) void {
-        self.provider_list = .{
-            .{ .actions = &self.actions },
-            .{ .apps = &self.apps },
-        };
-        const registry = wayspot.providers.ProviderRegistry.init(&self.provider_list);
-        self.service = wayspot.app.SearchService.initWithHistoryPath(registry, self.history_path);
+        self.service = wayspot.app.SearchService.initWithHistoryPath(&self.actions, &self.apps, self.history_path);
         self.service.max_history = 64;
     }
 };
@@ -114,7 +108,6 @@ fn setupRuntime(allocator: std.mem.Allocator, home: []const u8) !Runtime {
         .app_cache_path = app_cache,
         .history_path = history_path,
         .apps = wayspot.providers.AppsProvider.init(app_cache),
-        .provider_list = undefined,
         .service = undefined,
     };
 }

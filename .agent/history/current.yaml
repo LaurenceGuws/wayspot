@@ -7,7 +7,7 @@ product:
   summary: >
     Wayspot is a CLI-summoned SDL app launcher plus a minimal freedesktop
     notification daemon.
-  active_focus: app_icon_resolution_and_row_image
+  active_focus: pre_expansion_foot_it_up
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
