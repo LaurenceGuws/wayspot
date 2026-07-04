@@ -1,7 +1,8 @@
-//! SDL sunglasses surface owns one pass-through overlay layer and tint buffer.
+//! SDL sunglasses surface owns one pass-through overlay layer and state tint buffer.
 
 const std = @import("std");
 const hyprland = @import("../wallpaper/hyprland.zig");
+const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
 
@@ -10,7 +11,8 @@ const max_title_bytes: u32 = 160;
 const layer_namespace = "wayspot-sunglasses";
 const anchor_all_edges: u32 = 1 | 2 | 4 | 8;
 const layer_overlay: u32 = 3;
-const proof_argb_tint: u32 = 0x66660000;
+const tint_max_alpha: u32 = 120;
+const dim_max_alpha: u32 = 220;
 
 pub const SunglassesSurface = struct {
     window: *c.SDL_Window,
@@ -18,7 +20,7 @@ pub const SunglassesSurface = struct {
     monitor: hyprland.Monitor,
 
     /// The surface owns compositor resources but not monitor discovery or process lifetime.
-    pub fn init(monitor: hyprland.Monitor) !SunglassesSurface {
+    pub fn init(monitor: hyprland.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !SunglassesSurface {
         var title_buf: [max_title_bytes:0]u8 = undefined;
         const window_title = try writeTitle(&title_buf, monitor.name());
 
@@ -39,7 +41,7 @@ pub const SunglassesSurface = struct {
         var layer = try LayerShellRole.init(window, monitor);
         errdefer layer.deinit();
 
-        try layer.drawProofTint(monitor);
+        try layer.drawStateTint(monitor, monitor_state);
 
         return .{
             .window = window,
@@ -52,6 +54,10 @@ pub const SunglassesSurface = struct {
         self.layer.deinit();
         c.SDL_DestroyWindow(self.window);
         self.layer.flushDisplay();
+    }
+
+    pub fn redraw(self: *SunglassesSurface, monitor_state: ?*const sunglasses_state.MonitorState) !void {
+        try self.layer.drawStateTint(self.monitor, monitor_state);
     }
 };
 
@@ -112,14 +118,14 @@ const LayerShellRole = struct {
         return role;
     }
 
-    fn drawProofTint(self: *LayerShellRole, monitor: hyprland.Monitor) !void {
+    fn drawStateTint(self: *LayerShellRole, monitor: hyprland.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !void {
         var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
         const created = c.wayspot_shm_buffer_create_tint(
             &self.globals,
             &next_buffer,
             @intCast(monitor.width),
             @intCast(monitor.height),
-            proof_argb_tint,
+            stateArgb(monitor_state),
         );
         if (created != 0) return error.SunglassesTintBufferFailed;
         try self.attachCreatedBuffer(monitor, &next_buffer);
@@ -180,4 +186,62 @@ const LayerShellRole = struct {
 
 fn writeTitle(buf: *[max_title_bytes:0]u8, monitor_name: []const u8) ![:0]const u8 {
     return try std.fmt.bufPrintZ(buf, "wayspot-sunglasses:{s}", .{monitor_name});
+}
+
+fn stateArgb(monitor_state: ?*const sunglasses_state.MonitorState) u32 {
+    const monitor = monitor_state orelse return 0;
+    const dim_alpha = if (monitor.dim_enabled)
+        scaledAlpha(sunglasses_state.clampDim(monitor.dim_value), sunglasses_state.dim_max, dim_max_alpha)
+    else
+        0;
+    if (!monitor.red_blue_enabled or monitor.red_blue_value == sunglasses_state.red_blue_zero) {
+        return argb(dim_alpha, 0, 0, 0);
+    }
+
+    const tint_value = sunglasses_state.clampRedBlue(monitor.red_blue_value);
+    const tint_magnitude: u32 = @intCast(if (tint_value < 0) -tint_value else tint_value);
+    const tint_alpha = scaledAlpha(@intCast(tint_magnitude), sunglasses_state.red_blue_max, tint_max_alpha);
+    if (tint_value < 0) return compositeTintAndDim(0, 36, 255, tint_alpha, dim_alpha);
+    return compositeTintAndDim(255, 34, 0, tint_alpha, dim_alpha);
+}
+
+fn scaledAlpha(value: i32, max_value: i32, max_alpha: u32) u32 {
+    if (value <= 0) return 0;
+    const bounded: u32 = @intCast(@min(value, max_value));
+    const max_bound: u32 = @intCast(max_value);
+    return @min(max_alpha, (bounded * max_alpha) / max_bound);
+}
+
+fn argb(alpha: u32, red: u32, green: u32, blue: u32) u32 {
+    return ((alpha & 0xff) << 24) |
+        ((red & 0xff) << 16) |
+        ((green & 0xff) << 8) |
+        (blue & 0xff);
+}
+
+fn compositeTintAndDim(red: u32, green: u32, blue: u32, tint_alpha: u32, dim_alpha: u32) u32 {
+    const tint_visible = tint_alpha * (255 - dim_alpha);
+    const alpha = dim_alpha + (tint_visible / 255);
+    if (alpha == 0) return 0;
+    return argb(
+        alpha,
+        (red * tint_visible) / (255 * alpha),
+        (green * tint_visible) / (255 * alpha),
+        (blue * tint_visible) / (255 * alpha),
+    );
+}
+
+test "state argb keeps dim dominant when tint is also enabled" {
+    var monitor = try sunglasses_state.MonitorState.init("DP-1");
+    try std.testing.expectEqual(@as(u32, 0), stateArgb(null));
+
+    monitor.dim_enabled = true;
+    monitor.setDimValue(100);
+    try std.testing.expectEqual(argb(dim_max_alpha, 0, 0, 0), stateArgb(&monitor));
+
+    monitor.red_blue_enabled = true;
+    monitor.setRedBlueValue(100);
+    const combined = stateArgb(&monitor);
+    try std.testing.expect(((combined >> 24) & 0xff) >= dim_max_alpha);
+    try std.testing.expect(((combined >> 16) & 0xff) < 90);
 }

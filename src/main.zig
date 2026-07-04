@@ -45,14 +45,20 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (hasArg(args, "--sunglasses-proof")) {
+    if (hasArg(args, "--sunglasses-apply")) {
+        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        try wayspot.sunglasses.Runtime.applyNow(allocator, runtime_dir);
+        return;
+    }
+
+    if (hasArg(args, "--sunglasses-daemon")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runSunglassesProof(allocator, .{
+        runSunglassesDaemon(allocator, .{
             .runtime_dir = runtime_dir,
             .signature = signature,
         }) catch |err| {
-            std.log.err("sunglasses proof failed: {s}", .{@errorName(err)});
+            std.log.err("sunglasses daemon failed: {s}", .{@errorName(err)});
             std.process.exit(2);
         };
         return;
@@ -119,13 +125,13 @@ fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.C
     try wayspot.wallpaper.Runtime.runWallpaper(allocator, hypr);
 }
 
-fn runSunglassesProof(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+fn runSunglassesDaemon(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
     if (!wayspot.ui.sdl_enabled) {
-        std.log.err("sunglasses proof requires SDL build", .{});
+        std.log.err("sunglasses daemon requires SDL build", .{});
         std.process.exit(2);
     }
 
-    try wayspot.sunglasses.Runtime.runProof(allocator, hypr);
+    try wayspot.sunglasses.Runtime.runDaemon(allocator, hypr);
 }
 
 const Runtime = struct {

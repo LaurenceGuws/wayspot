@@ -37,8 +37,9 @@ progress:
     - 01_state_owner
     - 02_form_owner_no_effect
     - 03_overlay_surface_proof
+    - 04_apply_path
   current:
-    - ready_for_04_apply_path
+    - ready_for_05_session_cutover
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all

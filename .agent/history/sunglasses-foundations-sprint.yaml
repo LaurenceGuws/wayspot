@@ -217,7 +217,7 @@ implementation_slices:
     note:
       - src/main.zig and src/root.zig were touched only to expose the bounded CLI proof command
   - id: 04_apply_path
-    state: next
+    state: completed
     files:
       - src/sunglasses/runtime.zig
       - src/ui/sdl_shell.zig
@@ -226,6 +226,19 @@ implementation_slices:
       - form change persists state and wakes daemon
       - daemon redraws without polling
       - timerless daemon sleeps until monitor, apply, or shutdown wake
+    receipts:
+      - zigup run 0.16.0 fmt --check src/sunglasses/runtime.zig src/ui/sdl_shell.zig src/main.zig src/root.zig src/ui/sdl_sunglasses_surface.zig
+      - zigup run 0.16.0 build test --summary all
+      - zigup run 0.16.0 build -Doptimize=ReleaseFast
+      - git diff --check
+      - 'rg -n "(_ =|\busize\b|\banytype\b|\banyopaque\b)" src/sunglasses/runtime.zig src/ui/sdl_shell.zig src/main.zig src/root.zig src/ui/sdl_sunglasses_surface.zig'
+      - ./zig-out/bin/wayspot --sunglasses-daemon
+      - ./zig-out/bin/wayspot --sunglasses-apply
+      - hyprctl layers -j showed wayspot-sunglasses count 2 during daemon, 2 after apply wake, and 0 after SIGTERM cleanup
+    note:
+      - --sunglasses-proof was removed because the daemon path now creates state-derived overlay buffers and covers the proof surface receipt.
+      - apply redraw currently redraws all retained slots because the persisted state file has no changed-monitor delta; this keeps v1 direct and bounded without polling.
+      - red/blue tint and dim are composited into one uniform ARGB buffer so dim remains a dimming effect when tint is also enabled.
   - id: 05_session_cutover
     files:
       - /home/home/.config/hypr/modules/session.lua

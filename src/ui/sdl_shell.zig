@@ -12,6 +12,7 @@ const query_mod = @import("../search/query.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 const sunglasses_form = @import("sunglasses_form.zig");
+const sunglasses_runtime = @import("../sunglasses/runtime.zig");
 const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
@@ -295,6 +296,7 @@ const SdlShell = struct {
         const wake_event_type = c.SDL_RegisterEvents(1);
         if (wake_event_type == 0) return error.SdlWakeUnavailable;
 
+        const persisted_sunglasses_state = try sunglasses_state.load(allocator);
         var self = SdlShell{
             .allocator = allocator,
             .service = service,
@@ -302,6 +304,7 @@ const SdlShell = struct {
             .renderer = renderer,
             .text = text,
             .config = config,
+            .sunglasses_state = persisted_sunglasses_state,
             .wake_event_type = wake_event_type,
             .cursor = CursorBlink.init(sdlNowMs()),
         };
@@ -450,16 +453,19 @@ const SdlShell = struct {
                     },
                     c.SDLK_SPACE => {
                         if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
+                            try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
                     c.SDLK_LEFT => {
                         if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, -sliderKeyboardStep())) {
+                            try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
                     c.SDLK_RIGHT => {
                         if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, sliderKeyboardStep())) {
+                            try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
@@ -563,10 +569,25 @@ const SdlShell = struct {
         std.debug.assert(scale > 0);
         const layout = self.currentResultLayout(picker_viewport.max_visible_rows);
         if (try self.sunglasses_form.click(&self.sunglasses_state, layout, x / scale, y / scale)) {
+            try self.persistAndWakeSunglasses();
             self.dirty = true;
             return;
         }
         self.dirty = true;
+    }
+
+    fn persistAndWakeSunglasses(self: *SdlShell) !void {
+        try sunglasses_state.save(self.sunglasses_state, self.allocator);
+        const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
+            std.mem.span(runtime_dir_z)
+        else
+            return error.HyprlandRuntimeDirMissing;
+        sunglasses_runtime.Runtime.applyNow(self.allocator, runtime_dir) catch |err| switch (err) {
+            error.SunglassesDaemonNotRunning,
+            error.FileNotFound,
+            => std.log.warn("sunglasses daemon apply wake skipped err={s}", .{@errorName(err)}),
+            else => return err,
+        };
     }
 
     fn sunglassesActive(self: *const SdlShell) bool {
