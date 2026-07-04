@@ -40,6 +40,7 @@ pub const TextStyle = struct {
     color: Rgba8,
     max_bytes: u32,
     font_size_px: u16 = default_font_size_px,
+    surface_scale: f32 = 1.0,
 };
 
 const GlyphPlacement = struct {
@@ -124,7 +125,8 @@ pub const TextEngine = struct {
         var codepoints: [max_codepoints]u32 = undefined;
         const codepoint_count = boundedCodepoints(&codepoints, text, style.max_bytes);
         if (codepoint_count == 0) return;
-        try self.setFontSize(style.font_size_px);
+        const surface_scale = clampedSurfaceScale(style.surface_scale);
+        try self.setFontSize(effectiveFontSizePx(style.font_size_px, surface_scale));
 
         var glyphs: [max_glyphs]GlyphPlacement = undefined;
         const glyph_count = try self.shape(codepoints[0..codepoint_count], &glyphs);
@@ -138,7 +140,7 @@ pub const TextEngine = struct {
         try self.pixels.resize(self.allocator, @intCast(pixel_bytes));
         @memset(self.pixels.items, 0);
         try self.rasterize(self.pixels.items, bounds, glyphs[0..glyph_count], style.color);
-        try renderTexture(renderer, self.pixels.items, bounds, x, y);
+        try renderTexture(renderer, self.pixels.items, bounds, x, y, surface_scale);
     }
 
     fn loadPrimaryFace(self: *TextEngine) !void {
@@ -368,7 +370,14 @@ fn writePixel(pixels: []u8, width: u16, x: u16, y: u16, color: Rgba8, alpha: u8)
     pixels[@intCast(off + 3)] = effective_alpha;
 }
 
-fn renderTexture(renderer: *sdl.SDL_Renderer, pixels: []const u8, bounds: TextBounds, x: f32, y: f32) !void {
+fn renderTexture(
+    renderer: *sdl.SDL_Renderer,
+    pixels: []const u8,
+    bounds: TextBounds,
+    x: f32,
+    y: f32,
+    surface_scale: f32,
+) !void {
     const texture = sdl.SDL_CreateTexture(
         renderer,
         sdl.SDL_PIXELFORMAT_RGBA32,
@@ -382,14 +391,29 @@ fn renderTexture(renderer: *sdl.SDL_Renderer, pixels: []const u8, bounds: TextBo
     if (!blended) return error.SdlTextTextureFailed;
     const updated = sdl.SDL_UpdateTexture(texture, null, pixels.ptr, @intCast(@as(u32, bounds.width()) * 4));
     if (!updated) return error.SdlTextTextureFailed;
-    const dst = sdl.SDL_FRect{
-        .x = x + @as(f32, @floatFromInt(bounds.min_x)),
-        .y = y + @as(f32, @floatFromInt(bounds.min_y)),
-        .w = @floatFromInt(bounds.width()),
-        .h = @floatFromInt(bounds.height()),
-    };
+    const dst = textDestination(bounds, x, y, surface_scale);
     const rendered = sdl.SDL_RenderTexture(renderer, texture, null, &dst);
     if (!rendered) return error.SdlTextRenderFailed;
+}
+
+fn textDestination(bounds: TextBounds, x: f32, y: f32, surface_scale: f32) sdl.SDL_FRect {
+    const scale = clampedSurfaceScale(surface_scale);
+    return .{
+        .x = x + (@as(f32, @floatFromInt(bounds.min_x)) / scale),
+        .y = y + (@as(f32, @floatFromInt(bounds.min_y)) / scale),
+        .w = @as(f32, @floatFromInt(bounds.width())) / scale,
+        .h = @as(f32, @floatFromInt(bounds.height())) / scale,
+    };
+}
+
+fn effectiveFontSizePx(font_size_px: u16, surface_scale: f32) u16 {
+    const base = @as(f32, @floatFromInt(@max(font_size_px, 1)));
+    const scaled = @round(base * clampedSurfaceScale(surface_scale));
+    return @intFromFloat(@min(@max(scaled, 1.0), @as(f32, @floatFromInt(std.math.maxInt(u16)))));
+}
+
+fn clampedSurfaceScale(surface_scale: f32) f32 {
+    return @max(surface_scale, 0.1);
 }
 
 fn bitmapAlpha(
@@ -459,4 +483,16 @@ test "packed monochrome bitmap alpha matches Howl raster proof" {
     try std.testing.expectEqual(@as(u8, 0), bitmapAlpha(&row, 1, 1, false, 4, 1, 1, 0));
     try std.testing.expectEqual(@as(u8, 255), bitmapAlpha(&row, 1, 1, false, 4, 1, 2, 0));
     try std.testing.expectEqual(@as(u8, 0), bitmapAlpha(&row, 1, 1, false, 4, 1, 3, 0));
+}
+
+test "surface scale changes the raster size and preserves base destination" {
+    try std.testing.expectEqual(@as(u16, 17), effectiveFontSizePx(17, 1.0));
+    try std.testing.expectEqual(@as(u16, 26), effectiveFontSizePx(17, 1.5));
+
+    const bounds = TextBounds{ .min_x = 2, .min_y = 4, .max_x = 62, .max_y = 34 };
+    const dst = textDestination(bounds, 10, 20, 2.0);
+    try std.testing.expectEqual(@as(f32, 11), dst.x);
+    try std.testing.expectEqual(@as(f32, 22), dst.y);
+    try std.testing.expectEqual(@as(f32, 30), dst.w);
+    try std.testing.expectEqual(@as(f32, 15), dst.h);
 }

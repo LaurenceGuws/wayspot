@@ -245,6 +245,21 @@ default_window_size_fix_receipt:
     - git diff --check
     - hyprctl clients receipt for class=wayspot size=[988,546]
 
+text_zoom_sharpness_receipt:
+  id: scale_aware_text_raster
+  state: completed
+  behavior:
+    - picker and banner text pass the active surface scale into the text owner.
+    - FreeType pixel size and HarfBuzz font state are changed when the effective scaled font size changes.
+    - text textures are rasterized at scaled pixel dimensions and rendered into base surface coordinates.
+    - no retained text texture store exists in the current code path.
+  changed_files:
+    - src/ui/sdl_text.zig
+    - src/ui/sdl_shell.zig
+    - src/ui/sdl_banner.zig
+  verification:
+    - zigup run 0.16.0 build test --summary all
+
 verification_floor:
   automated:
     - zigup run 0.16.0 build test --summary all

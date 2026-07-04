@@ -125,16 +125,19 @@ fn render(
         .color = .{ .r = 150, .g = 166, .b = 184 },
         .max_bytes = max_app_bytes,
         .font_size_px = 13,
+        .surface_scale = scale,
     });
     try text.draw(renderer, 18, 36, request.summary, .{
         .color = .{ .r = 238, .g = 242, .b = 247 },
         .max_bytes = max_summary_bytes,
         .font_size_px = 18,
+        .surface_scale = scale,
     });
     try text.draw(renderer, 18, 66, request.body, .{
         .color = .{ .r = 188, .g = 198, .b = 210 },
         .max_bytes = max_body_bytes,
         .font_size_px = 15,
+        .surface_scale = scale,
     });
 
     const presented = c.SDL_RenderPresent(renderer);

@@ -551,17 +551,20 @@ const SdlShell = struct {
     }
 
     fn drawChrome(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
+        const surface_scale = self.config.scale();
         if (self.query.items.len == 0) {
             try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, "Search", .{
                 .color = .{ .r = 96, .g = 108, .b = 124 },
                 .max_bytes = 16,
                 .font_size_px = 17,
+                .surface_scale = surface_scale,
             });
         } else {
             try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, self.query.items, .{
                 .color = .{ .r = 168, .g = 185, .b = 204 },
                 .max_bytes = 84,
                 .font_size_px = 17,
+                .surface_scale = surface_scale,
             });
         }
         if (self.cursor.visible) try self.drawQueryCursor(layout);
@@ -600,6 +603,7 @@ const SdlShell = struct {
 
     fn drawResults(self: *SdlShell, range: picker_viewport.VisibleRange, layout: picker_viewport.ResultLayout) !void {
         const selected_result = self.viewport.selected();
+        const surface_scale = self.config.scale();
         var i: u32 = 0;
         while (i < range.count) : (i += 1) {
             const result_index = range.start + i;
@@ -626,6 +630,7 @@ const SdlShell = struct {
                     .{ .r = 216, .g = 222, .b = 230 },
                 .max_bytes = 72,
                 .font_size_px = 17,
+                .surface_scale = surface_scale,
             });
             try self.text.draw(self.renderer, layout.title_x, layout.subtitleY(i), result.subtitle, .{
                 .color = if (selected)
@@ -634,6 +639,7 @@ const SdlShell = struct {
                     .{ .r = 140, .g = 152, .b = 166 },
                 .max_bytes = 82,
                 .font_size_px = 14,
+                .surface_scale = surface_scale,
             });
             if (result.kind == .app) try self.drawResultIcon(layout.iconRect(i), result.icon);
         }
@@ -643,6 +649,7 @@ const SdlShell = struct {
                 .color = .{ .r = 190, .g = 198, .b = 208 },
                 .max_bytes = 32,
                 .font_size_px = 17,
+                .surface_scale = surface_scale,
             });
         }
     }
