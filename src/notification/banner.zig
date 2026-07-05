@@ -1,10 +1,11 @@
 //! Notification banner owns one short notification surface from render to cleanup.
 //!
 //! The notification DBus owner asks for a banner; this file owns the copied text,
-//! vendor objects, Hyprland placement command, and bounded display timeout.
+//! vendor objects, monitor placement action, and bounded display timeout.
 
 const std = @import("std");
 const config_defaults = @import("../config/defaults.zig");
+const env = @import("../env/mod.zig");
 const notification_preview = @import("../notification/preview.zig");
 const appearance_owner = @import("../picker/appearance.zig");
 const scale_owner = @import("../picker/scale.zig");
@@ -24,12 +25,7 @@ const max_timeout_ms: u32 = 10000;
 const event_wait_ms: i32 = 250;
 const placement_child_fail_code: i32 = 127;
 const max_placement_wait_interrupts: u32 = 8;
-const placement_command: [:0]const u8 =
-    \\mon=$(hyprctl -j monitors | jq -r '.[] | select(.focused == true) | .name' | head -n1)
-    \\if [ -n "$mon" ]; then
-    \\  hyprctl dispatch "hl.dsp.window.move({ monitor = \"$mon\", window = \"title:^Wayspot Notification$\" })" >/dev/null 2>&1
-    \\fi
-;
+const max_window_title_selector_bytes: u32 = 160;
 
 pub const Request = struct {
     app_name: []const u8,
@@ -220,25 +216,51 @@ fn monotonicMs() u64 {
 }
 
 fn placeOnFocusedMonitor() void {
-    runPlacementCommand() catch |err| {
-        log.debug("hypr placement command failed err={s}", .{@errorName(err)});
+    const monitor_source = env.MonitorSource.fromProcessEnv() orelse return;
+    runPlacementAction(std.heap.c_allocator, monitor_source, window_title) catch |err| {
+        log.debug("notification placement action failed err={s}", .{@errorName(err)});
     };
 }
 
-fn runPlacementCommand() !void {
+fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: env.MonitorSource, title: []const u8) !void {
+    const monitors = try monitor_source.queryMonitors(allocator);
+    const monitor_name = focusedMonitorName(monitors) orelse return error.NoFocusedEnvMonitor;
+    const command = try placementActionCommand(allocator, monitor_name, title);
+    defer allocator.free(command);
     const pid = try forkChild();
-    if (pid == 0) placementChild();
+    if (pid == 0) placementActionChild(command);
     try waitChild(pid);
 }
 
-fn placementChild() noreturn {
+fn focusedMonitorName(monitors: env.monitor.MonitorList) ?[]const u8 {
+    var index: u32 = 0;
+    while (index < monitors.count) : (index += 1) {
+        if (monitors.items[index].focused) return monitors.items[index].nameText();
+    }
+    return null;
+}
+
+fn placementActionCommand(allocator: std.mem.Allocator, monitor_name: []const u8, title: []const u8) ![]u8 {
+    if (title.len == 0 or title.len > max_window_title_selector_bytes) return error.InvalidWindowTitle;
+    return std.fmt.allocPrint(
+        allocator,
+        "hyprctl dispatch 'hl.dsp.window.move({{ monitor = \"{s}\", window = \"title:^{s}$\" }})' >/dev/null 2>&1",
+        .{ monitor_name, title },
+    );
+}
+
+fn placementActionChild(command: []const u8) noreturn {
+    var command_buf: [512:0]u8 = undefined;
+    if (command.len >= command_buf.len) std.c._exit(placement_child_fail_code);
+    @memcpy(command_buf[0..command.len], command);
+    command_buf[command.len] = 0;
     const shell_path = "/bin/sh";
     const shell_name = "sh";
     const shell_arg = "-lc";
     const argv: [4:null]?[*:0]const u8 = .{
         shell_name,
         shell_arg,
-        placement_command.ptr,
+        command_buf[0..command.len :0].ptr,
         null,
     };
     const exec_rc = std.c.execve(shell_path, &argv, std.c.environ);
@@ -281,4 +303,22 @@ test "boundedTimeout clamps notification expiry" {
     try std.testing.expectEqual(min_timeout_ms, boundedTimeout(1));
     try std.testing.expectEqual(@as(u32, 2500), boundedTimeout(2500));
     try std.testing.expectEqual(max_timeout_ms, boundedTimeout(60000));
+}
+
+test "notification placement action uses monitor fact only" {
+    var monitors = env.monitor.MonitorList{};
+    var first = try env.monitor.Monitor.init(.{ .value = 1 }, "DP-1", try env.monitor.MonitorSize.init(1920, 1080));
+    first.focused = false;
+    try monitors.append(first);
+    var second = try env.monitor.Monitor.init(.{ .value = 2 }, "HDMI-A-1", try env.monitor.MonitorSize.init(1280, 720));
+    second.focused = true;
+    try monitors.append(second);
+
+    const monitor_name = focusedMonitorName(monitors) orelse return error.NoFocusedEnvMonitor;
+    const command = try placementActionCommand(std.testing.allocator, monitor_name, window_title);
+    defer std.testing.allocator.free(command);
+
+    try std.testing.expect(std.mem.indexOf(u8, command, "monitor = \"HDMI-A-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "title:^Wayspot Notification$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "workspace") == null);
 }

@@ -21,12 +21,11 @@ pub fn build(b: *std.Build) void {
     });
     const lua_mod = lua_dep.module("howl_lua");
     const sdl_include = sdl_dep.path("include");
-    const sdl_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/c/sdl.h"),
-        .target = target,
-        .optimize = optimize,
+    const sdl_c_mod = translateCModule(b, b.path("src/c/sdl.h"), target, optimize, &.{sdl_include});
+    const text_c_mod = translateCModule(b, b.path("src/c/text.h"), target, optimize, &.{
+        .{ .cwd_relative = "/usr/include/freetype2" },
+        .{ .cwd_relative = "/usr/include/harfbuzz" },
     });
-    sdl_c.addIncludePath(sdl_include);
     const picker_candidate_mod = b.createModule(.{
         .root_source_file = b.path("src/picker/candidate.zig"),
         .target = target,
@@ -54,7 +53,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "howl_lua", .module = lua_mod },
         },
     });
-    mod.addImport("sdl_c", sdl_c.createModule());
+    mod.addImport("sdl_c", sdl_c_mod);
+    mod.addImport("text_c", text_c_mod);
     mod.addImport("picker_candidate", picker_candidate_mod);
     mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
@@ -76,7 +76,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "howl_lua", .module = lua_mod },
         },
     });
-    exe_mod.addImport("sdl_c", sdl_c.createModule());
+    exe_mod.addImport("sdl_c", sdl_c_mod);
+    exe_mod.addImport("text_c", text_c_mod);
     exe_mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
@@ -169,6 +170,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_picker_appearance_tests = b.addRunArtifact(picker_appearance_tests);
 
+    const sunglasses_form_mod = b.createModule(.{
+        .root_source_file = b.path("src/sunglasses_form_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sunglasses_form_mod.addImport("sdl_c", sdl_c_mod);
+    sunglasses_form_mod.addImport("text_c", text_c_mod);
+    const sunglasses_form_tests = b.addTest(.{
+        .root_module = sunglasses_form_mod,
+    });
+    sunglasses_form_tests.use_llvm = true;
+    sunglasses_form_tests.use_lld = true;
+    sunglasses_form_tests.root_module.addIncludePath(sdl_include);
+    sunglasses_form_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    const run_sunglasses_form_tests = b.addRunArtifact(sunglasses_form_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -176,7 +193,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_notification_history_cache_tests.step);
     test_step.dependOn(&run_notification_history_list_tests.step);
     test_step.dependOn(&run_picker_appearance_tests.step);
+    test_step.dependOn(&run_sunglasses_form_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);
+}
+
+fn translateCModule(
+    b: *std.Build,
+    root_source_file: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    include_paths: []const std.Build.LazyPath,
+) *std.Build.Module {
+    const translated = b.addTranslateC(.{
+        .root_source_file = root_source_file,
+        .target = target,
+        .optimize = optimize,
+    });
+    for (include_paths) |include_path| translated.addIncludePath(include_path);
+    return translated.createModule();
 }

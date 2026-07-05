@@ -1,70 +1,71 @@
-id: obvious_shape_command
+id: abi_reference_maturity
 state: complete
 
 purpose: >
-  Execute the reviewer-accepted style and command-surface sprint. The source of
-  truth is `.agent/history/obvious-shape-command-sprint.yaml`.
+  Execute the reviewer-accepted ABI/reference-maturity sprint. The source of
+  truth is `.agent/history/abi-reference-maturity.yaml`.
 
-active_index: .agent/history/obvious-shape-command-sprint.yaml
-
-supporting_research:
-  command_surface_vocabulary: .agent/history/command-surface-vocabulary-research.yaml
+active_index: .agent/history/abi-reference-maturity.yaml
 
 supersedes:
-  id: flat_lifecycle_nouns
+  id: de_entity_model_not_picker_abuse
   reason: >
-    User accepted the long style and footify sprint after lifecycle nouns were
-    flattened to concrete owners.
+    The env entity sprint completed and Sagan accepted it. User approved
+    starting delegated execution for the ABI/reference-maturity sprint.
 
 law:
-  - unfinished_work_must_be_completed_not_built_around
-  - no_escape_hatches
-  - one_command_model_two_surfaces
-  - no_workflow_vocabulary_in_product_source
-  - no_evidence_artifact_api_in_product_source
-  - cli_and_gui_share_the_same_command_owner
-  - nushell_completions_generated_from_shared_model
+  - vendored_ABI_is_direct_or_translated_at_ingestion_site
+  - Zig_maturity_claims_use_Zig_0_16_release_notes_and_local_std_build_source
+  - dev_references_is_the_bias_library
+  - reference_repo_material_is_promoted_to_dev_references_or_deleted_or_explicitly_ignored
+  - product_decisions_errors_and_lifecycle_live_in_Zig
+  - C_is_ABI_glue_only_unless_user_accepts_specific_C_product_owner
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - source-backed BusyBox and Nushell vocabulary application
-    - one picker command model shared by GUI and terminal surfaces
-    - terminal commands for list, query, open, and Nushell completion output
-    - stable legacy flags preserved exactly
-    - planning and evidence vocabulary removed from production source
-    - README/build/main/root and owner files made boring and obvious
-    - happy and unhappy paths asserted without workflow language
+    - live memory activation for abi_reference_maturity
+    - local dev_references promotion for exact Zig std build files
+    - local official ABI surface image and memory references
+    - reference_repo fate inspection and promote/delete/ignore recommendation
+    - accepted shallow ABI boundary decision for layer-shell and image buffers
+    - accepted sunglasses child startup failure detail preservation
   out:
-    - generic command framework
-    - new mode domains
-    - new IPC
-    - shell completions beyond Nushell
-    - argv0 link dispatch unless the accepted implementation can finish it without deferral
-    - compatibility wrappers
+    - product source or build implementation before accepted implementation slice
+    - ABI/C changes during reference-only slices
+    - broad Wayland abstraction
+    - broad ABI abstraction
+    - full upstream repo copying
+    - reference_repo as authority
 
 progress:
   completed:
-    - 00_plan_review_accepted
-    - 01_reference_vocabulary
-    - 00_live_memory_activation
-    - 02_command_model_index
-    - 03_terminal_surface
-    - 04_workflow_language_cleanup
-    - 05_control_spine_footing
-    - 06_comments_and_invariants
-    - 07_verification
-    - 08_final_review
+    - 00_plan_review
+    - 01_live_memory_activation
+    - 02a_zig_std_build_reference_promotion
+    - 02b_abi_surface_reference_download
+    - 02c_reference_repo_fate
+    - 03_zig_016_build_ingestion_lock
+    - 03a_picker_text_c_ingestion_cleanup
+    - 04_layer_shell_C_fate_decision
+    - 05_typed_C_error_boundary
+    - 06_move_product_image_policy_to_Zig
+    - 07_sunglasses_startup_error_visibility
+    - 08_surface_lifecycle_happy_unhappy_paths
+    - 09_reference_maturity_scans
+    - 02_dev_reference_bias_index
+    - 10_final_verification
   current: []
   pending: []
 
 verification_floor:
-  - commands listed in .agent/history/obvious-shape-command-sprint.yaml
+  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/abi-reference-maturity.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "git diff --check"
 
 stop_conditions:
-  - any implementation need conflicts with the accepted index
-  - CLI and GUI cannot share one command owner without changing accepted behavior
-  - Nushell completion shape cannot be generated from the shared model
-  - workflow vocabulary cannot be removed from product source without losing necessary diagnostics
-  - a reviewer rejects the final tree
+  - product source or build implementation starts during reference-only slices
+  - C retains product behavior without explicit user approval
+  - reference_repo remains ambiguous without promote_delete_or_ignore receipt
+  - needed official references cannot be sourced with provenance
+  - reviewer rejects the final tree
   - user decision is required

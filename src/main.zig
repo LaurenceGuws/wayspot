@@ -39,10 +39,10 @@ pub fn main(init: std.process.Init) !void {
     if (hasArg(args, "--wallpaper")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runWallpaperLoop(allocator, .{
+        runWallpaperLoop(allocator, wayspot.env.MonitorSource.init(.{
             .runtime_dir = runtime_dir,
             .signature = signature,
-        }) catch |err| {
+        })) catch |err| {
             std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});
             std.process.exit(2);
         };
@@ -70,10 +70,11 @@ pub fn main(init: std.process.Init) !void {
     if (hasArg(args, "--sunglasses-daemon")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runSunglassesOverlay(allocator, .{
+        runSunglassesOverlay(allocator, wayspot.env.MonitorSource.init(.{
             .runtime_dir = runtime_dir,
             .signature = signature,
-        }) catch |err| {
+        })) catch |err| {
+            wayspot.sunglasses.Overlay.recordStartupFailure(allocator, runtime_dir, err);
             std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
             std.process.exit(2);
         };
@@ -233,24 +234,24 @@ fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u
     return try out.toOwnedSlice(allocator);
 }
 
-fn runWallpaperLoop(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+fn runWallpaperLoop(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
     if (!build_options.enable_sdl) {
         std.log.err("wallpaper loop requires SDL build", .{});
         std.process.exit(2);
     }
 
     try wayspot.identity.set(wayspot.identity.wallpaper);
-    try wayspot.wallpaper.Loop.run(allocator, hypr);
+    try wayspot.wallpaper.Loop.run(allocator, monitor_source);
 }
 
-fn runSunglassesOverlay(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+fn runSunglassesOverlay(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
     if (!build_options.enable_sdl) {
         std.log.err("sunglasses overlay requires SDL build", .{});
         std.process.exit(2);
     }
 
     try wayspot.identity.set(wayspot.identity.sunglasses);
-    try wayspot.sunglasses.Overlay.runOverlay(allocator, hypr);
+    try wayspot.sunglasses.Overlay.runOverlay(allocator, monitor_source);
 }
 
 const SunglassesImageCommand = union(enum) {

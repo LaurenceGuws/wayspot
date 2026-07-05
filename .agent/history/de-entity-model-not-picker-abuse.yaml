@@ -1,0 +1,382 @@
+id: de_entity_model_not_picker_abuse
+title: Dumb Env Entity Facts Before Sunglasses Field Cleanup
+state: complete
+
+bug_category: domain_modeling_bug
+symptom: >
+  /sunglasses image path feels bolted on because real DE entity facts were
+  shorted and picker candidate/control vocabulary carried monitor/workspace/window
+  responsibilities.
+
+worktree:
+  expected_dirty_state: ["?? scratch.txt"]
+  current_gate_permissions:
+    repo_edits_allowed: true
+    implementation_allowed: true_after_live_memory_activation
+    applies_after:
+      - reviewer_plan_acceptance
+      - coordinator_user_approval
+      - live_sprint_memory_activation
+
+hard_invariants:
+  - monitor_is_the_only_env_domain_noun_for_screen_output_facts
+  - display_and_monitor_must_not_coexist_as_env_domain_nouns
+  - SDL_display_may_appear_only_as_implementation_source_or_API_term_inside_monitor_owned_code_where_SDL_forces_it
+  - no_src_env_display_zig
+  - no_display_exported_symbol_folder_product_noun_or_source_ownership_noun
+  - direct_hyprland_under_env_only_fills_dumb_entity_facts
+  - workspace_window_scope_is_dumb_models_only_not_feature_complete
+  - env_state_is_internal_and_shared_between_processes_commands_candidates_as_needed
+  - vendors_are_means_to_an_end_not_domain_models
+  - no_generic_common_shared_types_provider_registry_or_framework_shape
+
+reference_sources:
+  live_memory:
+    - AGENTS.md
+    - .agent/history/README.md
+    - .agent/history/current.yaml
+    - .agent/history/sprint.yaml
+    - .agent/history/references.yaml
+    - README.md
+  local_references:
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_GetDisplays.md
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_GetDisplayName.md
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_GetDisplayBounds.md
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_GetDisplayProperties.md
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_GetWindowProperties.md
+    - dev_references/sdl/sdlwiki_md/SDL3/SDL_CreateWindowWithProperties.md
+    - dev_references/sdl/sdlwiki_md/SDL3/README-wayland.md
+    - dev_references/hyprland/pages/ipc.md
+    - dev_references/hyprland/pages/using-hyprctl.md
+    - dev_references/hyprland/pages/dispatchers.md
+    - dev_references/hyprland/pages/workspace-rules.md
+    - dev_references/style/tigerbeetle/docs/TIGER_STYLE.md
+    - dev_references/terminals/foot/input.c
+    - dev_references/terminals/foot/render.c
+    - dev_references/terminals/foot/fdm.c
+
+user_corrections:
+  allowed_domain_nouns:
+    - process
+    - notification
+    - banners
+    - wallpaper
+    - sunglasses
+    - picker
+    - mode
+    - apps
+    - open
+    - notifications
+    - history_list
+    - lifecycle
+    - restart
+    - runtime_config
+    - red_blue_filter
+    - dimm
+    - image
+    - monitor
+    - workspace
+    - window
+    - state
+    - snapshot
+    - size
+    - scale
+    - visible
+    - focused
+    - current_active
+  implementation_source_terms:
+    - SDL
+    - SDL display
+    - Wayland
+    - Hyprland
+  rewrites:
+    - providers -> mode
+    - search_as_domain_noun -> picker
+    - display_as_domain_noun -> monitor
+    - sdl_prefixed_domain_nouns -> vendor_neutral_domain_nouns
+  accepted_exceptions:
+    - SDL API identifiers may appear in src/env/monitor.zig.
+    - SDL display may appear only as a non-exported implementation-source term in monitor-owned code.
+    - Hyprland protocol/source terms may appear in src/env/hyprland.zig.
+    - lowercase search may appear only as picker filtering/ranking implementation detail.
+
+desired_model_tree:
+  process:
+    notification:
+      banners: user_interface
+    wallpaper: {}
+    sunglasses: {}
+    picker:
+      role: user_interface
+      mode:
+        role: actions_as_list_index
+        apps:
+          action: open
+        notifications:
+          history_list:
+            retained_existing_gap_not_new_feature: true
+          lifecycle:
+            restart:
+              note: restart_needs_to_move
+        wallpaper:
+          lifecycle:
+            restart: {}
+        sunglasses:
+          note: first_expansion_of_index_candidate_type
+          runtime_config:
+            red_blue_filter: {}
+            dimm: {}
+            image: {}
+
+source_backed_findings:
+  sdl:
+    supports:
+      - connected display enumeration
+      - display names
+      - display bounds
+      - display properties including wl_output on Wayland
+      - SDL window properties including wl_display and wl_surface on Wayland
+      - custom roleless Wayland surfaces for protocols such as wlr_layer_shell
+    use_in_sprint:
+      - fill monitor size and optional scale where SDL can
+      - source current Wayspot surface handles as implementation detail
+    insufficient_for:
+      - current_active workspace facts
+      - external window facts
+      - focused external window facts
+  hyprland:
+    supports:
+      - monitors
+      - workspaces
+      - activeworkspace
+      - clients
+      - activewindow
+      - bounded JSON info requests
+      - socket2 event stream shaped EVENT>>DATA\n
+    use_in_sprint:
+      - fill dumb env facts SDL cannot fill
+      - no rich relationship policy
+    cautions:
+      - synchronous requests open_write_read_close promptly
+      - live events use socket2 not repeated polling
+
+domain_model:
+  folder: src/env
+  module: src/env/mod.zig
+  rule: >
+    env owns dumb monitor/workspace/window facts and optional bounded state
+    snapshots. Product domains consume env facts and must not import env.hyprland.
+  feature_scope: >
+    Prove current code uses these models correctly. Do not implement
+    feature-complete workspace/window behavior.
+  files:
+    src/env/monitor.zig:
+      symbols:
+        - MonitorId
+        - MonitorName
+        - MonitorSize
+        - MonitorScale
+        - Monitor
+        - MonitorList
+        - queryMonitors
+        - monitorName
+        - monitorSize
+        - monitorScale
+        - waylandOutput
+        - windowWaylandHandles
+      owns:
+        - monitor facts
+        - current_active_workspace_refs
+        - SDL-backed monitor fact loading where needed
+      bounds:
+        - max_monitors
+        - max_monitor_name_bytes
+        - max_current_active_workspaces_per_monitor
+    src/env/workspace.zig:
+      symbols:
+        - WorkspaceId
+        - WorkspaceName
+        - Workspace
+        - WorkspaceList
+      owns:
+        - visible_on_monitor_refs
+        - window_refs
+      bounds:
+        - max_workspaces
+        - max_workspace_name_bytes
+        - max_workspace_monitor_refs
+        - max_workspace_window_refs
+    src/env/window.zig:
+      symbols:
+        - WindowId
+        - WindowAddress
+        - WindowClass
+        - WindowTitle
+        - WindowSize
+        - Window
+        - WindowList
+      owns:
+        - visible
+        - focused
+        - workspace_ref
+      bounds:
+        - max_windows
+        - max_window_class_bytes
+        - max_window_title_bytes
+    src/env/state.zig:
+      preferred: true
+      symbols:
+        - EnvState
+        - EnvSnapshot
+        - refreshMonitors
+        - refreshFromHyprlandFacts
+        - monitorAt
+        - workspaceAt
+        - windowAt
+      rule: dumb_bounded_state_snapshot_owner_only
+    src/env/session.zig:
+      allowed_only_if_reviewer_requires_name: true
+      rule: dumb_state_snapshot_owner_only_no_policy_engine
+    src/env/hyprland.zig:
+      symbols:
+        - Connection
+        - request
+        - EventStream
+        - parseMonitors
+        - parseWorkspaces
+        - parseWindows
+        - classifyEventLine
+        - fillState
+      owns:
+        - Hyprland IPC
+        - bounded JSON parsing into dumb env facts
+        - socket2 event classification
+      must_not_own:
+        - relationship policy
+        - product behavior
+        - registry
+
+user_needed:
+  - id: approve_direct_hyprland_under_env
+    status: accepted_by_user_context
+    reason: Hyprland under env is allowed only to fill facts SDL cannot fill.
+  - id: approve_workspace_window_behavior_scope
+    status: accepted_by_user_context
+    reason: Scope is dumb models used by current code, not feature-complete behavior.
+  - id: approve_live_memory_supersession
+    status: accepted_by_user_context
+    reason: User approved activation before implementation.
+  - id: approve_notification_placement_scope
+    status: user_needed_if_expanded
+    reason: Existing monitor placement may be rewired; new active workspace/window placement needs approval.
+
+slices:
+  - id: "00_plan_review"
+    state: complete
+    owner: reviewer
+  - id: "01_user_approval"
+    state: complete
+    owner: coordinator
+  - id: "02_live_memory_activation"
+    state: complete
+    owner: coordinator_or_delegated_worker
+    goal: Activate sprint artifact and ownership supersession before implementation.
+    files:
+      create: [.agent/history/de-entity-model-not-picker-abuse.yaml]
+      change: [.agent/history/sprint.yaml, .agent/history/current.yaml, .agent/history/references.yaml]
+    stop_conditions: [activation_not_done, yaml_validation_fails]
+  - id: "03_reference_domain_lock"
+    state: complete
+    goal: Lock vocabulary and source boundaries.
+  - id: "04_env_entity_scaffold"
+    state: complete
+    goal: Add concrete env entity facts without product rewiring.
+    files:
+      create: [src/env/mod.zig, src/env/monitor.zig, src/env/workspace.zig, src/env/window.zig, src/env/state.zig]
+      avoid_create: [src/env/session.zig, src/env/display.zig, src/env/common.zig, src/env/types.zig, src/env/shared.zig]
+  - id: "05_monitor_fact_boundary"
+    state: complete
+    goal: Isolate SDL-backed facts behind monitor-owned names.
+  - id: "06_hyprland_fact_boundary"
+    state: complete
+    goal: Move Hyprland IPC/JSON/event ownership into env/hyprland.zig for dumb facts.
+  - id: "07_state_snapshot_usage"
+    state: complete
+    goal: Prove current code uses dumb env facts correctly.
+  - id: "08_process_tree_alignment"
+    state: complete
+    goal: Align ownership vocabulary with process/picker/mode tree.
+  - id: "09_product_rewire_to_env_facts"
+    state: complete
+    goal: Product domains consume env facts without direct Hyprland coupling.
+  - id: "10_sunglasses_runtime_config_after_domain"
+    state: complete
+    goal: Fix image path as concrete sunglasses runtime config after env facts are clean.
+  - id: "11_docs_alignment"
+    state: complete
+    goal: Align README after implementation truths exist.
+  - id: "12_verification_and_final_review"
+    state: complete
+    goal: Prove shape and get reviewer acceptance.
+    reviewer_acceptance: Sagan ACCEPT_SPRINT
+    verification:
+      fmt_check: pass
+      build_test_summary: "24/24 steps succeeded; 129/129 tests passed"
+      releasefast_build: pass
+      git_diff_check: pass
+      yaml_safe_load: pass
+      smoke_help: pass
+      smoke_commands: pass
+      smoke_complete_nushell_query: pass
+
+acceptance_gates:
+  implementation_gate:
+    - reviewer_accepts_plan
+    - coordinator_gets_user_approval_for_unresolved_user_needed
+    - coordinator_activates_live_sprint_memory_or_delegates_activation
+  final_gate:
+    - product_domains_do_not_import_env_hyprland
+    - env_state_or_allowed_session_is_dumb_snapshot_only
+    - env_monitor_owns_SDL_backed_monitor_size_optional_scale_without_display_domain_nouns
+    - env_hyprland_owns_fact_loading_only
+    - wallpaper_sunglasses_notification_consume_env_facts
+    - notification_placement_scope_matches_user_approval
+    - sunglasses_image_path_is_concrete_runtime_config
+    - mode_replaces_provider_vocabulary
+    - picker_replaces_search_domain_vocabulary
+
+rg_scans:
+  imports:
+    - "rg -n '@import\\(\".*hyprland\\.zig\"\\)' src --glob '*.zig'"
+    - "rg -n 'wallpaper/hyprland|\\.\\./wallpaper/hyprland|hyprctl|HYPRLAND_INSTANCE_SIGNATURE|socket2|\\.socket\\.sock' src --glob '*.zig'"
+    - "rg -n '@import\\(\".*env/hyprland\\.zig\"\\)' src/picker src/wallpaper src/sunglasses src/notification --glob '*.zig'"
+  forbidden_shape:
+    - "find src -path '*/common*' -o -path '*/shared*' -o -path '*/types*'"
+    - "find src/env -maxdepth 1 -type f \\( -iname 'display.zig' -o -iname 'sdl*.zig' -o -iname '*sdl*.zig' \\)"
+    - "rg -n '\\bprovider(s)?\\b|\\bProvider(s)?\\b' src README.md build.zig build.zig.zon"
+    - "find src -type f \\( -iname '*search*' -o -path '*/search/*' \\)"
+    - "rg -n '\\b(Search|Search[A-Z][A-Za-z0-9_]*|[A-Za-z0-9_]*Search)\\b' src --glob '*.zig'"
+    - "rg -n '\\bsearch\\b' src README.md build.zig build.zig.zon --glob '*.zig' --glob '*.md' --glob '!src/picker/rank.zig' --glob '!src/picker/query.zig'"
+    - "rg -n 'pub (const|fn|var) (sdl_|Sdl[A-Z][A-Za-z0-9_]*|SDL[A-Z][A-Za-z0-9_]*)' src/env src/picker src/wallpaper src/sunglasses src/notification --glob '*.zig'"
+    - "rg -n 'pub (const|fn|var) ([A-Za-z0-9_]*Display[A-Za-z0-9_]*|display[A-Za-z0-9_]*)' src/env src/picker src/wallpaper src/sunglasses src/notification --glob '*.zig'"
+
+must_not_exist_after_completion:
+  - src/env/display.zig
+  - src/wallpaper/hyprland.zig_as_live_owner_unless_reviewer_exception
+  - product_imports_env_hyprland
+  - Hyprland_socket_paths_JSON_parsing_or_event_names_in_product_domains
+  - monitor_workspace_window_facts_modeled_as_picker_candidates
+  - monitor_workspace_window_relationship_policy_engine
+  - feature_complete_workspace_window_behavior_claims
+  - display_as_env_domain_noun_exported_symbol_folder_product_noun_or_source_ownership_noun
+  - sunglasses_image_path_as_picker_Candidate
+  - generic_sunglasses_control_framework
+  - provider_vocabulary_where_mode_is_meant
+  - search_vocabulary_as_domain_owner_file_folder_or_exported_symbol
+  - sdl_prefixed_or_vendor_prefixed_exported_domain_nouns
+  - common_shared_types_folder_or_file
+  - generic_WM_abstraction_provider_registry_backend_registry
+  - stale_comments_claiming_wallpaper_owns_Hyprland_monitor_facts
+  - TODO_later_eventually_temporary_shim_compatibility_language
+  - unbounded_monitor_workspace_window_lists
+  - unbounded_Hyprland_response_or_event_buffers

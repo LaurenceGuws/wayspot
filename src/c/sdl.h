@@ -37,7 +37,24 @@ struct wayspot_shm_buffer {
     uint32_t byte_len;
 };
 
-int wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_display *display);
+enum wayspot_layer_result {
+    WAYSPOT_LAYER_OK = 0,
+    WAYSPOT_LAYER_INVALID_SIZE = 1,
+    WAYSPOT_LAYER_MEMFD_FAILED = 2,
+    WAYSPOT_LAYER_TRUNCATE_FAILED = 3,
+    WAYSPOT_LAYER_MMAP_FAILED = 4,
+    WAYSPOT_LAYER_SHM_POOL_FAILED = 5,
+    WAYSPOT_LAYER_WL_BUFFER_FAILED = 6,
+    WAYSPOT_LAYER_REGISTRY_FAILED = 7,
+    WAYSPOT_LAYER_REGISTRY_LISTENER_FAILED = 8,
+    WAYSPOT_LAYER_DISPLAY_ROUNDTRIP_FAILED = 9,
+    WAYSPOT_LAYER_SHELL_MISSING = 10,
+    WAYSPOT_LAYER_COMPOSITOR_MISSING = 11,
+    WAYSPOT_LAYER_SHM_MISSING = 12,
+    WAYSPOT_LAYER_INPUT_REGION_FAILED = 13,
+};
+
+enum wayspot_layer_result wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_display *display);
 void wayspot_layer_globals_deinit(struct wayspot_layer_globals *globals);
 struct wl_output *wayspot_layer_find_output(struct wayspot_layer_globals *globals, const char *name);
 struct zwlr_layer_surface_v1 *wayspot_layer_get_surface(struct wayspot_layer_globals *globals, struct wl_surface *surface, struct wl_output *output, const char *namespace_name);
@@ -52,10 +69,8 @@ void wayspot_layer_surface_destroy(struct zwlr_layer_surface_v1 *surface);
 void wayspot_wl_surface_commit(struct wl_surface *surface);
 int wayspot_wl_display_roundtrip(struct wl_display *display);
 void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display);
-int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path);
-int wayspot_shm_buffer_create_sunglasses_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path, uint32_t image_opacity, uint32_t overlay_argb);
-int wayspot_shm_buffer_create_tint(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t argb);
+enum wayspot_layer_result wayspot_shm_buffer_create(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t format);
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer);
 void wayspot_wl_surface_attach_buffer(struct wl_surface *surface, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height);
 void wayspot_wl_surface_detach_buffer(struct wl_surface *surface);
-int wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface);
+enum wayspot_layer_result wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface);

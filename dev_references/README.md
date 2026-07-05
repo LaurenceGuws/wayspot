@@ -8,10 +8,27 @@ not runtime code and must not be imported by `build.zig`.
 - Zig 0.16 interface changes:
   - `zig/zig-0.16-release-notes.md`
   - `zig/zig-0.16-release-notes.html`
+  - build-system source route:
+    - `zig_maturity/zig/lib/std/Build.zig`
+    - `zig_maturity/zig/lib/std/Build/Step/TranslateC.zig`
+    - `zig_maturity/zig/lib/std/Build/Module.zig`
+    - `zig_maturity/zig/lib/std/Build/Step/Compile.zig`
 - SDL 3 docs:
   - `sdl/sdlwiki_md/SDL3/`
   - useful current pages: `SDL_CreateWindow.md`, `SDL_WaitEvent.md`,
     `SDL_WaitEventTimeout.md`, `SDL_PushEvent.md`, `SDL_RenderDebugText.md`
+  - ABI/image boundary pages: `SDL_LoadPNG.md`, `SDL_LoadBMP.md`,
+    `SDL_ConvertSurface.md`, `SDL_CreateSurfaceFrom.md`,
+    `SDL_BlitSurfaceScaled.md`, `SDL_GetError.md`
+- Wayland and layer-shell ABI references:
+  - `wayland/protocols/wlr/wlr-layer-shell-unstable-v1.xml`
+  - `wayland/protocols/core/wayland.xml`
+  - `wayland/client/wayland-client.h`
+- Linux memory/syscall references for shm buffer decisions:
+  - `linux/man-pages/man2/memfd_create.2`
+  - `linux/man-pages/man2/mmap.2`
+  - `linux/man-pages/man2/ftruncate.2`
+  - `linux/man-pages/man2/truncate.2`
 - Hyprland docs captured from the current wiki:
   - Markdown fast path: `hyprland/pages/`
   - `hyprland/wiki/wiki.hypr.land/IPC/index.html`

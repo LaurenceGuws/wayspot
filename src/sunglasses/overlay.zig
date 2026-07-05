@@ -1,7 +1,7 @@
 //! Sunglasses overlay owns overlay slots, apply wakes, and shutdown cleanup order.
 
 const std = @import("std");
-const hyprland = @import("../wallpaper/hyprland.zig");
+const env = @import("../env/mod.zig");
 const sunglasses_state = @import("state.zig");
 const sunglasses_surface = @import("surface.zig");
 
@@ -16,8 +16,10 @@ const monitor_changed_event_type: u32 = @intCast(c.SDL_EVENT_USER + 41);
 const sunglasses_apply_event_type: u32 = @intCast(c.SDL_EVENT_USER + 42);
 const pid_dir_name = "wayspot";
 const pid_file_name = "sunglasses.pid";
+const startup_status_file_name = "sunglasses.startup.status";
 const reconcile_lock_file_name = "sunglasses.reconcile.lock";
 const max_pid_file_bytes: u32 = 32;
+const max_startup_status_bytes: u32 = 96;
 const max_proc_cmdline_bytes: u32 = 4096;
 const overlay_stop_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
 const overlay_start_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
@@ -30,14 +32,14 @@ var signal_apply_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 pub const Overlay = struct {
     allocator: std.mem.Allocator,
-    slots: [hyprland.max_monitors]SurfaceSlot = undefined,
+    slots: [env.monitor.max_monitors]SurfaceSlot = undefined,
     slot_count: u32 = 0,
     vendor_started: bool = false,
 
-    pub fn runOverlay(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
+    pub fn runOverlay(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
         var overlay = Overlay{ .allocator = allocator };
         defer overlay.deinit();
-        try overlay.startOverlay(hypr);
+        try overlay.startOverlay(monitor_source);
     }
 
     pub fn applyNow(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
@@ -58,6 +60,8 @@ pub const Overlay = struct {
         const state = try sunglasses_state.load(allocator);
         const pid_path = try sunglassesPidPath(allocator, runtime_dir);
         defer allocator.free(pid_path);
+        const status_path = try sunglassesStartupStatusPath(allocator, runtime_dir);
+        defer allocator.free(status_path);
 
         const child_state = childState(pid_path);
         switch (child_state) {
@@ -69,12 +73,19 @@ pub const Overlay = struct {
         switch (reconcileAction(state.needsOverlay(), child_live)) {
             .idle => {},
             .wake => try sendSignal(child_state.live, .USR1),
-            .start => try startOverlayAndWait(allocator, pid_path),
+            .start => try startOverlayAndWait(allocator, pid_path, status_path),
             .stop => try stopOverlay(pid_path, child_state.live),
         }
     }
 
-    fn startOverlay(self: *Overlay, hypr: hyprland.Connection) !void {
+    /// Records one bounded child startup failure beside the pid file for the parent poller.
+    pub fn recordStartupFailure(allocator: std.mem.Allocator, runtime_dir: []const u8, err: anyerror) void {
+        writeStartupStatus(allocator, runtime_dir, err) catch |write_err| {
+            std.log.debug("sunglasses startup status write failed err={s}", .{@errorName(write_err)});
+        };
+    }
+
+    fn startOverlay(self: *Overlay, monitor_source: env.MonitorSource) !void {
         var state = try sunglasses_state.load(self.allocator);
         if (!state.needsOverlay()) return;
 
@@ -82,15 +93,15 @@ pub const Overlay = struct {
         var signals = try OverlaySignals.init();
         defer signals.deinit();
         try signals.start();
-        var pid_file = try PidFile.create(self.allocator, hypr.runtime_dir);
+        var pid_file = try PidFile.create(self.allocator, monitor_source.runtimeDir());
         defer pid_file.deinit(self.allocator);
 
-        var monitor_watcher = try MonitorWatcher.init(self.allocator, hypr);
+        var monitor_watcher = try MonitorWatcher.init(self.allocator, monitor_source);
         defer monitor_watcher.deinit();
         try monitor_watcher.start();
 
-        try self.rebuildSurfaceSlots(hypr, &state);
-        try self.runApplyLoop(hypr, &state);
+        try self.rebuildSurfaceSlots(monitor_source, &state);
+        try self.runApplyLoop(monitor_source, &state);
     }
 
     fn startVendor(self: *Overlay) !void {
@@ -100,7 +111,7 @@ pub const Overlay = struct {
         self.vendor_started = true;
     }
 
-    fn runApplyLoop(self: *Overlay, hypr: hyprland.Connection, state: *sunglasses_state.State) !void {
+    fn runApplyLoop(self: *Overlay, monitor_source: env.MonitorSource, state: *sunglasses_state.State) !void {
         while (true) {
             switch (try waitForWake()) {
                 .shutdown => return,
@@ -112,22 +123,22 @@ pub const Overlay = struct {
                 .monitor_changed => {
                     state.* = try sunglasses_state.load(self.allocator);
                     if (!state.needsOverlay()) return;
-                    try self.rebuildSurfaceSlots(hypr, state);
+                    try self.rebuildSurfaceSlots(monitor_source, state);
                 },
             }
         }
     }
 
-    fn rebuildSurfaceSlots(self: *Overlay, hypr: hyprland.Connection, state: *const sunglasses_state.State) !void {
-        const monitors = try hyprland.queryMonitors(self.allocator, hypr);
-        if (monitors.count == 0) return error.NoHyprlandMonitors;
+    fn rebuildSurfaceSlots(self: *Overlay, monitor_source: env.MonitorSource, state: *const sunglasses_state.State) !void {
+        const monitors = try monitor_source.queryMonitors(self.allocator);
+        if (monitors.count == 0) return error.NoEnvMonitors;
 
         self.clearSurfaceSlots();
         var index: u32 = 0;
         while (index < monitors.count) : (index += 1) {
             const monitor = monitors.items[index];
             self.slots[self.slot_count] = .{
-                .surface = try sunglasses_surface.SunglassesSurface.init(monitor, state.get(monitor.name())),
+                .surface = try sunglasses_surface.SunglassesSurface.init(monitor, state.get(monitor.nameText())),
             };
             self.slot_count += 1;
         }
@@ -136,7 +147,7 @@ pub const Overlay = struct {
     fn redrawSurfaceSlots(self: *Overlay, state: *const sunglasses_state.State) !void {
         var index: u32 = 0;
         while (index < self.slot_count) : (index += 1) {
-            const monitor_name = self.slots[index].surface.monitor.name();
+            const monitor_name = self.slots[index].surface.monitor.nameText();
             try self.slots[index].redraw(state.get(monitor_name));
         }
     }
@@ -190,6 +201,29 @@ const ReconcileAction = enum {
     stop,
 };
 
+const StartupStatus = enum {
+    sunglasses_image_load_failed,
+    sunglasses_unsupported_image_extension,
+    sunglasses_image_convert_failed,
+    sunglasses_image_target_failed,
+    sunglasses_image_scale_failed,
+    sunglasses_image_opacity_invalid,
+    sunglasses_invalid_buffer_size,
+    sunglasses_memfd_failed,
+    sunglasses_truncate_failed,
+    sunglasses_mmap_failed,
+    sunglasses_shm_pool_failed,
+    sunglasses_wl_buffer_failed,
+    layer_shell_missing,
+    layer_shell_compositor_missing,
+    layer_shell_shm_missing,
+    layer_shell_output_missing,
+    layer_shell_surface_create_failed,
+    layer_shell_input_region_failed,
+    no_env_monitors,
+    sunglasses_overlay_start_failed,
+};
+
 fn reconcileAction(needs_overlay: bool, child_live: bool) ReconcileAction {
     if (needs_overlay) return if (child_live) .wake else .start;
     return if (child_live) .stop else .idle;
@@ -219,15 +253,15 @@ fn eventIsShutdown(event: c.SDL_Event) bool {
         event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 }
 
-/// MonitorWatcher converts Hyprland monitor events into vendor redraw wakes owned by Overlay.
+/// MonitorWatcher converts env monitor fact changes into vendor redraw wakes owned by Overlay.
 const MonitorWatcher = struct {
-    stream: hyprland.EventStream,
+    stream: env.MonitorFactStream,
     stop_fd: std.posix.fd_t = -1,
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init(allocator: std.mem.Allocator, hypr: hyprland.Connection) !MonitorWatcher {
-        var stream = try hyprland.EventStream.init(allocator, hypr);
+    fn init(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !MonitorWatcher {
+        var stream = try monitor_source.monitorStream(allocator);
         errdefer stream.deinit();
         return .{
             .stream = stream,
@@ -261,15 +295,15 @@ const MonitorWatcher = struct {
 
 fn monitorWatcherMain(watcher: *MonitorWatcher) void {
     while (!watcher.stop_requested.load(.acquire)) {
-        const event = watcher.stream.wait(watcher.stop_fd) catch |err| {
+        const wake = watcher.stream.wait(watcher.stop_fd) catch |err| {
             if (watcher.stop_requested.load(.acquire)) return;
             std.log.warn("sunglasses monitor event stream failed err={s}", .{@errorName(err)});
             pushVendorQuit();
             return;
         };
-        switch (event) {
+        switch (wake) {
             .stopped => return,
-            .monitor_changed => pushVendorUserEvent(monitor_changed_event_type),
+            .changed => pushVendorUserEvent(monitor_changed_event_type),
         }
     }
 }
@@ -511,6 +545,10 @@ fn sunglassesReconcileLockPath(allocator: std.mem.Allocator, runtime_dir: []cons
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, reconcile_lock_file_name });
 }
 
+fn sunglassesStartupStatusPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, startup_status_file_name });
+}
+
 fn readSunglassesPid(pid_path: []const u8) !std.os.linux.pid_t {
     var buf: [max_pid_file_bytes]u8 = undefined;
     const bytes = try std.Io.Dir.cwd().readFile(std.Options.debug_io, pid_path, &buf);
@@ -559,6 +597,13 @@ fn removePidFile(pid_path: []const u8) void {
     };
 }
 
+fn removeStartupStatus(status_path: []const u8) void {
+    std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, status_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => std.log.debug("sunglasses startup status remove failed err={s}", .{@errorName(err)}),
+    };
+}
+
 fn sendSignal(pid: std.os.linux.pid_t, signal: std.os.linux.SIG) !void {
     const rc = std.os.linux.kill(pid, signal);
     return switch (std.os.linux.errno(rc)) {
@@ -588,20 +633,166 @@ fn stopOverlay(pid_path: []const u8, pid: std.os.linux.pid_t) !void {
     return error.SunglassesOverlayStillRunning;
 }
 
-fn startOverlayAndWait(allocator: std.mem.Allocator, pid_path: []const u8) !void {
+fn startOverlayAndWait(allocator: std.mem.Allocator, pid_path: []const u8, status_path: []const u8) !void {
+    removeStartupStatus(status_path);
     try startOverlayDetached(allocator);
     var polls: u32 = 0;
     while (polls < max_overlay_start_polls) : (polls += 1) {
-        switch (childState(pid_path)) {
-            .live => return,
-            .stale => {
+        const status_error = try readStartupStatus(status_path);
+        switch (try overlayStartPoll(childState(pid_path), status_error)) {
+            .ready => return,
+            .wait => sleepNs(overlay_start_poll_sleep_ns),
+            .failed_stale => {
                 removePidFile(pid_path);
                 return error.SunglassesOverlayStartFailed;
             },
-            .absent => sleepNs(overlay_start_poll_sleep_ns),
         }
     }
     return error.SunglassesOverlayStartTimedOut;
+}
+
+const OverlayStartPoll = enum {
+    ready,
+    wait,
+    failed_stale,
+};
+
+fn overlayStartPoll(child_state: ChildState, startup_status: ?StartupStatus) !OverlayStartPoll {
+    if (startup_status) |status| return startupStatusFailure(status);
+    return switch (child_state) {
+        .live => .ready,
+        .stale => .failed_stale,
+        .absent => .wait,
+    };
+}
+
+/// Startup status is a local one-shot file, removed before each start and capped at max_startup_status_bytes.
+fn writeStartupStatus(allocator: std.mem.Allocator, runtime_dir: []const u8, err: anyerror) !void {
+    const dir_path = try sunglassesPidDirPath(allocator, runtime_dir);
+    defer allocator.free(dir_path);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir_path);
+
+    const status_path = try sunglassesStartupStatusPath(allocator, runtime_dir);
+    defer allocator.free(status_path);
+
+    const status = startupStatusName(startupStatusFromError(err));
+    std.debug.assert(status.len <= max_startup_status_bytes);
+    const io = std.Options.debug_io;
+    const file = try std.Io.Dir.createFileAbsolute(io, status_path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, status);
+    try file.writeStreamingAll(io, "\n");
+    try file.sync(io);
+}
+
+fn readStartupStatus(status_path: []const u8) !?StartupStatus {
+    var buf: [max_startup_status_bytes + 1]u8 = undefined;
+    const bytes = std.Io.Dir.cwd().readFile(std.Options.debug_io, status_path, &buf) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    if (bytes.len > max_startup_status_bytes) return error.SunglassesStartupStatusTooLarge;
+    const text = std.mem.trim(u8, bytes, " \n\r\t");
+    return try parseStartupStatus(text);
+}
+
+fn startupStatusFromError(err: anyerror) StartupStatus {
+    return switch (err) {
+        error.SunglassesImageLoadFailed => .sunglasses_image_load_failed,
+        error.SunglassesUnsupportedImageExtension => .sunglasses_unsupported_image_extension,
+        error.SunglassesImageConvertFailed => .sunglasses_image_convert_failed,
+        error.SunglassesImageTargetFailed => .sunglasses_image_target_failed,
+        error.SunglassesImageScaleFailed => .sunglasses_image_scale_failed,
+        error.SunglassesImageOpacityInvalid => .sunglasses_image_opacity_invalid,
+        error.SunglassesInvalidBufferSize => .sunglasses_invalid_buffer_size,
+        error.SunglassesMemfdFailed => .sunglasses_memfd_failed,
+        error.SunglassesTruncateFailed => .sunglasses_truncate_failed,
+        error.SunglassesMmapFailed => .sunglasses_mmap_failed,
+        error.SunglassesShmPoolFailed => .sunglasses_shm_pool_failed,
+        error.SunglassesWlBufferFailed => .sunglasses_wl_buffer_failed,
+        error.LayerShellMissing => .layer_shell_missing,
+        error.LayerShellCompositorMissing => .layer_shell_compositor_missing,
+        error.LayerShellShmMissing => .layer_shell_shm_missing,
+        error.LayerShellOutputMissing => .layer_shell_output_missing,
+        error.LayerShellSurfaceCreateFailed => .layer_shell_surface_create_failed,
+        error.LayerShellInputRegionFailed => .layer_shell_input_region_failed,
+        error.NoEnvMonitors => .no_env_monitors,
+        else => .sunglasses_overlay_start_failed,
+    };
+}
+
+fn startupStatusName(status: StartupStatus) []const u8 {
+    return switch (status) {
+        .sunglasses_image_load_failed => "SunglassesImageLoadFailed",
+        .sunglasses_unsupported_image_extension => "SunglassesUnsupportedImageExtension",
+        .sunglasses_image_convert_failed => "SunglassesImageConvertFailed",
+        .sunglasses_image_target_failed => "SunglassesImageTargetFailed",
+        .sunglasses_image_scale_failed => "SunglassesImageScaleFailed",
+        .sunglasses_image_opacity_invalid => "SunglassesImageOpacityInvalid",
+        .sunglasses_invalid_buffer_size => "SunglassesInvalidBufferSize",
+        .sunglasses_memfd_failed => "SunglassesMemfdFailed",
+        .sunglasses_truncate_failed => "SunglassesTruncateFailed",
+        .sunglasses_mmap_failed => "SunglassesMmapFailed",
+        .sunglasses_shm_pool_failed => "SunglassesShmPoolFailed",
+        .sunglasses_wl_buffer_failed => "SunglassesWlBufferFailed",
+        .layer_shell_missing => "LayerShellMissing",
+        .layer_shell_compositor_missing => "LayerShellCompositorMissing",
+        .layer_shell_shm_missing => "LayerShellShmMissing",
+        .layer_shell_output_missing => "LayerShellOutputMissing",
+        .layer_shell_surface_create_failed => "LayerShellSurfaceCreateFailed",
+        .layer_shell_input_region_failed => "LayerShellInputRegionFailed",
+        .no_env_monitors => "NoEnvMonitors",
+        .sunglasses_overlay_start_failed => "SunglassesOverlayStartFailed",
+    };
+}
+
+fn parseStartupStatus(text: []const u8) !StartupStatus {
+    if (std.mem.eql(u8, text, "SunglassesImageLoadFailed")) return .sunglasses_image_load_failed;
+    if (std.mem.eql(u8, text, "SunglassesUnsupportedImageExtension")) return .sunglasses_unsupported_image_extension;
+    if (std.mem.eql(u8, text, "SunglassesImageConvertFailed")) return .sunglasses_image_convert_failed;
+    if (std.mem.eql(u8, text, "SunglassesImageTargetFailed")) return .sunglasses_image_target_failed;
+    if (std.mem.eql(u8, text, "SunglassesImageScaleFailed")) return .sunglasses_image_scale_failed;
+    if (std.mem.eql(u8, text, "SunglassesImageOpacityInvalid")) return .sunglasses_image_opacity_invalid;
+    if (std.mem.eql(u8, text, "SunglassesInvalidBufferSize")) return .sunglasses_invalid_buffer_size;
+    if (std.mem.eql(u8, text, "SunglassesMemfdFailed")) return .sunglasses_memfd_failed;
+    if (std.mem.eql(u8, text, "SunglassesTruncateFailed")) return .sunglasses_truncate_failed;
+    if (std.mem.eql(u8, text, "SunglassesMmapFailed")) return .sunglasses_mmap_failed;
+    if (std.mem.eql(u8, text, "SunglassesShmPoolFailed")) return .sunglasses_shm_pool_failed;
+    if (std.mem.eql(u8, text, "SunglassesWlBufferFailed")) return .sunglasses_wl_buffer_failed;
+    if (std.mem.eql(u8, text, "LayerShellMissing")) return .layer_shell_missing;
+    if (std.mem.eql(u8, text, "LayerShellCompositorMissing")) return .layer_shell_compositor_missing;
+    if (std.mem.eql(u8, text, "LayerShellShmMissing")) return .layer_shell_shm_missing;
+    if (std.mem.eql(u8, text, "LayerShellOutputMissing")) return .layer_shell_output_missing;
+    if (std.mem.eql(u8, text, "LayerShellSurfaceCreateFailed")) return .layer_shell_surface_create_failed;
+    if (std.mem.eql(u8, text, "LayerShellInputRegionFailed")) return .layer_shell_input_region_failed;
+    if (std.mem.eql(u8, text, "NoEnvMonitors")) return .no_env_monitors;
+    if (std.mem.eql(u8, text, "SunglassesOverlayStartFailed")) return .sunglasses_overlay_start_failed;
+    return error.UnknownSunglassesStartupStatus;
+}
+
+fn startupStatusFailure(status: StartupStatus) anyerror {
+    return switch (status) {
+        .sunglasses_image_load_failed => error.SunglassesImageLoadFailed,
+        .sunglasses_unsupported_image_extension => error.SunglassesUnsupportedImageExtension,
+        .sunglasses_image_convert_failed => error.SunglassesImageConvertFailed,
+        .sunglasses_image_target_failed => error.SunglassesImageTargetFailed,
+        .sunglasses_image_scale_failed => error.SunglassesImageScaleFailed,
+        .sunglasses_image_opacity_invalid => error.SunglassesImageOpacityInvalid,
+        .sunglasses_invalid_buffer_size => error.SunglassesInvalidBufferSize,
+        .sunglasses_memfd_failed => error.SunglassesMemfdFailed,
+        .sunglasses_truncate_failed => error.SunglassesTruncateFailed,
+        .sunglasses_mmap_failed => error.SunglassesMmapFailed,
+        .sunglasses_shm_pool_failed => error.SunglassesShmPoolFailed,
+        .sunglasses_wl_buffer_failed => error.SunglassesWlBufferFailed,
+        .layer_shell_missing => error.LayerShellMissing,
+        .layer_shell_compositor_missing => error.LayerShellCompositorMissing,
+        .layer_shell_shm_missing => error.LayerShellShmMissing,
+        .layer_shell_output_missing => error.LayerShellOutputMissing,
+        .layer_shell_surface_create_failed => error.LayerShellSurfaceCreateFailed,
+        .layer_shell_input_region_failed => error.LayerShellInputRegionFailed,
+        .no_env_monitors => error.NoEnvMonitors,
+        .sunglasses_overlay_start_failed => error.SunglassesOverlayStartFailed,
+    };
 }
 
 fn startOverlayDetached(allocator: std.mem.Allocator) !void {
@@ -796,8 +987,88 @@ test "sunglasses overlay reconciliation action follows saved state need and live
     try std.testing.expectEqual(ReconcileAction.wake, reconcileAction(true, true));
 }
 
+test "sunglasses overlay slots are bounded by env monitor facts" {
+    const overlay = Overlay{ .allocator = std.testing.allocator };
+    try std.testing.expectEqual(@as(u32, env.monitor.max_monitors), @as(u32, @intCast(overlay.slots.len)));
+}
+
 test "sunglasses reconcile lock path stays beside pid file" {
     const path = try sunglassesReconcileLockPath(std.testing.allocator, "/run/user/1000");
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings("/run/user/1000/wayspot/sunglasses.reconcile.lock", path);
+}
+
+test "sunglasses startup status path stays beside pid file" {
+    const path = try sunglassesStartupStatusPath(std.testing.allocator, "/run/user/1000");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/run/user/1000/wayspot/sunglasses.startup.status", path);
+}
+
+test "sunglasses startup poll reports status before timeout" {
+    try std.testing.expectError(error.SunglassesImageLoadFailed, overlayStartPoll(.absent, .sunglasses_image_load_failed));
+    try std.testing.expectError(error.SunglassesImageLoadFailed, overlayStartPoll(.stale, .sunglasses_image_load_failed));
+}
+
+test "sunglasses startup poll keeps ready wait and stale outcomes without status" {
+    try std.testing.expectEqual(OverlayStartPoll.ready, try overlayStartPoll(.{ .live = 1 }, null));
+    try std.testing.expectEqual(OverlayStartPoll.wait, try overlayStartPoll(.absent, null));
+    try std.testing.expectEqual(OverlayStartPoll.failed_stale, try overlayStartPoll(.stale, null));
+}
+
+test "sunglasses startup status parses known and rejects unknown" {
+    try std.testing.expectEqual(StartupStatus.sunglasses_image_load_failed, try parseStartupStatus("SunglassesImageLoadFailed"));
+    try std.testing.expectError(error.UnknownSunglassesStartupStatus, parseStartupStatus("SunglassesOverlayStartTimedOut"));
+}
+
+test "sunglasses startup status round trips missing image failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime_dir = try testRuntimeDir(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(runtime_dir);
+
+    try writeStartupStatus(std.testing.allocator, runtime_dir, error.SunglassesImageLoadFailed);
+    const status_path = try sunglassesStartupStatusPath(std.testing.allocator, runtime_dir);
+    defer std.testing.allocator.free(status_path);
+
+    try std.testing.expectEqual(StartupStatus.sunglasses_image_load_failed, (try readStartupStatus(status_path)).?);
+    try std.testing.expectError(error.SunglassesImageLoadFailed, overlayStartPoll(.absent, try readStartupStatus(status_path)));
+}
+
+test "sunglasses startup status rejects oversized file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime_dir = try testRuntimeDir(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(runtime_dir);
+    const dir_path = try sunglassesPidDirPath(std.testing.allocator, runtime_dir);
+    defer std.testing.allocator.free(dir_path);
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir_path);
+    const status_path = try sunglassesStartupStatusPath(std.testing.allocator, runtime_dir);
+    defer std.testing.allocator.free(status_path);
+
+    var too_large: [max_startup_status_bytes + 1]u8 = undefined;
+    @memset(&too_large, 'A');
+    const file = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, status_path, .{ .truncate = true });
+    defer file.close(std.Options.debug_io);
+    try file.writeStreamingAll(std.Options.debug_io, &too_large);
+
+    try std.testing.expectError(error.SunglassesStartupStatusTooLarge, readStartupStatus(status_path));
+}
+
+test "sunglasses startup status cleanup removes stale status on new start" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime_dir = try testRuntimeDir(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(runtime_dir);
+    try writeStartupStatus(std.testing.allocator, runtime_dir, error.SunglassesImageLoadFailed);
+    const status_path = try sunglassesStartupStatusPath(std.testing.allocator, runtime_dir);
+    defer std.testing.allocator.free(status_path);
+
+    removeStartupStatus(status_path);
+    try std.testing.expectEqual(@as(?StartupStatus, null), try readStartupStatus(status_path));
+}
+
+fn testRuntimeDir(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir) ![]u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, ".", allocator);
+    defer allocator.free(cwd);
+    return std.fmt.allocPrint(allocator, "{s}/.zig-cache/tmp/{s}", .{ cwd, &tmp.sub_path });
 }

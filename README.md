@@ -23,7 +23,7 @@ Query the same command rows used by the picker:
 wayspot query settings
 ```
 
-Open a command payload from the shared picker model:
+Open a command payload from the picker:
 
 ```bash
 wayspot open settings
@@ -58,8 +58,14 @@ without Lua standard libraries, and stops after 100000 Lua instructions. Invalid
 present user values are rejected instead of partially mutating the embedded
 appearance state.
 
+## Current features
+
+- The picker is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
+- Picker modes include application rows, notification history rows, wallpaper lifecycle rows, and sunglasses runtime configuration.
+- The notification D-Bus interface owns a long-lived freedesktop notification name and can show retained notification history through the picker.
+- The wallpaper loop owns one background surface per monitor and uses configured still images.
+- Sunglasses owns per-monitor overlay settings for the red/blue filter, dimming, and image opacity.
+
 ## Scope
 
-- The launcher is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
-- The notification DBus interface owns a long-lived DBus name.
-- GTK, resident launcher IPC, shell modules, broad wallpaper toolkits, open registries, and script engines are out of scope.
+- GTK, resident launcher IPC, shell modules, broad wallpaper toolkits, and script engines are out of scope.

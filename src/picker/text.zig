@@ -7,13 +7,7 @@
 const std = @import("std");
 const c = @import("sdl_c");
 const appearance_values = @import("appearance.zig");
-
-const ft = @cImport({
-    @cInclude("ft2build.h");
-    @cInclude("freetype/freetype.h");
-    @cInclude("harfbuzz/hb.h");
-    @cInclude("harfbuzz/hb-ft.h");
-});
+const ft = @import("text_c");
 
 const max_text_bytes: u32 = 512;
 const max_codepoints: u32 = 256;

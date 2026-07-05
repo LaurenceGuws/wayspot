@@ -16,7 +16,10 @@ active_files:
   memory_manual: /home/home/personal/wayspot/.agent/history/README.md
   current_worldview: /home/home/personal/wayspot/.agent/history/current.yaml
   sprint_contract: /home/home/personal/wayspot/.agent/history/sprint.yaml
+  active_sprint_artifact: /home/home/personal/wayspot/.agent/history/abi-reference-maturity.yaml
+  completed_env_entity_sprint: /home/home/personal/wayspot/.agent/history/de-entity-model-not-picker-abuse.yaml
   references: /home/home/personal/wayspot/.agent/history/references.yaml
+  command_surface_archive: /home/home/personal/wayspot/.agent/history/obvious-shape-command-sprint.yaml
   scope_map: /home/home/personal/wayspot/.agent/history/wayspot-scope-map.yaml
   surface_scale_index: /home/home/personal/wayspot/.agent/history/wayspot-surface-scale-index.yaml
   picker_viewport_index: /home/home/personal/wayspot/.agent/history/wayspot-picker-viewport-index.yaml
@@ -29,7 +32,7 @@ source_references:
   provenance:
     qagent_workflow_source: /home/home/personal/projects/qagent
     rule: >
-      qagent provided the copied way-of-work framework. It is not live authority
+      qagent provided the copied way-of-work rules. It is not live authority
       for Wayspot planning or implementation.
     howl_lua_vendor:
       source_copy: /home/home/personal/wayspot/vendor/howl-lua
@@ -39,11 +42,12 @@ source_references:
       provenance_file: /home/home/personal/wayspot/vendor/howl-lua/WAYSPOT_VENDOR.txt
       rule: >
         Wayspot vendors howl-lua as ordinary source files, not as a Git
-        submodule or embedded checkout, so future clones include the local
-        source copy directly.
+        submodule or embedded checkout. Vendors are means to an end, not domain
+        models.
   tigerbeetle:
     root: /home/home/personal/wayspot/dev_references/style/tigerbeetle
     required_for_owner_claims:
+      - docs/TIGER_STYLE.md
       - src/stdx/bounded_array.zig
       - src/queue.zig
   foot:
@@ -51,18 +55,61 @@ source_references:
     required_for_picker_claims:
       - input.c
       - render.c
-      - selection.c
+      - fdm.c
   sdl:
     docs: /home/home/personal/wayspot/dev_references/sdl
-    vendor:
-      root: /home/home/personal/projects/howl-sdl
-      branch: release-3.4.x
-      commit: c5ba24c694b5d520cdc1d029d8def398690d6894
-      icon_loader_apis:
-        - include/SDL3/SDL_surface.h:SDL_LoadPNG
-        - include/SDL3/SDL_surface.h:SDL_LoadBMP
+    required_for_monitor_fact_claims:
+      - sdlwiki_md/SDL3/SDL_GetDisplays.md
+      - sdlwiki_md/SDL3/SDL_GetDisplayName.md
+      - sdlwiki_md/SDL3/SDL_GetDisplayBounds.md
+      - sdlwiki_md/SDL3/SDL_GetDisplayProperties.md
+      - sdlwiki_md/SDL3/SDL_GetWindowProperties.md
+      - sdlwiki_md/SDL3/SDL_CreateWindowWithProperties.md
+      - sdlwiki_md/SDL3/README-wayland.md
+    rule: >
+      SDL display is an implementation-source/API term only. The env/domain noun
+      for screen output facts is monitor, and src/env/display.zig must not exist.
+  hyprland:
+    docs: /home/home/personal/wayspot/dev_references/hyprland/pages
+    required_for_env_fact_claims:
+      - ipc.md
+      - using-hyprctl.md
+      - dispatchers.md
+      - workspace-rules.md
+    rule: >
+      Hyprland IPC belongs under env only to fill dumb monitor/workspace/window
+      facts that SDL cannot fill. Product domains do not own Hyprland IPC.
   zig:
     release_notes: /home/home/personal/wayspot/dev_references/zig/release-notes.html
+    std_build_source:
+      - /home/home/personal/wayspot/dev_references/zig_maturity/zig/lib/std/Build.zig
+      - /home/home/personal/wayspot/dev_references/zig_maturity/zig/lib/std/Build/Step/TranslateC.zig
+      - /home/home/personal/wayspot/dev_references/zig_maturity/zig/lib/std/Build/Module.zig
+      - /home/home/personal/wayspot/dev_references/zig_maturity/zig/lib/std/Build/Step/Compile.zig
+  abi_surface:
+    sdl_image_docs:
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_LoadPNG.md
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_LoadBMP.md
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_ConvertSurface.md
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_CreateSurfaceFrom.md
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_BlitSurfaceScaled.md
+      - /home/home/personal/wayspot/dev_references/sdl/sdlwiki_md/SDL3/SDL_GetError.md
+    wayland_layer_shell:
+      - /home/home/personal/wayspot/dev_references/wayland/protocols/wlr/wlr-layer-shell-unstable-v1.xml
+      - /home/home/personal/wayspot/dev_references/wayland/protocols/core/wayland.xml
+      - /home/home/personal/wayspot/dev_references/wayland/client/wayland-client.h
+    linux_memory:
+      - /home/home/personal/wayspot/dev_references/linux/man-pages/man2/memfd_create.2
+      - /home/home/personal/wayspot/dev_references/linux/man-pages/man2/mmap.2
+      - /home/home/personal/wayspot/dev_references/linux/man-pages/man2/ftruncate.2
+      - /home/home/personal/wayspot/dev_references/linux/man-pages/man2/truncate.2
+  reference_repo:
+    path: /home/home/personal/wayspot/reference_repo
+    rule: >
+      Do not use as authority. For abi_reference_maturity, inspection found no
+      scoped ABI/surface/image material to promote. Recommended fate is
+      safe-to-ignore or delete after reviewer/user acceptance because it holds
+      D-Bus and notification spec material outside this sprint scope.
 
 repo_entrypoints:
   cli:
@@ -72,21 +119,29 @@ repo_entrypoints:
       - wayspot query <text>
       - wayspot open <open-payload>
       - wayspot complete nushell ...spans
+  env:
+    planned_root: /home/home/personal/wayspot/src/env/mod.zig
+    monitor: /home/home/personal/wayspot/src/env/monitor.zig
+    workspace: /home/home/personal/wayspot/src/env/workspace.zig
+    window: /home/home/personal/wayspot/src/env/window.zig
+    state: /home/home/personal/wayspot/src/env/state.zig
+    hyprland: /home/home/personal/wayspot/src/env/hyprland.zig
+    forbidden:
+      - /home/home/personal/wayspot/src/env/display.zig
+      - /home/home/personal/wayspot/src/env/common.zig
+      - /home/home/personal/wayspot/src/env/shared.zig
+      - /home/home/personal/wayspot/src/env/types.zig
   picker:
     command: /home/home/personal/wayspot/src/picker/command.zig
     surface: /home/home/personal/wayspot/src/picker/surface.zig
     viewport: /home/home/personal/wayspot/src/picker/viewport.zig
     text: /home/home/personal/wayspot/src/picker/text.zig
-    surface_config: /home/home/personal/wayspot/src/picker/scale.zig
     appearance: /home/home/personal/wayspot/src/picker/appearance.zig
-    inert_appearance_values: /home/home/personal/wayspot/src/picker/appearance.zig
-    defaults_loader: /home/home/personal/wayspot/src/config/defaults.zig
-    embedded_defaults_lua: /home/home/personal/wayspot/assets/lua/defaults.lua
-  picker_rows:
-    exports: /home/home/personal/wayspot/src/picker/mod.zig
-    command_model: /home/home/personal/wayspot/src/picker/command.zig
+  picker_modes:
     apps: /home/home/personal/wayspot/src/picker/mode/apps.zig
-    rank: /home/home/personal/wayspot/src/picker/rank.zig
+    notifications: /home/home/personal/wayspot/src/picker/mode/notifications.zig
+    wallpaper: /home/home/personal/wayspot/src/picker/mode/wallpaper.zig
+    sunglasses: /home/home/personal/wayspot/src/picker/mode/sunglasses.zig
   notifications:
     dbus: /home/home/personal/wayspot/src/notification/dbus.zig
     rows: /home/home/personal/wayspot/src/notification/rows.zig
@@ -94,20 +149,26 @@ repo_entrypoints:
   wallpaper:
     discovery: /home/home/personal/wayspot/.agent/history/hyprland-direct-surface-discovery.yaml
     contract: /home/home/personal/wayspot/.agent/history/wallpaper-v1-sprint-contract.yaml
-    monitor_glasses_probe: /home/home/personal/wayspot/tools/hypr-wallpaper-window-probe.py
+    rule: >
+      Wallpaper consumes env monitor facts. Wallpaper no longer owns Hyprland
+      monitor fact discovery in live planning.
 
 verification:
+  memory_activation:
+    - cd /home/home/personal/wayspot && python -c 'import yaml; [yaml.safe_load(open(p, encoding="utf-8")) for p in (".agent/history/de-entity-model-not-picker-abuse.yaml", ".agent/history/sprint.yaml", ".agent/history/current.yaml", ".agent/history/references.yaml")]'
+    - cd /home/home/personal/wayspot && git diff --check
   build:
     - cd /home/home/personal/wayspot && zigup run 0.16.0 build test --summary all
     - cd /home/home/personal/wayspot && zigup run 0.16.0 build
   smoke:
-    - cd /home/home/personal/wayspot && ./re-run.sh
-    - cd /home/home/personal/wayspot && ./zig-out/bin/wayspot --notifications-daemon
+    - cd /home/home/personal/wayspot && ./zig-out/bin/wayspot --help
+    - cd /home/home/personal/wayspot && ./zig-out/bin/wayspot commands
 
 archive_policy:
   retired_memory:
     - .agent/history/artifacts.jsonl
+    - .agent/history/obvious-shape-command-sprint.yaml
   rule: >
-    artifacts.jsonl remains historical Wayspot memory until explicitly
-    archived. New active worldview belongs in current.yaml, sprint.yaml, and
-    references.yaml.
+    Retired memory remains historical Wayspot memory until explicitly archived.
+    New active worldview belongs in current.yaml, sprint.yaml, references.yaml,
+    and the active sprint artifact.

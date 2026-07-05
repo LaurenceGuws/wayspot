@@ -101,7 +101,7 @@ pub const Apps = struct {
         const start_len = out.items.len;
         var scan = DesktopScanState{};
         defer scan.deinit(allocator);
-        var roots = try desktopSearchRoots(allocator);
+        var roots = try desktopFileRoots(allocator);
         defer {
             for (roots.items) |item| allocator.free(item);
             roots.deinit(allocator);
@@ -290,7 +290,7 @@ fn normalizeDesktopExecAlloc(allocator: std.mem.Allocator, exec_cmd: []const u8)
     return allocator.dupe(u8, trimmed);
 }
 
-fn desktopSearchRoots(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
+fn desktopFileRoots(allocator: std.mem.Allocator) !std.ArrayList([]u8) {
     var roots = std.ArrayList([]u8).empty;
     errdefer {
         for (roots.items) |item| allocator.free(item);

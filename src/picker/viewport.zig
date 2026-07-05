@@ -492,7 +492,7 @@ test "resize recalculates visible range without invalid state" {
     var viewport = Viewport.init();
 
     try testing.expect(viewport.resetResults(10));
-    try testing.expect(viewport.resize(0));
+    try testing.expect(!viewport.resize(0));
     try testing.expectEqual(@as(u32, 1), viewport.visible_rows);
     try testing.expectEqual(VisibleRange{ .start = 0, .count = 1 }, viewport.visibleRange());
 

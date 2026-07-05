@@ -13,7 +13,7 @@ const rank = @import("rank.zig");
 const textbox = @import("textbox.zig");
 const viewport = @import("viewport.zig");
 const query_mod = @import("query.zig");
-const hyprland = @import("../wallpaper/hyprland.zig");
+const env = @import("../env/mod.zig");
 const scale_owner = @import("scale.zig");
 const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
@@ -700,7 +700,7 @@ const Surface = struct {
         const picker = self.appearance.picker;
         const query_x = @field(layout, "query_" ++ "te" ++ "xt_x");
         if (self.query.items.len == 0) {
-            try self.text.draw(self.renderer, query_x, layout.query_text_y, "Search", .{
+            try self.text.draw(self.renderer, query_x, layout.query_text_y, "Query", .{
                 .color = picker.query_placeholder.color,
                 .max_bytes = 16,
                 .font_size_px = picker.query_placeholder.font_px,
@@ -845,19 +845,8 @@ fn setDrawColor(renderer: *c.SDL_Renderer, color: appearance_owner.Rgba8) bool {
 
 fn loadSunglassesStateForSession(allocator: std.mem.Allocator) !sunglasses_state.State {
     const loaded = try sunglasses_state.load(allocator);
-    const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
-        std.mem.span(runtime_dir_z)
-    else
-        return loaded;
-    const signature = if (std.c.getenv("HYPRLAND_INSTANCE_SIGNATURE")) |signature_z|
-        std.mem.span(signature_z)
-    else
-        return loaded;
-
-    const monitors = hyprland.queryMonitors(allocator, .{
-        .runtime_dir = runtime_dir,
-        .signature = signature,
-    }) catch |err| {
+    const monitor_source = env.MonitorSource.fromProcessEnv() orelse return loaded;
+    const monitors = monitor_source.queryMonitors(allocator) catch |err| {
         std.log.warn("sunglasses monitor state seed skipped err={s}", .{@errorName(err)});
         return loaded;
     };
@@ -866,11 +855,11 @@ fn loadSunglassesStateForSession(allocator: std.mem.Allocator) !sunglasses_state
     return normalizeSunglassesStateForMonitors(loaded, monitors);
 }
 
-fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors: hyprland.MonitorList) !sunglasses_state.State {
+fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors: env.monitor.MonitorList) !sunglasses_state.State {
     var normalized = sunglasses_state.defaultState();
     var index: u32 = 0;
     while (index < monitors.count) : (index += 1) {
-        const monitor_name = monitors.items[index].name();
+        const monitor_name = monitors.items[index].nameText();
         var monitor_state = if (loaded.get(monitor_name)) |existing|
             existing.*
         else if (loaded.get("default")) |default_monitor_state|
@@ -917,12 +906,9 @@ test "sunglasses state maps default values onto real monitor names" {
     default_monitor_state.setRedBlueValue(35);
     try loaded.append(default_monitor_state);
 
-    var monitors = hyprland.MonitorList{};
-    monitors.items[0] = .{};
+    var monitors = env.monitor.MonitorList{};
     const monitor_name = "DP-1";
-    @memcpy(monitors.items[0].name_buf[0..monitor_name.len], monitor_name);
-    monitors.items[0].name_len = @intCast(monitor_name.len);
-    monitors.count = 1;
+    try monitors.append(try env.monitor.Monitor.init(.{ .value = 1 }, monitor_name, try env.monitor.MonitorSize.init(1920, 1080)));
 
     const normalized = try normalizeSunglassesStateForMonitors(loaded, monitors);
     try std.testing.expectEqual(@as(u32, 1), normalized.count);

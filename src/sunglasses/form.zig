@@ -14,7 +14,7 @@ const default_monitor_name = "default";
 pub const control_count: u32 = 8;
 const control_right_inset: f32 = viewport.default_result_icon_right_inset;
 
-const FormField = enum {
+pub const FormField = enum {
     monitor,
     red_blue_toggle,
     red_blue_slider,
@@ -129,6 +129,7 @@ pub const Form = struct {
         if (self.focus != .image_path) return .no_change;
         const monitor = currentMonitorMutable(state, self.selected_monitor);
         self.seedPathEdit(monitor.imagePath());
+        if (self.path_error) return .invalid;
         const edit = self.pathEdit();
 
         if (edit.len == 0) {
@@ -654,6 +655,22 @@ test "form focus wraps in both directions" {
     try std.testing.expectEqual(FormField.image_path, form.focus);
 }
 
+test "tab focus order stays bounded across all runtime config fields" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    var index: u32 = 0;
+    while (index < control_count) : (index += 1) {
+        try std.testing.expectEqual(controlFromIndex(index), form.focus);
+        try form.focusNext(&state, false);
+    }
+    try std.testing.expectEqual(FormField.monitor, form.focus);
+
+    try form.focusNext(&state, true);
+    try std.testing.expectEqual(FormField.image_path, form.focus);
+}
+
 test "monitor row activation and click cycle monitors" {
     var state = sunglasses_state.defaultState();
     try state.append(try sunglasses_state.MonitorState.init("HDMI-A-1"));
@@ -684,7 +701,7 @@ test "form hit testing follows picker row geometry and gaps" {
 
     try std.testing.expect(try form.focusAt(&state, layout, slider_row.x + 20, slider_row.y + 2));
     try std.testing.expectEqual(FormField.red_blue_slider, form.focus);
-    try std.testing.expect(try form.click(&state, style, layout, slider_row.x + slider.w - 2, slider_row.y + (slider.h / 2)));
+    try std.testing.expect(try form.click(&state, style, layout, slider_row.x + slider_row.w - 2, slider_row.y + (slider_row.h / 2)));
     try std.testing.expectEqual(sunglasses_state.red_blue_max, state.monitors[0].red_blue_value);
 }
 
@@ -737,6 +754,21 @@ test "image path text input appends within bounded edit buffer" {
     try std.testing.expect(try form.handleTextInput(&state, "abcdef"));
     try std.testing.expectEqual(sunglasses_state.max_image_path_bytes, form.path_edit.len);
     try std.testing.expect(form.path_error);
+}
+
+test "image path overflow does not commit truncated runtime config" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    form.focus = .image_path;
+    try std.testing.expect(try form.handleTextInput(&state, "/tmp/"));
+    form.path_edit.len = sunglasses_state.max_image_path_bytes - 1;
+
+    try std.testing.expect(try form.handleTextInput(&state, "abcdef"));
+    try std.testing.expect(form.path_error);
+    try std.testing.expectEqual(CommitResult.invalid, try form.commitFocused(&state));
+    try std.testing.expectEqualStrings("", state.monitors[0].imagePath());
 }
 
 test "image path backspace deletes from edit buffer" {
@@ -794,6 +826,29 @@ test "image path invalid commit keeps focus and state unchanged" {
     try std.testing.expectEqualStrings("/tmp/old.png", state.monitors[0].imagePath());
     try std.testing.expect(form.path_error);
     try std.testing.expect(form.focusedPathInput());
+}
+
+test "image path invalid commit leaves red blue dim and opacity unchanged" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    state.monitors[0].red_blue_enabled = true;
+    state.monitors[0].setRedBlueValue(35);
+    state.monitors[0].dim_enabled = true;
+    state.monitors[0].setDimValue(40);
+    state.monitors[0].image_enabled = true;
+    state.monitors[0].setImageOpacity(65);
+
+    form.focus = .image_path;
+    try std.testing.expect(try form.handleTextInput(&state, "relative.png"));
+    try std.testing.expectEqual(CommitResult.invalid, try form.commitFocused(&state));
+    try std.testing.expect(state.monitors[0].red_blue_enabled);
+    try std.testing.expectEqual(@as(i32, 35), state.monitors[0].red_blue_value);
+    try std.testing.expect(state.monitors[0].dim_enabled);
+    try std.testing.expectEqual(@as(i32, 40), state.monitors[0].dim_value);
+    try std.testing.expect(state.monitors[0].image_enabled);
+    try std.testing.expectEqual(@as(i32, 65), state.monitors[0].image_opacity);
 }
 
 test "image opacity hit testing uses bounded slider range" {

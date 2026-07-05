@@ -70,107 +70,46 @@ static uint32_t wayspot_min_u32(uint32_t a, uint32_t b)
     return a < b ? a : b;
 }
 
-static int wayspot_has_extension(const char *path, const char *extension)
-{
-    size_t path_len = strlen(path);
-    size_t extension_len = strlen(extension);
-    if (path_len < extension_len) {
-        return 0;
-    }
-    return SDL_strcasecmp(path + path_len - extension_len, extension) == 0;
-}
-
-static int wayspot_cover_source_rect(int source_width, int source_height, int target_width, int target_height, SDL_Rect *rect)
-{
-    if (source_width <= 0 || source_height <= 0 || target_width <= 0 || target_height <= 0) {
-        return -1;
-    }
-
-    int64_t source_as_target_wide = (int64_t)source_width * target_height;
-    int64_t target_as_source_wide = (int64_t)target_width * source_height;
-    if (source_as_target_wide > target_as_source_wide) {
-        int crop_width = (int)((int64_t)source_height * target_width / target_height);
-        rect->x = (source_width - crop_width) / 2;
-        rect->y = 0;
-        rect->w = crop_width;
-        rect->h = source_height;
-    } else {
-        int crop_height = (int)((int64_t)source_width * target_height / target_width);
-        rect->x = 0;
-        rect->y = (source_height - crop_height) / 2;
-        rect->w = source_width;
-        rect->h = crop_height;
-    }
-    return rect->w <= 0 || rect->h <= 0 ? -1 : 0;
-}
-
-static uint32_t wayspot_scale_byte(uint32_t value, uint32_t numerator, uint32_t denominator)
-{
-    return denominator == 0 ? 0 : (value * numerator + (denominator / 2)) / denominator;
-}
-
-static uint32_t wayspot_premultiply_argb(uint32_t argb, uint32_t opacity)
-{
-    uint32_t source_alpha = (argb >> 24) & 0xff;
-    uint32_t alpha = wayspot_scale_byte(source_alpha, opacity, 100);
-    uint32_t red = wayspot_scale_byte((argb >> 16) & 0xff, alpha, 255);
-    uint32_t green = wayspot_scale_byte((argb >> 8) & 0xff, alpha, 255);
-    uint32_t blue = wayspot_scale_byte(argb & 0xff, alpha, 255);
-    return (alpha << 24) | (red << 16) | (green << 8) | blue;
-}
-
-static uint32_t wayspot_argb_over(uint32_t source, uint32_t destination)
-{
-    uint32_t source_alpha = (source >> 24) & 0xff;
-    uint32_t inverse_alpha = 255 - source_alpha;
-    uint32_t alpha = source_alpha + wayspot_scale_byte((destination >> 24) & 0xff, inverse_alpha, 255);
-    uint32_t red = ((source >> 16) & 0xff) + wayspot_scale_byte((destination >> 16) & 0xff, inverse_alpha, 255);
-    uint32_t green = ((source >> 8) & 0xff) + wayspot_scale_byte((destination >> 8) & 0xff, inverse_alpha, 255);
-    uint32_t blue = (source & 0xff) + wayspot_scale_byte(destination & 0xff, inverse_alpha, 255);
-    alpha = wayspot_min_u32(alpha, 255);
-    red = wayspot_min_u32(red, 255);
-    green = wayspot_min_u32(green, 255);
-    blue = wayspot_min_u32(blue, 255);
-    return (alpha << 24) | (red << 16) | (green << 8) | blue;
-}
-
-static int wayspot_shm_buffer_create_empty(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t format, const char *name)
+enum wayspot_layer_result wayspot_shm_buffer_create(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t format)
 {
     if (width == 0 || height == 0 || width > UINT32_MAX / 4 || height > UINT32_MAX / (width * 4)) {
-        return -1;
+        return WAYSPOT_LAYER_INVALID_SIZE;
+    }
+    if (globals->shm == NULL) {
+        return WAYSPOT_LAYER_SHM_MISSING;
     }
     uint32_t stride = width * 4;
     uint32_t byte_len = stride * height;
-    int fd = memfd_create(name, MFD_CLOEXEC);
+    int fd = memfd_create("wayspot-shm-buffer", MFD_CLOEXEC);
     if (fd < 0) {
-        return -1;
+        return WAYSPOT_LAYER_MEMFD_FAILED;
     }
     if (ftruncate(fd, byte_len) != 0) {
         close(fd);
-        return -1;
+        return WAYSPOT_LAYER_TRUNCATE_FAILED;
     }
     void *data = mmap(NULL, byte_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) {
         close(fd);
-        return -1;
+        return WAYSPOT_LAYER_MMAP_FAILED;
     }
     struct wl_shm_pool *pool = wl_shm_create_pool(globals->shm, fd, (int32_t)byte_len);
     if (pool == NULL) {
         munmap(data, byte_len);
         close(fd);
-        return -1;
+        return WAYSPOT_LAYER_SHM_POOL_FAILED;
     }
     struct wl_buffer *wl_buffer = wl_shm_pool_create_buffer(pool, 0, (int32_t)width, (int32_t)height, (int32_t)stride, format);
     wl_shm_pool_destroy(pool);
     close(fd);
     if (wl_buffer == NULL) {
         munmap(data, byte_len);
-        return -1;
+        return WAYSPOT_LAYER_WL_BUFFER_FAILED;
     }
     buffer->buffer = wl_buffer;
     buffer->data = data;
     buffer->byte_len = byte_len;
-    return 0;
+    return WAYSPOT_LAYER_OK;
 }
 
 static void wayspot_output_geometry(void *data, struct wl_output *output, int32_t x, int32_t y, int32_t physical_width, int32_t physical_height, int32_t subpixel, const char *make, const char *model, int32_t transform)
@@ -308,24 +247,33 @@ static const struct {
     wayspot_layer_surface_closed,
 };
 
-int wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_display *display)
+enum wayspot_layer_result wayspot_layer_globals_init(struct wayspot_layer_globals *globals, struct wl_display *display)
 {
     memset(globals, 0, sizeof(*globals));
     globals->display = display;
     globals->registry = wl_display_get_registry(display);
     if (globals->registry == NULL) {
-        return -1;
+        return WAYSPOT_LAYER_REGISTRY_FAILED;
     }
     if (wl_registry_add_listener(globals->registry, &wayspot_registry_listener, globals) != 0) {
-        return -1;
+        return WAYSPOT_LAYER_REGISTRY_LISTENER_FAILED;
     }
     if (wl_display_roundtrip(display) < 0) {
-        return -1;
+        return WAYSPOT_LAYER_DISPLAY_ROUNDTRIP_FAILED;
     }
     if (wl_display_roundtrip(display) < 0) {
-        return -1;
+        return WAYSPOT_LAYER_DISPLAY_ROUNDTRIP_FAILED;
     }
-    return globals->layer_shell == NULL || globals->compositor == NULL || globals->shm == NULL ? -1 : 0;
+    if (globals->layer_shell == NULL) {
+        return WAYSPOT_LAYER_SHELL_MISSING;
+    }
+    if (globals->compositor == NULL) {
+        return WAYSPOT_LAYER_COMPOSITOR_MISSING;
+    }
+    if (globals->shm == NULL) {
+        return WAYSPOT_LAYER_SHM_MISSING;
+    }
+    return WAYSPOT_LAYER_OK;
 }
 
 void wayspot_layer_globals_deinit(struct wayspot_layer_globals *globals)
@@ -430,129 +378,6 @@ void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display)
     (void)wl_display_roundtrip(display);
 }
 
-int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path)
-{
-    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height, WL_SHM_FORMAT_XRGB8888, "wayspot-wallpaper") != 0) {
-        return -1;
-    }
-
-    SDL_Surface *loaded = NULL;
-    if (wayspot_has_extension(path, ".png")) {
-        loaded = SDL_LoadPNG(path);
-    } else if (wayspot_has_extension(path, ".bmp")) {
-        loaded = SDL_LoadBMP(path);
-    }
-    if (loaded == NULL) {
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Surface *source = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_XRGB8888);
-    SDL_DestroySurface(loaded);
-    if (source == NULL) {
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Surface *target = SDL_CreateSurfaceFrom((int)width, (int)height, SDL_PIXELFORMAT_XRGB8888, buffer->data, (int)(width * 4));
-    if (target == NULL) {
-        SDL_DestroySurface(source);
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Rect source_rect;
-    int crop_ok = wayspot_cover_source_rect(source->w, source->h, (int)width, (int)height, &source_rect);
-    if (crop_ok != 0 || !SDL_BlitSurfaceScaled(source, &source_rect, target, NULL, SDL_SCALEMODE_LINEAR)) {
-        SDL_DestroySurface(target);
-        SDL_DestroySurface(source);
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_DestroySurface(target);
-    SDL_DestroySurface(source);
-    return 0;
-}
-
-int wayspot_shm_buffer_create_sunglasses_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path, uint32_t image_opacity, uint32_t overlay_argb)
-{
-    if (image_opacity > 100 || wayspot_shm_buffer_create_empty(globals, buffer, width, height, WL_SHM_FORMAT_ARGB8888, "wayspot-sunglasses-image") != 0) {
-        return -1;
-    }
-
-    SDL_Surface *loaded = NULL;
-    if (wayspot_has_extension(path, ".png")) {
-        loaded = SDL_LoadPNG(path);
-    } else if (wayspot_has_extension(path, ".bmp")) {
-        loaded = SDL_LoadBMP(path);
-    }
-    if (loaded == NULL) {
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Surface *source = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_ARGB8888);
-    SDL_DestroySurface(loaded);
-    if (source == NULL) {
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Surface *target = SDL_CreateSurfaceFrom((int)width, (int)height, SDL_PIXELFORMAT_ARGB8888, buffer->data, (int)(width * 4));
-    if (target == NULL) {
-        SDL_DestroySurface(source);
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    /* The post-blit pass owns opacity and premultiply, so scaled copy keeps source ARGB straight. */
-    if (!SDL_SetSurfaceBlendMode(source, SDL_BLENDMODE_NONE)) {
-        SDL_DestroySurface(target);
-        SDL_DestroySurface(source);
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_Rect source_rect;
-    int crop_ok = wayspot_cover_source_rect(source->w, source->h, (int)width, (int)height, &source_rect);
-    if (crop_ok != 0 || !SDL_BlitSurfaceScaled(source, &source_rect, target, NULL, SDL_SCALEMODE_LINEAR)) {
-        SDL_DestroySurface(target);
-        SDL_DestroySurface(source);
-        wayspot_shm_buffer_destroy(buffer);
-        return -1;
-    }
-
-    SDL_DestroySurface(target);
-    SDL_DestroySurface(source);
-
-    uint32_t pixel_count = width * height;
-    uint32_t *pixels = buffer->data;
-    uint32_t index = 0;
-    while (index < pixel_count) {
-        uint32_t image = wayspot_premultiply_argb(pixels[index], image_opacity);
-        pixels[index] = overlay_argb == 0 ? image : wayspot_argb_over(overlay_argb, image);
-        index += 1;
-    }
-    return 0;
-}
-
-int wayspot_shm_buffer_create_tint(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t argb)
-{
-    if (wayspot_shm_buffer_create_empty(globals, buffer, width, height, WL_SHM_FORMAT_ARGB8888, "wayspot-sunglasses") != 0) {
-        return -1;
-    }
-
-    uint32_t pixel_count = width * height;
-    uint32_t *pixels = buffer->data;
-    uint32_t index = 0;
-    while (index < pixel_count) {
-        pixels[index] = argb;
-        index += 1;
-    }
-    return 0;
-}
-
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer)
 {
     if (buffer->buffer != NULL) {
@@ -577,13 +402,13 @@ void wayspot_wl_surface_detach_buffer(struct wl_surface *surface)
     wl_surface_attach(surface, NULL, 0, 0);
 }
 
-int wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface)
+enum wayspot_layer_result wayspot_wl_surface_set_empty_input_region(struct wayspot_layer_globals *globals, struct wl_surface *surface)
 {
     struct wl_region *region = wl_compositor_create_region(globals->compositor);
     if (region == NULL) {
-        return -1;
+        return WAYSPOT_LAYER_INPUT_REGION_FAILED;
     }
     wl_surface_set_input_region(surface, region);
     wl_region_destroy(region);
-    return 0;
+    return WAYSPOT_LAYER_OK;
 }

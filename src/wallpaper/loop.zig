@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const config_owner = @import("config.zig");
-const hyprland = @import("hyprland.zig");
+const env = @import("../env/mod.zig");
 const library_owner = @import("library.zig");
 const wallpaper_surface = @import("surface.zig");
 
@@ -24,11 +24,11 @@ var signal_rotate_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 pub const Loop = struct {
     allocator: std.mem.Allocator,
-    slots: [hyprland.max_monitors]SurfaceSlot = undefined,
+    slots: [env.monitor.max_monitors]SurfaceSlot = undefined,
     slot_count: u32 = 0,
     vendor_started: bool = false,
 
-    pub fn run(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
+    pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
         var config = try config_owner.load(allocator);
         defer config.deinit(allocator);
 
@@ -38,7 +38,7 @@ pub const Loop = struct {
 
         var loop = Loop{ .allocator = allocator };
         defer loop.deinit();
-        try loop.startWallpaper(hypr, &library, config.interval_seconds);
+        try loop.startWallpaper(monitor_source, &library, config.interval_seconds);
     }
 
     pub fn rotateNow(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
@@ -52,23 +52,23 @@ pub const Loop = struct {
         try sendSignal(pid, .USR1);
     }
 
-    fn startWallpaper(self: *Loop, hypr: hyprland.Connection, library: *const library_owner.Library, interval_seconds: u32) !void {
+    fn startWallpaper(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, interval_seconds: u32) !void {
         try self.startVendor();
         var signals = try LoopSignals.init();
         defer signals.deinit();
         try signals.start();
-        var pid_file = try PidFile.create(self.allocator, hypr.runtime_dir);
+        var pid_file = try PidFile.create(self.allocator, monitor_source.runtimeDir());
         defer pid_file.deinit(self.allocator);
 
-        var monitor_watcher = try MonitorWatcher.init(self.allocator, hypr);
+        var monitor_watcher = try MonitorWatcher.init(self.allocator, monitor_source);
         defer monitor_watcher.deinit();
         try monitor_watcher.start();
 
         var prng = std.Random.DefaultPrng.init(c.SDL_GetTicks());
         const random = prng.random();
-        try self.rebuildSurfaceSlots(hypr, library, random);
+        try self.rebuildSurfaceSlots(monitor_source, library, random);
 
-        try self.runRandomLoop(hypr, library, random, interval_seconds);
+        try self.runRandomLoop(monitor_source, library, random, interval_seconds);
     }
 
     fn startVendor(self: *Loop) !void {
@@ -78,7 +78,7 @@ pub const Loop = struct {
         self.vendor_started = true;
     }
 
-    fn runRandomLoop(self: *Loop, hypr: hyprland.Connection, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
+    fn runRandomLoop(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
         const interval_ms = @as(u64, interval_seconds) * 1000;
         var next_deadline = c.SDL_GetTicks() + interval_ms;
         while (true) {
@@ -94,15 +94,15 @@ pub const Loop = struct {
                     next_deadline = c.SDL_GetTicks() + interval_ms;
                 },
                 .monitor_changed => {
-                    try self.rebuildSurfaceSlots(hypr, library, random);
+                    try self.rebuildSurfaceSlots(monitor_source, library, random);
                 },
             }
         }
     }
 
-    fn rebuildSurfaceSlots(self: *Loop, hypr: hyprland.Connection, library: *const library_owner.Library, random: std.Random) !void {
-        const monitors = try hyprland.queryMonitors(self.allocator, hypr);
-        if (monitors.count == 0) return error.NoHyprlandMonitors;
+    fn rebuildSurfaceSlots(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, random: std.Random) !void {
+        const monitors = try monitor_source.queryMonitors(self.allocator);
+        if (monitors.count == 0) return error.NoEnvMonitors;
 
         self.clearSurfaceSlots();
         var index: u32 = 0;
@@ -190,15 +190,15 @@ fn eventIsShutdown(event: c.SDL_Event) bool {
         event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 }
 
-/// MonitorWatcher converts Hyprland socket2 monitor events into vendor wake events owned by Loop.
+/// MonitorWatcher converts env monitor fact changes into vendor wake events owned by Loop.
 const MonitorWatcher = struct {
-    stream: hyprland.EventStream,
+    stream: env.MonitorFactStream,
     stop_fd: std.posix.fd_t = -1,
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init(allocator: std.mem.Allocator, hypr: hyprland.Connection) !MonitorWatcher {
-        var stream = try hyprland.EventStream.init(allocator, hypr);
+    fn init(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !MonitorWatcher {
+        var stream = try monitor_source.monitorStream(allocator);
         errdefer stream.deinit();
         return .{
             .stream = stream,
@@ -232,15 +232,15 @@ const MonitorWatcher = struct {
 
 fn monitorWatcherMain(watcher: *MonitorWatcher) void {
     while (!watcher.stop_requested.load(.acquire)) {
-        const event = watcher.stream.wait(watcher.stop_fd) catch |err| {
+        const wake = watcher.stream.wait(watcher.stop_fd) catch |err| {
             if (watcher.stop_requested.load(.acquire)) return;
             std.log.warn("wallpaper monitor event stream failed err={s}", .{@errorName(err)});
             pushVendorQuit();
             return;
         };
-        switch (event) {
+        switch (wake) {
             .stopped => return,
-            .monitor_changed => pushVendorUserEvent(monitor_changed_event_type),
+            .changed => pushVendorUserEvent(monitor_changed_event_type),
         }
     }
 }
@@ -546,4 +546,9 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
         .SUCCESS => @intCast(rc),
         else => error.SystemCallFailed,
     };
+}
+
+test "wallpaper slots are bounded by env monitor facts" {
+    const loop = Loop{ .allocator = std.testing.allocator };
+    try std.testing.expectEqual(@as(u32, env.monitor.max_monitors), @as(u32, @intCast(loop.slots.len)));
 }

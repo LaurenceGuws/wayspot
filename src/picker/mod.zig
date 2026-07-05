@@ -18,5 +18,5 @@ pub const text = @import("text.zig");
 pub const textbox = @import("textbox.zig");
 pub const viewport = @import("viewport.zig");
 
-/// Picker is the shared command model used by the GUI and terminal surfaces.
+/// Picker is the command row owner used by the GUI and terminal surfaces.
 pub const Picker = command.Command;

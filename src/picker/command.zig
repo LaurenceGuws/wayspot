@@ -24,7 +24,7 @@ comptime {
     std.debug.assert(max_launch_wait_interrupts > 0);
 }
 
-/// Command is the shared command owner consumed by the GUI picker and terminal commands.
+/// Command owns picker rows consumed by the GUI picker and terminal commands.
 pub const Command = struct {
     opens: ?*open_owner.Open = null,
     apps: ?*apps_mode.Apps = null,
@@ -114,7 +114,7 @@ pub const Command = struct {
                 break :blk try open_owner.resolveExecutionCommand(allocator, spec.execution);
             },
             .lifecycle => blk: {
-                const command = mode.resolveLifecycleCommand(row.open) orelse return error.UnknownOpen;
+                const command = mode.resolveRestartLifecycleCommand(row.open) orelse return error.UnknownOpen;
                 break :blk try allocator.dupe(u8, command);
             },
             .mode, .notification, .hint => error.UnknownOpen,
@@ -505,6 +505,44 @@ test "command model resolves app and lifecycle commands" {
     try std.testing.expect(std.mem.indexOf(u8, lifecycle, "--notifications-daemon") != null);
 
     try std.testing.expectError(error.UnknownOpen, model.open(std.testing.allocator, "missing-open"));
+}
+
+test "command model keeps app open payload behavior" {
+    var list = candidate.Candidate.List.empty;
+    defer list.deinit(std.testing.allocator);
+    try list.append(std.testing.allocator, candidate.Candidate.init(.app, "Terminal", "Utilities", "foot"));
+
+    var model = Command{
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    const command = try model.open(std.testing.allocator, "foot");
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("foot", command);
+}
+
+test "command model collects notification history list rows" {
+    var list = candidate.Candidate.List.empty;
+    defer list.deinit(std.testing.allocator);
+    try list.append(std.testing.allocator, candidate.Candidate.init(.notification, "Summary", "App", "notification-history:0:1"));
+
+    var model = Command{
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(std.testing.allocator);
+    var writer = output.writer(std.testing.allocator);
+    try model.commands(std.testing.allocator, &writer.interface);
+    try writer.interface.flush();
+
+    try std.testing.expectEqualStrings("notification\tnotification-history:0:1\tSummary\tApp\n", output.items);
 }
 
 test "command model writes nushell completion records" {
