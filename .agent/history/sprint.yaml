@@ -1,55 +1,92 @@
-id: notification_history_json_cache
-state: completed
+id: monitor_glasses_media_expansion
+state: approved_for_worker_execution
 
 purpose: >
-  Persist accepted freedesktop notifications into a bounded JSON cache and expose
-  a /notifications history picker view without adding launcher IPC or a preview
-  surface.
+  Expand /sunglasses into monitor-glasses media overlays carefully: first a
+  per-monitor still-image overlay on the existing pass-through layer surfaces,
+  then a video probe that proves or rejects external-player lifecycle before
+  any product code owns video.
 
 law:
-  - notification_daemon_persistence_is_best_effort
-  - notification_history_rows_are_informational
-  - json_cache_is_the_file_owner_for_history_retention_and_bounds
-  - launcher_remains_cli_summoned_with_no_resident_ipc
+  - still_image_overlay_extends_the_existing_sunglasses_surface_owner
+  - video_is_probe_only_until_lifecycle_placement_and_cleanup_are_proven
+  - no_sdl_video_player_in_this_sprint
+  - no_generic_media_or_surface_framework
+  - no_resident_launcher_ipc
 
 current_scope:
   in:
-    - notification daemon writes accepted Notify calls to JSON history
-    - cache path follows ${XDG_STATE_HOME:-$HOME/.local/state}/wayspot/notifications-history.json
-    - history cache keeps rows newer than 7 days and caps retained rows
-    - /notifications lists restart plus Notification history
-    - /notifications history lists cached rows newest-first
-    - banner and history previews share bounded whitespace-collapsing text helpers
+    - per-monitor image overlay enable flag
+    - per-monitor image opacity bounded 0..100
+    - per-monitor bounded absolute image path
+    - PNG and BMP still images through existing SDL decode precedent
+    - form controls for image enable, opacity, and clear/path summary
+    - hidden CLI setter/clearer only if needed to provide honest path selection
+    - local mpv video probe with exact process cleanup receipts
   out:
-    - notification detail preview pane
-    - notification replay or action invocation from history
-    - launcher IPC
-    - generic provider registry
+    - SDL-native video decode or playback
+    - VLC support unless a local probe proves a better installed path
+    - file picker UI
+    - schedules, profiles, presets, animations, or media library indexing
+    - generic overlay framework shared with wallpaper
 
 owners:
-  cache: src/notifications/history_cache.zig
-  daemon_persistence: src/notifications/dbus_daemon.zig
-  provider: src/providers/notification_history.zig
-  routing: src/search/rank.zig
-  picker_non_launch: src/ui/sdl_shell.zig
-  banner_preview: src/ui/sdl_banner.zig
+  state: src/sunglasses/state.zig
+  runtime: src/sunglasses/runtime.zig
+  form: src/ui/sunglasses_form.zig
+  surface: src/ui/sdl_sunglasses_surface.zig
+  wayland_shm_helpers:
+    - src/c/sdl.h
+    - src/c/wayspot_layer_shell.c
+  picker_integration: src/ui/sdl_shell.zig
+  cli: src/main.zig
+
+accepted_shape:
+  still_image:
+    config_format: >
+      Extend each monitor block with image_enabled, image_opacity, and image_path.
+      Missing image fields in an old saved state parse as disabled defaults.
+    path_rule: absolute_path_only_with_bounded_bytes
+    draw_rule: >
+      The sunglasses surface attaches one ARGB shm buffer per monitor redraw. If
+      image is enabled and opacity is non-zero, the buffer is image-derived;
+      red/blue and dim compose into that same buffer. Otherwise the current
+      uniform tint buffer path remains.
+    selection_rule: >
+      V1 may use a hidden CLI setter/clearer instead of building a file picker.
+      The /sunglasses form owns toggling, opacity, and clear behavior.
+  video:
+    product_state: not_accepted_yet
+    probe_rule: >
+      Probe mpv as an external exact-child process with fixed title/app-id,
+      no audio, looped playback, deterministic Hyprland placement, no focus
+      theft, and exact cleanup. Do not merge product video until the probe
+      passes receipts.
 
 progress:
   completed:
-    - 01_json_cache_owner
-    - 02_daemon_best_effort_persistence
-    - 03_notification_history_provider
-    - 04_route_and_non_launch_rows
-    - 05_real_provider_test_artifact
+    - 00_scope_and_owner_map
+    - 01_still_image_state_owner
   current:
-    - notification_history_json_cache_complete
+    - 02_still_image_surface_buffer
+  pending:
+    - 03_form_and_cli_controls
+    - 04_visual_receipts
+    - 05_external_video_probe
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
-  - zigup run 0.16.0 test src/search/rank.zig
-  - zigup run 0.16.0 test src/notification_history_provider_test.zig
   - zigup run 0.16.0 build -Doptimize=ReleaseFast
-  - zigup run 0.16.0 fmt --check touched Zig files
+  - zigup run 0.16.0 fmt --check touched files
   - git diff --check
   - banned active Zig pattern scan
-  - isolated dbus-run-session notify-send JSON write receipt
+  - hyprctl layers -j receipt for image overlay surfaces
+  - screenshot receipt for image visibility and pass-through behavior
+  - video probe receipts only after mpv placement is accepted
+
+stop_conditions:
+  - image overlay cannot preserve pass-through input and exact cleanup
+  - image decode requires broad new dependencies or unbounded buffers
+  - config parsing becomes migration-heavy or ambiguous
+  - mpv cannot be placed without focus theft or stale windows
+  - video requires Wayspot to own frame queues or decoder clocks
