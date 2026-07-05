@@ -1,5 +1,5 @@
 id: ui_controls_dry_extraction
-state: approved_for_worker_execution
+state: complete
 
 purpose: >
   Execute the reviewer-accepted UI controls DRY extraction sprint. The source of
@@ -46,14 +46,14 @@ progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_supersession
-  current:
     - 01_controls_folder_and_exports
-  pending:
     - 02_cursor_blink_extraction
     - 03_textbox_extraction
     - 04_slider_extraction
     - 05_comment_and_test_bibliography
     - 06_final_reviewer_gate
+  current: []
+  pending: []
 
 verification_floor:
   - commands listed in .agent/history/ui-elements-dry-sprint.yaml

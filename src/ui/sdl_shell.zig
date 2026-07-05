@@ -7,6 +7,7 @@ const std = @import("std");
 const app = @import("../app/mod.zig");
 const app_icons = @import("app_icons.zig");
 const common_dispatch = @import("common/dispatch.zig");
+const controls = @import("controls/mod.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const query_mod = @import("../search/query.zig");
 const hyprland = @import("../wallpaper/hyprland.zig");
@@ -39,7 +40,6 @@ const max_launch_wait_interrupts: u32 = 16;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
-const cursor_blink_interval_ms: u64 = 530;
 const LaunchRunError = error{
     CommandFailed,
     ForkFailed,
@@ -54,7 +54,6 @@ comptime {
     std.debug.assert(max_launch_wait_interrupts > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
-    std.debug.assert(cursor_blink_interval_ms > 0);
 }
 
 /// LaunchQueue owns one detached command intent between picker activation and controlled drain.
@@ -173,38 +172,6 @@ const ShutdownSignal = struct {
     }
 };
 
-const CursorBlink = struct {
-    visible: bool,
-    next_toggle_ms: u64,
-
-    fn init(now_ms: u64) CursorBlink {
-        return .{
-            .visible = true,
-            .next_toggle_ms = now_ms + cursor_blink_interval_ms,
-        };
-    }
-
-    fn reset(self: *CursorBlink, now_ms: u64) void {
-        self.visible = true;
-        self.next_toggle_ms = now_ms + cursor_blink_interval_ms;
-    }
-
-    fn advance(self: *CursorBlink, now_ms: u64) bool {
-        if (now_ms < self.next_toggle_ms) return false;
-        const was_visible = self.visible;
-        const toggles: u64 = ((now_ms - self.next_toggle_ms) / cursor_blink_interval_ms) + 1;
-        if ((toggles & 1) == 1) self.visible = !self.visible;
-        self.next_toggle_ms += toggles * cursor_blink_interval_ms;
-        return self.visible != was_visible;
-    }
-
-    fn waitTimeoutMs(self: *const CursorBlink, now_ms: u64) i32 {
-        if (now_ms >= self.next_toggle_ms) return 0;
-        const remaining = self.next_toggle_ms - now_ms;
-        return @intCast(@min(remaining, @as(u64, @intCast(std.math.maxInt(i32)))));
-    }
-};
-
 fn shutdownSignalHandler(signal: std.posix.SIG) callconv(.c) void {
     if (signal != .INT and signal != .TERM) return;
     const fd = shutdown_handler_fd.load(.acquire);
@@ -258,7 +225,7 @@ const SdlShell = struct {
     config: surface_config.SurfaceConfig,
     base_width: f32 = @floatFromInt(base_window_width),
     base_height: f32 = @floatFromInt(base_window_height),
-    cursor: CursorBlink = CursorBlink.init(0),
+    cursor: controls.cursor_blink.CursorBlink = controls.cursor_blink.CursorBlink.init(0, controls.cursor_blink.cursor_blink_interval_ms),
     shutdown_signal: ?*ShutdownSignal = null,
     wake_event_type: u32 = 0,
     query: std.ArrayList(u8) = .empty,
@@ -308,7 +275,7 @@ const SdlShell = struct {
             .config = config,
             .sunglasses_state = persisted_sunglasses_state,
             .wake_event_type = wake_event_type,
-            .cursor = CursorBlink.init(sdlNowMs()),
+            .cursor = controls.cursor_blink.CursorBlink.init(sdlNowMs(), controls.cursor_blink.cursor_blink_interval_ms),
         };
         try self.refreshResults();
         const shown = c.SDL_ShowWindow(window);
@@ -407,7 +374,8 @@ const SdlShell = struct {
                     return true;
                 }
                 const text = std.mem.span(event.text.text);
-                try self.query.appendSlice(self.allocator, text);
+                const query_edit = try controls.textbox.appendArrayList(&self.query, self.allocator, text);
+                std.debug.assert(query_edit != .overflow);
                 self.resetCursorBlink();
                 try self.refreshResults();
             },
@@ -459,7 +427,8 @@ const SdlShell = struct {
                             }
                             return true;
                         }
-                        trimLastUtf8(&self.query);
+                        const query_edit = controls.textbox.backspaceArrayList(&self.query);
+                        std.debug.assert(query_edit != .overflow);
                         self.resetCursorBlink();
                         try self.refreshResults();
                     },
@@ -867,13 +836,6 @@ const SdlShell = struct {
     }
 };
 
-fn trimLastUtf8(query: *std.ArrayList(u8)) void {
-    if (query.items.len == 0) return;
-    var idx = query.items.len - 1;
-    while (idx > 0 and (query.items[idx] & 0b1100_0000) == 0b1000_0000) : (idx -= 1) {}
-    query.shrinkRetainingCapacity(idx);
-}
-
 fn sdlNowMs() u64 {
     return c.SDL_GetTicks();
 }
@@ -919,8 +881,8 @@ fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors:
         const monitor_name = monitors.items[index].name();
         var monitor_state = if (loaded.get(monitor_name)) |existing|
             existing.*
-        else if (loaded.get("default")) |fallback|
-            fallback.*
+        else if (loaded.get("default")) |default_monitor_state|
+            default_monitor_state.*
         else
             try sunglasses_state.MonitorState.init(monitor_name);
         try monitor_state.setName(monitor_name);
@@ -956,12 +918,12 @@ test "route base height compacts sunglasses form only" {
     try std.testing.expect(routeBaseHeight(true) < routeBaseHeight(false));
 }
 
-test "sunglasses state maps legacy default values onto real monitor names" {
+test "sunglasses state maps default values onto real monitor names" {
     var loaded = sunglasses_state.defaultState();
-    var fallback = try sunglasses_state.MonitorState.init("default");
-    fallback.red_blue_enabled = true;
-    fallback.setRedBlueValue(35);
-    try loaded.append(fallback);
+    var default_monitor_state = try sunglasses_state.MonitorState.init("default");
+    default_monitor_state.red_blue_enabled = true;
+    default_monitor_state.setRedBlueValue(35);
+    try loaded.append(default_monitor_state);
 
     var monitors = hyprland.MonitorList{};
     monitors.items[0] = .{};
@@ -1127,31 +1089,6 @@ fn launchRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
 fn launchRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
     if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
     return error.CommandFailed;
-}
-
-test "cursor blink advances only at its deadline" {
-    var cursor = CursorBlink.init(100);
-
-    try std.testing.expect(cursor.visible);
-    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(100));
-    try std.testing.expect(!cursor.advance(629));
-    try std.testing.expect(cursor.visible);
-    try std.testing.expect(cursor.advance(630));
-    try std.testing.expect(!cursor.visible);
-    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(630));
-}
-
-test "cursor reset shows cursor and restarts deadline" {
-    var cursor = CursorBlink.init(0);
-
-    try std.testing.expect(cursor.advance(530));
-    try std.testing.expect(!cursor.visible);
-    cursor.reset(900);
-    try std.testing.expect(cursor.visible);
-    try std.testing.expectEqual(@as(i32, 530), cursor.waitTimeoutMs(900));
-    try std.testing.expect(!cursor.advance(1429));
-    try std.testing.expect(cursor.advance(1430));
-    try std.testing.expect(!cursor.visible);
 }
 
 test "launch queue clears after successful drain" {

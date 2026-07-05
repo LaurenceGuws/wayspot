@@ -1,5 +1,5 @@
 id: ui_controls_dry_extraction
-state: reviewer_gate_pending
+state: complete
 
 purpose: >
   DRY the active product Zig under `src/` by extracting exactly three reusable,
@@ -8,11 +8,9 @@ purpose: >
   preserves current UX behavior and leaves product vocabulary with product
   owners.
 
-active_sprint_conflict: >
-  `.agent/history/sprint.yaml` still names `monitor_glasses_media_expansion` as
-  approved for worker execution. This sprint is blocked from implementation
-  until the user explicitly supersedes that live sprint or the coordinator
-  updates live memory after user approval.
+live_memory: >
+  `.agent/history/sprint.yaml` superseded `monitor_glasses_media_expansion` and
+  made this sprint the active implementation sprint before source work started.
 
 stop_condition: >
   Stop only when every active product Zig file under `src/` has a matching
@@ -249,6 +247,10 @@ repo_survey:
   src/ui/app_icons.zig: KEEP_LOCAL_ICON_TEXTURE_OWNER
   src/ui/common/dispatch.zig: NO_ELEMENT_MECHANICS
   src/ui/common/kinds.zig: NO_ELEMENT_MECHANICS
+  src/ui/controls/cursor_blink.zig: ACCEPTED_CONTROL_CURSOR_BLINK
+  src/ui/controls/mod.zig: ACCEPTED_CONTROL_EXPORTS
+  src/ui/controls/slider.zig: ACCEPTED_CONTROL_SLIDER
+  src/ui/controls/textbox.zig: ACCEPTED_CONTROL_TEXTBOX
   src/ui/mod.zig: NO_ELEMENT_MECHANICS
   src/ui/picker_viewport.zig: KEEP_LOCAL_PICKER_VIEWPORT_OWNER
   src/ui/sdl_banner.zig: KEEP_LOCAL_NOTIFICATION_SURFACE
@@ -367,7 +369,7 @@ comment_requirements:
 
 pre_implementation_cleanup_gate:
   required:
-    - this artifact is present in the worktree planning checkpoint
+    - this artifact is present in the planning checkpoint
     - untracked `wayspot-sunglasses-*` receipt duplicates are removed or folded into memory
     - AGENTS.md rewrite is committed or explicitly included in the planning checkpoint
 

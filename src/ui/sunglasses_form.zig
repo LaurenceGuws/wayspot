@@ -1,6 +1,7 @@
 //! Sunglasses form owns picker-pane controls for in-memory filter state edits.
 
 const std = @import("std");
+const controls = @import("controls/mod.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const sdl_text = @import("sdl_text.zig");
 const sunglasses_state = @import("../sunglasses/state.zig");
@@ -38,8 +39,7 @@ pub const CommitResult = enum {
 pub const Form = struct {
     selected_monitor: u32 = 0,
     focus: Control = .monitor,
-    path_edit_buf: [sunglasses_state.max_image_path_bytes]u8 = undefined,
-    path_edit_len: u32 = 0,
+    path_edit: controls.textbox.Textbox(sunglasses_state.max_image_path_bytes) = .{},
     path_editing: bool = false,
     path_error: bool = false,
 
@@ -115,17 +115,7 @@ pub const Form = struct {
         if (self.focus != .image_path) return false;
         self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
         self.path_error = false;
-        if (text.len == 0) return true;
-
-        const remaining = sunglasses_state.max_image_path_bytes - self.path_edit_len;
-        const copy_len: u32 = if (text.len > @as(@TypeOf(text.len), remaining)) remaining else @intCast(text.len);
-        if (copy_len > 0) {
-            const start = self.path_edit_len;
-            const end = start + copy_len;
-            @memcpy(self.path_edit_buf[start..end], text[0..copy_len]);
-            self.path_edit_len = end;
-        }
-        if (text.len > @as(@TypeOf(text.len), copy_len)) self.path_error = true;
+        self.path_error = self.path_edit.append(text) == .overflow;
         return true;
     }
 
@@ -134,8 +124,8 @@ pub const Form = struct {
         if (self.focus != .image_path) return false;
         self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
         self.path_error = false;
-        if (self.path_edit_len == 0) return true;
-        self.path_edit_len = previousUtf8Start(self.pathEdit(), self.path_edit_len);
+        const edit_result = self.path_edit.backspace();
+        std.debug.assert(edit_result != .overflow);
         return true;
     }
 
@@ -177,17 +167,17 @@ pub const Form = struct {
             .monitor => return self.adjustSelectedMonitor(state, delta),
             .red_blue_slider => {
                 const before = monitor.red_blue_value;
-                monitor.setRedBlueValue(before + delta);
+                monitor.setRedBlueValue(redBlueRange().adjust(before, delta));
                 return monitor.red_blue_value != before;
             },
             .dim_slider => {
                 const before = monitor.dim_value;
-                monitor.setDimValue(before + delta);
+                monitor.setDimValue(dimRange().adjust(before, delta));
                 return monitor.dim_value != before;
             },
             .image_opacity_slider => {
                 const before = monitor.image_opacity;
-                monitor.setImageOpacity(before + delta);
+                monitor.setImageOpacity(imageOpacityRange().adjust(before, delta));
                 return monitor.image_opacity != before;
             },
             else => return false,
@@ -214,17 +204,17 @@ pub const Form = struct {
             },
             .red_blue_slider => {
                 const before = monitor.red_blue_value;
-                monitor.setRedBlueValue(redBlueFromX(hit.row, x));
+                monitor.setRedBlueValue(redBlueValueAt(hit.row, x));
                 return monitor.red_blue_value != before;
             },
             .dim_slider => {
                 const before = monitor.dim_value;
-                monitor.setDimValue(dimFromX(hit.row, x));
+                monitor.setDimValue(dimValueAt(hit.row, x));
                 return monitor.dim_value != before;
             },
             .image_opacity_slider => {
                 const before = monitor.image_opacity;
-                monitor.setImageOpacity(imageOpacityFromX(hit.row, x));
+                monitor.setImageOpacity(imageOpacityValueAt(hit.row, x));
                 return monitor.image_opacity != before;
             },
             .image_path => return false,
@@ -295,14 +285,14 @@ pub const Form = struct {
     fn seedPathEdit(self: *Form, path: []const u8) void {
         if (self.path_editing) return;
         std.debug.assert(path.len <= sunglasses_state.max_image_path_bytes);
-        @memcpy(self.path_edit_buf[0..path.len], path);
-        self.path_edit_len = @intCast(path.len);
+        const edit_result = self.path_edit.replace(path);
+        std.debug.assert(edit_result != .overflow);
         self.path_editing = true;
         self.path_error = false;
     }
 
     fn pathEdit(self: *const Form) []const u8 {
-        return self.path_edit_buf[0..self.path_edit_len];
+        return self.path_edit.slice();
     }
 
     fn drawPathValue(
@@ -316,7 +306,7 @@ pub const Form = struct {
         const row = controlRow(layout, .image_path);
         const value = if (self.focus == .image_path and self.path_error)
             "invalid path"
-        else if (self.focus == .image_path and self.path_editing and self.path_edit_len == 0)
+        else if (self.focus == .image_path and self.path_editing and self.pathEdit().len == 0)
             "empty clears"
         else if (self.focus == .image_path and self.path_editing)
             self.pathEdit()
@@ -471,37 +461,31 @@ fn drawToggle(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, enabled: boo
 }
 
 fn drawSignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = sliderTrack(row);
+    const track = trackForRow(row);
     try drawSliderTrack(renderer, track);
-    const normalized = @as(f32, @floatFromInt(sunglasses_state.clampRedBlue(value) - sunglasses_state.red_blue_min)) /
-        @as(f32, @floatFromInt(sunglasses_state.red_blue_max - sunglasses_state.red_blue_min));
-    try drawSliderKnob(renderer, track, normalized);
+    try drawSliderKnob(renderer, track, redBlueRange().normalized(value));
 }
 
 fn drawUnsignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = sliderTrack(row);
+    const track = trackForRow(row);
     try drawSliderTrack(renderer, track);
-    const normalized = @as(f32, @floatFromInt(sunglasses_state.clampDim(value) - sunglasses_state.dim_min)) /
-        @as(f32, @floatFromInt(sunglasses_state.dim_max - sunglasses_state.dim_min));
-    try drawSliderKnob(renderer, track, normalized);
+    try drawSliderKnob(renderer, track, dimRange().normalized(value));
 }
 
 fn drawImageOpacitySlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = sliderTrack(row);
+    const track = trackForRow(row);
     try drawSliderTrack(renderer, track);
-    const normalized = @as(f32, @floatFromInt(sunglasses_state.clampImageOpacity(value) - sunglasses_state.image_opacity_min)) /
-        @as(f32, @floatFromInt(sunglasses_state.image_opacity_max - sunglasses_state.image_opacity_min));
-    try drawSliderKnob(renderer, track, normalized);
+    try drawSliderKnob(renderer, track, imageOpacityRange().normalized(value));
 }
 
-fn drawSliderTrack(renderer: *c.SDL_Renderer, track: picker_viewport.Rect) !void {
+fn drawSliderTrack(renderer: *c.SDL_Renderer, track: controls.slider.Track) !void {
     const color = c.SDL_SetRenderDrawColor(renderer, 92, 104, 120, 255);
     const rect = c.SDL_FRect{ .x = track.x, .y = track.y, .w = track.w, .h = track.h };
     const filled = c.SDL_RenderFillRect(renderer, &rect);
     if (!color or !filled) return error.SdlRenderFailed;
 }
 
-fn drawSliderKnob(renderer: *c.SDL_Renderer, track: picker_viewport.Rect, normalized: f32) !void {
+fn drawSliderKnob(renderer: *c.SDL_Renderer, track: controls.slider.Track, normalized: f32) !void {
     const x = track.x + (track.w * @min(1, @max(0, normalized))) - (knob_width / 2);
     const y = track.y + (track.h / 2) - (knob_height / 2);
     const color = c.SDL_SetRenderDrawColor(renderer, 228, 235, 244, 255);
@@ -519,7 +503,7 @@ fn drawSignedValue(
     value: i32,
 ) !void {
     var buf: [16]u8 = undefined;
-    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampRedBlue(value)});
+    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{redBlueRange().clamp(value)});
     const row = controlRow(layout, control);
     try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
@@ -538,7 +522,7 @@ fn drawUnsignedValue(
     value: i32,
 ) !void {
     var buf: [16]u8 = undefined;
-    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampDim(value)});
+    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{dimRange().clamp(value)});
     const row = controlRow(layout, control);
     try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
@@ -557,7 +541,7 @@ fn drawImageOpacityValue(
     value: i32,
 ) !void {
     var buf: [16]u8 = undefined;
-    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampImageOpacity(value)});
+    const rendered = try std.fmt.bufPrint(&buf, "{d}", .{imageOpacityRange().clamp(value)});
     const row = controlRow(layout, control);
     try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
@@ -576,53 +560,43 @@ fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
     };
 }
 
-fn sliderTrack(row: picker_viewport.Rect) picker_viewport.Rect {
+fn trackForRow(row: picker_viewport.Rect) controls.slider.Track {
     const track_x = valueTextX(row) + value_column_width;
     const track_right = row.x + row.w - control_right_inset;
-    return .{
-        .x = track_x,
-        .y = row.y + (row.h - slider_height) / 2,
-        .w = @max(1, track_right - track_x),
-        .h = slider_height,
-    };
+    return controls.slider.Track.init(track_x, row.y + (row.h - slider_height) / 2, track_right - track_x, slider_height);
 }
 
 fn valueTextX(row: picker_viewport.Rect) f32 {
     return row.x + @max(122, row.w * 0.28);
 }
 
-fn redBlueFromX(row: picker_viewport.Rect, x: f32) i32 {
-    const track = sliderTrack(row);
-    const normalized = @min(1, @max(0, (x - track.x) / track.w));
-    const span = sunglasses_state.red_blue_max - sunglasses_state.red_blue_min;
-    return sunglasses_state.clampRedBlue(sunglasses_state.red_blue_min + @as(i32, @intFromFloat(@round(normalized * @as(f32, @floatFromInt(span))))));
+fn redBlueValueAt(row: picker_viewport.Rect, x: f32) i32 {
+    return redBlueRange().valueFromX(trackForRow(row), x);
 }
 
-fn dimFromX(row: picker_viewport.Rect, x: f32) i32 {
-    const track = sliderTrack(row);
-    const normalized = @min(1, @max(0, (x - track.x) / track.w));
-    const span = sunglasses_state.dim_max - sunglasses_state.dim_min;
-    return sunglasses_state.clampDim(sunglasses_state.dim_min + @as(i32, @intFromFloat(@round(normalized * @as(f32, @floatFromInt(span))))));
+fn dimValueAt(row: picker_viewport.Rect, x: f32) i32 {
+    return dimRange().valueFromX(trackForRow(row), x);
 }
 
-fn imageOpacityFromX(row: picker_viewport.Rect, x: f32) i32 {
-    const track = sliderTrack(row);
-    const normalized = @min(1, @max(0, (x - track.x) / track.w));
-    const span = sunglasses_state.image_opacity_max - sunglasses_state.image_opacity_min;
-    return sunglasses_state.clampImageOpacity(sunglasses_state.image_opacity_min + @as(i32, @intFromFloat(@round(normalized * @as(f32, @floatFromInt(span))))));
+fn imageOpacityValueAt(row: picker_viewport.Rect, x: f32) i32 {
+    return imageOpacityRange().valueFromX(trackForRow(row), x);
+}
+
+fn redBlueRange() controls.slider.ScalarRange {
+    return controls.slider.ScalarRange.init(sunglasses_state.red_blue_min, sunglasses_state.red_blue_max);
+}
+
+fn dimRange() controls.slider.ScalarRange {
+    return controls.slider.ScalarRange.init(sunglasses_state.dim_min, sunglasses_state.dim_max);
+}
+
+fn imageOpacityRange() controls.slider.ScalarRange {
+    return controls.slider.ScalarRange.init(sunglasses_state.image_opacity_min, sunglasses_state.image_opacity_max);
 }
 
 fn pathSummary(path: []const u8) []const u8 {
     if (path.len == 0) return "not set";
     return std.fs.path.basename(path);
-}
-
-fn previousUtf8Start(text: []const u8, end: u32) u32 {
-    std.debug.assert(text.len >= @as(@TypeOf(text.len), end));
-    if (end == 0) return 0;
-    var index = end - 1;
-    while (index > 0 and (text[index] & 0b1100_0000) == 0b1000_0000) : (index -= 1) {}
-    return index;
 }
 
 fn negativeMagnitude(delta: i32) u32 {
@@ -748,9 +722,9 @@ test "image path text input appends within bounded edit buffer" {
     try std.testing.expect(try form.handleTextInput(&state, "overlay.png"));
     try std.testing.expectEqualStrings("/tmp/overlay.png", form.pathEdit());
 
-    form.path_edit_len = sunglasses_state.max_image_path_bytes - 1;
+    form.path_edit.len = sunglasses_state.max_image_path_bytes - 1;
     try std.testing.expect(try form.handleTextInput(&state, "abcdef"));
-    try std.testing.expectEqual(sunglasses_state.max_image_path_bytes, form.path_edit_len);
+    try std.testing.expectEqual(sunglasses_state.max_image_path_bytes, form.path_edit.len);
     try std.testing.expect(form.path_error);
 }
 
@@ -787,7 +761,7 @@ test "image path empty commit clears path and disables image" {
     try state.monitors[0].setImagePath("/tmp/wayspot-overlay.png");
     form.focus = .image_path;
     form.seedPathEdit(state.monitors[0].imagePath());
-    form.path_edit_len = 0;
+    form.path_edit.len = 0;
 
     try std.testing.expectEqual(CommitResult.changed, try form.commitFocused(&state));
     try std.testing.expect(!state.monitors[0].image_enabled);
@@ -802,7 +776,7 @@ test "image path invalid commit keeps focus and state unchanged" {
     try state.monitors[0].setImagePath("/tmp/old.png");
     form.focus = .image_path;
     form.seedPathEdit(state.monitors[0].imagePath());
-    form.path_edit_len = 0;
+    form.path_edit.len = 0;
     try std.testing.expect(try form.handleTextInput(&state, "relative.png"));
 
     try std.testing.expectEqual(CommitResult.invalid, try form.commitFocused(&state));
