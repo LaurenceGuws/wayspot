@@ -7,6 +7,7 @@ pub const SearchService = struct {
     actions: ?*providers.ActionsProvider = null,
     apps: ?*providers.AppsProvider = null,
     modes: ?*providers.ModesProvider = null,
+    notification_history: ?*providers.NotificationHistoryProvider = null,
     query_mu: std.Io.Mutex = .init,
     history_path: ?[]const u8 = null,
     candidates: search.CandidateList = .empty,
@@ -75,6 +76,7 @@ pub const SearchService = struct {
     fn loadCandidatesOnce(self: *SearchService, allocator: std.mem.Allocator) !void {
         if (self.candidates_loaded) return;
         if (self.modes) |provider| try provider.collect(allocator, &self.candidates);
+        if (self.notification_history) |provider| try provider.collect(allocator, &self.candidates);
         if (self.actions) |provider| try provider.collect(allocator, &self.candidates);
         if (self.apps) |provider| try provider.collect(allocator, &self.candidates);
         self.candidates_loaded = true;

@@ -27,7 +27,7 @@ pub fn rankCandidatesWithHistory(
     defer scored.deinit(allocator);
 
     for (candidates) |candidate| {
-        if (!matchesRoute(query.route, candidate)) continue;
+        if (!matchesRoute(query, candidate)) continue;
         const score = candidateScoreNewestFirst(query.route, query.term, candidate, recent_actions);
         if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
@@ -47,7 +47,7 @@ pub fn rankCandidatesWithOldestFirstHistory(
     defer scored.deinit(allocator);
 
     for (candidates) |candidate| {
-        if (!matchesRoute(query.route, candidate)) continue;
+        if (!matchesRoute(query, candidate)) continue;
         const score = candidateScoreOldestFirst(query.route, query.term, candidate, history_actions);
         if (score <= 0) continue;
         try scored.append(allocator, .{ .candidate = candidate, .score = score });
@@ -77,12 +77,12 @@ fn lessThan(_: void, a: ScoredCandidate, b: ScoredCandidate) bool {
     return icon_order == .lt;
 }
 
-fn matchesRoute(route: query_mod.Route, candidate: types.Candidate) bool {
-    return switch (route) {
+fn matchesRoute(query: query_mod.Query, candidate: types.Candidate) bool {
+    return switch (query.route) {
         .blended => candidate.kind == .app,
         .apps => candidate.kind == .app,
-        .modes => candidate.kind == .mode,
-        .notifications => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:notifications:restart"),
+        .modes => candidate.kind == .mode and !std.mem.eql(u8, candidate.action, "/notifications history"),
+        .notifications => matchesNotificationRoute(query.term, candidate),
         .sunglasses => false,
         .wallpapers => candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:wallpapers:restart"),
         .run => true,
@@ -111,6 +111,16 @@ fn candidateScoreOldestFirst(
 
 fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, candidate: types.Candidate) ?i32 {
     var score: i32 = baseWeight(route, candidate.kind);
+    if (route == .notifications and candidate.kind == .notification) {
+        const history_filter = notificationHistoryFilter(needle) orelse return null;
+        if (history_filter.len == 0) return score + notificationHistoryOrderBoost(candidate.action);
+        if (indexOfAsciiFold(candidate.title, history_filter) == null and
+            (candidate.subtitle.len == 0 or indexOfAsciiFold(candidate.subtitle, history_filter) == null))
+        {
+            return null;
+        }
+        return score + 30 + notificationHistoryOrderBoost(candidate.action);
+    }
     if (needle.len == 0) return score;
 
     const title_contains = indexOfAsciiFold(candidate.title, needle) != null;
@@ -123,6 +133,29 @@ fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, cand
     if (subtitle_contains) score += 10;
     score += shortQueryBias(needle.len, candidate.kind);
     return score;
+}
+
+fn matchesNotificationRoute(term: []const u8, candidate: types.Candidate) bool {
+    if (notificationHistoryFilter(term) != null) return candidate.kind == .notification;
+    if (candidate.kind == .daemon and std.mem.eql(u8, candidate.action, "daemon:notifications:restart")) return true;
+    return candidate.kind == .mode and std.mem.eql(u8, candidate.action, "/notifications history");
+}
+
+fn notificationHistoryFilter(term: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, term, " \t");
+    if (std.mem.eql(u8, trimmed, "history")) return "";
+    if (!std.mem.startsWith(u8, trimmed, "history ")) return null;
+    return std.mem.trim(u8, trimmed["history".len..], " \t");
+}
+
+fn notificationHistoryOrderBoost(action: []const u8) i32 {
+    const prefix = "notification-history:";
+    if (!std.mem.startsWith(u8, action, prefix)) return 0;
+    const rest = action[prefix.len..];
+    const end = std.mem.indexOfScalar(u8, rest, ':') orelse return 0;
+    const rank = std.fmt.parseInt(u32, rest[0..end], 10) catch return 0;
+    const bounded_rank = @min(rank, 900);
+    return 1000 - @as(i32, @intCast(bounded_rank));
 }
 
 fn eqlAsciiFold(haystack: []const u8, needle: []const u8) bool {
@@ -205,6 +238,16 @@ fn recencyBonus(index: u32) i32 {
 
 fn baseWeight(route: query_mod.Route, kind: types.CandidateKind) i32 {
     if (route == .run) return 0;
+    if (route == .notifications) {
+        return switch (kind) {
+            .app => 0,
+            .action => 0,
+            .mode => 70,
+            .daemon => 100,
+            .notification => 60,
+            .hint => 0,
+        };
+    }
     return switch (kind) {
         .app => 100,
         .action => 70,
@@ -249,6 +292,9 @@ test "slash routes expose modes and daemon commands only" {
         .init(.mode, "/sunglasses", "Filter form", "/sunglasses"),
         .init(.mode, "/wallpapers", "Runtime mode", "/wallpapers"),
         .init(.daemon, "Restart notifications daemon", "Runtime", "daemon:notifications:restart"),
+        .init(.mode, "Notification history", "Runtime", "/notifications history"),
+        .init(.notification, "New message", "Mail: body", "notification-history:0:2"),
+        .init(.notification, "Older message", "Mail: body", "notification-history:1:1"),
         .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
         .init(.app, "Kitty", "Terminal", "kitty"),
     };
@@ -264,8 +310,14 @@ test "slash routes expose modes and daemon commands only" {
 
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(notifications.len)));
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(notifications.len)));
     try std.testing.expectEqualStrings("daemon:notifications:restart", notifications[0].candidate.action);
+
+    const history = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications history"), &candidates);
+    defer std.testing.allocator.free(history);
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(history.len)));
+    try std.testing.expectEqual(types.CandidateKind.notification, history[0].candidate.kind);
+    try std.testing.expectEqualStrings("notification-history:0:2", history[0].candidate.action);
 }
 
 test "default route is apps only" {

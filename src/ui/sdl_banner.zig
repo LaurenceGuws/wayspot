@@ -4,6 +4,7 @@
 //! SDL objects, Hyprland placement command, and bounded display timeout.
 
 const std = @import("std");
+const notification_preview = @import("../notifications/preview.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 
@@ -24,9 +25,6 @@ const default_timeout_ms: u32 = 4200;
 const min_timeout_ms: u32 = 1200;
 const max_timeout_ms: u32 = 10000;
 const event_wait_ms: i32 = 250;
-const max_app_bytes: u32 = 80;
-const max_summary_bytes: u32 = 132;
-const max_body_bytes: u32 = 132;
 const placement_child_fail_code: i32 = 127;
 const max_placement_wait_interrupts: u32 = 8;
 const placement_command: [:0]const u8 =
@@ -125,21 +123,25 @@ fn render(
     const accent_drawn = c.SDL_RenderFillRect(renderer, &accent);
     if (!accent_color or !accent_drawn) return error.SdlRenderFailed;
 
-    try text.draw(renderer, text_x, app_y, request.app_name, .{
+    const app_text = notification_preview.bannerApp(request.app_name);
+    const summary_text = notification_preview.bannerSummary(request.summary);
+    const body_text = notification_preview.bannerBody(request.body);
+
+    try text.draw(renderer, text_x, app_y, app_text.slice(), .{
         .color = .{ .r = 150, .g = 166, .b = 184 },
-        .max_bytes = max_app_bytes,
+        .max_bytes = notification_preview.banner_app_max,
         .font_size_px = 13,
         .surface_scale = scale,
     });
-    try text.draw(renderer, text_x, summary_y, request.summary, .{
+    try text.draw(renderer, text_x, summary_y, summary_text.slice(), .{
         .color = .{ .r = 238, .g = 242, .b = 247 },
-        .max_bytes = max_summary_bytes,
+        .max_bytes = notification_preview.banner_summary_max,
         .font_size_px = 18,
         .surface_scale = scale,
     });
-    try text.draw(renderer, text_x, body_y, request.body, .{
+    try text.draw(renderer, text_x, body_y, body_text.slice(), .{
         .color = .{ .r = 188, .g = 198, .b = 210 },
-        .max_bytes = max_body_bytes,
+        .max_bytes = notification_preview.banner_body_max,
         .font_size_px = 15,
         .surface_scale = scale,
     });

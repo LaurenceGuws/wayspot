@@ -1,53 +1,55 @@
-id: sunglasses_foundations
+id: notification_history_json_cache
 state: completed
 
-source:
-  detailed_index: .agent/history/sunglasses-foundations-sprint.yaml
-  followup_receipts: .agent/history/sunglasses-followup-receipts.yaml
-
 purpose: >
-  Add the v1 foundations for /sunglasses as a real subsystem: a picker form
-  for red/blue and dim controls, persisted bounded state, and a non-interactive
-  overlay daemon that applies the state per monitor.
+  Persist accepted freedesktop notifications into a bounded JSON cache and expose
+  a /notifications history picker view without adding launcher IPC or a preview
+  surface.
 
 law:
-  - sunglasses_is_a_runtime_surface_subsystem_not_a_picker_row
-  - form_modes_are_not_result_lists
-  - overlay_surfaces_must_be_non_interactive_and_cleaned_up_once
-  - no_generic_surface_framework_before_two_real_owners_force_a_deletion
+  - notification_daemon_persistence_is_best_effort
+  - notification_history_rows_are_informational
+  - json_cache_is_the_file_owner_for_history_retention_and_bounds
+  - launcher_remains_cli_summoned_with_no_resident_ipc
 
 current_scope:
   in:
-    - /sunglasses mode row
-    - /sunglasses opens a form pane in the picker
-    - one red/blue toggle and bounded slider per monitor
-    - one dim toggle and bounded slider per monitor
-    - persisted sunglasses state
-    - one resident sunglasses daemon
-    - one pass-through overlay surface per monitor
-    - daemon apply wake when form state changes
+    - notification daemon writes accepted Notify calls to JSON history
+    - cache path follows ${XDG_STATE_HOME:-$HOME/.local/state}/wayspot/notifications-history.json
+    - history cache keeps rows newer than 7 days and caps retained rows
+    - /notifications lists restart plus Notification history
+    - /notifications history lists cached rows newest-first
+    - banner and history previews share bounded whitespace-collapsing text helpers
   out:
-    - color science beyond a simple signed blue-to-red tint
-    - schedules, sunrise, location, animation, profiles, presets
-    - generic UI framework
-    - plugin or provider registry
-    - scripting VM
+    - notification detail preview pane
+    - notification replay or action invocation from history
+    - launcher IPC
+    - generic provider registry
+
+owners:
+  cache: src/notifications/history_cache.zig
+  daemon_persistence: src/notifications/dbus_daemon.zig
+  provider: src/providers/notification_history.zig
+  routing: src/search/rank.zig
+  picker_non_launch: src/ui/sdl_shell.zig
+  banner_preview: src/ui/sdl_banner.zig
 
 progress:
   completed:
-    - 01_state_owner
-    - 02_form_owner_no_effect
-    - 03_overlay_surface_proof
-    - 04_apply_path
-    - 05_session_cutover
+    - 01_json_cache_owner
+    - 02_daemon_best_effort_persistence
+    - 03_notification_history_provider
+    - 04_route_and_non_launch_rows
+    - 05_real_provider_test_artifact
   current:
-    - sunglasses_foundations_complete
+    - notification_history_json_cache_complete
 
 verification_floor:
   - zigup run 0.16.0 build test --summary all
+  - zigup run 0.16.0 test src/search/rank.zig
+  - zigup run 0.16.0 test src/notification_history_provider_test.zig
   - zigup run 0.16.0 build -Doptimize=ReleaseFast
   - zigup run 0.16.0 fmt --check touched Zig files
   - git diff --check
   - banned active Zig pattern scan
-  - hyprctl layers receipt for sunglasses overlay surfaces
-  - screenshot receipt for visible red/blue and dim effects
+  - isolated dbus-run-session notify-send JSON write receipt

@@ -533,6 +533,7 @@ const SdlShell = struct {
             try self.switchMode(candidate.action);
             return;
         }
+        if (candidate.kind == .notification or candidate.kind == .hint) return;
         var plan = try common_dispatch.planCommandKind(self.allocator, uiKind(candidate.kind), candidate.action);
         defer plan.deinit(self.allocator);
         if (!plan.detach_command) return error.LaunchMustDetach;

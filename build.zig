@@ -129,11 +129,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_notification_history_cache_tests = b.addRunArtifact(notification_history_cache_tests);
 
+    const notification_history_provider_mod = b.createModule(.{
+        .root_source_file = b.path("src/notification_history_provider_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const notification_history_provider_tests = b.addTest(.{
+        .root_module = notification_history_provider_mod,
+    });
+    const run_notification_history_provider_tests = b.addRunArtifact(notification_history_provider_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);
     test_step.dependOn(&run_notification_history_cache_tests.step);
+    test_step.dependOn(&run_notification_history_provider_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const history_cache = @import("history_cache.zig");
 const notifications_state = @import("state.zig");
 const notifications_runtime = @import("runtime.zig");
 const sdl_banner = @import("../ui/sdl_banner.zig");
@@ -582,6 +583,24 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
             .actions = action_pairs,
         });
     }
+    persistHistory(self.allocator, .{
+        .id = id,
+        .created_ns = 0,
+        .updated_ns = 0,
+        .app_name = std.mem.span(app_name),
+        .app_icon = std.mem.span(app_icon),
+        .summary = std.mem.span(summary),
+        .body = std.mem.span(body),
+        .urgency = parsed_hints.urgency,
+        .transient = parsed_hints.transient,
+        .active = true,
+    }) catch |err| {
+        log.warn("notification history save failed id={d} app=\"{s}\" err={s}", .{
+            id,
+            std.mem.span(app_name),
+            @errorName(err),
+        });
+    };
     notifications_runtime.recordNotify(
         self.allocator,
         id,
@@ -607,6 +626,29 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
     );
 
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
+}
+
+fn persistHistory(allocator: std.mem.Allocator, input: history_cache.RowInput) !void {
+    const now_ns = realtimeNs();
+    var cache = try history_cache.load(allocator, now_ns);
+    defer cache.deinit();
+    var row = input;
+    row.created_ns = now_ns;
+    row.updated_ns = now_ns;
+    try cache.upsert(row);
+    cache.pruneOld(now_ns);
+    const path = try history_cache.cachePath(allocator);
+    defer allocator.free(path);
+    try cache.saveAtPath(path);
+}
+
+fn realtimeNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    const seconds_ns: u64 = @intCast(ts.sec * std.time.ns_per_s);
+    const nanos: u64 = @intCast(ts.nsec);
+    return seconds_ns + nanos;
 }
 
 fn onNotifyBanner(event: Daemon.NotifyEvent) void {

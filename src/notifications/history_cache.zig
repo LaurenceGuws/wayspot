@@ -11,7 +11,7 @@ pub const max_summary_bytes: u32 = 512;
 pub const max_body_bytes: u32 = 4096;
 pub const retention_ns: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
-const cache_relative_path = ".local/state/wayspot/notifications-history.json";
+const cache_relative_path = "wayspot/notifications-history.json";
 
 comptime {
     std.debug.assert(max_file_bytes > 0);
@@ -136,8 +136,11 @@ pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8, now_ns: u64) !
 }
 
 pub fn cachePath(allocator: std.mem.Allocator) ![]u8 {
+    if (std.c.getenv("XDG_STATE_HOME")) |state_home_z| {
+        return std.fmt.allocPrint(allocator, "{s}/{s}", .{ std.mem.span(state_home_z), cache_relative_path });
+    }
     const home = if (std.c.getenv("HOME")) |home_z| std.mem.span(home_z) else ".";
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, cache_relative_path });
+    return std.fmt.allocPrint(allocator, "{s}/.local/state/{s}", .{ home, cache_relative_path });
 }
 
 fn parseInto(cache: *Cache, raw: []const u8) !void {
