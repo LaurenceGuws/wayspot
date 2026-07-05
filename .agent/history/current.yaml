@@ -7,7 +7,7 @@ product:
   summary: >
     Wayspot is a pragmatic DE busybox: CLI-summoned SDL app launcher,
     notification daemon, wallpaper daemon, and focused runtime surfaces.
-  active_focus: ui_appearance_lua_defaults
+  active_focus: domain_language_footing
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child

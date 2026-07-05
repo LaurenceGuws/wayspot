@@ -1,72 +1,63 @@
-id: ui_appearance_lua_defaults
-state: complete
+id: domain_language_footing
+state: active
 
 purpose: >
-  Execute the reviewer-accepted UI appearance and Lua defaults sprint. The
-  source of truth is `.agent/history/ui-appearance-lua-defaults-sprint.yaml`.
+  Execute the reviewer-accepted domain language footing sprint. The source of
+  truth is `.agent/history/domain-language-footing-sprint.yaml`.
 
-active_index: .agent/history/ui-appearance-lua-defaults-sprint.yaml
+active_index: .agent/history/domain-language-footing-sprint.yaml
 
 supersedes:
-  id: ui_controls_dry_extraction
+  id: ui_appearance_lua_defaults
   reason: >
-    User accepted the UI appearance and Lua defaults sprint as the next active
-    implementation sprint. UI controls dry extraction is complete.
-
-accepted_new_files:
-  - assets/lua/defaults.lua
-  - src/config/mod.zig
-  - src/config/defaults.zig
-  - src/ui/appearance.zig
-  - src/ui/controls/appearance.zig
-  - vendor/howl-lua/
+    User accepted the next repo-wide footing sprint after the Lua appearance
+    defaults sprint completed.
 
 law:
   - implement_nothing_not_named_in_the_active_index
-  - preserve_current_visual_defaults_before_user_override
-  - no_product_domain_files_under_src_ui_controls
-  - no_peer_shared_ui_control_folder
+  - final_tree_contains_nothing_more_and_nothing_less_than_the_index
+  - no_provider_search_common_types_ui_control_command_or_action_buckets
+  - no_sdl_prefixed_product_files_or_symbols
   - no_compatibility_wrappers
-  - no_runtime_scripting_vm
-  - lua_defaults_are_bounded_data_only
+  - no_non_final_mapping_choices
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - vendor howl-lua at v0.1.0-beta.2 exactly
-    - add bounded Lua defaults file and loader
-    - add inert appearance values under src/ui/controls
-    - add product appearance mapping under src/ui
-    - wire picker, banner, text, and sunglasses form to appearance state
-    - delete moved hardcoded appearance literals from renderer files
-    - update tests, memory, docs, and production comments
+    - rename or delete every rejected source path named by the index
+    - move notification, picker, mode, wallpaper, and sunglasses code to accepted owners
+    - update build graph roots and test module names
+    - update root exports, main wiring, README, AGENTS, and live memory
+    - preserve current product behavior through explicit receipts
   out:
-    - generic theme framework
-    - runtime Lua callbacks or scripting features
-    - provider or mode registration through Lua
-    - product-domain files inside src/ui/controls
-    - changing picker, banner, or form behavior beyond config-owned defaults
+    - new modes
+    - new IPC
+    - new config schema
+    - new runtime caches
+    - generic UI framework
+    - compatibility modules for old paths
 
 progress:
   completed:
     - 00_index_review_accepted
-    - 00_live_memory_supersession
-    - 01_vendor_and_build_receipt
-    - 02_defaults_lua_surface
-    - 03_bounded_config_loader
-    - 04_inert_and_product_appearance
-    - 05_surface_wiring_and_deletion
-    - 06_memory_and_docs
-    - 07_final_reviewer_gate
-  current: []
-  pending: []
+    - 00_live_memory_activation
+  current:
+    - 01_notification_owner
+  pending:
+    - 02_picker_query_rank_candidate
+    - 03_mode_index
+    - 04_picker_surface_elements
+    - 05_wallpaper_sunglasses_surfaces
+    - 06_build_memory_docs
+    - 07_behavior_receipts
+    - 08_final_reviewer_gate
 
 verification_floor:
-  - commands listed in .agent/history/ui-appearance-lua-defaults-sprint.yaml
+  - commands listed in .agent/history/domain-language-footing-sprint.yaml
 
 stop_conditions:
   - any implementation need conflicts with the accepted index
-  - visual default preservation cannot be maintained
-  - bounded Lua execution cannot be implemented without changing the accepted vendor policy
-  - a reviewer rejects the final code
+  - any old path needs a compatibility shim to keep building
+  - a behavior receipt cannot be made concrete
+  - a reviewer rejects the final tree
   - user decision is required
