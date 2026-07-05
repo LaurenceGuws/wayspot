@@ -1,63 +1,62 @@
-id: domain_language_footing
-state: complete
+id: flat_lifecycle_nouns
+state: active
 
 purpose: >
-  Execute the reviewer-accepted domain language footing sprint. The source of
-  truth is `.agent/history/domain-language-footing-sprint.yaml`.
+  Execute the reviewer-accepted lifecycle noun flattening sprint. The source of
+  truth is `.agent/history/flat-lifecycle-nouns-sprint.yaml`.
 
-active_index: .agent/history/domain-language-footing-sprint.yaml
+active_index: .agent/history/flat-lifecycle-nouns-sprint.yaml
 
 supersedes:
-  id: ui_appearance_lua_defaults
+  id: domain_language_footing
   reason: >
-    User accepted the next repo-wide footing sprint after the Lua appearance
-    defaults sprint completed.
+    User accepted the follow-up flattening sprint after the domain footing
+    sprint completed.
 
 law:
   - implement_nothing_not_named_in_the_active_index
-  - final_tree_contains_nothing_more_and_nothing_less_than_the_index
-  - no_rejected_bucket_vocabulary
-  - no_vendor_prefixed_product_files_or_symbols
+  - flatten_daemon_runtime_process_to_concrete_owner_names
+  - keep_external_daemon_flags_stable
   - no_compatibility_wrappers
-  - no_non_final_mapping_choices
+  - no_sideways_lifecycle_buckets
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - rename or delete every rejected source path named by the index
-    - move notification, picker, mode, wallpaper, and sunglasses code to accepted owners
-    - update build graph roots and test module names
-    - update root exports, main wiring, README, AGENTS, and live memory
-    - preserve current product behavior through explicit receipts
+    - move notification daemon/runtime to dbus/rows
+    - move wallpaper runtime to loop
+    - move sunglasses runtime to overlay
+    - move process identity to identity
+    - rename picker daemon rows to lifecycle rows
+    - update source, build graph, README, AGENTS, live memory, re-run helper, and packaging
+    - preserve behavior through explicit receipts
   out:
     - new modes
     - new IPC
     - new config schema
-    - new runtime caches
-    - generic UI framework
+    - new caches
     - compatibility modules for old paths
 
 progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_activation
-    - 01_notification_owner
-    - 02_picker_query_rank_candidate
-    - 03_mode_index
-    - 04_picker_surface_elements
-    - 05_wallpaper_sunglasses_surfaces
-    - 06_build_memory_docs
-    - 07_behavior_receipts
-    - 08_final_reviewer_gate
-  current: []
-  pending: []
+  current:
+    - 01_notification_flatten
+  pending:
+    - 02_wallpaper_sunglasses_flatten
+    - 03_picker_lifecycle_rows
+    - 04_identity_and_child_nouns
+    - 05_docs_memory_build
+    - 06_behavior_receipts
+    - 07_final_reviewer_gate
 
 verification_floor:
-  - commands listed in .agent/history/domain-language-footing-sprint.yaml
+  - commands listed in .agent/history/flat-lifecycle-nouns-sprint.yaml
 
 stop_conditions:
   - any implementation need conflicts with the accepted index
-  - any old path needs a compatibility shim to keep building
+  - an old path needs a compatibility wrapper to keep building
   - a behavior receipt cannot be made concrete
   - a reviewer rejects the final tree
   - user decision is required

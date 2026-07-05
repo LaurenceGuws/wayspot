@@ -1,0 +1,320 @@
+id: flat_lifecycle_nouns
+state: accepted
+
+purpose: >
+  Flatten Wayspot's remaining broad lifecycle nouns after the domain footing
+  sprint. `daemon`, `runtime`, and `process` must stop being Wayspot domain
+  owners. The code should name the concrete thing it owns: DBus notification
+  interface, notification rows, wallpaper loop, sunglasses overlay, picker
+  rows, PID files, child forks, and visible program identity.
+
+user_goal: >
+  Flatten `deamon`, `daemon`, `runtime`, and `process` nouns. This is expected
+  to be mostly mechanical, but it must leave the tree with direct owner names
+  rather than new sideways buckets.
+
+stop_condition: >
+  Stop only when every Wayspot-owned file, folder, symbol, comment, memory
+  entry, README phrase, and build module using daemon/runtime/process as a
+  domain noun has either moved to an exact concrete owner or been deleted; all
+  stale names are absent from source and live memory except explicitly allowed
+  external interface strings; behavior receipts pass; and the strict reviewer
+  accepts the final tree.
+
+team_protocol:
+  coordinator: >
+    Owns this index, activates it only after reviewer acceptance, delegates the
+    implementation to one worker, and does not implement sprint code.
+  planner_coder: >
+    One long-lived teammate implements only the accepted index. No new behavior,
+    no compatibility wrappers, no broader architecture.
+  reviewer: >
+    One strict teammate gates the index and final tree. Passing tests are not
+    acceptance.
+  report_to_user_only_for:
+    - user_needed_blocker
+    - sprint_complete
+
+accepted_owner_language:
+  notification:
+    dbus: Freedesktop notification DBus interface and timers.
+    rows: bounded in-memory notification rows shown by banners and history.
+    banner: copied notification text and child banner surface.
+    history_cache: JSON cache file.
+    history_list: picker history rows.
+  wallpaper:
+    loop: monitor surfaces, random timer, rotate wake, shutdown cleanup.
+    surface: per-monitor background surface.
+    hyprland: monitor facts and Hyprland socket paths.
+    library: image discovery.
+  sunglasses:
+    overlay: monitor overlay loop, apply wake, PID file, shutdown cleanup.
+    state: persisted monitor filter config.
+    surface: per-monitor overlay surface.
+    form: picker form.
+  picker:
+    mode: slash index rows.
+    open: selected row execution.
+    candidate_kind: >
+      Use concrete row kind names. The restart row kind must not be named
+      daemon; prefer `lifecycle`.
+  identity:
+    role: visible Linux comm names for Wayspot entrypoints.
+
+rejected_language:
+  words_must_not_remain_as_wayspot_domain_nouns:
+    - daemon
+    - Daemon
+    - deamon
+    - Deamon
+    - runtime
+    - Runtime
+    - process
+    - Process
+  rejected_paths:
+    - src/notification/daemon.zig
+    - src/notification/runtime.zig
+    - src/wallpaper/runtime.zig
+    - src/sunglasses/runtime.zig
+    - src/process_identity.zig
+  rejected_symbols:
+    - Daemon
+    - Runtime
+    - RuntimeWake
+    - RuntimeSignals
+    - DaemonProcessState
+    - runDaemon
+    - runWallpaper
+    - process_identity
+    - forkProcess
+    - waitProcess
+    - needsDaemon
+    - resolveDaemonCommand
+    - daemonExpireTimeoutMs
+
+allowed_external_interface_language:
+  rule: >
+    Keep these only when they are fixed external/user interfaces or standard
+    library/API names. They must not leak into Wayspot owner names, file names,
+    comments that describe owners, or picker row kinds.
+  allowed_examples:
+    - "--notifications-daemon"
+    - "--sunglasses-daemon"
+    - "wayspot --notifications-daemon"
+    - "wayspot --sunglasses-daemon"
+    - packaging/systemd ExecStart values that invoke external daemon flags
+    - freedesktop phrase "notification daemon" in README only if user-facing
+      compatibility wording needs it
+    - std.process
+    - std.c._exit
+    - std.os.linux.pid_t as a literal OS type
+    - /proc as a literal Linux filesystem path
+    - XDG_RUNTIME_DIR as an external environment variable
+    - Hyprland runtime directory field when it mirrors XDG_RUNTIME_DIR
+
+target_tree_shape:
+  required_paths:
+    - src/identity.zig
+    - src/notification/dbus.zig
+    - src/notification/rows.zig
+    - src/notification/banner.zig
+    - src/notification/history_cache.zig
+    - src/notification/history_list.zig
+    - src/notification/preview.zig
+    - src/notification/state.zig
+    - src/wallpaper/loop.zig
+    - src/wallpaper/surface.zig
+    - src/sunglasses/overlay.zig
+    - src/sunglasses/state.zig
+    - src/sunglasses/surface.zig
+    - src/picker/mode/notifications.zig
+    - src/picker/mode/wallpaper.zig
+    - src/picker/mode/sunglasses.zig
+  paths_must_not_exist_after:
+    - src/process_identity.zig
+    - src/notification/daemon.zig
+    - src/notification/runtime.zig
+    - src/wallpaper/runtime.zig
+    - src/sunglasses/runtime.zig
+
+explicit_file_mapping:
+  src/main.zig: update_identity_loop_overlay_call_sites_and_local_picker_bundle_names
+  src/root.zig: update_identity_notification_dbus_rows_wallpaper_loop_sunglasses_overlay_exports
+  src/process_identity.zig: src/identity.zig
+  src/notification/daemon.zig: src/notification/dbus.zig
+  src/notification/runtime.zig: src/notification/rows.zig
+  src/notification/banner.zig: rename_child_fork_wait_helpers
+  src/notification/mod.zig: update_dbus_rows_exports
+  src/wallpaper/runtime.zig: src/wallpaper/loop.zig
+  src/wallpaper/mod.zig: update_loop_export
+  src/wallpaper/hyprland.zig: keep_runtime_dir_only_as_XDG_RUNTIME_DIR_backed_field
+  src/wallpaper/surface.zig: replace_process_lifetime_comment_with_owner_lifetime_comment
+  src/sunglasses/runtime.zig: src/sunglasses/overlay.zig
+  src/sunglasses/mod.zig: update_overlay_export
+  src/sunglasses/state.zig: needsDaemon_to_needsOverlay_and_comments
+  src/sunglasses/surface.zig: replace_process_lifetime_comment_with_owner_lifetime_comment
+  src/config/defaults.zig: replace_process_environment_comment_with_environment_comment
+  src/picker/candidate.zig: Candidate_Kind_daemon_to_lifecycle
+  src/picker/surface.zig: update_sunglasses_overlay_import_and_lifecycle_row_handling
+  src/picker/rank.zig: daemon_row_kind_and_open_strings_to_lifecycle
+  src/picker/mod.zig: replace_process_lifetime_comment_with_picker_lifecycle_comment
+  src/picker/mode/mod.zig: resolveDaemonCommand_to_resolveLifecycleCommand
+  src/picker/mode/notifications.zig: daemon_restart_rows_to_lifecycle_restart_rows
+  src/picker/mode/wallpaper.zig: daemon_restart_rows_to_lifecycle_restart_rows
+  src/picker/mode/sunglasses.zig: runtime_config_comment_to_filter_config_comment
+  AGENTS.md: flatten_repo_map_and_rules_to_concrete_owner_language
+  README.md: keep_only_external_notification_daemon_phrase_if_needed
+  .agent/history/current.yaml: flatten_live_memory_owner_language
+  .agent/history/references.yaml: update_paths_and_receipts_to_dbus_rows_loop_overlay_identity
+  .agent/history/sprint.yaml: activate_flat_lifecycle_contract_and_remove_old_runtime_wording
+  re-run.sh: rename_helper_local_daemon_process_runtime_words_to_notification_wallpaper_pid_xdg_words
+  packaging/systemd/wayspot.service: rename_description_to_notification_dbus_interface_and_keep_exec_flag
+
+symbol_mapping:
+  process_identity: identity
+  wayspot.process_identity: wayspot.identity
+  notification.daemon: notification.dbus
+  notification.runtime: notification.rows
+  wallpaper.Runtime: wallpaper.Loop
+  sunglasses.Runtime: sunglasses.Overlay
+  Daemon: DBus
+  notification.Daemon: notification.DBus
+  runDaemon: runOverlay
+  runSunglassesDaemon: runSunglassesOverlay
+  runWallpaper: run
+  runRandomTimer: runRandomLoop
+  Runtime: Loop
+  RuntimeWake: Wake
+  RuntimeSignals: Signals
+  DaemonProcessState: ChildState
+  setupRuntime: setupPickerBundle
+  "const Runtime": "const PickerBundle"
+  "var runtime": "var loop_or_overlay_or_picker_bundle"
+  "runtime_signal_shutdown_fd": "signal_shutdown_fd"
+  "runtime_signal_rotate_fd": "signal_rotate_fd"
+  "runtime_signal_apply_fd": "signal_apply_fd"
+  runtimeSignalHandler: signalHandler
+  runtimeSignalsMain: signalsMain
+  waitForRuntimeWake: waitForWake
+  daemon_stop_poll_sleep_ns: overlay_stop_poll_sleep_ns
+  daemon_start_poll_sleep_ns: overlay_start_poll_sleep_ns
+  max_daemon_stop_polls: max_overlay_stop_polls
+  max_daemon_start_polls: max_overlay_start_polls
+  daemon_child_fail_code: overlay_child_fail_code
+  max_daemon_wait_interrupts: max_child_wait_interrupts
+  daemonProcessState: childState
+  startDaemon: startOverlay
+  stopDaemon: stopOverlay
+  startDaemonAndWait: startOverlayAndWait
+  startDaemonDetached: startOverlayDetached
+  daemonWrapperChild: overlayWrapperChild
+  execSunglassesDaemon: execSunglassesOverlay
+  processLooksLikeSunglassesDaemon: pidMatchesSunglassesOverlay
+  cmdlineLooksLikeSunglassesDaemon: cmdlineMatchesSunglassesOverlay
+  processLooksLikeWallpaper: pidMatchesWallpaper
+  process_state: child_state
+  process_live: child_live
+  needsDaemon: needsOverlay
+  resolveDaemonCommand: resolveLifecycleCommand
+  Candidate.Kind.daemon: Candidate.Kind.lifecycle
+  "daemon:notifications:restart": "lifecycle:notifications:restart"
+  "daemon:wallpapers:restart": "lifecycle:wallpapers:restart"
+  forkProcess: forkChild
+  waitProcess: waitChild
+  daemonExpireTimeoutMs: expireTimeoutMs
+  WallpaperDaemonNotRunning: WallpaperLoopNotRunning
+  SunglassesDaemonNotRunning: SunglassesOverlayNotRunning
+  SunglassesDaemonStillRunning: SunglassesOverlayStillRunning
+  SunglassesDaemonStartFailed: SunglassesOverlayStartFailed
+  SunglassesDaemonStartTimedOut: SunglassesOverlayStartTimedOut
+
+behavior_contract:
+  preserve:
+    - existing CLI flags, including daemon-named external flags
+    - notification DBus ownership and banner dispatch
+    - notification history cache/list behavior
+    - wallpaper random loop and rotate-now CLI behavior
+    - sunglasses overlay reconciliation and apply behavior
+    - picker slash modes and restart rows
+    - process visible names, under the new identity owner
+  no_behavior_expansion:
+    - no new modes
+    - no new config schema
+    - no new IPC
+    - no new caches
+    - no compatibility modules for old paths
+
+behavior_receipts_required:
+  cli_help:
+    command: "./zig-out/bin/wayspot --help"
+    proves: external CLI flags remain stable.
+  picker_open_smoke:
+    command: "bash -lc 'timeout 3 ./zig-out/bin/wayspot --ui; status=$?; test \"$status\" -eq 124'"
+    proves: picker starts and remains alive until timeout owns shutdown.
+  notification_dbus_smoke:
+    command: "bash -lc 'timeout 4 ./zig-out/bin/wayspot --notifications-daemon; status=$?; test \"$status\" -eq 124'"
+    proves: notification DBus path starts and remains alive.
+  wallpaper_rotate:
+    command: "bash -lc './zig-out/bin/wayspot --wallpaper-rotate-now; status=$?; test \"$status\" -eq 0'"
+    proves: wallpaper rotate route resolves and exits zero in the current session.
+  sunglasses_apply_unhappy:
+    command: "bash -lc 'out=$(./zig-out/bin/wayspot --sunglasses-apply 2>&1); status=$?; test \"$status\" -eq 1 && printf \"%s\\n\" \"$out\" | rg -q \"FileNotFound\"'"
+    proves: sunglasses apply route still resolves and reports missing overlay wake path.
+  rerun_parse:
+    command: "bash -n re-run.sh"
+    proves: local helper still parses.
+
+slices:
+  "00_index_review":
+    goal: Strict reviewer accepts or rejects this contract.
+  "01_notification_flatten":
+    goal: Move notification daemon/runtime owners to dbus/rows.
+    receipts:
+      - src/notification/daemon.zig deleted
+      - src/notification/runtime.zig deleted
+      - notification module exports use dbus and rows
+  "02_wallpaper_sunglasses_flatten":
+    goal: Move wallpaper runtime to loop and sunglasses runtime to overlay.
+    receipts:
+      - src/wallpaper/runtime.zig deleted
+      - src/sunglasses/runtime.zig deleted
+      - public exports use Loop and Overlay
+  "03_picker_lifecycle_rows":
+    goal: Rename daemon row kind/open strings/commands to lifecycle language.
+    receipts:
+      - Candidate.Kind has no daemon member
+      - lifecycle restart row behavior preserved
+  "04_identity_and_child_nouns":
+    goal: Move process_identity to identity and rename child fork/wait helpers.
+    receipts:
+      - src/process_identity.zig deleted
+      - root/main use identity
+  "05_docs_memory_build":
+    goal: Update build graph, README, AGENTS, packaging, re-run helper, and live memory to flattened nouns.
+  "06_behavior_receipts":
+    goal: Run all receipts and record expected statuses.
+  "07_final_reviewer_gate":
+    goal: Strict reviewer accepts the full migrated tree.
+
+verification_floor:
+  - "zigup run 0.16.0 fmt --check build.zig build.zig.zon src"
+  - "zigup run 0.16.0 build test --summary all"
+  - "zigup run 0.16.0 build -Doptimize=ReleaseFast"
+  - "git diff --check"
+  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/flat-lifecycle-nouns-sprint.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "test ! -e src/process_identity.zig && test ! -e src/notification/daemon.zig && test ! -e src/notification/runtime.zig && test ! -e src/wallpaper/runtime.zig && test ! -e src/sunglasses/runtime.zig"
+  - "bash -lc '! rg -n \"\\b(deamon|Deamon)\\b|process_identity|notification\\.daemon|notification\\.runtime|wallpaper\\.Runtime|sunglasses\\.Runtime|\\bDaemon\\b|\\bRuntime\\b|RuntimeWake|RuntimeSignals|DaemonProcessState|needsDaemon|resolveDaemonCommand|forkProcess|waitProcess|daemonExpireTimeoutMs|\\.daemon\\b|daemon:notifications:restart|daemon:wallpapers:restart|runSunglassesDaemon|setupRuntime|processLooksLike|cmdlineLooksLike|daemonProcessState|startDaemon|stopDaemon|startDaemonAndWait|startDaemonDetached|daemonWrapperChild|execSunglassesDaemon|daemon_stop|daemon_start|max_daemon|daemon_child|daemon_wait|WallpaperDaemon|SunglassesDaemon|daemon_pids|process_has_wayspot_arg|Notification Daemon\" src build.zig README.md AGENTS.md re-run.sh packaging/systemd .agent/history/README.md .agent/history/current.yaml .agent/history/sprint.yaml .agent/history/references.yaml'"
+  - "bash -lc '! rg -n \"\\bdaemon\\b|\\bruntime\\b|\\bprocess\\b\" src README.md AGENTS.md re-run.sh packaging/systemd .agent/history/README.md .agent/history/current.yaml .agent/history/sprint.yaml .agent/history/references.yaml | rg -v -- \"--notifications-daemon|--sunglasses-daemon|ExecStart=.*--notifications-daemon|std\\.process|std\\.c\\._exit|std\\.os\\.linux\\.pid_t|/proc|XDG_RUNTIME_DIR|runtime_dir|README.md:.*notification daemon|external/user interfaces\"'"
+  - "bash -lc '! rg -n \"(^|[^A-Za-z0-9_])_\\\\s*=|\\\\busize\\\\b|\\\\banytype\\\\b|TODO\" src --glob \"*.zig\" && test \"$(rg -n \"\\\\banyopaque\\\\b\" src --glob \"*.zig\" | cut -d: -f1 | sort -u)\" = \"src/notification/dbus.zig\"'"
+
+reviewer_gate:
+  index_acceptance_questions:
+    - Are daemon/runtime/process flattened to concrete owner names?
+    - Are allowed external words narrow enough?
+    - Are all current affected files and public symbols mapped exactly?
+    - Are behavior receipts concrete?
+  final_acceptance_questions:
+    - Are rejected paths gone?
+    - Are stale symbols/comments/live memory gone?
+    - Did tests, scans, and behavior receipts pass?
+    - Is there no compatibility wrapper or sideways bucket?
