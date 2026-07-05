@@ -83,7 +83,7 @@ fn matchesRoute(query: query_mod.Query, candidate: candidate_mod.Candidate) bool
         .apps => candidate.kind == .app,
         .modes => candidate.kind == .mode and !std.mem.eql(u8, candidate.open, "/notifications history"),
         .notifications => matchesNotificationRoute(query.term, candidate),
-        .sunglasses => false,
+        .sunglasses => candidate.kind == .mode and std.mem.eql(u8, candidate.open, "/sunglasses"),
         .wallpapers => candidate.kind == .lifecycle and std.mem.eql(u8, candidate.open, "lifecycle:wallpapers:restart"),
         .run => true,
     };
@@ -306,7 +306,8 @@ test "slash routes expose modes and lifecycle commands only" {
 
     const sunglasses = try rankCandidates(std.testing.allocator, query_mod.parse("/sunglasses"), &candidates);
     defer std.testing.allocator.free(sunglasses);
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(sunglasses.len)));
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(sunglasses.len)));
+    try std.testing.expectEqualStrings("/sunglasses", sunglasses[0].candidate.open);
 
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);

@@ -6,10 +6,9 @@
 const std = @import("std");
 const app = @import("mod.zig");
 const app_icons = @import("icons.zig");
+const command_owner = @import("command.zig");
 const config_defaults = @import("../config/defaults.zig");
 const cursor_blink = @import("cursor_blink.zig");
-const mode = @import("mode/mod.zig");
-const open_owner = @import("open.zig");
 const rank = @import("rank.zig");
 const textbox = @import("textbox.zig");
 const viewport = @import("viewport.zig");
@@ -37,39 +36,28 @@ pub fn run(
     try surface.loop();
 }
 
-const max_command_bytes = 4096;
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
-const launch_child_fail_code: i32 = 127;
-const max_launch_wait_interrupts: u32 = 16;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
-const LaunchRunError = error{
-    CommandFailed,
-    ForkFailed,
-    WaitFailed,
-    WaitInterruptedTooOften,
-};
-const LaunchRunner = *const fn ([*:0]const u8) LaunchRunError!void;
+const LaunchRunner = *const fn ([*:0]const u8) anyerror!void;
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
-    std.debug.assert(max_command_bytes > 0);
-    std.debug.assert(max_launch_wait_interrupts > 0);
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
 }
 
 /// LaunchQueue owns one detached command intent between picker activation and controlled drain.
 const LaunchQueue = struct {
-    command_buf: [max_command_bytes + 1]u8 = undefined,
+    command_buf: [command_owner.max_command_bytes + 1]u8 = undefined,
     command_len: u32 = 0,
     state: enum { idle, queued } = .idle,
 
     fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
         if (command_bytes.len == 0) return error.EmptyCommand;
-        if (command_bytes.len > max_command_bytes) return error.CommandTooLong;
+        if (command_bytes.len > command_owner.max_command_bytes) return error.CommandTooLong;
         std.debug.assert(self.state == .idle);
         @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
         self.command_buf[command_bytes.len] = 0;
@@ -91,7 +79,7 @@ const LaunchQueue = struct {
     fn commandZ(self: *LaunchQueue) [*:0]const u8 {
         std.debug.assert(self.state == .queued);
         std.debug.assert(self.command_len > 0);
-        std.debug.assert(self.command_len <= max_command_bytes);
+        std.debug.assert(self.command_len <= command_owner.max_command_bytes);
         std.debug.assert(self.command_buf[self.command_len] == 0);
         return self.command_buf[0..self.command_len :0].ptr;
     }
@@ -546,32 +534,13 @@ const Surface = struct {
             return;
         }
         if (candidate.kind == .notification or candidate.kind == .hint) return;
-        const command = try self.commandForCandidate(candidate.kind, candidate.open);
+        const command = try self.picker.resolveCandidateCommand(self.allocator, candidate);
         defer self.allocator.free(command);
         if (candidate.kind == .app or candidate.kind == .open) {
             try self.picker.recordSelection(self.allocator, candidate.open);
         }
         try self.launch_queue.queue(command);
         self.shutdown_after_launch = true;
-    }
-
-    fn commandForCandidate(
-        self: *Surface,
-        kind: @import("picker_candidate").Candidate.Kind,
-        open: []const u8,
-    ) ![]u8 {
-        return switch (kind) {
-            .app => self.allocator.dupe(u8, open),
-            .open => blk: {
-                const spec = open_owner.resolveSpec(open) orelse return error.UnknownOpen;
-                break :blk try open_owner.resolveExecutionCommand(self.allocator, spec.execution);
-            },
-            .lifecycle => blk: {
-                const command = mode.resolveLifecycleCommand(open) orelse return error.UnknownOpen;
-                break :blk try self.allocator.dupe(u8, command);
-            },
-            .mode, .notification, .hint => error.UnknownOpen,
-        };
     }
 
     fn switchMode(self: *Surface, mode_query: []const u8) !void {
@@ -582,7 +551,7 @@ const Surface = struct {
     }
 
     fn drainPendingLaunch(self: *Surface) !void {
-        try drainLaunchQueue(&self.launch_queue, runDetachedCommand);
+        try drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
     }
 
     fn render(self: *Surface) !void {
@@ -1019,97 +988,17 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
     };
 }
 
-fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) LaunchRunError!void {
+fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) anyerror!void {
     if (!queue.hasQueued()) return;
     defer queue.clear();
     try runner(queue.commandZ());
 }
 
-fn runDetachedCommand(command: [*:0]const u8) LaunchRunError!void {
-    const wrapper_pid = try launchFork();
-    if (wrapper_pid == 0) {
-        launchWrapperChild(command);
-    }
-    try launchWait(wrapper_pid);
-}
-
-fn launchWrapperChild(command: [*:0]const u8) noreturn {
-    const stdio_ok = launchRedirectStdio();
-    if (!stdio_ok) std.c._exit(launch_child_fail_code);
-
-    const session_id = std.c.setsid();
-    if (session_id == -1) std.c._exit(launch_child_fail_code);
-
-    const app_pid = launchFork() catch std.c._exit(launch_child_fail_code);
-    if (app_pid == 0) launchExecShell(command);
-
-    std.c._exit(0);
-}
-
-fn launchExecShell(command: [*:0]const u8) noreturn {
-    const shell_path = "/bin/sh";
-    const shell_name = "sh";
-    const shell_arg = "-lc";
-    const argv: [4:null]?[*:0]const u8 = .{
-        shell_name,
-        shell_arg,
-        command,
-        null,
-    };
-    const exec_rc = std.c.execve(shell_path, &argv, std.c.environ);
-    if (exec_rc == -1) std.c._exit(launch_child_fail_code);
-    std.c._exit(launch_child_fail_code);
-}
-
-fn launchRedirectStdio() bool {
-    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = false });
-    if (dev_null == -1) return false;
-
-    const stdin_rc = std.c.dup2(dev_null, 0);
-    const stdout_rc = std.c.dup2(dev_null, 1);
-    const stderr_rc = std.c.dup2(dev_null, 2);
-    const close_rc = std.c.close(dev_null);
-    if (stdin_rc == -1) return false;
-    if (stdout_rc == -1) return false;
-    if (stderr_rc == -1) return false;
-    if (close_rc == -1) return false;
-    return true;
-}
-
-fn launchFork() LaunchRunError!std.c.pid_t {
-    const pid = std.c.fork();
-    if (pid == -1) return error.ForkFailed;
-    return pid;
-}
-
-fn launchWait(pid: std.c.pid_t) LaunchRunError!void {
-    var status: i32 = 0;
-    var interrupts: u32 = 0;
-    while (interrupts < max_launch_wait_interrupts) {
-        const waited = std.c.waitpid(pid, &status, 0);
-        if (waited == pid) break;
-        if (waited == -1) {
-            const errno = std.c._errno().*;
-            if (errno == @intFromEnum(std.c.E.INTR)) {
-                interrupts += 1;
-                continue;
-            }
-            return error.WaitFailed;
-        }
-        return error.WaitFailed;
-    } else {
-        return error.WaitInterruptedTooOften;
-    }
-    const status_bits: u32 = @bitCast(status);
-    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
-    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
-}
-
-fn launchRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
+fn launchRunnerOkForTest(command: [*:0]const u8) anyerror!void {
     if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
 }
 
-fn launchRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
+fn launchRunnerFailForTest(command: [*:0]const u8) anyerror!void {
     if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
     return error.CommandFailed;
 }

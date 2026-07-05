@@ -1,5 +1,5 @@
 id: obvious_shape_command
-state: active
+state: complete
 
 purpose: >
   Execute the reviewer-accepted style and command-surface sprint. The source of
@@ -21,7 +21,7 @@ law:
   - no_escape_hatches
   - one_command_model_two_surfaces
   - no_workflow_vocabulary_in_product_source
-  - no_receipt_api_in_product_source
+  - no_evidence_artifact_api_in_product_source
   - cli_and_gui_share_the_same_command_owner
   - nushell_completions_generated_from_shared_model
   - reviewer_gate_required_for_completion
@@ -32,7 +32,7 @@ current_scope:
     - one picker command model shared by GUI and terminal surfaces
     - terminal commands for list, query, open, and Nushell completion output
     - stable legacy flags preserved exactly
-    - workflow/receipt vocabulary removed from production source
+    - planning and evidence vocabulary removed from production source
     - README/build/main/root and owner files made boring and obvious
     - happy and unhappy paths asserted without workflow language
   out:
@@ -48,15 +48,15 @@ progress:
     - 00_plan_review_accepted
     - 01_reference_vocabulary
     - 00_live_memory_activation
-  current:
     - 02_command_model_index
-  pending:
     - 03_terminal_surface
     - 04_workflow_language_cleanup
     - 05_control_spine_footing
     - 06_comments_and_invariants
     - 07_verification
     - 08_final_review
+  current: []
+  pending: []
 
 verification_floor:
   - commands listed in .agent/history/obvious-shape-command-sprint.yaml

@@ -1,4 +1,4 @@
-//! App icon diagnostics prove resolver and vendor texture upload results for local app rows.
+//! App icon diagnostics report resolver and vendor texture upload results for local app rows.
 
 const std = @import("std");
 const candidate_mod = @import("picker_candidate");
@@ -6,8 +6,8 @@ const app_icons = @import("icons.zig");
 
 const c = @import("sdl_c");
 
-pub const receipt_path = ".agent/history/icon-diag.receipt.tsv";
-const max_receipt_rows: u32 = 768;
+pub const report_path = ".zig-cache/wayspot/icon-diagnostic.tsv";
+const max_report_rows: u32 = 768;
 
 const Counts = struct {
     app_rows: u32 = 0,
@@ -19,7 +19,8 @@ const Counts = struct {
     skipped: u32 = 0,
 };
 
-pub fn writeReceipt(candidates: []const candidate_mod.Candidate) !void {
+/// writeReport writes a bounded TSV icon diagnostic report and stdout summary.
+pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
     defer c.SDL_Quit();
 
@@ -34,8 +35,8 @@ pub fn writeReceipt(candidates: []const candidate_mod.Candidate) !void {
     const renderer = c.SDL_CreateRenderer(window, null) orelse return error.SdlRendererFailed;
     defer c.SDL_DestroyRenderer(renderer);
 
-    try ensureReceiptParent();
-    var file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, receipt_path, .{ .truncate = true });
+    try ensureReportParent();
+    var file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, report_path, .{ .truncate = true });
     defer file.close(std.Options.debug_io);
 
     var file_buffer: [8192]u8 = undefined;
@@ -49,7 +50,7 @@ pub fn writeReceipt(candidates: []const candidate_mod.Candidate) !void {
     for (candidates) |candidate| {
         if (candidate.kind != .app) continue;
         counts.app_rows += 1;
-        if (counts.app_rows > max_receipt_rows) {
+        if (counts.app_rows > max_report_rows) {
             counts.skipped += 1;
             continue;
         }
@@ -114,9 +115,9 @@ pub fn writeReceipt(candidates: []const candidate_mod.Candidate) !void {
     var stdout_buffer: [512]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "icon diagnostic receipt: {s}\napp_rows={d} resolved={d} surface_ok={d} surface_failed={d} iconless={d} unsupported={d} skipped={d}\n",
+        "icon diagnostic report: {s}\napp_rows={d} resolved={d} surface_ok={d} surface_failed={d} iconless={d} unsupported={d} skipped={d}\n",
         .{
-            receipt_path,
+            report_path,
             counts.app_rows,
             counts.resolved,
             counts.surface_ok,
@@ -129,7 +130,7 @@ pub fn writeReceipt(candidates: []const candidate_mod.Candidate) !void {
     try stdout_writer.interface.flush();
 }
 
-fn ensureReceiptParent() !void {
-    const parent = std.fs.path.dirname(receipt_path) orelse return;
+fn ensureReportParent() !void {
+    const parent = std.fs.path.dirname(report_path) orelse return;
     try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, parent);
 }

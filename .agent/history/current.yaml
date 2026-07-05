@@ -83,7 +83,7 @@ design_law:
     - delete unearned helper shape before adding optimization shape
     - model only the current product domain
     - do not preserve old architecture as inert fallback surface
-    - prove behavior through bounded tests and manual receipts
+    - prove behavior through bounded tests and direct behavior checks
 
 constraints:
   bounds:

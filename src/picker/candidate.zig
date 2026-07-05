@@ -37,7 +37,7 @@ pub const Candidate = struct {
         };
     }
 
-    /// Builds a candidate row with an icon name resolved later by the picker surface.
+    /// Builds a candidate row with an icon name resolved by the picker surface during row draw.
     pub fn initWithIcon(
         kind: Kind,
         title: []const u8,

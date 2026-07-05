@@ -67,7 +67,13 @@ source_references:
 repo_entrypoints:
   cli:
     main: /home/home/personal/wayspot/src/main.zig
+    terminal_commands:
+      - wayspot commands
+      - wayspot query <text>
+      - wayspot open <open-payload>
+      - wayspot complete nushell ...spans
   picker:
+    command: /home/home/personal/wayspot/src/picker/command.zig
     surface: /home/home/personal/wayspot/src/picker/surface.zig
     viewport: /home/home/personal/wayspot/src/picker/viewport.zig
     text: /home/home/personal/wayspot/src/picker/text.zig
@@ -77,7 +83,8 @@ repo_entrypoints:
     defaults_loader: /home/home/personal/wayspot/src/config/defaults.zig
     embedded_defaults_lua: /home/home/personal/wayspot/assets/lua/defaults.lua
   picker_rows:
-    picker: /home/home/personal/wayspot/src/picker/mod.zig
+    exports: /home/home/personal/wayspot/src/picker/mod.zig
+    command_model: /home/home/personal/wayspot/src/picker/command.zig
     apps: /home/home/personal/wayspot/src/picker/mode/apps.zig
     rank: /home/home/personal/wayspot/src/picker/rank.zig
   notifications:

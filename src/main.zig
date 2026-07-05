@@ -80,6 +80,27 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "commands")) {
+        try runTerminalCommands(allocator, home);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "query")) {
+        try runTerminalQuery(allocator, home, args[2..]);
+        return;
+    }
+
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "open")) {
+        if (args.len != 3) return error.OpenPayloadRequired;
+        try runTerminalOpen(allocator, home, args[2]);
+        return;
+    }
+
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "complete") and std.mem.eql(u8, args[2], "nushell")) {
+        try runTerminalNushellCompletion(allocator, home, args[3..]);
+        return;
+    }
+
     try wayspot.bufferedPrint();
 }
 
@@ -116,7 +137,7 @@ fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
     defer candidates.deinit(allocator);
 
     try apps.collect(allocator, &candidates);
-    try wayspot.picker.icon_diag.writeReceipt(candidates.items);
+    try wayspot.picker.icon_diag.writeReport(candidates.items);
 }
 
 fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
@@ -131,6 +152,85 @@ fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     try apps.collect(allocator, &candidates);
     const counts = try wayspot.picker.icon_cache.refresh(home, candidates.items);
     try wayspot.picker.icon_cache.printRefreshSummary(counts);
+}
+
+fn runTerminalCommands(allocator: std.mem.Allocator, home: []const u8) !void {
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
+    try picker_bundle.picker.commands(allocator, &stdout_writer.interface);
+    try stdout_writer.interface.flush();
+}
+
+fn runTerminalQuery(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+    try picker_bundle.picker.loadHistory(allocator);
+
+    const raw_query = try joinCommandText(allocator, query_parts);
+    defer allocator.free(raw_query);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
+    try picker_bundle.picker.query(allocator, raw_query, &stdout_writer.interface);
+    try stdout_writer.interface.flush();
+}
+
+fn runTerminalOpen(allocator: std.mem.Allocator, home: []const u8, payload: []const u8) !void {
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+    try picker_bundle.picker.loadHistory(allocator);
+
+    const command = try picker_bundle.picker.open(allocator, payload);
+    defer allocator.free(command);
+    try picker_bundle.picker.recordSelection(allocator, payload);
+    try runCommandBytes(command);
+    try picker_bundle.picker.saveHistory(allocator);
+}
+
+fn runTerminalNushellCompletion(allocator: std.mem.Allocator, home: []const u8, spans: []const []const u8) !void {
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+    try picker_bundle.picker.loadHistory(allocator);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
+    try picker_bundle.picker.completeNushell(allocator, spans, &stdout_writer.interface);
+    try stdout_writer.interface.flush();
+}
+
+fn runCommandBytes(command: []const u8) !void {
+    if (command.len == 0) return error.EmptyCommand;
+    if (command.len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
+    var command_buf: [wayspot.picker.command.max_command_bytes + 1]u8 = undefined;
+    @memcpy(command_buf[0..command.len], command);
+    command_buf[command.len] = 0;
+    try wayspot.picker.command.runDetachedShellCommand(command_buf[0..command.len :0].ptr);
+}
+
+fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+    if (parts.len == 0) return allocator.dupe(u8, "");
+    var total_len: u32 = 0;
+    for (parts) |part| {
+        total_len += @intCast(part.len);
+        if (total_len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
+    }
+    total_len += @intCast(parts.len - 1);
+    if (total_len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
+
+    var out = try std.ArrayList(u8).initCapacity(allocator, total_len);
+    errdefer out.deinit(allocator);
+    for (parts, 0..) |part, index| {
+        if (index > 0) try out.append(allocator, ' ');
+        try out.appendSlice(allocator, part);
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn runWallpaperLoop(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {

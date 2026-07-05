@@ -1,6 +1,7 @@
 # wayspot
 
-Wayspot is a small Wayland launcher and notification DBus interface built in Zig.
+Wayspot is a small Wayland launcher, command picker, notification DBus interface,
+wallpaper loop, and focused surface set built in Zig.
 
 ## Commands
 
@@ -8,6 +9,30 @@ Run one bounded picker lifecycle:
 
 ```bash
 wayspot --ui
+```
+
+List the picker command rows in the terminal:
+
+```bash
+wayspot commands
+```
+
+Query the same command rows used by the picker:
+
+```bash
+wayspot query settings
+```
+
+Open a command payload from the shared picker model:
+
+```bash
+wayspot open settings
+```
+
+Print Nushell custom completion records:
+
+```bash
+wayspot complete nushell wayspot query set
 ```
 
 Own the freedesktop notification D-Bus name:
