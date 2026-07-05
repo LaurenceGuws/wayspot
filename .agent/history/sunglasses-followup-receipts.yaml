@@ -51,6 +51,12 @@ fixed_failures:
       loops: wayspot-notify, wayspot-wall, and wayspot-sunglas. The names fit
       Linux's 15 visible byte comm bound, so btop and ps can distinguish modes
       even when argv remains wayspot.
+  - name: form_rows_follow_picker_geometry
+    assertion: >
+      The /sunglasses form derives row rects and hit testing from picker
+      ResultLayout rows, keeps monitor-only focus changes out of saved-state
+      wakes, and lets mouse hover plus Up/Down move form focus like the picker
+      list.
 
 automated_receipts:
   - command: zigup run 0.16.0 build test --summary all
@@ -99,6 +105,16 @@ automated_receipts:
     result: passed_after_monitor_row_and_process_name_followup
   - command: 'rg -n "(_\s*=|\busize\b|\banytype\b|\banyopaque\b)" src/main.zig src/root.zig src/process_identity.zig src/ui/sdl_shell.zig src/ui/sunglasses_form.zig'
     result: no_hits_after_monitor_row_and_process_name_followup
+  - command: zigup run 0.16.0 build test --summary all
+    result: passed_after_sunglasses_form_cleanup
+  - command: zigup run 0.16.0 build
+    result: passed_after_sunglasses_form_cleanup
+  - command: zigup run 0.16.0 fmt --check src/ui/sunglasses_form.zig src/ui/sdl_shell.zig
+    result: passed_after_sunglasses_form_cleanup
+  - command: git diff --check
+    result: passed_after_sunglasses_form_cleanup
+  - command: 'rg -n "(^|[^A-Za-z0-9_])(_ =|usize|anytype|anyopaque)([^A-Za-z0-9_]|$)" src/ui/sunglasses_form.zig src/ui/sdl_shell.zig'
+    result: no_hits_after_sunglasses_form_cleanup
 
 cli_receipts:
   - name: missing_daemon
@@ -153,6 +169,9 @@ cli_receipts:
 visual_receipts:
   - /tmp/wayspot-row-alignment-after.png
   - /tmp/wayspot-sunglasses-alignment-after.png
+  - path: .agent/history/receipts/sunglasses-form-cleanup.png
+    command: /home/home/.codex/skills/hyprland-screenshot/scripts/hypr-capture.py --title Wayspot --output .agent/history/receipts/sunglasses-form-cleanup.png
+    geometry: 409,358 1102x365
 
 handover:
   - Use hyprctl layers, not hyprctl clients, to receipt sunglasses surfaces.

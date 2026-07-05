@@ -270,6 +270,7 @@ const SdlShell = struct {
     dirty: bool = true,
     launch_queue: LaunchQueue = .{},
     shutdown_after_launch: bool = false,
+    window_sized_for_sunglasses: bool = false,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
         const config = try surface_config.load(allocator);
@@ -309,11 +310,11 @@ const SdlShell = struct {
             .wake_event_type = wake_event_type,
             .cursor = CursorBlink.init(sdlNowMs()),
         };
-        try self.applyDefaultWindowSize();
+        try self.applyWindowSizeForRoute(true);
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
-        try self.applyDefaultWindowSize();
+        try self.applyWindowSizeForRoute(true);
         try self.updateViewportForWindow();
         try self.refreshResults();
         return self;
@@ -411,7 +412,10 @@ const SdlShell = struct {
                 if (wheel_y != 0 and self.viewport.scrollLines(scroll_delta)) self.dirty = true;
             },
             c.SDL_EVENT_MOUSE_MOTION => {
-                if (self.sunglassesActive()) return true;
+                if (self.sunglassesActive()) {
+                    if (self.focusSunglassesFormAt(event.motion.x, event.motion.y)) self.dirty = true;
+                    return true;
+                }
                 if (self.visibleRowAtPoint(event.motion.x, event.motion.y)) |visible_row| {
                     if (self.viewport.selectVisibleRow(visible_row)) self.dirty = true;
                 }
@@ -482,11 +486,19 @@ const SdlShell = struct {
                         }
                     },
                     c.SDLK_UP => {
-                        if (self.sunglassesActive()) return true;
+                        if (self.sunglassesActive()) {
+                            self.sunglasses_form.focusNext(true);
+                            self.dirty = true;
+                            return true;
+                        }
                         if (self.viewport.moveSelection(-1)) self.dirty = true;
                     },
                     c.SDLK_DOWN => {
-                        if (self.sunglassesActive()) return true;
+                        if (self.sunglassesActive()) {
+                            self.sunglasses_form.focusNext(false);
+                            self.dirty = true;
+                            return true;
+                        }
                         if (self.viewport.moveSelection(1)) self.dirty = true;
                     },
                     else => {},
@@ -500,6 +512,7 @@ const SdlShell = struct {
     fn refreshResults(self: *SdlShell) !void {
         self.freeResults();
         self.results = try self.service.searchQuery(self.allocator, self.query.items);
+        try self.applyWindowSizeForRoute(false);
         if (self.viewport.resetResults(@intCast(self.results.len))) {
             self.dirty = true;
             return;
@@ -551,7 +564,10 @@ const SdlShell = struct {
         if (!background_color or !cleared) return error.SdlRenderFailed;
 
         const range = self.viewport.visibleRange();
-        const layout = self.currentResultLayout(range.count);
+        const layout = if (self.sunglassesActive())
+            self.currentResultLayout(sunglasses_form.control_count)
+        else
+            self.currentResultLayout(range.count);
         try self.drawChrome(layout);
         if (self.sunglassesActive()) {
             try self.sunglasses_form.render(self.renderer, &self.text, layout, self.config.scale(), &self.sunglasses_state);
@@ -575,13 +591,20 @@ const SdlShell = struct {
     fn clickSunglassesForm(self: *SdlShell, x: f32, y: f32) !void {
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
-        const layout = self.currentResultLayout(picker_viewport.max_visible_rows);
+        const layout = self.currentResultLayout(sunglasses_form.control_count);
         if (try self.sunglasses_form.click(&self.sunglasses_state, layout, x / scale, y / scale)) {
             if (self.sunglasses_form.focusedControlChangesSavedState()) try self.persistAndWakeSunglasses();
             self.dirty = true;
             return;
         }
         self.dirty = true;
+    }
+
+    fn focusSunglassesFormAt(self: *SdlShell, x: f32, y: f32) bool {
+        const scale = self.config.scale();
+        std.debug.assert(scale > 0);
+        const layout = self.currentResultLayout(sunglasses_form.control_count);
+        return self.sunglasses_form.focusAt(layout, x / scale, y / scale);
     }
 
     fn persistAndWakeSunglasses(self: *SdlShell) !void {
@@ -632,10 +655,42 @@ const SdlShell = struct {
         self.dirty = true;
     }
 
-    fn applyDefaultWindowSize(self: *SdlShell) !void {
-        const size = self.config.scaledDimensions(base_window_width, base_window_height);
+    fn applyWindowSizeForRoute(self: *SdlShell, force: bool) !void {
+        const sunglasses_active = self.sunglassesActive();
+        if (!force and self.window_sized_for_sunglasses == sunglasses_active) return;
+
+        const base_height = if (sunglasses_active)
+            @as(i32, @intFromFloat(picker_viewport.baseHeightForRows(sunglasses_form.control_count)))
+        else
+            base_window_height;
+        const size = self.config.scaledDimensions(base_window_width, base_height);
+        try self.applyRouteSizeLimits(sunglasses_active, size);
         const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
         if (!resized) return error.SdlResizeFailed;
+        const synced = c.SDL_SyncWindow(self.window);
+        if (!synced) return error.SdlResizeFailed;
+        self.window_sized_for_sunglasses = sunglasses_active;
+        try self.updateViewportForWindow();
+    }
+
+    fn applyRouteSizeLimits(self: *SdlShell, sunglasses_active: bool, size: surface_config.Dimensions) !void {
+        try self.clearWindowSizeLimits();
+        if (sunglasses_active) {
+            const min_set = c.SDL_SetWindowMinimumSize(self.window, size.width, size.height);
+            const max_set = c.SDL_SetWindowMaximumSize(self.window, size.width, size.height);
+            if (!max_set or !min_set) return error.SdlResizeFailed;
+            return;
+        }
+
+        const min_size = self.config.scaledDimensions(picker_viewport.min_base_width_px, picker_viewport.min_base_height_px);
+        const min_set = c.SDL_SetWindowMinimumSize(self.window, min_size.width, min_size.height);
+        if (!min_set) return error.SdlResizeFailed;
+    }
+
+    fn clearWindowSizeLimits(self: *SdlShell) !void {
+        const max_released = c.SDL_SetWindowMaximumSize(self.window, 0, 0);
+        const min_released = c.SDL_SetWindowMinimumSize(self.window, 0, 0);
+        if (!max_released or !min_released) return error.SdlResizeFailed;
     }
 
     fn drawChrome(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
@@ -773,7 +828,7 @@ const SdlShell = struct {
     }
 
     fn applySurfaceScale(self: *SdlShell) !void {
-        try self.applyDefaultWindowSize();
+        try self.applyWindowSizeForRoute(true);
         const scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
         if (!scaled) return error.SdlScaleFailed;

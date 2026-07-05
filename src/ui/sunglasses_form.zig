@@ -8,17 +8,15 @@ const sunglasses_state = @import("../sunglasses/state.zig");
 const c = @import("sdl_c");
 
 const default_monitor_name = "default";
-const control_count: u32 = 5;
-const row_height: f32 = 42;
-const row_gap: f32 = 2;
-const label_x_offset: f32 = 10;
-const value_column_width: f32 = 46;
-const control_right_inset: f32 = 12;
-const form_text_line_height: f32 = 18;
+pub const control_count: u32 = 5;
+const value_column_width: f32 = 42;
+const control_right_inset: f32 = picker_viewport.default_result_icon_right_inset;
 const slider_height: f32 = 4;
 const toggle_size: f32 = 16;
 const knob_width: f32 = 8;
 const knob_height: f32 = 20;
+const text_font_px: u32 = 15;
+const value_font_px: u32 = 14;
 
 const Control = enum {
     monitor,
@@ -47,6 +45,13 @@ pub const Form = struct {
         else
             (current + 1) % control_count;
         self.focus = controlFromIndex(next);
+    }
+
+    pub fn focusAt(self: *Form, layout: picker_viewport.ResultLayout, x: f32, y: f32) bool {
+        const hit = controlAt(layout, x, y) orelse return false;
+        if (self.focus == hit.control) return false;
+        self.focus = hit.control;
+        return true;
     }
 
     pub fn focusedControlChangesSavedState(self: *const Form) bool {
@@ -136,24 +141,24 @@ pub const Form = struct {
         try drawControlBackground(renderer, controlRow(layout, .dim_toggle), self.focus == .dim_toggle);
         try drawControlBackground(renderer, controlRow(layout, .dim_slider), self.focus == .dim_slider);
 
-        try drawText(text, renderer, layout, .monitor, surface_scale, "Monitor");
+        try drawLabel(text, renderer, layout, .monitor, surface_scale, "Monitor");
         const monitor_row = controlRow(layout, .monitor);
-        try text.draw(renderer, valueX(monitor_row), textY(layout, .monitor), monitor.name(), .{
+        try text.draw(renderer, valueTextX(monitor_row), textY(layout, .monitor), monitor.name(), .{
             .color = .{ .r = 218, .g = 226, .b = 236 },
             .max_bytes = sunglasses_state.max_monitor_name_bytes,
-            .font_size_px = 15,
+            .font_size_px = text_font_px,
             .surface_scale = surface_scale,
         });
 
-        try drawText(text, renderer, layout, .red_blue_toggle, surface_scale, "Red/Blue");
+        try drawLabel(text, renderer, layout, .red_blue_toggle, surface_scale, "Red/Blue");
         try drawToggle(renderer, controlRow(layout, .red_blue_toggle), monitor.red_blue_enabled);
-        try drawText(text, renderer, layout, .red_blue_slider, surface_scale, "Blue to red");
+        try drawLabel(text, renderer, layout, .red_blue_slider, surface_scale, "Blue to red");
         try drawSignedSlider(renderer, controlRow(layout, .red_blue_slider), monitor.red_blue_value);
         try drawSignedValue(text, renderer, layout, .red_blue_slider, surface_scale, monitor.red_blue_value);
 
-        try drawText(text, renderer, layout, .dim_toggle, surface_scale, "Dim");
+        try drawLabel(text, renderer, layout, .dim_toggle, surface_scale, "Dim");
         try drawToggle(renderer, controlRow(layout, .dim_toggle), monitor.dim_enabled);
-        try drawText(text, renderer, layout, .dim_slider, surface_scale, "Dim amount");
+        try drawLabel(text, renderer, layout, .dim_slider, surface_scale, "Dim amount");
         try drawUnsignedSlider(renderer, controlRow(layout, .dim_slider), monitor.dim_value);
         try drawUnsignedValue(text, renderer, layout, .dim_slider, surface_scale, monitor.dim_value);
     }
@@ -213,26 +218,41 @@ fn controlFromIndex(index: u32) Control {
 }
 
 fn controlRow(layout: picker_viewport.ResultLayout, control: Control) picker_viewport.Rect {
-    const index = controlIndex(control);
-    const y = layout.result_top + @as(f32, @floatFromInt(index)) * (row_height + row_gap);
-    return .{ .x = layout.row_x, .y = y, .w = layout.row_width, .h = row_height };
+    return controlRowAtIndex(layout, controlIndex(control));
+}
+
+fn controlRowAtIndex(layout: picker_viewport.ResultLayout, index: u32) picker_viewport.Rect {
+    std.debug.assert(index < control_count);
+    const row_step = layout.row_height + layout.row_gap;
+    const y = layout.result_top + row_step * @as(f32, @floatFromInt(index));
+    return .{ .x = layout.row_x, .y = y, .w = layout.row_width, .h = layout.row_height };
 }
 
 fn textY(layout: picker_viewport.ResultLayout, control: Control) f32 {
     const row = controlRow(layout, control);
-    return row.y + (row.h - form_text_line_height) / 2;
+    return row.y + (row.h - layout.title_line_height) / 2;
 }
 
 fn controlAt(layout: picker_viewport.ResultLayout, x: f32, y: f32) ?Hit {
-    var index: u32 = 0;
-    while (index < control_count) : (index += 1) {
-        const control = controlFromIndex(index);
-        const row = controlRow(layout, control);
-        if (x >= row.x and x < row.x + row.w and y >= row.y and y < row.y + row.h) {
-            return .{ .control = control, .row = row };
-        }
-    }
-    return null;
+    const row_index = controlIndexAtPoint(layout, x, y) orelse return null;
+    if (row_index >= control_count) return null;
+    const control = controlFromIndex(row_index);
+    return .{ .control = control, .row = controlRow(layout, control) };
+}
+
+fn controlIndexAtPoint(layout: picker_viewport.ResultLayout, x: f32, y: f32) ?u32 {
+    if (x < layout.row_x or x >= layout.row_x + layout.row_width) return null;
+    if (y < layout.result_top) return null;
+
+    const row_step = layout.row_height + layout.row_gap;
+    if (row_step <= 0) return null;
+
+    const row_float = @floor((y - layout.result_top) / row_step);
+    if (row_float >= @as(f32, @floatFromInt(control_count))) return null;
+
+    const row: u32 = @intFromFloat(row_float);
+    const top = layout.result_top + row_step * @as(f32, @floatFromInt(row));
+    return if (y < top + layout.row_height) row else null;
 }
 
 fn drawControlBackground(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, focused: bool) !void {
@@ -243,7 +263,7 @@ fn drawControlBackground(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, f
     if (!color or !filled) return error.SdlRenderFailed;
 }
 
-fn drawText(
+fn drawLabel(
     text: *sdl_text.TextEngine,
     renderer: *c.SDL_Renderer,
     layout: picker_viewport.ResultLayout,
@@ -251,11 +271,10 @@ fn drawText(
     surface_scale: f32,
     value: []const u8,
 ) !void {
-    const row = controlRow(layout, control);
-    try text.draw(renderer, row.x + label_x_offset, textY(layout, control), value, .{
+    try text.draw(renderer, layout.title_x, textY(layout, control), value, .{
         .color = .{ .r = 216, .g = 222, .b = 230 },
         .max_bytes = 32,
-        .font_size_px = 15,
+        .font_size_px = text_font_px,
         .surface_scale = surface_scale,
     });
 }
@@ -317,10 +336,10 @@ fn drawSignedValue(
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampRedBlue(value)});
     const row = controlRow(layout, control);
-    try text.draw(renderer, valueX(row), textY(layout, control), rendered, .{
+    try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
         .max_bytes = 16,
-        .font_size_px = 15,
+        .font_size_px = value_font_px,
         .surface_scale = surface_scale,
     });
 }
@@ -336,17 +355,17 @@ fn drawUnsignedValue(
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{sunglasses_state.clampDim(value)});
     const row = controlRow(layout, control);
-    try text.draw(renderer, valueX(row), textY(layout, control), rendered, .{
+    try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
         .color = .{ .r = 186, .g = 202, .b = 224 },
         .max_bytes = 16,
-        .font_size_px = 15,
+        .font_size_px = value_font_px,
         .surface_scale = surface_scale,
     });
 }
 
 fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
     return .{
-        .x = valueX(row),
+        .x = valueTextX(row),
         .y = row.y + (row.h - toggle_size) / 2,
         .w = toggle_size,
         .h = toggle_size,
@@ -354,7 +373,7 @@ fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
 }
 
 fn sliderTrack(row: picker_viewport.Rect) picker_viewport.Rect {
-    const track_x = valueX(row) + value_column_width;
+    const track_x = valueTextX(row) + value_column_width;
     const track_right = row.x + row.w - control_right_inset;
     return .{
         .x = track_x,
@@ -364,8 +383,8 @@ fn sliderTrack(row: picker_viewport.Rect) picker_viewport.Rect {
     };
 }
 
-fn valueX(row: picker_viewport.Rect) f32 {
-    return row.x + @max(132, row.w * 0.32);
+fn valueTextX(row: picker_viewport.Rect) f32 {
+    return row.x + @max(122, row.w * 0.28);
 }
 
 fn redBlueFromX(row: picker_viewport.Rect, x: f32) i32 {
@@ -432,4 +451,55 @@ test "monitor row activation and click cycle monitors" {
     const layout = picker_viewport.ResultLayout.default(5);
     try std.testing.expect(try form.click(&state, layout, layout.row_x + 20, layout.result_top + 20));
     try std.testing.expectEqual(@as(u32, 0), form.selected_monitor);
+}
+
+test "form hit testing follows picker row geometry and gaps" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+    const layout = picker_viewport.ResultLayout.default(5);
+    const slider = layout.rowRect(2);
+    const gap_y = slider.y - (picker_viewport.default_result_row_gap / 2);
+
+    try form.ensureReady(&state);
+    try std.testing.expect(!try form.click(&state, layout, slider.x + 20, gap_y));
+    try std.testing.expectEqual(Control.monitor, form.focus);
+
+    try std.testing.expect(try form.focusAt(layout, slider.x + 20, slider.y + 2));
+    try std.testing.expectEqual(Control.red_blue_slider, form.focus);
+    try std.testing.expect(try form.click(&state, layout, slider.x + slider.w - 2, slider.y + (slider.h / 2)));
+    try std.testing.expectEqual(sunglasses_state.red_blue_max, state.monitors[0].red_blue_value);
+}
+
+test "form hit testing keeps all controls when result rows clamp below five" {
+    const layout = picker_viewport.ResultLayout.forWindow(
+        picker_viewport.default_base_width,
+        picker_viewport.min_base_height,
+        control_count,
+    );
+    try std.testing.expect(layout.visible_rows < control_count);
+
+    var index: u32 = 0;
+    while (index < control_count) : (index += 1) {
+        const control = controlFromIndex(index);
+        const row = controlRow(layout, control);
+        try std.testing.expectEqual(layout.row_x, row.x);
+        try std.testing.expectEqual(layout.row_width, row.w);
+        try std.testing.expectEqual(layout.row_height, row.h);
+
+        const hit = controlAt(layout, row.x + 2, row.y + (row.h / 2)) orelse return error.ExpectedFormControlHit;
+        try std.testing.expectEqual(control, hit.control);
+    }
+}
+
+test "monitor-only focus changes do not require saved state" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    try std.testing.expect(!form.focusedControlChangesSavedState());
+    form.focus = .red_blue_toggle;
+    try std.testing.expect(form.focusedControlChangesSavedState());
+    form.focus = .monitor;
+    try std.testing.expect(!try form.activateFocused(&state));
+    try std.testing.expect(!form.focusedControlChangesSavedState());
 }

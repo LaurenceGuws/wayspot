@@ -342,6 +342,17 @@ pub fn visibleRowsForHeight(available_height: f32, row_height: f32, row_gap: f32
     return rows;
 }
 
+pub fn rowGridHeightForRows(row_count_raw: u32) f32 {
+    const row_count = clampVisibleRows(row_count_raw);
+    const rows_height = default_result_row_height * @as(f32, @floatFromInt(row_count));
+    const gaps_height = default_result_row_gap * @as(f32, @floatFromInt(row_count - 1));
+    return rows_height + gaps_height;
+}
+
+pub fn baseHeightForRows(row_count: u32) f32 {
+    return default_query_line_y + default_result_list_gap + rowGridHeightForRows(row_count) + default_result_bottom_margin;
+}
+
 fn sameState(a: Viewport, b: Viewport) bool {
     return a.total_rows == b.total_rows and
         a.selected_row == b.selected_row and
@@ -572,7 +583,20 @@ test "default result area is exactly the eight row grid plus gaps" {
 
     try testing.expectEqual(@as(u32, 8), layout.visible_rows);
     try testing.expectEqual(row_grid_height, layout.resultAreaHeight());
+    try testing.expectEqual(row_grid_height, rowGridHeightForRows(8));
+    try testing.expectEqual(default_base_height, baseHeightForRows(8));
     try testing.expectEqual(@as(u32, 8), visibleRowsForHeight(layout.resultAreaHeight(), default_result_row_height, default_result_row_gap));
+}
+
+test "base height for row count fits that exact row grid" {
+    const testing = std.testing;
+    const base_height = baseHeightForRows(5);
+    const layout = ResultLayout.forWindow(default_base_width, base_height, 5);
+
+    try testing.expectEqual(@as(f32, 218), rowGridHeightForRows(5));
+    try testing.expectEqual(@as(f32, 252), base_height);
+    try testing.expectEqual(@as(u32, 5), layout.visible_rows);
+    try testing.expectEqual(rowGridHeightForRows(5), layout.resultAreaHeight());
 }
 
 test "default result layout places icon inside row hit area" {
