@@ -58,6 +58,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (sunglassesImageCommand(args)) |command| {
+        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        try applySunglassesImageCommand(allocator, runtime_dir, command);
+        return;
+    }
+
     if (hasArg(args, "--sunglasses-daemon")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
@@ -144,6 +150,52 @@ fn runSunglassesDaemon(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyp
     try wayspot.sunglasses.Runtime.runDaemon(allocator, hypr);
 }
 
+const SunglassesImageCommand = union(enum) {
+    set: struct {
+        monitor: []const u8,
+        path: []const u8,
+    },
+    clear: struct {
+        monitor: []const u8,
+    },
+};
+
+fn sunglassesImageCommand(args: []const []const u8) ?SunglassesImageCommand {
+    if (args.len == 4 and std.mem.eql(u8, args[1], "--sunglasses-set-image")) {
+        return .{ .set = .{
+            .monitor = args[2],
+            .path = args[3],
+        } };
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "--sunglasses-clear-image")) {
+        return .{ .clear = .{
+            .monitor = args[2],
+        } };
+    }
+    return null;
+}
+
+fn applySunglassesImageCommand(
+    allocator: std.mem.Allocator,
+    runtime_dir: []const u8,
+    command: SunglassesImageCommand,
+) !void {
+    var state = try wayspot.sunglasses.state.load(allocator);
+    switch (command) {
+        .set => |set| {
+            const monitor = try state.ensureMonitor(set.monitor);
+            try monitor.setImagePath(set.path);
+        },
+        .clear => |clear| {
+            const monitor = try state.ensureMonitor(clear.monitor);
+            monitor.image_enabled = false;
+            monitor.clearImagePath();
+        },
+    }
+    try wayspot.sunglasses.state.save(state, allocator);
+    try wayspot.sunglasses.Runtime.reconcileSavedState(allocator, runtime_dir);
+}
+
 const Runtime = struct {
     app_cache_path: []u8,
     history_path: []u8,
@@ -187,4 +239,31 @@ fn hasArg(args: []const []const u8, needle: []const u8) bool {
         if (std.mem.eql(u8, arg, needle)) return true;
     }
     return false;
+}
+
+test "sunglasses image command parser accepts exact hidden setter and clearer" {
+    const set_args = [_][]const u8{ "wayspot", "--sunglasses-set-image", "DP-1", "/tmp/overlay.png" };
+    const set = sunglassesImageCommand(&set_args) orelse return error.ExpectedSetImageCommand;
+    switch (set) {
+        .set => |value| {
+            try std.testing.expectEqualStrings("DP-1", value.monitor);
+            try std.testing.expectEqualStrings("/tmp/overlay.png", value.path);
+        },
+        .clear => return error.ExpectedSetImageCommand,
+    }
+
+    const clear_args = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1" };
+    const clear = sunglassesImageCommand(&clear_args) orelse return error.ExpectedClearImageCommand;
+    switch (clear) {
+        .set => return error.ExpectedClearImageCommand,
+        .clear => |value| try std.testing.expectEqualStrings("DP-1", value.monitor),
+    }
+}
+
+test "sunglasses image command parser rejects partial hidden commands" {
+    const missing_path = [_][]const u8{ "wayspot", "--sunglasses-set-image", "DP-1" };
+    try std.testing.expect(sunglassesImageCommand(&missing_path) == null);
+
+    const extra_arg = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1", "/tmp/overlay.png" };
+    try std.testing.expect(sunglassesImageCommand(&extra_arg) == null);
 }

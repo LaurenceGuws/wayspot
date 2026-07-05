@@ -398,7 +398,14 @@ const SdlShell = struct {
                 try self.updateViewportForWindow();
             },
             c.SDL_EVENT_TEXT_INPUT => {
-                if (self.sunglassesActive()) return true;
+                if (self.sunglassesActive()) {
+                    const text = std.mem.span(event.text.text);
+                    if (try self.sunglasses_form.handleTextInput(&self.sunglasses_state, text)) {
+                        self.resetCursorBlink();
+                        self.dirty = true;
+                    }
+                    return true;
+                }
                 const text = std.mem.span(event.text.text);
                 try self.query.appendSlice(self.allocator, text);
                 self.resetCursorBlink();
@@ -412,7 +419,7 @@ const SdlShell = struct {
             },
             c.SDL_EVENT_MOUSE_MOTION => {
                 if (self.sunglassesActive()) {
-                    if (self.focusSunglassesFormAt(event.motion.x, event.motion.y)) self.dirty = true;
+                    if (try self.focusSunglassesFormAt(event.motion.x, event.motion.y)) self.dirty = true;
                     return true;
                 }
                 if (self.visibleRowAtPoint(event.motion.x, event.motion.y)) |visible_row| {
@@ -445,17 +452,25 @@ const SdlShell = struct {
                         return false;
                     },
                     c.SDLK_BACKSPACE => {
+                        if (self.sunglassesActive()) {
+                            if (try self.sunglasses_form.handleBackspace(&self.sunglasses_state)) {
+                                self.resetCursorBlink();
+                                self.dirty = true;
+                            }
+                            return true;
+                        }
                         trimLastUtf8(&self.query);
                         self.resetCursorBlink();
                         try self.refreshResults();
                     },
                     c.SDLK_TAB => {
                         if (self.sunglassesActive()) {
-                            self.sunglasses_form.focusNext((event.key.mod & c.SDL_KMOD_SHIFT) != 0);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_state, (event.key.mod & c.SDL_KMOD_SHIFT) != 0);
                             self.dirty = true;
                         }
                     },
                     c.SDLK_SPACE => {
+                        if (self.sunglassesActive() and self.sunglasses_form.focusedPathInput()) return true;
                         if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
                             if (self.sunglasses_form.focusedControlChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
@@ -464,6 +479,26 @@ const SdlShell = struct {
                         if (self.sunglassesActive()) return true;
                     },
                     c.SDLK_RETURN, c.SDLK_KP_ENTER => {
+                        if (self.sunglassesActive()) {
+                            const was_path_input = self.sunglasses_form.focusedPathInput();
+                            switch (try self.sunglasses_form.commitFocused(&self.sunglasses_state)) {
+                                .changed => {
+                                    try self.persistAndWakeSunglasses();
+                                    self.dirty = true;
+                                    return true;
+                                },
+                                .invalid => {
+                                    self.dirty = true;
+                                    return true;
+                                },
+                                .no_change => {
+                                    if (was_path_input) {
+                                        self.dirty = true;
+                                        return true;
+                                    }
+                                },
+                            }
+                        }
                         if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
                             if (self.sunglasses_form.focusedControlChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
@@ -486,7 +521,7 @@ const SdlShell = struct {
                     },
                     c.SDLK_UP => {
                         if (self.sunglassesActive()) {
-                            self.sunglasses_form.focusNext(true);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_state, true);
                             self.dirty = true;
                             return true;
                         }
@@ -494,7 +529,7 @@ const SdlShell = struct {
                     },
                     c.SDLK_DOWN => {
                         if (self.sunglassesActive()) {
-                            self.sunglasses_form.focusNext(false);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_state, false);
                             self.dirty = true;
                             return true;
                         }
@@ -600,11 +635,11 @@ const SdlShell = struct {
         self.dirty = true;
     }
 
-    fn focusSunglassesFormAt(self: *SdlShell, x: f32, y: f32) bool {
+    fn focusSunglassesFormAt(self: *SdlShell, x: f32, y: f32) !bool {
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
         const layout = self.currentResultLayout(sunglasses_form.control_count);
-        return self.sunglasses_form.focusAt(layout, x / scale, y / scale);
+        return try self.sunglasses_form.focusAt(&self.sunglasses_state, layout, x / scale, y / scale);
     }
 
     fn persistAndWakeSunglasses(self: *SdlShell) !void {

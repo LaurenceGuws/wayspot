@@ -68,10 +68,10 @@ progress:
     - 00_scope_and_owner_map
     - 01_still_image_state_owner
     - 02_still_image_surface_buffer
-  current:
     - 03_form_and_cli_controls
-  pending:
+  current:
     - 04_visual_receipts
+  pending:
     - 05_external_video_probe
 
 verification_floor:
