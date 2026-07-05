@@ -1,4 +1,4 @@
-//! Sunglasses mode owns the runtime configuration row facts.
+//! Sunglasses mode owns the filter configuration row facts.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");

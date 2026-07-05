@@ -21,7 +21,7 @@ pub const viewport = @import("viewport.zig");
 const apps_mode = @import("mode/apps.zig");
 const history_list = @import("../notification/history_list.zig");
 
-/// Picker keeps candidate rows and persisted selection history for one process.
+/// Picker keeps candidate rows and persisted selection history for one picker lifecycle.
 pub const Picker = struct {
     opens: ?*open.Open = null,
     apps: ?*apps_mode.Apps = null,
@@ -210,7 +210,7 @@ fn deinitHistory(history: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allo
     history.deinit(allocator);
 }
 
-test "picker collects candidates once per process lifetime" {
+test "picker collects candidates once per picker lifecycle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 

@@ -15,7 +15,7 @@ pub const WallpaperSurface = struct {
     layer: LayerShellRole,
     monitor: hyprland.Monitor,
 
-    /// The surface does not own image discovery, Hyprland IPC, or process lifetime.
+    /// The surface does not own image discovery, Hyprland IPC, or picker lifecycle.
     pub fn init(monitor: hyprland.Monitor) !WallpaperSurface {
         var title_buf: [max_title_bytes:0]u8 = undefined;
         const window_title = try writeTitle(&title_buf, monitor.name());

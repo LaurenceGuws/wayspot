@@ -1,4 +1,4 @@
-//! Process identity owns bounded Linux comm names for Wayspot runtimes.
+//! Identity owns bounded Linux comm names for Wayspot entrypoints.
 
 const std = @import("std");
 
@@ -17,18 +17,18 @@ comptime {
 }
 
 pub fn set(name: []const u8) !void {
-    if (name.len == 0 or name.len > max_linux_comm_visible_bytes) return error.InvalidProcessName;
+    if (name.len == 0 or name.len > max_linux_comm_visible_bytes) return error.InvalidIdentityName;
     var buf: [max_linux_comm_visible_bytes + 1:0]u8 = undefined;
     @memset(&buf, 0);
     @memcpy(buf[0..name.len], name);
     const ptr_value: u64 = @intFromPtr(&buf);
     if (@import("builtin").os.tag == .linux) {
         const result = try std.posix.prctl(.SET_NAME, .{ptr_value});
-        if (result != 0) return error.ProcessNameFailed;
+        if (result != 0) return error.IdentityNameFailed;
     }
 }
 
-test "process comm names fit Linux visible process name bound" {
+test "visible comm names fit Linux visible entrypoint name bound" {
     try std.testing.expect(notifications.len <= max_linux_comm_visible_bytes);
     try std.testing.expect(picker.len <= max_linux_comm_visible_bytes);
     try std.testing.expect(wallpaper.len <= max_linux_comm_visible_bytes);

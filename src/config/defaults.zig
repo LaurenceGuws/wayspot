@@ -67,7 +67,7 @@ pub fn load(allocator: std.mem.Allocator, home: []const u8) !appearance_owner.Ap
     return appearance_state;
 }
 
-/// Loads defaults using HOME from the process environment, falling back to embedded values.
+/// Loads defaults using HOME from the environment, falling back to embedded values.
 pub fn loadFromEnvironment(allocator: std.mem.Allocator) !appearance_owner.Appearance {
     const home = if (std.c.getenv("HOME")) |home_z| std.mem.span(home_z) else ".";
     return load(allocator, home);

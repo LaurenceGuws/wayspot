@@ -1,5 +1,5 @@
 [Unit]
-Description=Wayspot Notification Daemon
+Description=Wayspot Notification DBus Interface
 After=graphical-session.target
 Wants=graphical-session.target
 

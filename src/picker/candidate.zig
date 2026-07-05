@@ -8,7 +8,7 @@ pub const Candidate = struct {
         app,
         open,
         mode,
-        daemon,
+        lifecycle,
         notification,
         hint,
     };

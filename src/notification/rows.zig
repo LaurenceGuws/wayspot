@@ -1,4 +1,4 @@
-//! Notification runtime owns the bounded in-process rows shown by notification banners.
+//! Notification rows own the bounded in-memory rows shown by notification banners.
 
 const std = @import("std");
 
@@ -44,34 +44,34 @@ pub const Snapshot = struct {
     updated_ns: i128,
 };
 
-const Runtime = struct {
+const Rows = struct {
     mu: std.Io.Mutex = .init,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     close_fn: ?*const fn (u32) bool = null,
 };
 
-var runtime: Runtime = .{};
+var row_store: Rows = .{};
 
 pub fn registerCloser(close_fn: *const fn (u32) bool) void {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
-    runtime.close_fn = close_fn;
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
+    row_store.close_fn = close_fn;
 }
 
 pub fn clearCloser(close_fn: *const fn (u32) bool) void {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
-    if (runtime.close_fn == close_fn) runtime.close_fn = null;
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
+    if (row_store.close_fn == close_fn) row_store.close_fn = null;
 }
 
 pub fn resetForTest(allocator: std.mem.Allocator) void {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
-    for (runtime.entries.items) |row| {
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
+    for (row_store.entries.items) |row| {
         freeEntry(allocator, row);
     }
-    runtime.entries.clearRetainingCapacity();
-    runtime.close_fn = null;
+    row_store.entries.clearRetainingCapacity();
+    row_store.close_fn = null;
 }
 
 pub fn recordNotify(
@@ -84,12 +84,12 @@ pub fn recordNotify(
     urgency: u8,
     transient: bool,
 ) !void {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
 
     const now = nowNs();
     if (findIndexLocked(id)) |idx| {
-        var row = &runtime.entries.items[idx];
+        var row = &row_store.entries.items[idx];
         allocator.free(row.app_name);
         allocator.free(row.app_icon);
         allocator.free(row.summary);
@@ -106,7 +106,7 @@ pub fn recordNotify(
         return;
     }
 
-    try runtime.entries.append(allocator, .{
+    try row_store.entries.append(allocator, .{
         .id = id,
         .app_name = try duplicateBounded(allocator, app_name, max_app_name_bytes),
         .app_icon = try duplicateBounded(allocator, app_icon, max_app_icon_bytes),
@@ -120,42 +120,42 @@ pub fn recordNotify(
         .updated_ns = now,
     });
 
-    while (runtime.entries.items.len > max_entries) {
-        const removed = runtime.entries.orderedRemove(0);
+    while (row_store.entries.items.len > max_entries) {
+        const removed = row_store.entries.orderedRemove(0);
         freeEntry(allocator, removed);
     }
 }
 
 pub fn recordClosed(id: u32, reason: u32) void {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
     const idx = findIndexLocked(id) orelse return;
-    runtime.entries.items[idx].active = false;
-    runtime.entries.items[idx].closed_reason = reason;
-    runtime.entries.items[idx].updated_ns = nowNs();
+    row_store.entries.items[idx].active = false;
+    row_store.entries.items[idx].closed_reason = reason;
+    row_store.entries.items[idx].updated_ns = nowNs();
 }
 
 pub fn closeById(id: u32) bool {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
-    const close_fn = runtime.close_fn orelse return false;
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
+    const close_fn = row_store.close_fn orelse return false;
     return close_fn(id);
 }
 
 pub fn closeAllActive() u32 {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    const close_fn = runtime.close_fn;
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    const close_fn = row_store.close_fn;
     var ids: [max_entries]u32 = undefined;
     var id_count: u32 = 0;
     if (close_fn != null) {
-        for (runtime.entries.items) |entry| {
+        for (row_store.entries.items) |entry| {
             if (!entry.active) continue;
             std.debug.assert(id_count < max_entries);
             ids[id_count] = entry.id;
             id_count += 1;
         }
     }
-    runtime.mu.unlock(std.Options.debug_io);
+    row_store.mu.unlock(std.Options.debug_io);
 
     if (close_fn == null) return 0;
     var closed: u32 = 0;
@@ -166,16 +166,16 @@ pub fn closeAllActive() u32 {
 }
 
 pub fn snapshot(allocator: std.mem.Allocator) ![]Snapshot {
-    runtime.mu.lockUncancelable(std.Options.debug_io);
-    defer runtime.mu.unlock(std.Options.debug_io);
+    row_store.mu.lockUncancelable(std.Options.debug_io);
+    defer row_store.mu.unlock(std.Options.debug_io);
 
-    var out = try allocator.alloc(Snapshot, runtime.entries.items.len);
+    var out = try allocator.alloc(Snapshot, row_store.entries.items.len);
     errdefer {
         for (out) |row| freeSnapshotRow(allocator, row);
         allocator.free(out);
     }
 
-    for (runtime.entries.items, 0..) |entry, idx| {
+    for (row_store.entries.items, 0..) |entry, idx| {
         out[idx] = .{
             .id = entry.id,
             .app_name = try duplicateBounded(allocator, entry.app_name, max_app_name_bytes),
@@ -199,7 +199,7 @@ pub fn freeSnapshot(allocator: std.mem.Allocator, rows: []Snapshot) void {
 }
 
 fn findIndexLocked(id: u32) ?u32 {
-    for (runtime.entries.items, 0..) |row, idx| {
+    for (row_store.entries.items, 0..) |row, idx| {
         if (row.id == id) return @intCast(idx);
     }
     return null;
@@ -241,7 +241,7 @@ test "recordNotify and snapshot preserve latest state" {
 
     const rows = try snapshot(allocator);
     defer freeSnapshot(allocator, rows);
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(rows.len)));
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(row_store.len)));
     try std.testing.expectEqual(@as(u32, 7), rows[0].id);
     try std.testing.expectEqualStrings("app2", rows[0].app_name);
     try std.testing.expectEqualStrings("app2-icon", rows[0].app_icon);

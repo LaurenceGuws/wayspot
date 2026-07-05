@@ -1,13 +1,13 @@
-//! Notification owns daemon state, history cache, history rows, and banners.
+//! Notification owns DBus state, history cache, history rows, and banners.
 
 const std = @import("std");
 
 pub const banner = @import("banner.zig");
 pub const state = @import("state.zig");
-pub const daemon = @import("daemon.zig");
-pub const Daemon = daemon.Daemon;
-pub const run = daemon.run;
-pub const runtime = @import("runtime.zig");
+pub const dbus = @import("dbus.zig");
+pub const DBus = dbus.DBus;
+pub const run = dbus.run;
+pub const rows = @import("rows.zig");
 pub const preview = @import("preview.zig");
 pub const history_cache = @import("history_cache.zig");
 pub const history_list = @import("history_list.zig");

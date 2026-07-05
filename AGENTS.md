@@ -3,7 +3,7 @@
 ## Repository Map
 
 This file summarizes `tree -L 2` and the Wayspot team workflow. Product-facing
-behavior belongs in `README.md`. Runtime truth belongs in Zig doc comments and
+behavior belongs in `README.md`. Source truth belongs in Zig doc comments and
 the source itself.
 
 - `.agent/history/`
@@ -22,7 +22,7 @@ the source itself.
   current user-visible features do.
 
 - `assets/icons/`
-  Static assets used by packaging or runtime surfaces.
+  Static assets used by packaging or focused surfaces.
 
 - `build.zig`, `build.zig.zon`
   Zig 0.16 build graph and dependency pins. Arch Linux requires
@@ -39,7 +39,7 @@ the source itself.
   Service integration files.
 
 - `re-run.sh`
-  Local rebuild/sync/run helper. Keep runtime/build knobs centralized here or
+  Local rebuild/sync/run helper. Keep build knobs centralized here or
   in `.rerun.env`.
 
 - `reference_repo/`
@@ -55,10 +55,10 @@ the source itself.
   Bounded configuration defaults and Lua defaults loading.
 
 - `src/main.zig`
-  CLI mode selection, top-level runtime wiring, and cleanup order.
+  CLI mode selection, top-level entrypoint wiring, and cleanup order.
 
 - `src/notification/`
-  Freedesktop notification daemon, bounded notification state, history cache,
+  Freedesktop notification DBus interface, bounded notification state, history cache,
   history list rows, and banner surface.
 
 - `src/picker/`
@@ -67,13 +67,13 @@ the source itself.
   concrete inert picker elements.
 
 - `src/sunglasses/`
-  Monitor-glasses domain state and runtime overlay reconciliation.
+  Monitor-glasses state and overlay reconciliation.
 
 - `src/wallpaper/`
-  Wallpaper daemon/domain code, Hyprland monitor facts, and still-image runtime.
+  Wallpaper loop/domain code, Hyprland monitor facts, and still-image loop.
 
 - `tools/`
-  Development probes and receipt helpers. Tools are not runtime architecture.
+  Development probes and receipt helpers. Tools are not architecture.
 
 - `zig-pkg/`
   Local Zig package cache/vendor material for SDL dependency.
@@ -115,32 +115,31 @@ wrappers, no broad architecture kept around for later.
 ## Product Scope
 
 Wayspot is a pragmatic DE busybox: CLI-summoned picker, notification
-daemon, wallpaper daemon, and focused runtime surfaces.
+DBus interface, wallpaper loop, and focused focused surfaces.
 
 Keep the core path small: initialize the vendor windowing backend for one
 bounded picker lifecycle, load app/open/mode rows, launch the selected command,
-clean up once, render typed notification rows, and keep long-lived daemons
+clean up once, render typed notification rows, and keep long-lived loops
 intentional.
 
 Out of scope unless a fresh indexed sprint accepts it: GTK, shell modules, open
-registries, broad WM abstractions, web/window/workspace inventories, runtime
-scripting VMs, resident launcher IPC, and generic UI frameworks.
+registries, broad WM abstractions, web/window/workspace inventories, scripting VMs, resident launcher IPC, and generic UI frameworks.
 
 ## Code Rules
 
 - Everything has a bound: loops, queues, buffers, command strings, result pages,
   wake slots, retained notifications, and discovered media.
 - Everything is cleaned up once by the owner that allocated or started it.
-- CPU sleeps unless there is input, notification work, daemon work, or a
+- CPU sleeps unless there is input, notification work, DBus work, or a
   scheduled deadline.
 - Do not use `_ =`, `usize`, `anytype`, or `anyopaque` in active Zig code. The
   only known `anyopaque` exception is the GLib D-Bus callback boundary in the
-  notification daemon.
+  notification DBus interface.
 - DRY means remove duplicated intent. It does not mean moving product-specific
   vocabulary sideways into a shared folder.
 - Picker inert mechanics live under concrete picker nouns such as `textbox`,
   `slider`, and `cursor_blink`. No generic product bucket owns rendering,
-  persistence, Hyprland, daemon, or product-domain imports.
+  persistence, Hyprland, DBus, or product-domain imports.
 
 ## Documentation Rules
 

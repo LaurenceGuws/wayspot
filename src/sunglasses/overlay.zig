@@ -1,4 +1,4 @@
-//! Sunglasses runtime owns overlay slots, apply wakes, and shutdown cleanup order.
+//! Sunglasses overlay owns overlay slots, apply wakes, and shutdown cleanup order.
 
 const std = @import("std");
 const hyprland = @import("../wallpaper/hyprland.zig");
@@ -19,34 +19,34 @@ const pid_file_name = "sunglasses.pid";
 const reconcile_lock_file_name = "sunglasses.reconcile.lock";
 const max_pid_file_bytes: u32 = 32;
 const max_proc_cmdline_bytes: u32 = 4096;
-const daemon_stop_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
-const daemon_start_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
-const max_daemon_stop_polls: u32 = 100;
-const max_daemon_start_polls: u32 = 100;
-const daemon_child_fail_code: i32 = 127;
-const max_daemon_wait_interrupts: u32 = 8;
-var runtime_signal_shutdown_fd = std.atomic.Value(std.posix.fd_t).init(-1);
-var runtime_signal_apply_fd = std.atomic.Value(std.posix.fd_t).init(-1);
+const overlay_stop_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
+const overlay_start_poll_sleep_ns: u64 = 10 * std.time.ns_per_ms;
+const max_overlay_stop_polls: u32 = 100;
+const max_overlay_start_polls: u32 = 100;
+const overlay_child_fail_code: i32 = 127;
+const max_child_wait_interrupts: u32 = 8;
+var signal_shutdown_fd = std.atomic.Value(std.posix.fd_t).init(-1);
+var signal_apply_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
-pub const Runtime = struct {
+pub const Overlay = struct {
     allocator: std.mem.Allocator,
     slots: [hyprland.max_monitors]SurfaceSlot = undefined,
     slot_count: u32 = 0,
     vendor_started: bool = false,
 
-    pub fn runDaemon(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
-        var runtime = Runtime{ .allocator = allocator };
-        defer runtime.deinit();
-        try runtime.startDaemon(hypr);
+    pub fn runOverlay(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
+        var overlay = Overlay{ .allocator = allocator };
+        defer overlay.deinit();
+        try overlay.startOverlay(hypr);
     }
 
     pub fn applyNow(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
         const pid_path = try sunglassesPidPath(allocator, runtime_dir);
         defer allocator.free(pid_path);
         const pid = try readSunglassesPid(pid_path);
-        if (!processLooksLikeSunglassesDaemon(pid)) {
+        if (!pidMatchesSunglassesOverlay(pid)) {
             removePidFile(pid_path);
-            return error.SunglassesDaemonNotRunning;
+            return error.SunglassesOverlayNotRunning;
         }
         try sendSignal(pid, .USR1);
     }
@@ -59,29 +59,29 @@ pub const Runtime = struct {
         const pid_path = try sunglassesPidPath(allocator, runtime_dir);
         defer allocator.free(pid_path);
 
-        const process_state = daemonProcessState(pid_path);
-        switch (process_state) {
+        const child_state = childState(pid_path);
+        switch (child_state) {
             .stale => removePidFile(pid_path),
             else => {},
         }
 
-        const process_live = process_state == .live;
-        switch (reconcileAction(state.needsDaemon(), process_live)) {
+        const child_live = child_state == .live;
+        switch (reconcileAction(state.needsOverlay(), child_live)) {
             .idle => {},
-            .wake => try sendSignal(process_state.live, .USR1),
-            .start => try startDaemonAndWait(allocator, pid_path),
-            .stop => try stopDaemon(pid_path, process_state.live),
+            .wake => try sendSignal(child_state.live, .USR1),
+            .start => try startOverlayAndWait(allocator, pid_path),
+            .stop => try stopOverlay(pid_path, child_state.live),
         }
     }
 
-    fn startDaemon(self: *Runtime, hypr: hyprland.Connection) !void {
+    fn startOverlay(self: *Overlay, hypr: hyprland.Connection) !void {
         var state = try sunglasses_state.load(self.allocator);
-        if (!state.needsDaemon()) return;
+        if (!state.needsOverlay()) return;
 
         try self.startVendor();
-        var runtime_signals = try RuntimeSignals.init();
-        defer runtime_signals.deinit();
-        try runtime_signals.start();
+        var signals = try OverlaySignals.init();
+        defer signals.deinit();
+        try signals.start();
         var pid_file = try PidFile.create(self.allocator, hypr.runtime_dir);
         defer pid_file.deinit(self.allocator);
 
@@ -93,32 +93,32 @@ pub const Runtime = struct {
         try self.runApplyLoop(hypr, &state);
     }
 
-    fn startVendor(self: *Runtime) !void {
+    fn startVendor(self: *Overlay) !void {
         const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sunglasses_surface.class_name);
         if (!hint_set) return error.SdlHintFailed;
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         self.vendor_started = true;
     }
 
-    fn runApplyLoop(self: *Runtime, hypr: hyprland.Connection, state: *sunglasses_state.State) !void {
+    fn runApplyLoop(self: *Overlay, hypr: hyprland.Connection, state: *sunglasses_state.State) !void {
         while (true) {
-            switch (try waitForRuntimeWake()) {
+            switch (try waitForWake()) {
                 .shutdown => return,
                 .apply => {
                     state.* = try sunglasses_state.load(self.allocator);
-                    if (!state.needsDaemon()) return;
+                    if (!state.needsOverlay()) return;
                     try self.redrawSurfaceSlots(state);
                 },
                 .monitor_changed => {
                     state.* = try sunglasses_state.load(self.allocator);
-                    if (!state.needsDaemon()) return;
+                    if (!state.needsOverlay()) return;
                     try self.rebuildSurfaceSlots(hypr, state);
                 },
             }
         }
     }
 
-    fn rebuildSurfaceSlots(self: *Runtime, hypr: hyprland.Connection, state: *const sunglasses_state.State) !void {
+    fn rebuildSurfaceSlots(self: *Overlay, hypr: hyprland.Connection, state: *const sunglasses_state.State) !void {
         const monitors = try hyprland.queryMonitors(self.allocator, hypr);
         if (monitors.count == 0) return error.NoHyprlandMonitors;
 
@@ -133,7 +133,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn redrawSurfaceSlots(self: *Runtime, state: *const sunglasses_state.State) !void {
+    fn redrawSurfaceSlots(self: *Overlay, state: *const sunglasses_state.State) !void {
         var index: u32 = 0;
         while (index < self.slot_count) : (index += 1) {
             const monitor_name = self.slots[index].surface.monitor.name();
@@ -141,7 +141,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn clearSurfaceSlots(self: *Runtime) void {
+    fn clearSurfaceSlots(self: *Overlay) void {
         var index = self.slot_count;
         while (index > 0) {
             index -= 1;
@@ -150,7 +150,7 @@ pub const Runtime = struct {
         self.slot_count = 0;
     }
 
-    pub fn deinit(self: *Runtime) void {
+    pub fn deinit(self: *Overlay) void {
         self.clearSurfaceSlots();
         if (self.vendor_started) {
             c.SDL_Quit();
@@ -171,13 +171,13 @@ pub const SurfaceSlot = struct {
     }
 };
 
-const RuntimeWake = enum {
+const OverlayWake = enum {
     shutdown,
     apply,
     monitor_changed,
 };
 
-const DaemonProcessState = union(enum) {
+const ChildState = union(enum) {
     absent,
     stale,
     live: std.os.linux.pid_t,
@@ -190,12 +190,12 @@ const ReconcileAction = enum {
     stop,
 };
 
-fn reconcileAction(needs_daemon: bool, process_live: bool) ReconcileAction {
-    if (needs_daemon) return if (process_live) .wake else .start;
-    return if (process_live) .stop else .idle;
+fn reconcileAction(needs_overlay: bool, child_live: bool) ReconcileAction {
+    if (needs_overlay) return if (child_live) .wake else .start;
+    return if (child_live) .stop else .idle;
 }
 
-fn waitForRuntimeWake() !RuntimeWake {
+fn waitForWake() !OverlayWake {
     while (true) {
         var event: c.SDL_Event = undefined;
         if (c.SDL_WaitEvent(&event)) {
@@ -219,7 +219,7 @@ fn eventIsShutdown(event: c.SDL_Event) bool {
         event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 }
 
-/// MonitorWatcher converts Hyprland monitor events into vendor redraw wakes owned by Runtime.
+/// MonitorWatcher converts Hyprland monitor events into vendor redraw wakes owned by Overlay.
 const MonitorWatcher = struct {
     stream: hyprland.EventStream,
     stop_fd: std.posix.fd_t = -1,
@@ -294,8 +294,8 @@ fn pushVendorQuit() void {
     }
 }
 
-/// RuntimeSignals converts process termination into the vendor event loop shutdown path.
-const RuntimeSignals = struct {
+/// OverlaySignals converts signal termination into the vendor event loop shutdown path.
+const OverlaySignals = struct {
     shutdown_fd: std.posix.fd_t = -1,
     apply_fd: std.posix.fd_t = -1,
     old_int_action: std.posix.Sigaction = undefined,
@@ -305,7 +305,7 @@ const RuntimeSignals = struct {
     installed: bool = false,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init() !RuntimeSignals {
+    fn init() !OverlaySignals {
         const shutdown_fd = try osEventFd();
         errdefer osClose(shutdown_fd);
         const apply_fd = try osEventFd();
@@ -315,23 +315,23 @@ const RuntimeSignals = struct {
         };
     }
 
-    fn start(self: *RuntimeSignals) !void {
+    fn start(self: *OverlaySignals) !void {
         std.debug.assert(self.shutdown_fd != -1);
         std.debug.assert(self.apply_fd != -1);
-        runtime_signal_shutdown_fd.store(self.shutdown_fd, .release);
-        runtime_signal_apply_fd.store(self.apply_fd, .release);
+        signal_shutdown_fd.store(self.shutdown_fd, .release);
+        signal_apply_fd.store(self.apply_fd, .release);
         self.installHandlers();
-        self.thread = try std.Thread.spawn(.{}, runtimeSignalsMain, .{self});
+        self.thread = try std.Thread.spawn(.{}, signalsMain, .{self});
     }
 
-    fn stop(self: *RuntimeSignals) void {
+    fn stop(self: *OverlaySignals) void {
         self.stop_requested.store(true, .release);
         if (self.installed) {
             self.restoreHandlers();
             self.installed = false;
         }
-        runtime_signal_shutdown_fd.store(-1, .release);
-        runtime_signal_apply_fd.store(-1, .release);
+        signal_shutdown_fd.store(-1, .release);
+        signal_apply_fd.store(-1, .release);
         if (self.thread) |thread| {
             signalEventFd(self.shutdown_fd, shutdown_eventfd_stop_value);
             thread.join();
@@ -347,13 +347,13 @@ const RuntimeSignals = struct {
         }
     }
 
-    fn deinit(self: *RuntimeSignals) void {
+    fn deinit(self: *OverlaySignals) void {
         self.stop();
     }
 
-    fn installHandlers(self: *RuntimeSignals) void {
+    fn installHandlers(self: *OverlaySignals) void {
         var action = std.posix.Sigaction{
-            .handler = .{ .handler = runtimeSignalHandler },
+            .handler = .{ .handler = signalHandler },
             .mask = std.posix.sigemptyset(),
             .flags = 0,
         };
@@ -363,7 +363,7 @@ const RuntimeSignals = struct {
         self.installed = true;
     }
 
-    fn restoreHandlers(self: *RuntimeSignals) void {
+    fn restoreHandlers(self: *OverlaySignals) void {
         std.posix.sigaction(.INT, &self.old_int_action, null);
         std.posix.sigaction(.TERM, &self.old_term_action, null);
         std.posix.sigaction(.USR1, &self.old_usr1_action, null);
@@ -390,10 +390,10 @@ const RuntimeSignals = struct {
     }
 };
 
-fn runtimeSignalHandler(signal: std.posix.SIG) callconv(.c) void {
+fn signalHandler(signal: std.posix.SIG) callconv(.c) void {
     const fd = switch (signal) {
-        .INT, .TERM => runtime_signal_shutdown_fd.load(.acquire),
-        .USR1 => runtime_signal_apply_fd.load(.acquire),
+        .INT, .TERM => signal_shutdown_fd.load(.acquire),
+        .USR1 => signal_apply_fd.load(.acquire),
         else => return,
     };
     if (fd == -1) return;
@@ -402,21 +402,21 @@ fn runtimeSignalHandler(signal: std.posix.SIG) callconv(.c) void {
     if (std.os.linux.errno(written) != .SUCCESS) return;
 }
 
-fn runtimeSignalsMain(runtime_signals: *RuntimeSignals) void {
+fn signalsMain(signals: *OverlaySignals) void {
     var poll_fds = [_]std.posix.pollfd{
         .{
-            .fd = runtime_signals.shutdown_fd,
+            .fd = signals.shutdown_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         },
         .{
-            .fd = runtime_signals.apply_fd,
+            .fd = signals.apply_fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         },
     };
 
-    while (!runtime_signals.stop_requested.load(.acquire)) {
+    while (!signals.stop_requested.load(.acquire)) {
         poll_fds[0].revents = 0;
         poll_fds[1].revents = 0;
         const ready = osPoll(&poll_fds, shutdown_signal_poll_timeout_ms) catch |err| {
@@ -425,22 +425,22 @@ fn runtimeSignalsMain(runtime_signals: *RuntimeSignals) void {
         };
         if (ready == 0) continue;
         if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) {
-            drainEventFd(runtime_signals.apply_fd) catch |err| {
+            drainEventFd(signals.apply_fd) catch |err| {
                 std.log.warn("sunglasses apply read failed err={s}", .{@errorName(err)});
                 return;
             };
-            if (runtime_signals.stop_requested.load(.acquire)) return;
-            RuntimeSignals.pushApplyWake();
+            if (signals.stop_requested.load(.acquire)) return;
+            OverlaySignals.pushApplyWake();
         }
         if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
 
-        drainEventFd(runtime_signals.shutdown_fd) catch |err| {
+        drainEventFd(signals.shutdown_fd) catch |err| {
             if (err == error.WouldBlock) continue;
             std.log.warn("sunglasses shutdown read failed err={s}", .{@errorName(err)});
             return;
         };
-        if (runtime_signals.stop_requested.load(.acquire)) return;
-        RuntimeSignals.pushShutdownWake();
+        if (signals.stop_requested.load(.acquire)) return;
+        OverlaySignals.pushShutdownWake();
         return;
     }
 }
@@ -518,38 +518,38 @@ fn readSunglassesPid(pid_path: []const u8) !std.os.linux.pid_t {
     return std.fmt.parseInt(std.os.linux.pid_t, text, 10);
 }
 
-fn daemonProcessState(pid_path: []const u8) DaemonProcessState {
+fn childState(pid_path: []const u8) ChildState {
     const pid = readSunglassesPid(pid_path) catch |err| switch (err) {
         error.FileNotFound => return .absent,
         else => return .stale,
     };
-    if (!processLooksLikeSunglassesDaemon(pid)) return .stale;
+    if (!pidMatchesSunglassesOverlay(pid)) return .stale;
     return .{ .live = pid };
 }
 
-fn processLooksLikeSunglassesDaemon(pid: std.os.linux.pid_t) bool {
+fn pidMatchesSunglassesOverlay(pid: std.os.linux.pid_t) bool {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
     var cmdline_buf: [max_proc_cmdline_bytes]u8 = undefined;
     const cmdline = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, &cmdline_buf) catch return false;
-    return cmdlineLooksLikeSunglassesDaemon(cmdline);
+    return cmdlineMatchesSunglassesOverlay(cmdline);
 }
 
-fn cmdlineLooksLikeSunglassesDaemon(cmdline: []const u8) bool {
+fn cmdlineMatchesSunglassesOverlay(cmdline: []const u8) bool {
     var has_binary = false;
-    var has_daemon_arg = false;
+    var has_external_flag = false;
     var args = std.mem.splitScalar(u8, cmdline, 0);
     while (args.next()) |arg| {
         if (arg.len == 0) continue;
         if (std.mem.eql(u8, arg, "--sunglasses-daemon")) {
-            has_daemon_arg = true;
+            has_external_flag = true;
             continue;
         }
         if (std.mem.eql(u8, std.fs.path.basename(arg), "wayspot")) {
             has_binary = true;
         }
     }
-    return has_binary and has_daemon_arg;
+    return has_binary and has_external_flag;
 }
 
 fn removePidFile(pid_path: []const u8) void {
@@ -563,14 +563,14 @@ fn sendSignal(pid: std.os.linux.pid_t, signal: std.os.linux.SIG) !void {
     const rc = std.os.linux.kill(pid, signal);
     return switch (std.os.linux.errno(rc)) {
         .SUCCESS => {},
-        .SRCH => error.SunglassesDaemonNotRunning,
+        .SRCH => error.SunglassesOverlayNotRunning,
         else => error.SystemCallFailed,
     };
 }
 
-fn stopDaemon(pid_path: []const u8, pid: std.os.linux.pid_t) !void {
+fn stopOverlay(pid_path: []const u8, pid: std.os.linux.pid_t) !void {
     sendSignal(pid, .TERM) catch |err| switch (err) {
-        error.SunglassesDaemonNotRunning => {
+        error.SunglassesOverlayNotRunning => {
             removePidFile(pid_path);
             return;
         },
@@ -578,39 +578,39 @@ fn stopDaemon(pid_path: []const u8, pid: std.os.linux.pid_t) !void {
     };
 
     var polls: u32 = 0;
-    while (polls < max_daemon_stop_polls) : (polls += 1) {
-        if (!processLooksLikeSunglassesDaemon(pid)) {
+    while (polls < max_overlay_stop_polls) : (polls += 1) {
+        if (!pidMatchesSunglassesOverlay(pid)) {
             removePidFile(pid_path);
             return;
         }
-        sleepNs(daemon_stop_poll_sleep_ns);
+        sleepNs(overlay_stop_poll_sleep_ns);
     }
-    return error.SunglassesDaemonStillRunning;
+    return error.SunglassesOverlayStillRunning;
 }
 
-fn startDaemonAndWait(allocator: std.mem.Allocator, pid_path: []const u8) !void {
-    try startDaemonDetached(allocator);
+fn startOverlayAndWait(allocator: std.mem.Allocator, pid_path: []const u8) !void {
+    try startOverlayDetached(allocator);
     var polls: u32 = 0;
-    while (polls < max_daemon_start_polls) : (polls += 1) {
-        switch (daemonProcessState(pid_path)) {
+    while (polls < max_overlay_start_polls) : (polls += 1) {
+        switch (childState(pid_path)) {
             .live => return,
             .stale => {
                 removePidFile(pid_path);
-                return error.SunglassesDaemonStartFailed;
+                return error.SunglassesOverlayStartFailed;
             },
-            .absent => sleepNs(daemon_start_poll_sleep_ns),
+            .absent => sleepNs(overlay_start_poll_sleep_ns),
         }
     }
-    return error.SunglassesDaemonStartTimedOut;
+    return error.SunglassesOverlayStartTimedOut;
 }
 
-fn startDaemonDetached(allocator: std.mem.Allocator) !void {
+fn startOverlayDetached(allocator: std.mem.Allocator) !void {
     const exe_path_z = try selfExePathZ(allocator);
     defer allocator.free(exe_path_z);
 
-    const wrapper_pid = try forkProcess();
-    if (wrapper_pid == 0) daemonWrapperChild(exe_path_z);
-    try waitProcess(wrapper_pid);
+    const wrapper_pid = try forkChild();
+    if (wrapper_pid == 0) overlayWrapperChild(exe_path_z);
+    try waitChild(wrapper_pid);
 }
 
 fn selfExePathZ(allocator: std.mem.Allocator) ![:0]u8 {
@@ -619,29 +619,29 @@ fn selfExePathZ(allocator: std.mem.Allocator) ![:0]u8 {
     return try allocator.dupeZ(u8, path_buf[0..path_len]);
 }
 
-fn daemonWrapperChild(exe_path_z: [:0]const u8) noreturn {
+fn overlayWrapperChild(exe_path_z: [:0]const u8) noreturn {
     const stdio_ok = redirectStdioToNull();
-    if (!stdio_ok) std.c._exit(daemon_child_fail_code);
+    if (!stdio_ok) std.c._exit(overlay_child_fail_code);
 
     const session_id = std.c.setsid();
-    if (session_id == -1) std.c._exit(daemon_child_fail_code);
+    if (session_id == -1) std.c._exit(overlay_child_fail_code);
 
-    const daemon_pid = forkProcess() catch std.c._exit(daemon_child_fail_code);
-    if (daemon_pid == 0) execSunglassesDaemon(exe_path_z);
+    const overlay_pid = forkChild() catch std.c._exit(overlay_child_fail_code);
+    if (overlay_pid == 0) execSunglassesOverlay(exe_path_z);
 
     std.c._exit(0);
 }
 
-fn execSunglassesDaemon(exe_path_z: [:0]const u8) noreturn {
-    const daemon_arg = "--sunglasses-daemon";
+fn execSunglassesOverlay(exe_path_z: [:0]const u8) noreturn {
+    const external_flag = "--sunglasses-daemon";
     const argv: [3:null]?[*:0]const u8 = .{
         exe_path_z.ptr,
-        daemon_arg,
+        external_flag,
         null,
     };
     const exec_rc = std.c.execve(exe_path_z.ptr, &argv, std.c.environ);
-    if (exec_rc == -1) std.c._exit(daemon_child_fail_code);
-    std.c._exit(daemon_child_fail_code);
+    if (exec_rc == -1) std.c._exit(overlay_child_fail_code);
+    std.c._exit(overlay_child_fail_code);
 }
 
 fn redirectStdioToNull() bool {
@@ -659,16 +659,16 @@ fn redirectStdioToNull() bool {
     return true;
 }
 
-fn forkProcess() !std.c.pid_t {
+fn forkChild() !std.c.pid_t {
     const pid = std.c.fork();
     if (pid == -1) return error.ForkFailed;
     return pid;
 }
 
-fn waitProcess(pid: std.c.pid_t) !void {
+fn waitChild(pid: std.c.pid_t) !void {
     var status: i32 = 0;
     var interrupts: u32 = 0;
-    while (interrupts < max_daemon_wait_interrupts) {
+    while (interrupts < max_child_wait_interrupts) {
         const waited = std.c.waitpid(pid, &status, 0);
         if (waited == pid) break;
         if (waited == -1) {
@@ -783,13 +783,13 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
     };
 }
 
-test "sunglasses daemon cmdline check requires exact argv entries" {
-    try std.testing.expect(cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-daemon\x00"));
-    try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("bash\x00-c\x00wayspot --sunglasses-daemon\x00"));
-    try std.testing.expect(!cmdlineLooksLikeSunglassesDaemon("/home/home/.local/bin/wayspot\x00--sunglasses-apply\x00"));
+test "sunglasses overlay cmdline check requires exact argv entries" {
+    try std.testing.expect(cmdlineMatchesSunglassesOverlay("/home/home/.local/bin/wayspot\x00--sunglasses-daemon\x00"));
+    try std.testing.expect(!cmdlineMatchesSunglassesOverlay("bash\x00-c\x00wayspot --sunglasses-daemon\x00"));
+    try std.testing.expect(!cmdlineMatchesSunglassesOverlay("/home/home/.local/bin/wayspot\x00--sunglasses-apply\x00"));
 }
 
-test "sunglasses runtime reconciliation action follows saved state need and live process" {
+test "sunglasses overlay reconciliation action follows saved state need and live child" {
     try std.testing.expectEqual(ReconcileAction.idle, reconcileAction(false, false));
     try std.testing.expectEqual(ReconcileAction.stop, reconcileAction(false, true));
     try std.testing.expectEqual(ReconcileAction.start, reconcileAction(true, false));

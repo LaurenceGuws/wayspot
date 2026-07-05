@@ -136,7 +136,7 @@ pub const State = struct {
         return null;
     }
 
-    /// Forms and daemons mutate retained monitor slots through this owner.
+    /// Forms and overlays mutate retained monitor slots through this owner.
     pub fn ensureMonitor(self: *State, name_text: []const u8) !*MonitorState {
         if (self.getMutable(name_text)) |monitor| return monitor;
         if (self.count >= max_monitors) return error.TooManyMonitors;
@@ -167,7 +167,7 @@ pub const State = struct {
         return out[0..offset];
     }
 
-    pub fn needsDaemon(self: *const State) bool {
+    pub fn needsOverlay(self: *const State) bool {
         var index: u32 = 0;
         while (index < self.count) : (index += 1) {
             if (self.monitors[index].hasEffectiveFilter() or self.monitors[index].hasEffectiveImageOverlay()) return true;
@@ -405,7 +405,7 @@ test "clamp min max and zero semantics" {
 
 test "effective filter predicate ignores disabled and zero-value FormFields" {
     var state = defaultState();
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 
     var monitor = try MonitorState.init("DP-1");
     monitor.red_blue_enabled = true;
@@ -414,17 +414,17 @@ test "effective filter predicate ignores disabled and zero-value FormFields" {
     monitor.dim_value = dim_zero;
     try state.append(monitor);
     try std.testing.expect(!state.monitors[0].hasEffectiveFilter());
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 
     state.monitors[0].red_blue_value = 20;
     try std.testing.expect(state.monitors[0].hasEffectiveFilter());
-    try std.testing.expect(state.needsDaemon());
+    try std.testing.expect(state.needsOverlay());
 
     state.monitors[0].red_blue_enabled = false;
     state.monitors[0].dim_enabled = false;
     state.monitors[0].dim_value = 50;
     try std.testing.expect(!state.monitors[0].hasEffectiveFilter());
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 }
 
 test "effective image overlay requires enabled opacity and absolute path" {
@@ -434,22 +434,22 @@ test "effective image overlay requires enabled opacity and absolute path" {
     monitor.setImageOpacity(35);
     try state.append(monitor);
     try std.testing.expect(!state.monitors[0].hasEffectiveImageOverlay());
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 
     try state.monitors[0].setImagePath("/home/home/Pictures/overlay.png");
     try std.testing.expect(state.monitors[0].hasEffectiveImageOverlay());
-    try std.testing.expect(state.needsDaemon());
+    try std.testing.expect(state.needsOverlay());
 
     state.monitors[0].image_opacity = image_opacity_zero;
     try std.testing.expect(!state.monitors[0].hasEffectiveImageOverlay());
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 
     const invalid_path = "/home/home/Pictures/over\nlay.png";
     @memcpy(state.monitors[0].image_path_buf[0..invalid_path.len], invalid_path);
     state.monitors[0].image_path_len = @intCast(invalid_path.len);
     state.monitors[0].image_opacity = 35;
     try std.testing.expect(!state.monitors[0].hasEffectiveImageOverlay());
-    try std.testing.expect(!state.needsDaemon());
+    try std.testing.expect(!state.needsOverlay());
 }
 
 test "image path setter accepts bounded absolute paths only" {
@@ -522,7 +522,7 @@ test "parse valid state with image fields" {
     try std.testing.expect(state.monitors[0].image_enabled);
     try std.testing.expectEqual(@as(i32, 65), state.monitors[0].image_opacity);
     try std.testing.expectEqualStrings("/home/home/Pictures/overlay.png", state.monitors[0].imagePath());
-    try std.testing.expect(state.needsDaemon());
+    try std.testing.expect(state.needsOverlay());
 }
 
 test "malformed state load falls back to default" {

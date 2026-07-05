@@ -1,6 +1,6 @@
 //! Notification banner owns one short notification surface from render to cleanup.
 //!
-//! The notification daemon asks for a banner; this file owns the copied text,
+//! The notification DBus owner asks for a banner; this file owns the copied text,
 //! vendor objects, Hyprland placement command, and bounded display timeout.
 
 const std = @import("std");
@@ -47,13 +47,13 @@ fn boundedTimeout(expire_timeout: i32) u32 {
 }
 
 pub fn spawn(request: Request) !void {
-    const wrapper_pid = try forkProcess();
+    const wrapper_pid = try forkChild();
     if (wrapper_pid == 0) wrapperChild(request);
-    try waitProcess(wrapper_pid);
+    try waitChild(wrapper_pid);
 }
 
 fn wrapperChild(request: Request) noreturn {
-    const banner_pid = forkProcess() catch std.c._exit(placement_child_fail_code);
+    const banner_pid = forkChild() catch std.c._exit(placement_child_fail_code);
     if (banner_pid == 0) bannerChild(request);
     std.c._exit(0);
 }
@@ -226,9 +226,9 @@ fn placeOnFocusedMonitor() void {
 }
 
 fn runPlacementCommand() !void {
-    const pid = try forkProcess();
+    const pid = try forkChild();
     if (pid == 0) placementChild();
-    try waitProcess(pid);
+    try waitChild(pid);
 }
 
 fn placementChild() noreturn {
@@ -246,13 +246,13 @@ fn placementChild() noreturn {
     std.c._exit(placement_child_fail_code);
 }
 
-fn forkProcess() !std.c.pid_t {
+fn forkChild() !std.c.pid_t {
     const pid = std.c.fork();
     if (pid == -1) return error.ForkFailed;
     return pid;
 }
 
-fn waitProcess(pid: std.c.pid_t) !void {
+fn waitChild(pid: std.c.pid_t) !void {
     var status: i32 = 0;
     var interrupts: u32 = 0;
     while (interrupts < max_placement_wait_interrupts) {

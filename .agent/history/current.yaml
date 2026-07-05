@@ -6,22 +6,22 @@ workspace:
 product:
   summary: >
     Wayspot is a pragmatic DE busybox: CLI-summoned picker,
-    notification daemon, wallpaper daemon, and focused runtime surfaces.
+    notification DBus interface, wallpaper loop, and focused surfaces.
   active_focus: flat_lifecycle_nouns
   flow:
-    launcher: cli -> runtime -> picker -> picker_surface -> detached_command -> cleanup
-    notifications: cli -> notification_daemon -> notification_state -> notification_banner_child
-    wallpaper: cli_or_daemon -> hyprland_monitor_facts -> vendor_wayland_surfaces -> wlr_layer_shell_background
-    sunglasses: picker_form -> persisted_filter_state -> overlay_daemon -> per_monitor_pass_through_layer_surfaces
+    launcher: cli -> picker_bundle -> picker -> picker_surface -> detached_command -> cleanup
+    notifications: cli -> notification_dbus -> notification_state -> notification_banner_child
+    wallpaper: cli_or_loop -> hyprland_monitor_facts -> vendor_wayland_surfaces -> wlr_layer_shell_background
+    sunglasses: picker_form -> persisted_filter_state -> overlay -> per_monitor_pass_through_layer_surfaces
 
 ownership:
   main:
     - CLI mode selection
-    - runtime owner wiring
+    - entrypoint owner wiring
     - top-level cleanup order
   picker:
     - retained candidate list for one picker lifecycle
-    - slash mode candidates and daemon command rows
+    - slash mode candidates and lifecycle command rows
     - history load, snapshot, record, and save
     - query ranking entry point
   app_rows:
@@ -52,14 +52,14 @@ ownership:
   notifications:
     - freedesktop D-Bus notification interface
     - bounded retained notification rows
-    - banner child process lifecycle
+    - banner child lifecycle
   wallpaper:
     - one Wayspot-owned vendor surface per monitor
     - Hyprland monitor discovery and wlr-layer-shell background output binding
     - still-image random alternating timer from one configured library path
   modes:
     - slash-prefixed picker mode rows
-    - /notifications and /wallpapers daemon command lists
+    - /notifications and /wallpapers lifecycle command lists
     - no /apps row because apps remain the default picker list
   sunglasses:
     - /sunglasses opens a form pane, not a result list
@@ -68,11 +68,11 @@ ownership:
     - state applies through a resident non-interactive per-monitor overlay owner
 
 boundaries:
-  - notification_daemon_is_the_only_long_lived_interface
+  - notification_dbus_interface_is_long_lived
   - launcher_ipc_is_not_authorized
   - picker_surface_is_the_picker_control_spine
   - picker_viewport_has_no_vendor_dispatch_config_or_allocator_dependency
-  - qagent_memory_is_not_a_runtime_or_planning_dependency
+  - qagent_memory_is_not_a_planning_dependency
 
 design_law:
   summary:
@@ -86,12 +86,12 @@ design_law:
     - prove behavior through bounded tests and manual receipts
 
 constraints:
-  runtime:
+  bounds:
     - every_loop_queue_buffer_command_result_page_wake_slot_and_notification_has_a_bound
     - every_owner_cleans_up_once
     - cpu_sleeps_unless_input_notification_work_or_deadline_exists
   code:
-    - no_gtk_shell_modules_open_registries_web_window_workspace_open inventories_or_runtime_vms
+    - no_gtk_shell_modules_open_registries_web_window_workspace_open inventories_or_scripting_vms
     - no_resident_launcher_ipc_without_fresh_approved_design
     - no_usize_anytype_anyopaque_or_discard_assignment_in_active_zig
     - comments_are_production_assertions

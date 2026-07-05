@@ -84,7 +84,7 @@ fn matchesRoute(query: query_mod.Query, candidate: candidate_mod.Candidate) bool
         .modes => candidate.kind == .mode and !std.mem.eql(u8, candidate.open, "/notifications history"),
         .notifications => matchesNotificationRoute(query.term, candidate),
         .sunglasses => false,
-        .wallpapers => candidate.kind == .daemon and std.mem.eql(u8, candidate.open, "daemon:wallpapers:restart"),
+        .wallpapers => candidate.kind == .lifecycle and std.mem.eql(u8, candidate.open, "lifecycle:wallpapers:restart"),
         .run => true,
     };
 }
@@ -137,7 +137,7 @@ fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, cand
 
 fn matchesNotificationRoute(term: []const u8, candidate: candidate_mod.Candidate) bool {
     if (notificationHistoryFilter(term) != null) return candidate.kind == .notification;
-    if (candidate.kind == .daemon and std.mem.eql(u8, candidate.open, "daemon:notifications:restart")) return true;
+    if (candidate.kind == .lifecycle and std.mem.eql(u8, candidate.open, "lifecycle:notifications:restart")) return true;
     return candidate.kind == .mode and std.mem.eql(u8, candidate.open, "/notifications history");
 }
 
@@ -202,7 +202,7 @@ fn shortQueryBias(needle_len: u64, kind: candidate_mod.Candidate.Kind) i32 {
         .open => 50,
         .app => 0,
         .mode => 0,
-        .daemon => 0,
+        .lifecycle => 0,
         .notification => 0,
         .hint => 0,
     };
@@ -243,7 +243,7 @@ fn baseWeight(route: query_mod.Route, kind: candidate_mod.Candidate.Kind) i32 {
             .app => 0,
             .open => 0,
             .mode => 70,
-            .daemon => 100,
+            .lifecycle => 100,
             .notification => 60,
             .hint => 0,
         };
@@ -252,7 +252,7 @@ fn baseWeight(route: query_mod.Route, kind: candidate_mod.Candidate.Kind) i32 {
         .app => 100,
         .open => 70,
         .mode => 90,
-        .daemon => 80,
+        .lifecycle => 80,
         .notification => 60,
         .hint => 10,
     };
@@ -286,16 +286,16 @@ test "route filter limits result kinds" {
     try std.testing.expectEqual(candidate_mod.Candidate.Kind.app, ranked[0].candidate.kind);
 }
 
-test "slash routes expose modes and daemon commands only" {
+test "slash routes expose modes and lifecycle commands only" {
     const candidates = [_]candidate_mod.Candidate{
-        .init(.mode, "/notifications", "Runtime mode", "/notifications"),
+        .init(.mode, "/notifications", "Lifecycle mode", "/notifications"),
         .init(.mode, "/sunglasses", "Filter form", "/sunglasses"),
-        .init(.mode, "/wallpapers", "Runtime mode", "/wallpapers"),
-        .init(.daemon, "Restart notifications daemon", "Runtime", "daemon:notifications:restart"),
-        .init(.mode, "Notification history", "Runtime", "/notifications history"),
+        .init(.mode, "/wallpapers", "Lifecycle mode", "/wallpapers"),
+        .init(.lifecycle, "Restart notifications", "Lifecycle", "lifecycle:notifications:restart"),
+        .init(.mode, "Notification history", "Lifecycle", "/notifications history"),
         .init(.notification, "New message", "Mail: body", "notification-history:0:2"),
         .init(.notification, "Older message", "Mail: body", "notification-history:1:1"),
-        .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
+        .init(.lifecycle, "Restart wallpaper", "Lifecycle", "lifecycle:wallpapers:restart"),
         .init(.app, "Kitty", "Terminal", "kitty"),
     };
 
@@ -311,7 +311,7 @@ test "slash routes expose modes and daemon commands only" {
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(notifications.len)));
-    try std.testing.expectEqualStrings("daemon:notifications:restart", notifications[0].candidate.open);
+    try std.testing.expectEqualStrings("lifecycle:notifications:restart", notifications[0].candidate.open);
 
     const history = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications history"), &candidates);
     defer std.testing.allocator.free(history);
@@ -322,8 +322,8 @@ test "slash routes expose modes and daemon commands only" {
 
 test "default route is apps only" {
     const candidates = [_]candidate_mod.Candidate{
-        .init(.mode, "/notifications", "Daemon mode", "/notifications"),
-        .init(.daemon, "Restart wallpaper daemon", "Runtime", "daemon:wallpapers:restart"),
+        .init(.mode, "/notifications", "Lifecycle mode", "/notifications"),
+        .init(.lifecycle, "Restart wallpaper", "Lifecycle", "lifecycle:wallpapers:restart"),
         .init(.open, "Settings", "System", "settings"),
         .init(.app, "Kitty", "Terminal", "kitty"),
     };

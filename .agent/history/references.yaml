@@ -81,10 +81,10 @@ repo_entrypoints:
     apps: /home/home/personal/wayspot/src/picker/mode/apps.zig
     rank: /home/home/personal/wayspot/src/picker/rank.zig
   notifications:
-    daemon: /home/home/personal/wayspot/src/notification/daemon.zig
-    runtime: /home/home/personal/wayspot/src/notification/runtime.zig
+    dbus: /home/home/personal/wayspot/src/notification/dbus.zig
+    rows: /home/home/personal/wayspot/src/notification/rows.zig
     banner: /home/home/personal/wayspot/src/notification/banner.zig
-  future_wallpaper:
+  wallpaper:
     discovery: /home/home/personal/wayspot/.agent/history/hyprland-direct-surface-discovery.yaml
     contract: /home/home/personal/wayspot/.agent/history/wallpaper-v1-sprint-contract.yaml
     monitor_glasses_probe: /home/home/personal/wayspot/tools/hypr-wallpaper-window-probe.py

@@ -39,24 +39,24 @@ restart_notifications() {
     local pid
     local waited
     local log_dir
-    local -a daemon_pids
+    local -a service_pids
 
     if command -v systemctl >/dev/null 2>&1 && systemctl --user --quiet is-active wayspot.service; then
-        echo "[re-run] restarting notification daemon: systemctl --user restart wayspot.service"
+        echo "[re-run] restarting notification DBus interface: systemctl --user restart wayspot.service"
         systemctl --user restart wayspot.service
         return
     fi
 
-    mapfile -t daemon_pids < <(pgrep -f "[w]ayspot .*--notifications-daemon|[w]ayspot --notifications-daemon" || true)
-    for pid in "${daemon_pids[@]}"; do
-        echo "[re-run] stopping notification daemon pid=$pid"
+    mapfile -t service_pids < <(pgrep -f "[w]ayspot .*--notifications-daemon|[w]ayspot --notifications-daemon" || true)
+    for pid in "${service_pids[@]}"; do
+        echo "[re-run] stopping notification DBus interface pid=$pid"
         kill -TERM "$pid" 2>/dev/null || true
     done
 
     waited=0
-    while ((${#daemon_pids[@]} > 0 && waited < 20)); do
+    while ((${#service_pids[@]} > 0 && waited < 20)); do
         local alive=0
-        for pid in "${daemon_pids[@]}"; do
+        for pid in "${service_pids[@]}"; do
             if kill -0 "$pid" 2>/dev/null; then
                 alive=1
             fi
@@ -70,11 +70,11 @@ restart_notifications() {
 
     log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wayspot"
     mkdir -p "$log_dir"
-    echo "[re-run] starting notification daemon: $bin_path --notifications-daemon"
+    echo "[re-run] starting notification DBus interface: $bin_path --notifications-daemon"
     setsid "$bin_path" --notifications-daemon >>"$log_dir/notifications.log" 2>&1 &
 }
 
-process_has_wayspot_arg() {
+pid_has_wayspot_arg() {
     local pid="$1"
     local expected_arg="$2"
     local -a argv=()
@@ -108,7 +108,7 @@ collect_wallpaper_pids() {
     if [[ -r "$pid_file" ]]; then
         read -r pid <"$pid_file" || true
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
-            if process_has_wayspot_arg "$pid" "--wallpaper"; then
+            if pid_has_wayspot_arg "$pid" "--wallpaper"; then
                 found+=("$pid")
             else
                 rm -f "$pid_file"
@@ -118,7 +118,7 @@ collect_wallpaper_pids() {
 
     mapfile -t candidates < <(pgrep -f "[w]ayspot .*--wallpaper|[w]ayspot --wallpaper" || true)
     for pid in "${candidates[@]}"; do
-        process_has_wayspot_arg "$pid" "--wallpaper" || continue
+        pid_has_wayspot_arg "$pid" "--wallpaper" || continue
         if [[ " ${found[*]} " != *" $pid "* ]]; then
             found+=("$pid")
         fi
@@ -131,32 +131,32 @@ collect_wallpaper_pids() {
 
 restart_wallpaper() {
     local bin_path="$1"
-    local runtime_dir="${XDG_RUNTIME_DIR:-}"
+    local xdg_dir="${XDG_RUNTIME_DIR:-}"
     local pid_file
     local pid
     local waited
     local log_dir
-    local -a daemon_pids
+    local -a service_pids
     local started_pid=""
 
-    if [[ -z "$runtime_dir" ]]; then
-        echo "[re-run] wallpaper daemon refresh skipped (XDG_RUNTIME_DIR is empty)"
+    if [[ -z "$xdg_dir" ]]; then
+        echo "[re-run] wallpaper loop refresh skipped (XDG_RUNTIME_DIR is empty)"
         return
     fi
 
-    pid_file="$runtime_dir/wayspot/wallpaper.pid"
-    mapfile -t daemon_pids < <(collect_wallpaper_pids "$pid_file")
+    pid_file="$xdg_dir/wayspot/wallpaper.pid"
+    mapfile -t service_pids < <(collect_wallpaper_pids "$pid_file")
 
-    for pid in "${daemon_pids[@]}"; do
-        echo "[re-run] stopping wallpaper daemon pid=$pid"
+    for pid in "${service_pids[@]}"; do
+        echo "[re-run] stopping wallpaper loop pid=$pid"
         kill -TERM "$pid" 2>/dev/null || true
     done
 
     waited=0
-    while ((${#daemon_pids[@]} > 0 && waited < 40)); do
+    while ((${#service_pids[@]} > 0 && waited < 40)); do
         local alive=0
-        for pid in "${daemon_pids[@]}"; do
-            if process_has_wayspot_arg "$pid" "--wallpaper"; then
+        for pid in "${service_pids[@]}"; do
+            if pid_has_wayspot_arg "$pid" "--wallpaper"; then
                 alive=1
             fi
         done
@@ -169,15 +169,15 @@ restart_wallpaper() {
 
     log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wayspot"
     mkdir -p "$log_dir"
-    echo "[re-run] starting wallpaper daemon: $bin_path --wallpaper"
+    echo "[re-run] starting wallpaper loop: $bin_path --wallpaper"
     setsid "$bin_path" --wallpaper >>"$log_dir/wallpaper.log" 2>&1 &
 
     waited=0
     while ((waited < 40)); do
         if [[ -r "$pid_file" ]]; then
             read -r started_pid <"$pid_file" || true
-            if [[ "$started_pid" =~ ^[0-9]+$ ]] && process_has_wayspot_arg "$started_pid" "--wallpaper"; then
-                echo "[re-run] wallpaper daemon pid=$started_pid"
+            if [[ "$started_pid" =~ ^[0-9]+$ ]] && pid_has_wayspot_arg "$started_pid" "--wallpaper"; then
+                echo "[re-run] wallpaper loop pid=$started_pid"
                 return
             fi
         fi
@@ -185,7 +185,7 @@ restart_wallpaper() {
         waited=$((waited + 1))
     done
 
-    echo "[re-run] wallpaper daemon pid not published yet"
+    echo "[re-run] wallpaper loop pid not published yet"
 }
 
 echo "[re-run] building: zig build ${build_flags[*]}"
@@ -199,13 +199,13 @@ fi
 if [[ "$RERUN_NOTIFICATIONS" == "true" && -n "$RERUN_INSTALL_BIN" ]]; then
     restart_notifications "$RERUN_INSTALL_BIN"
 else
-    echo "[re-run] notification daemon refresh skipped (RERUN_NOTIFICATIONS=false)"
+    echo "[re-run] notification DBus interface refresh skipped (RERUN_NOTIFICATIONS=false)"
 fi
 
 if [[ "$RERUN_WALLPAPER" == "true" && -n "$RERUN_INSTALL_BIN" ]]; then
     restart_wallpaper "$RERUN_INSTALL_BIN"
 else
-    echo "[re-run] wallpaper daemon refresh skipped (RERUN_WALLPAPER=false)"
+    echo "[re-run] wallpaper loop refresh skipped (RERUN_WALLPAPER=false)"
 fi
 
 if [[ "$RERUN_UI" == "true" ]]; then

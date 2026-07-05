@@ -1,9 +1,9 @@
-//! Notification daemon owns the Freedesktop D-Bus service and banner dispatch.
+//! Notification DBus owns the Freedesktop interface and banner dispatch.
 
 const std = @import("std");
 const history_cache = @import("history_cache.zig");
 const notifications_state = @import("state.zig");
-const notifications_runtime = @import("runtime.zig");
+const notification_rows = @import("rows.zig");
 const banner = @import("banner.zig");
 
 const log = std.log.scoped(.notifications);
@@ -131,10 +131,10 @@ extern fn g_timeout_add_full(
 extern fn g_source_remove(tag: guint) gboolean;
 
 pub fn run(allocator: std.mem.Allocator) !void {
-    var daemon = try Daemon.init(allocator);
-    defer daemon.deinit();
-    daemon.setHooks(.{ .on_notify = onNotifyBanner });
-    try daemon.start();
+    var dbus = try DBus.init(allocator);
+    defer dbus.deinit();
+    dbus.setHooks(.{ .on_notify = onNotifyBanner });
+    try dbus.start();
 
     const loop = g_main_loop_new(null, 0) orelse return error.NotificationsMainLoopFailed;
     defer g_main_loop_unref(loop);
@@ -211,7 +211,7 @@ const vtable = GDBusInterfaceVTable{
     .set_property = null,
 };
 
-pub const Daemon = struct {
+pub const DBus = struct {
     pub const Action = struct {
         key: []const u8,
         label: []const u8,
@@ -249,7 +249,7 @@ pub const Daemon = struct {
     connection: ?*GDBusConnection = null,
     hooks: Hooks = .{},
 
-    pub fn init(allocator: std.mem.Allocator) !Daemon {
+    pub fn init(allocator: std.mem.Allocator) !DBus {
         var gerr: ?*GError = null;
         const node = g_dbus_node_info_new_for_xml(introspection_xml, &gerr);
         if (node == null) {
@@ -264,7 +264,7 @@ pub const Daemon = struct {
         };
     }
 
-    pub fn start(self: *Daemon) !void {
+    pub fn start(self: *DBus) !void {
         if (self.owner_id != 0) return;
         self.owner_id = g_bus_own_name(
             G_BUS_TYPE_SESSION,
@@ -279,7 +279,7 @@ pub const Daemon = struct {
         if (self.owner_id == 0) return error.NotificationsBusOwnFailed;
     }
 
-    pub fn deinit(self: *Daemon) void {
+    pub fn deinit(self: *DBus) void {
         if (self.registration_id != 0 and self.connection != null) {
             const removed = g_dbus_connection_unregister_object(self.connection.?, self.registration_id);
             if (removed == 0) log.warn("notifications object unregister failed", .{});
@@ -302,18 +302,18 @@ pub const Daemon = struct {
         self.state.deinit();
     }
 
-    pub fn setHooks(self: *Daemon, hooks: Hooks) void {
+    pub fn setHooks(self: *DBus, hooks: Hooks) void {
         self.hooks = hooks;
     }
 
-    pub fn clearHooks(self: *Daemon) void {
+    pub fn clearHooks(self: *DBus) void {
         self.hooks = .{};
     }
 
-    pub fn closeWithReason(self: *Daemon, id: u32, reason: u32) bool {
+    pub fn closeWithReason(self: *DBus, id: u32, reason: u32) bool {
         if (!self.state.close(id)) return false;
         self.cancelTimer(id);
-        notifications_runtime.recordClosed(id, reason);
+        notification_rows.recordClosed(id, reason);
         emitNotificationClosed(self, id, reason);
         if (self.hooks.on_closed) |on_closed| {
             on_closed(.{
@@ -324,11 +324,11 @@ pub const Daemon = struct {
         return true;
     }
 
-    fn replaceTimer(self: *Daemon, id: u32, expire_timeout: i32, urgency: u8) !void {
+    fn replaceTimer(self: *DBus, id: u32, expire_timeout: i32, urgency: u8) !void {
         self.cancelTimer(id);
-        const timeout_ms = daemonExpireTimeoutMs(expire_timeout, urgency) orelse return;
+        const timeout_ms = dbusExpireTimeoutMs(expire_timeout, urgency) orelse return;
         const context = try self.allocator.create(TimeoutContext);
-        context.* = .{ .daemon = self, .id = id };
+        context.* = .{ .dbus = self, .id = id };
         const source_id = g_timeout_add_full(
             glib_priority_default,
             timeout_ms,
@@ -347,13 +347,13 @@ pub const Daemon = struct {
         };
     }
 
-    fn cancelTimer(self: *Daemon, id: u32) void {
+    fn cancelTimer(self: *DBus, id: u32) void {
         const removed = self.timers.fetchRemove(id) orelse return;
         const source_removed = g_source_remove(removed.value);
         if (source_removed == 0) log.debug("notification timer already removed id={d}", .{id});
     }
 
-    fn clearTimers(self: *Daemon) void {
+    fn clearTimers(self: *DBus) void {
         var iter = self.timers.iterator();
         while (iter.next()) |entry| {
             const source_removed = g_source_remove(entry.value_ptr.*);
@@ -364,7 +364,7 @@ pub const Daemon = struct {
         self.timers.clearRetainingCapacity();
     }
 
-    pub fn emitActionInvoked(self: *Daemon, id: u32, action_key: []const u8) void {
+    pub fn emitActionInvoked(self: *DBus, id: u32, action_key: []const u8) void {
         const conn = self.connection orelse return;
         const key_z = self.allocator.dupeZ(u8, action_key) catch return;
         defer self.allocator.free(key_z);
@@ -382,16 +382,16 @@ pub const Daemon = struct {
 };
 
 const TimeoutContext = struct {
-    daemon: *Daemon,
+    dbus: *DBus,
     id: u32,
 };
 
 fn onNotificationExpired(user_data: ?*anyopaque) callconv(.c) gboolean {
     const raw = user_data orelse return glib_source_remove;
     const context: *TimeoutContext = @ptrCast(@alignCast(raw));
-    const removed = context.daemon.timers.fetchRemove(context.id);
+    const removed = context.dbus.timers.fetchRemove(context.id);
     if (removed != null) {
-        const closed = context.daemon.closeWithReason(context.id, close_reason_expired);
+        const closed = context.dbus.closeWithReason(context.id, close_reason_expired);
         if (!closed) log.debug("notification expiry ignored inactive id={d}", .{context.id});
     }
     return glib_source_remove;
@@ -400,12 +400,12 @@ fn onNotificationExpired(user_data: ?*anyopaque) callconv(.c) gboolean {
 fn freeTimeoutContext(user_data: ?*anyopaque) callconv(.c) void {
     const raw = user_data orelse return;
     const context: *TimeoutContext = @ptrCast(@alignCast(raw));
-    context.daemon.allocator.destroy(context);
+    context.dbus.allocator.destroy(context);
 }
 
 fn onBusAcquired(connection: ?*GDBusConnection, _: [*c]const u8, user_data: ?*anyopaque) callconv(.c) void {
     if (connection == null or user_data == null) return;
-    const self: *Daemon = @ptrCast(@alignCast(user_data.?));
+    const self: *DBus = @ptrCast(@alignCast(user_data.?));
 
     if (self.connection) |existing| {
         g_object_unref(existing);
@@ -441,7 +441,7 @@ fn onNameLost(_: ?*GDBusConnection, name: [*c]const u8, user_data: ?*anyopaque) 
         log.warn("lost dbus name: {s}", .{std.mem.span(name)});
     }
     if (user_data == null) return;
-    const self: *Daemon = @ptrCast(@alignCast(user_data.?));
+    const self: *DBus = @ptrCast(@alignCast(user_data.?));
     self.registration_id = 0;
 }
 
@@ -456,7 +456,7 @@ fn onMethodCall(
     user_data: ?*anyopaque,
 ) callconv(.c) void {
     if (invocation == null or user_data == null) return;
-    const self: *Daemon = @ptrCast(@alignCast(user_data.?));
+    const self: *DBus = @ptrCast(@alignCast(user_data.?));
     const method = std.mem.span(method_name);
 
     if (std.mem.eql(u8, method, "GetCapabilities")) {
@@ -500,7 +500,7 @@ fn handleGetServerInformation(invocation: *GDBusMethodInvocation) void {
     );
 }
 
-fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
+fn handleNotify(self: *DBus, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
     const payload = parameters orelse {
         returnInvalidArgs(invocation, "Notify expects parameters");
         return;
@@ -603,7 +603,7 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
             @errorName(err),
         });
     };
-    notifications_runtime.recordNotify(
+    notification_rows.recordNotify(
         self.allocator,
         id,
         std.mem.span(app_name),
@@ -613,7 +613,7 @@ fn handleNotify(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodI
         parsed_hints.urgency,
         parsed_hints.transient,
     ) catch |err| {
-        std.log.warn("notifications runtime record failed id={d} err={s}", .{ id, @errorName(err) });
+        std.log.warn("notification rows record failed id={d} err={s}", .{ id, @errorName(err) });
     };
     log.info(
         "notify id={d} app=\"{s}\" summary=\"{s}\" urgency={d} actions={d} replaced={}",
@@ -653,7 +653,7 @@ fn realtimeNs() u64 {
     return seconds_ns + nanos;
 }
 
-fn onNotifyBanner(event: Daemon.NotifyEvent) void {
+fn onNotifyBanner(event: DBus.NotifyEvent) void {
     banner.spawn(.{
         .app_name = event.app_name,
         .summary = event.summary,
@@ -665,7 +665,7 @@ fn onNotifyBanner(event: Daemon.NotifyEvent) void {
     };
 }
 
-fn handleCloseNotification(self: *Daemon, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
+fn handleCloseNotification(self: *DBus, parameters: ?*GVariant, invocation: *GDBusMethodInvocation) void {
     const payload = parameters orelse {
         returnInvalidArgs(invocation, "CloseNotification expects parameters");
         return;
@@ -693,7 +693,7 @@ fn handleCloseNotification(self: *Daemon, parameters: ?*GVariant, invocation: *G
     g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
 }
 
-fn emitNotificationClosed(self: *Daemon, id: u32, reason: u32) void {
+fn emitNotificationClosed(self: *DBus, id: u32, reason: u32) void {
     const conn = self.connection orelse return;
     const emitted = g_dbus_connection_emit_signal(
         conn,
@@ -715,7 +715,7 @@ fn returnInvalidArgs(invocation: *GDBusMethodInvocation, message: [*:0]const u8)
     );
 }
 
-fn daemonExpireTimeoutMs(expire_timeout: i32, urgency: u8) ?guint {
+fn dbusExpireTimeoutMs(expire_timeout: i32, urgency: u8) ?guint {
     if (urgency == 2) return null;
     if (expire_timeout == 0) return null;
     if (expire_timeout < 0) return default_expire_timeout_ms;
@@ -741,13 +741,13 @@ fn parseHints(hints_variant: *GVariant) ParsedHints {
     return result;
 }
 
-fn parseActions(allocator: std.mem.Allocator, actions_variant: *GVariant) ![]Daemon.Action {
+fn parseActions(allocator: std.mem.Allocator, actions_variant: *GVariant) ![]DBus.Action {
     const child_count = g_variant_n_children(actions_variant);
     if (child_count < 2) return &.{};
 
     const pair_count = child_count / 2;
     const admitted_pairs = @min(pair_count, max_action_pairs);
-    var actions = try allocator.alloc(Daemon.Action, @intCast(admitted_pairs));
+    var actions = try allocator.alloc(DBus.Action, @intCast(admitted_pairs));
     errdefer allocator.free(actions);
 
     var out_idx: u32 = 0;
@@ -783,10 +783,10 @@ fn logGError(context: []const u8, gerr: ?*GError) void {
     log.err("{s}", .{context});
 }
 
-test "daemon expiry timeout follows notification spec sentinel values" {
-    try std.testing.expectEqual(default_expire_timeout_ms, daemonExpireTimeoutMs(-1, 1).?);
-    try std.testing.expectEqual(@as(?guint, null), daemonExpireTimeoutMs(0, 1));
-    try std.testing.expectEqual(@as(?guint, null), daemonExpireTimeoutMs(5000, 2));
-    try std.testing.expectEqual(@as(guint, 1), daemonExpireTimeoutMs(1, 1).?);
-    try std.testing.expectEqual(max_expire_timeout_ms, daemonExpireTimeoutMs(@intCast(max_expire_timeout_ms + 1), 1));
+test "dbus expiry timeout follows notification spec sentinel values" {
+    try std.testing.expectEqual(default_expire_timeout_ms, dbusExpireTimeoutMs(-1, 1).?);
+    try std.testing.expectEqual(@as(?guint, null), dbusExpireTimeoutMs(0, 1));
+    try std.testing.expectEqual(@as(?guint, null), dbusExpireTimeoutMs(5000, 2));
+    try std.testing.expectEqual(@as(guint, 1), dbusExpireTimeoutMs(1, 1).?);
+    try std.testing.expectEqual(max_expire_timeout_ms, dbusExpireTimeoutMs(@intCast(max_expire_timeout_ms + 1), 1));
 }

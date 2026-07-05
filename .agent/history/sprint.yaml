@@ -1,5 +1,5 @@
 id: flat_lifecycle_nouns
-state: active
+state: complete
 
 purpose: >
   Execute the reviewer-accepted lifecycle noun flattening sprint. The source of
@@ -15,19 +15,19 @@ supersedes:
 
 law:
   - implement_nothing_not_named_in_the_active_index
-  - flatten_daemon_runtime_process_to_concrete_owner_names
-  - keep_external_daemon_flags_stable
+  - flatten_lifecycle_nouns_to_concrete_owner_names
+  - keep_external_service_flags_stable
   - no_compatibility_wrappers
   - no_sideways_lifecycle_buckets
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - move notification daemon/runtime to dbus/rows
-    - move wallpaper runtime to loop
-    - move sunglasses runtime to overlay
-    - move process identity to identity
-    - rename picker daemon rows to lifecycle rows
+    - move notification DBus and rows to accepted paths
+    - move wallpaper loop to accepted path
+    - move sunglasses overlay to accepted path
+    - move visible identity to accepted path
+    - rename picker restart rows to lifecycle rows
     - update source, build graph, README, AGENTS, live memory, re-run helper, and packaging
     - preserve behavior through explicit receipts
   out:
@@ -41,15 +41,10 @@ progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_activation
-  current:
-    - 01_notification_flatten
-  pending:
-    - 02_wallpaper_sunglasses_flatten
-    - 03_picker_lifecycle_rows
-    - 04_identity_and_child_nouns
-    - 05_docs_memory_build
     - 06_behavior_receipts
     - 07_final_reviewer_gate
+  current: []
+  pending: []
 
 verification_floor:
   - commands listed in .agent/history/flat-lifecycle-nouns-sprint.yaml

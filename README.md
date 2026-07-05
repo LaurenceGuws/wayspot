@@ -1,6 +1,6 @@
 # wayspot
 
-Wayspot is a small Wayland launcher and notification daemon built in Zig.
+Wayspot is a small Wayland launcher and notification DBus interface built in Zig.
 
 ## Commands
 
@@ -36,5 +36,5 @@ appearance state.
 ## Scope
 
 - The launcher is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
-- The notification daemon is the only long-lived interface.
+- The notification DBus interface owns a long-lived DBus name.
 - GTK, resident launcher IPC, shell modules, broad wallpaper toolkits, open registries, and script engines are out of scope.

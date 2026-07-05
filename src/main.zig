@@ -1,4 +1,4 @@
-//! Process entry point owns CLI mode selection and top-level cleanup order.
+//! Entrypoint owns CLI mode selection and top-level cleanup order.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     const home = init.minimal.environ.getPosix("HOME") orelse ".";
 
     if (hasArg(args, "--notifications-daemon")) {
-        try wayspot.process_identity.set(wayspot.process_identity.notifications);
+        try wayspot.identity.set(wayspot.identity.notifications);
         try wayspot.notification.run(allocator);
         return;
     }
@@ -32,18 +32,18 @@ pub fn main(init: std.process.Init) !void {
 
     if (hasArg(args, "--next-wallpaper") or hasArg(args, "--wallpaper-rotate-now")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.wallpaper.Runtime.rotateNow(allocator, runtime_dir);
+        try wayspot.wallpaper.Loop.rotateNow(allocator, runtime_dir);
         return;
     }
 
     if (hasArg(args, "--wallpaper")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runWallpaper(allocator, .{
+        runWallpaperLoop(allocator, .{
             .runtime_dir = runtime_dir,
             .signature = signature,
         }) catch |err| {
-            std.log.err("wallpaper daemon failed: {s}", .{@errorName(err)});
+            std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});
             std.process.exit(2);
         };
         return;
@@ -51,13 +51,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (hasArg(args, "--sunglasses-apply")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.sunglasses.Runtime.applyNow(allocator, runtime_dir);
+        try wayspot.sunglasses.Overlay.applyNow(allocator, runtime_dir);
         return;
     }
 
     if (hasArg(args, "--sunglasses-reconcile")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.sunglasses.Runtime.reconcileSavedState(allocator, runtime_dir);
+        try wayspot.sunglasses.Overlay.reconcileSavedState(allocator, runtime_dir);
         return;
     }
 
@@ -70,11 +70,11 @@ pub fn main(init: std.process.Init) !void {
     if (hasArg(args, "--sunglasses-daemon")) {
         const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
         const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runSunglassesDaemon(allocator, .{
+        runSunglassesOverlay(allocator, .{
             .runtime_dir = runtime_dir,
             .signature = signature,
         }) catch |err| {
-            std.log.err("sunglasses daemon failed: {s}", .{@errorName(err)});
+            std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
             std.process.exit(2);
         };
         return;
@@ -89,16 +89,16 @@ fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
         std.process.exit(2);
     }
 
-    try wayspot.process_identity.set(wayspot.process_identity.picker);
-    var runtime = try setupRuntime(allocator, home);
-    runtime.wirePicker();
-    defer runtime.deinit(allocator);
-    try runtime.picker.loadHistory(allocator);
-    defer runtime.picker.saveHistory(allocator) catch |err| {
+    try wayspot.identity.set(wayspot.identity.picker);
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+    try picker_bundle.picker.loadHistory(allocator);
+    defer picker_bundle.picker.saveHistory(allocator) catch |err| {
         std.log.err("failed to save history: {s}", .{@errorName(err)});
     };
 
-    try wayspot.picker.surface.run(allocator, &runtime.picker, home);
+    try wayspot.picker.surface.run(allocator, &picker_bundle.picker, home);
 }
 
 fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
@@ -133,24 +133,24 @@ fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     try wayspot.picker.icon_cache.printRefreshSummary(counts);
 }
 
-fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+fn runWallpaperLoop(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
     if (!build_options.enable_sdl) {
-        std.log.err("wallpaper daemon requires SDL build", .{});
+        std.log.err("wallpaper loop requires SDL build", .{});
         std.process.exit(2);
     }
 
-    try wayspot.process_identity.set(wayspot.process_identity.wallpaper);
-    try wayspot.wallpaper.Runtime.runWallpaper(allocator, hypr);
+    try wayspot.identity.set(wayspot.identity.wallpaper);
+    try wayspot.wallpaper.Loop.run(allocator, hypr);
 }
 
-fn runSunglassesDaemon(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
+fn runSunglassesOverlay(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
     if (!build_options.enable_sdl) {
-        std.log.err("sunglasses daemon requires SDL build", .{});
+        std.log.err("sunglasses overlay requires SDL build", .{});
         std.process.exit(2);
     }
 
-    try wayspot.process_identity.set(wayspot.process_identity.sunglasses);
-    try wayspot.sunglasses.Runtime.runDaemon(allocator, hypr);
+    try wayspot.identity.set(wayspot.identity.sunglasses);
+    try wayspot.sunglasses.Overlay.runOverlay(allocator, hypr);
 }
 
 const SunglassesImageCommand = union(enum) {
@@ -196,10 +196,10 @@ fn applySunglassesImageCommand(
         },
     }
     try wayspot.sunglasses.state.save(state, allocator);
-    try wayspot.sunglasses.Runtime.reconcileSavedState(allocator, runtime_dir);
+    try wayspot.sunglasses.Overlay.reconcileSavedState(allocator, runtime_dir);
 }
 
-const Runtime = struct {
+const PickerBundle = struct {
     app_cache_path: []u8,
     history_path: []u8,
     opens: wayspot.picker.open.Open = .{},
@@ -208,7 +208,7 @@ const Runtime = struct {
     apps: wayspot.picker.mode.apps.Apps,
     picker: wayspot.picker.Picker,
 
-    fn deinit(self: *Runtime, allocator: std.mem.Allocator) void {
+    fn deinit(self: *PickerBundle, allocator: std.mem.Allocator) void {
         self.picker.deinit(allocator);
         self.notification_history.deinit(allocator);
         self.apps.deinit(allocator);
@@ -216,14 +216,14 @@ const Runtime = struct {
         allocator.free(self.history_path);
     }
 
-    fn wirePicker(self: *Runtime) void {
+    fn wirePicker(self: *PickerBundle) void {
         self.picker = wayspot.picker.Picker.initWithHistoryPath(&self.opens, &self.apps, &self.modes, self.history_path);
         self.picker.notification_history = &self.notification_history;
         self.picker.max_history = 64;
     }
 };
 
-fn setupRuntime(allocator: std.mem.Allocator, home: []const u8) !Runtime {
+fn setupPickerBundle(allocator: std.mem.Allocator, home: []const u8) !PickerBundle {
     const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
     errdefer allocator.free(app_cache);
     const history_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/wayspot/history.log", .{home});

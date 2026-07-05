@@ -19,7 +19,7 @@ const scale_owner = @import("scale.zig");
 const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
 const sunglasses_form = @import("../sunglasses/form.zig");
-const sunglasses_runtime = @import("../sunglasses/runtime.zig");
+const sunglasses_overlay = @import("../sunglasses/overlay.zig");
 const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
@@ -566,8 +566,8 @@ const Surface = struct {
                 const spec = open_owner.resolveSpec(open) orelse return error.UnknownOpen;
                 break :blk try open_owner.resolveExecutionCommand(self.allocator, spec.execution);
             },
-            .daemon => blk: {
-                const command = mode.resolveDaemonCommand(open) orelse return error.UnknownOpen;
+            .lifecycle => blk: {
+                const command = mode.resolveLifecycleCommand(open) orelse return error.UnknownOpen;
                 break :blk try self.allocator.dupe(u8, command);
             },
             .mode, .notification, .hint => error.UnknownOpen,
@@ -650,7 +650,7 @@ const Surface = struct {
             std.mem.span(runtime_dir_z)
         else
             return error.HyprlandRuntimeDirMissing;
-        try sunglasses_runtime.Runtime.reconcileSavedState(self.allocator, runtime_dir);
+        try sunglasses_overlay.Overlay.reconcileSavedState(self.allocator, runtime_dir);
     }
 
     fn sunglassesActive(self: *const Surface) bool {

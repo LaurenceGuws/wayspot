@@ -3,12 +3,12 @@
 const std = @import("std");
 const candidate = @import("picker_candidate");
 
-pub const restart_open = "daemon:wallpapers:restart";
+pub const restart_open = "lifecycle:wallpapers:restart";
 
 /// collect appends wallpaper mode rows to the picker list.
 pub fn collect(allocator: std.mem.Allocator, out: *candidate.Candidate.List) !void {
-    try out.append(allocator, candidate.Candidate.init(.mode, "/wallpapers", "Daemon mode", "/wallpapers"));
-    try out.append(allocator, candidate.Candidate.init(.daemon, "Restart wallpaper daemon", "Runtime", restart_open));
+    try out.append(allocator, candidate.Candidate.init(.mode, "/wallpapers", "Mode", "/wallpapers"));
+    try out.append(allocator, candidate.Candidate.init(.lifecycle, "Restart wallpaper", "Lifecycle", restart_open));
 }
 
 /// restartCommand returns the shell command used by the wallpaper restart row.

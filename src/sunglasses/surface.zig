@@ -20,7 +20,7 @@ pub const SunglassesSurface = struct {
     layer: LayerShellRole,
     monitor: hyprland.Monitor,
 
-    /// The surface owns compositor resources but not monitor discovery or process lifetime.
+    /// The surface owns compositor resources but not monitor discovery or picker lifecycle.
     pub fn init(monitor: hyprland.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !SunglassesSurface {
         var title_buf: [max_title_bytes:0]u8 = undefined;
         const window_title = try writeTitle(&title_buf, monitor.name());
