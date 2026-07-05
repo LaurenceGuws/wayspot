@@ -364,6 +364,15 @@ tests_and_smokes:
     - lifecycle proof screenshot with a regular window above the wallpaper surface
     - hyprctl layers -j receipt for wayspot-wallpaper background layer surfaces
     - post-shutdown layers receipt showing no wayspot-wallpaper layers
+  rerun_receipts:
+    - command: RERUN_UI=false RERUN_NOTIFICATIONS=false ./re-run.sh
+      result: >
+        Rebuilt ReleaseFast, synced ~/.local/bin/wayspot, skipped notifications
+        and picker, stopped old wallpaper pid 3894662, started
+        /home/home/.local/bin/wayspot --wallpaper, and printed wallpaper daemon
+        pid 3894823 after bounded PID publication wait.
+    - command: 'ps -o pid,comm,args -p "$(cat "$XDG_RUNTIME_DIR/wayspot/wallpaper.pid")"'
+      result: pid_3894823_comm_wayspot-wall_args_/home/home/.local/bin/wayspot_--wallpaper
 
 stop_conditions:
   - SDL custom-role window creation cannot expose a roleless wl_surface before rendering
