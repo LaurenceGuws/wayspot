@@ -1,0 +1,326 @@
+id: obvious_shape_command
+state: accepted
+
+purpose: >
+  Engrave the current Wayspot model until the code shape is obvious from
+  README, build.zig.zon, build.zig, main.zig, root.zig, and the small owner
+  files. The sprint also finishes the unfinished interface split: GUI and CLI
+  must expose the same picker command model instead of defining separate
+  command surfaces.
+
+user_stop_condition: >
+  User needs to inspect shape because the team believes there is now nothing
+  more and nothing less than expected. This must be blatantly easy to see in
+  code, from README, build.zig.zon, build.zig, and main to small owners. Source
+  must contain no agent workflow commentary, only production commentary. Happy
+  paths are asserted, unhappy paths are asserted, the domain is clean and small
+  with intentional shallow file/folder naming, and the control spines are
+  boring, correct, obvious to find, and own lifecycle and event-driven calls.
+
+hard_law:
+  - unfinished_work_must_be_completed_not_built_around
+  - no_escape_hatches
+  - no_postponed_shape_work
+  - no_later_or_eventually_language
+  - no_generic_helper_common_shared_manager_bucket
+  - no_compatibility_wrappers
+  - no_agent_workflow_vocabulary_in_src
+  - no_receipt_api_in_product_source
+  - one_command_model_two_surfaces
+  - passing_tests_are_not_acceptance
+  - reviewer_gate_required_for_plan_and_final_code
+
+team_protocol:
+  coordinator: >
+    Owns this index, activates it after reviewer acceptance, delegates
+    implementation to one long-lived worker, waits, and does not implement
+    sprint code.
+  worker: >
+    Implements only the accepted index. It must complete unfinished work in
+    scope instead of deferring, building around, or marking it as follow-up.
+  reviewer: >
+    Strictly rejects plan or code if any scope is skipped, deferred, hidden in
+    generic structure, or described with workflow vocabulary.
+  report_to_user_only_for:
+    - user_needed_blocker
+    - sprint_complete
+
+accepted_vocabulary:
+  product:
+    - picker
+    - command
+    - mode
+    - candidate
+    - open
+    - lifecycle
+    - notification
+    - wallpaper
+    - sunglasses
+    - surface
+    - terminal
+    - completion
+    - diagnostic
+  busybox_research_terms:
+    - multi-call_binary
+    - applet
+    - argv0_dispatch
+    - install_symlink
+  nushell_research_terms:
+    - custom_completions
+    - completion_command
+    - custom_completer
+    - extern
+    - known_external_command
+    - external_completer
+
+rejected_vocabulary_in_product_source:
+  words:
+    - receipt
+    - receipts
+    - agent
+    - workflow
+    - TODO
+    - later
+    - eventually
+    - temporary
+    - shim
+    - compatibility
+  allowed_locations:
+    - .agent/history/
+    - AGENTS.md when describing team workflow
+    - tools/ only when the file is explicitly a development tool
+
+one_command_model:
+  rule: >
+    GUI and CLI consume the same picker command model. The model owns modes,
+    candidates, command kind dispatch, command execution, lifecycle command
+    rows, and completion data. Surfaces render or invoke it; surfaces do not
+    define parallel command behavior.
+  gui_surface: >
+    Interactive picker surface. It filters/ranks command candidates, renders
+    rows/forms, and opens the selected command through the shared model.
+  cli_surface: >
+    Terminal surface. It exposes the same modes and command candidates through
+    subcommands on the multi-call binary, prints/list/executes through the
+    shared model, and owns shell completion output.
+  first_completion_shell: nushell
+  vocabulary_source: .agent/history/command-surface-vocabulary-research.yaml
+  busybox_shape: >
+    Wayspot may use the multi-call binary pattern. Product rows are commands.
+    Do not use applet as a Wayspot product noun until actual argv0 link dispatch
+    is implemented.
+
+legacy_flags:
+  stable_external_flags:
+    - --ui
+    - --notifications-daemon
+    - --wallpaper
+    - --next-wallpaper
+    - --wallpaper-rotate-now
+    - --sunglasses-daemon
+    - --sunglasses-apply
+    - --sunglasses-reconcile
+    - --sunglasses-set-image
+    - --sunglasses-clear-image
+    - --icon-diag
+    - --icon-cache-refresh
+  hidden_operational_controls:
+    - --notifications-daemon
+    - --wallpaper
+    - --wallpaper-rotate-now
+    - --sunglasses-daemon
+    - --sunglasses-apply
+    - --sunglasses-reconcile
+    - --sunglasses-set-image
+    - --sunglasses-clear-image
+    - --icon-diag
+    - --icon-cache-refresh
+  shared_model_terminal_commands:
+    - "wayspot commands"
+    - "wayspot query <text>"
+    - "wayspot open <open-payload>"
+    - "wayspot complete nushell ...spans"
+  rule: >
+    Stable flags keep working for existing integrations, but overlapping
+    behavior must route through the shared command model owner where the picker
+    already owns the command row. Hidden operational flags do not get parallel
+    candidate lists.
+
+target_tree_pressure:
+  required_easy_walk:
+    - README.md explains product commands without implementation archaeology.
+    - build.zig.zon exposes only real dependencies and source paths.
+    - build.zig is grouped by product owner and test roots are obvious.
+    - src/main.zig is a boring entrypoint spine.
+    - src/root.zig exports only accepted owner nouns.
+    - src/picker command model is the one owner for GUI and terminal command behavior.
+    - large owner files either prove ownership with clear invariants or are
+      split into concrete child nouns already present in the model.
+  current_pressure_files:
+    - src/picker/surface.zig
+    - src/sunglasses/form.zig
+    - src/sunglasses/overlay.zig
+    - src/notification/dbus.zig
+    - src/config/defaults.zig
+    - src/picker/mode/apps.zig
+    - src/notification/history_cache.zig
+    - src/wallpaper/loop.zig
+
+required_scope:
+  command_model_normalization:
+    must:
+      - identify current GUI command path from query to candidate to open
+      - identify current CLI-only command branches in main.zig
+      - define one shared command model owner at src/picker/command.zig unless reviewer-approved research forces a better concrete name
+      - route GUI selected rows through that owner
+      - route terminal commands through that owner where behavior overlaps
+      - expose terminal list/query/execute behavior that mirrors picker modes
+      - add nushell completion output from the shared command model
+      - keep every stable legacy flag listed by this index working
+    must_not:
+      - duplicate mode or candidate lists for CLI
+      - define terminal-only command behavior for the same command
+      - build around old main.zig branches by calling them from new wrappers
+  workflow_language_cleanup:
+    must:
+      - remove receipt APIs from src
+      - rename product diagnostics to diagnostic/report language only if still user-facing
+      - move purely workflow evidence to .agent/history or tools
+      - convert useful runtime observation to std.log.debug
+      - delete observation paths that no longer earn their place
+    known_current_hits:
+      - src/main.zig calls picker.icon_diag.writeReceipt
+      - src/picker/icon_diag.zig owns receipt-like output
+  obvious_control_spines:
+    must:
+      - make src/main.zig dispatch boring and auditable
+      - make picker surface lifecycle obvious
+      - make notification DBus lifecycle obvious
+      - make wallpaper loop lifecycle obvious
+      - make sunglasses overlay lifecycle obvious
+      - assert happy and unhappy paths with owner tests or direct receipt-free behavior checks
+  comments:
+    must:
+      - keep top-level //! on every Zig file
+      - keep /// on important symbols where it states real contract/bounds/cleanup
+      - delete commentary that describes agent process or future cleanup
+      - prefer std library style comments over narrative prose
+
+research_required_before_implementation:
+  durable_output: .agent/history/command-surface-vocabulary-research.yaml
+  busybox:
+    purpose: >
+      Confirm official vocabulary for one binary exposing many commands, first
+      argument or argv[0] dispatch, applets, and shell integration.
+    allowed_sources:
+      - official BusyBox documentation or source comments
+      - local dev_references if present
+    output_required:
+      - accepted_terms
+      - terms_to_avoid
+      - implications_for_Wayspot_CLI_shape
+  nushell:
+    purpose: >
+      Confirm official vocabulary and format for external command completions.
+    allowed_sources:
+      - official Nushell documentation or source comments
+      - local dev_references if present
+    output_required:
+      - accepted_terms
+      - output_shape
+      - implications_for_Wayspot_completion_command
+  final_naming_rule: >
+    Implementation may use `commands`, `query`, `open`, and `complete nushell`
+    because the accepted research artifact supports command/product language and
+    Nushell completion-command/completer language.
+
+explicit_initial_file_scope:
+  inspect_and_likely_change:
+    - README.md
+    - build.zig.zon
+    - build.zig
+    - src/main.zig
+    - src/root.zig
+    - src/picker/mod.zig
+    - src/picker/candidate.zig
+    - src/picker/open.zig
+    - src/picker/command.zig
+    - src/picker/mode/mod.zig
+    - src/picker/mode/apps.zig
+    - src/picker/mode/notifications.zig
+    - src/picker/mode/wallpaper.zig
+    - src/picker/mode/sunglasses.zig
+    - src/picker/rank.zig
+    - src/picker/surface.zig
+    - src/picker/icon_diag.zig
+    - src/notification/dbus.zig
+    - src/wallpaper/loop.zig
+    - src/sunglasses/overlay.zig
+    - src/sunglasses/form.zig
+    - src/config/defaults.zig
+    - .agent/history/current.yaml
+    - .agent/history/references.yaml
+    - .agent/history/sprint.yaml
+  inspect_only_unless_needed:
+    - re-run.sh
+    - packaging/
+    - tools/
+
+slices:
+  "00_plan_review":
+    goal: Strict reviewer accepts this index before implementation.
+  "01_reference_vocabulary":
+    goal: BusyBox and Nushell vocabulary is confirmed in .agent/history/command-surface-vocabulary-research.yaml and applied to names.
+  "02_command_model_index":
+    goal: Define the single command model owner and remove duplicated CLI/GUI command behavior.
+  "03_terminal_surface":
+    goal: Terminal CLI exposes the shared model, including nushell completion output.
+  "04_workflow_language_cleanup":
+    goal: Remove receipt/workflow language from production source; redesign, debug-log, move, or delete accordingly.
+  "05_control_spine_footing":
+    goal: Make README/build/main/root and large owners obviously boring and direct.
+  "06_comments_and_invariants":
+    goal: Production comments assert ownership, bounds, cleanup, happy paths, and unhappy paths.
+  "07_verification":
+    goal: Run full tests, scans, completions, CLI/GUI behavior checks, and source comment checks.
+  "08_final_review":
+    goal: Strict reviewer accepts that nothing more and nothing less remains.
+
+verification_floor:
+  - "zigup run 0.16.0 fmt --check build.zig build.zig.zon src"
+  - "zigup run 0.16.0 build test --summary all"
+  - "zigup run 0.16.0 build -Doptimize=ReleaseFast"
+  - "git diff --check"
+  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/obvious-shape-command-sprint.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "python -c 'import yaml; data=yaml.safe_load(open(\".agent/history/command-surface-vocabulary-research.yaml\", encoding=\"utf-8\")); assert data[\"busybox\"][\"official_sources\"]; assert data[\"nushell\"][\"official_sources\"]'"
+  - "bash -lc '! rg -n \"receipt|receipts|agent|workflow|TODO|later|eventually|temporary|compatibility|shim\" src README.md build.zig build.zig.zon'"
+  - "bash -lc '! rg -n \"writeReceipt|receipt\" src --glob \"*.zig\"'"
+  - "bash -lc '! rg -n \"(^|[^A-Za-z0-9_])_\\\\s*=|\\\\busize\\\\b|\\\\banytype\\\\b|TODO\" src --glob \"*.zig\" && test \"$(rg -n \"\\\\banyopaque\\\\b\" src --glob \"*.zig\" | cut -d: -f1 | sort -u)\" = \"src/notification/dbus.zig\"'"
+  - "bash -lc 'missing=0; while IFS= read -r file; do first=$(sed -n \"1p\" \"$file\"); case \"$first\" in \"//!\"*) ;; *) echo \"$file\"; missing=1;; esac; done < <(find src -name \"*.zig\" | sort); test \"$missing\" -eq 0'"
+  - "./zig-out/bin/wayspot --help"
+  - "bash -lc 'timeout 3 ./zig-out/bin/wayspot --ui; status=$?; test \"$status\" -eq 124'"
+  - "./zig-out/bin/wayspot commands"
+  - "./zig-out/bin/wayspot query /"
+  - "./zig-out/bin/wayspot query /notifications"
+  - "./zig-out/bin/wayspot query /wallpapers"
+  - "./zig-out/bin/wayspot query /sunglasses"
+  - "bash -lc './zig-out/bin/wayspot open __missing__; status=$?; test \"$status\" -ne 0'"
+  - "bash -lc './zig-out/bin/wayspot complete nushell / | python -m json.tool >/dev/null'"
+  - "bash -lc './zig-out/bin/wayspot complete nushell / | rg \"\\\"value\\\":\\s*\\\"/notifications\\\"\"'"
+  - "bash -lc './zig-out/bin/wayspot complete nushell / | rg \"\\\"description\\\"'"
+  - "bash -lc 'rg -n \"pub const Command|pub fn commands|pub fn query|pub fn open|pub fn completeNushell\" src/picker/command.zig'"
+  - "bash -lc '! rg -n \"lifecycle:notifications:restart|lifecycle:wallpapers:restart|/notifications|/wallpapers|/sunglasses|Power menu|Settings\" src/main.zig'"
+
+reviewer_gate:
+  plan_questions:
+    - Does the index forbid every likely escape hatch?
+    - Does CLI/GUI normalization have a single owner and no duplicate command lists?
+    - Is workflow vocabulary banned from product source?
+    - Is official BusyBox/Nushell vocabulary required before naming?
+  final_questions:
+    - Can README/build.zig.zon/build.zig/main/root be read as a clear spine?
+    - Are GUI and CLI two surfaces over the same command model?
+    - Are nushell completions generated from the shared model?
+    - Are happy and unhappy paths asserted without workflow vocabulary?
+    - Are large files either justified by ownership or split into concrete child nouns?
+    - Is there nothing postponed, hidden, or built around?

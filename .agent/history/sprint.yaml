@@ -1,57 +1,70 @@
-id: flat_lifecycle_nouns
-state: complete
+id: obvious_shape_command
+state: active
 
 purpose: >
-  Execute the reviewer-accepted lifecycle noun flattening sprint. The source of
-  truth is `.agent/history/flat-lifecycle-nouns-sprint.yaml`.
+  Execute the reviewer-accepted style and command-surface sprint. The source of
+  truth is `.agent/history/obvious-shape-command-sprint.yaml`.
 
-active_index: .agent/history/flat-lifecycle-nouns-sprint.yaml
+active_index: .agent/history/obvious-shape-command-sprint.yaml
+
+supporting_research:
+  command_surface_vocabulary: .agent/history/command-surface-vocabulary-research.yaml
 
 supersedes:
-  id: domain_language_footing
+  id: flat_lifecycle_nouns
   reason: >
-    User accepted the follow-up flattening sprint after the domain footing
-    sprint completed.
+    User accepted the long style and footify sprint after lifecycle nouns were
+    flattened to concrete owners.
 
 law:
-  - implement_nothing_not_named_in_the_active_index
-  - flatten_lifecycle_nouns_to_concrete_owner_names
-  - keep_external_service_flags_stable
-  - no_compatibility_wrappers
-  - no_sideways_lifecycle_buckets
+  - unfinished_work_must_be_completed_not_built_around
+  - no_escape_hatches
+  - one_command_model_two_surfaces
+  - no_workflow_vocabulary_in_product_source
+  - no_receipt_api_in_product_source
+  - cli_and_gui_share_the_same_command_owner
+  - nushell_completions_generated_from_shared_model
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - move notification DBus and rows to accepted paths
-    - move wallpaper loop to accepted path
-    - move sunglasses overlay to accepted path
-    - move visible identity to accepted path
-    - rename picker restart rows to lifecycle rows
-    - update source, build graph, README, AGENTS, live memory, re-run helper, and packaging
-    - preserve behavior through explicit receipts
+    - source-backed BusyBox and Nushell vocabulary application
+    - one picker command model shared by GUI and terminal surfaces
+    - terminal commands for list, query, open, and Nushell completion output
+    - stable legacy flags preserved exactly
+    - workflow/receipt vocabulary removed from production source
+    - README/build/main/root and owner files made boring and obvious
+    - happy and unhappy paths asserted without workflow language
   out:
-    - new modes
+    - generic command framework
+    - new mode domains
     - new IPC
-    - new config schema
-    - new caches
-    - compatibility modules for old paths
+    - shell completions beyond Nushell
+    - argv0 link dispatch unless the accepted implementation can finish it without deferral
+    - compatibility wrappers
 
 progress:
   completed:
-    - 00_index_review_accepted
+    - 00_plan_review_accepted
+    - 01_reference_vocabulary
     - 00_live_memory_activation
-    - 06_behavior_receipts
-    - 07_final_reviewer_gate
-  current: []
-  pending: []
+  current:
+    - 02_command_model_index
+  pending:
+    - 03_terminal_surface
+    - 04_workflow_language_cleanup
+    - 05_control_spine_footing
+    - 06_comments_and_invariants
+    - 07_verification
+    - 08_final_review
 
 verification_floor:
-  - commands listed in .agent/history/flat-lifecycle-nouns-sprint.yaml
+  - commands listed in .agent/history/obvious-shape-command-sprint.yaml
 
 stop_conditions:
   - any implementation need conflicts with the accepted index
-  - an old path needs a compatibility wrapper to keep building
-  - a behavior receipt cannot be made concrete
+  - CLI and GUI cannot share one command owner without changing accepted behavior
+  - Nushell completion shape cannot be generated from the shared model
+  - workflow vocabulary cannot be removed from product source without losing necessary diagnostics
   - a reviewer rejects the final tree
   - user decision is required
