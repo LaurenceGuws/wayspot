@@ -200,7 +200,7 @@ fn stateArgb(monitor_state: ?*const sunglasses_state.MonitorState) u32 {
 
     const tint_value = sunglasses_state.clampRedBlue(monitor.red_blue_value);
     const tint_magnitude: u32 = @intCast(if (tint_value < 0) -tint_value else tint_value);
-    const tint_alpha = scaledAlpha(@intCast(tint_magnitude), sunglasses_state.red_blue_max, tint_max_alpha);
+    const tint_alpha = scaledTintAlpha(@intCast(tint_magnitude), sunglasses_state.red_blue_max, tint_max_alpha);
     if (tint_value < 0) return compositeTintAndDim(0, 36, 255, tint_alpha, dim_alpha);
     return compositeTintAndDim(255, 34, 0, tint_alpha, dim_alpha);
 }
@@ -210,6 +210,15 @@ fn scaledAlpha(value: i32, max_value: i32, max_alpha: u32) u32 {
     const bounded: u32 = @intCast(@min(value, max_value));
     const max_bound: u32 = @intCast(max_value);
     return @min(max_alpha, (bounded * max_alpha) / max_bound);
+}
+
+fn scaledTintAlpha(value: i32, max_value: i32, max_alpha: u32) u32 {
+    if (value <= 0) return 0;
+    const bounded: u32 = @intCast(@min(value, max_value));
+    const max_bound: u32 = @intCast(max_value);
+    const curve_max = max_bound * max_bound * 4;
+    const curved = (bounded * max_bound) + (bounded * bounded * 3);
+    return @min(max_alpha, ((curved * max_alpha) + (curve_max / 2)) / curve_max);
 }
 
 fn argb(alpha: u32, red: u32, green: u32, blue: u32) u32 {
@@ -225,9 +234,9 @@ fn compositeTintAndDim(red: u32, green: u32, blue: u32, tint_alpha: u32, dim_alp
     if (alpha == 0) return 0;
     return argb(
         alpha,
-        (red * tint_visible) / (255 * alpha),
-        (green * tint_visible) / (255 * alpha),
-        (blue * tint_visible) / (255 * alpha),
+        (red * tint_visible) / (255 * 255),
+        (green * tint_visible) / (255 * 255),
+        (blue * tint_visible) / (255 * 255),
     );
 }
 
@@ -244,4 +253,29 @@ test "state argb keeps dim dominant when tint is also enabled" {
     const combined = stateArgb(&monitor);
     try std.testing.expect(((combined >> 24) & 0xff) >= dim_max_alpha);
     try std.testing.expect(((combined >> 16) & 0xff) < 90);
+}
+
+test "red blue tint alpha starts gently and preserves maximum" {
+    const old_linear_one_tick = scaledAlpha(1, sunglasses_state.red_blue_max, tint_max_alpha);
+    try std.testing.expect(scaledTintAlpha(1, sunglasses_state.red_blue_max, tint_max_alpha) < old_linear_one_tick);
+    try std.testing.expect(scaledTintAlpha(5, sunglasses_state.red_blue_max, tint_max_alpha) > 0);
+    try std.testing.expect(scaledTintAlpha(5, sunglasses_state.red_blue_max, tint_max_alpha) < scaledAlpha(5, sunglasses_state.red_blue_max, tint_max_alpha));
+    try std.testing.expect(scaledTintAlpha(10, sunglasses_state.red_blue_max, tint_max_alpha) < scaledAlpha(10, sunglasses_state.red_blue_max, tint_max_alpha));
+    try std.testing.expect(scaledTintAlpha(10, sunglasses_state.red_blue_max, tint_max_alpha) > scaledTintAlpha(5, sunglasses_state.red_blue_max, tint_max_alpha));
+    try std.testing.expectEqual(tint_max_alpha, scaledTintAlpha(sunglasses_state.red_blue_max, sunglasses_state.red_blue_max, tint_max_alpha));
+}
+
+test "state argb uses softened red blue tint at low values" {
+    var monitor = try sunglasses_state.MonitorState.init("DP-1");
+    monitor.red_blue_enabled = true;
+    monitor.setRedBlueValue(1);
+    try std.testing.expectEqual(@as(u32, 0), stateArgb(&monitor));
+
+    monitor.setRedBlueValue(5);
+    const low_tick = stateArgb(&monitor);
+    try std.testing.expect(((low_tick >> 24) & 0xff) > 0);
+    try std.testing.expect(((low_tick >> 16) & 0xff) <= ((low_tick >> 24) & 0xff));
+
+    monitor.setRedBlueValue(100);
+    try std.testing.expectEqual(compositeTintAndDim(255, 34, 0, tint_max_alpha, 0), stateArgb(&monitor));
 }

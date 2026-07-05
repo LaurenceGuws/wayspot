@@ -270,7 +270,7 @@ const SdlShell = struct {
     dirty: bool = true,
     launch_queue: LaunchQueue = .{},
     shutdown_after_launch: bool = false,
-    window_sized_for_sunglasses: bool = false,
+    window_sized_for_sunglasses: ?bool = null,
 
     fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
         const config = try surface_config.load(allocator);
@@ -310,13 +310,12 @@ const SdlShell = struct {
             .wake_event_type = wake_event_type,
             .cursor = CursorBlink.init(sdlNowMs()),
         };
-        try self.applyWindowSizeForRoute(true);
+        try self.refreshResults();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
         try self.applyWindowSizeForRoute(true);
         try self.updateViewportForWindow();
-        try self.refreshResults();
         return self;
     }
 
@@ -657,12 +656,13 @@ const SdlShell = struct {
 
     fn applyWindowSizeForRoute(self: *SdlShell, force: bool) !void {
         const sunglasses_active = self.sunglassesActive();
-        if (!force and self.window_sized_for_sunglasses == sunglasses_active) return;
+        if (!force) {
+            if (self.window_sized_for_sunglasses) |sized_for_sunglasses| {
+                if (sized_for_sunglasses == sunglasses_active) return;
+            }
+        }
 
-        const base_height = if (sunglasses_active)
-            @as(i32, @intFromFloat(picker_viewport.baseHeightForRows(sunglasses_form.control_count)))
-        else
-            base_window_height;
+        const base_height = routeBaseHeight(sunglasses_active);
         const size = self.config.scaledDimensions(base_window_width, base_height);
         try self.applyRouteSizeLimits(sunglasses_active, size);
         const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
@@ -679,12 +679,7 @@ const SdlShell = struct {
             const min_set = c.SDL_SetWindowMinimumSize(self.window, size.width, size.height);
             const max_set = c.SDL_SetWindowMaximumSize(self.window, size.width, size.height);
             if (!max_set or !min_set) return error.SdlResizeFailed;
-            return;
         }
-
-        const min_size = self.config.scaledDimensions(picker_viewport.min_base_width_px, picker_viewport.min_base_height_px);
-        const min_set = c.SDL_SetWindowMinimumSize(self.window, min_size.width, min_size.height);
-        if (!min_set) return error.SdlResizeFailed;
     }
 
     fn clearWindowSizeLimits(self: *SdlShell) !void {
@@ -900,6 +895,29 @@ fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors:
 
 fn sliderKeyboardStep() i32 {
     return 5;
+}
+
+fn routeBaseHeight(sunglasses_active: bool) i32 {
+    if (sunglasses_active) {
+        return @intFromFloat(picker_viewport.baseHeightForRows(sunglasses_form.control_count));
+    }
+    return base_window_height;
+}
+
+test "route base height keeps default picker at eight rows" {
+    try std.testing.expectEqual(base_window_height, routeBaseHeight(false));
+    try std.testing.expectEqual(
+        @as(i32, @intFromFloat(picker_viewport.baseHeightForRows(8))),
+        routeBaseHeight(false),
+    );
+}
+
+test "route base height compacts sunglasses form only" {
+    try std.testing.expectEqual(
+        @as(i32, @intFromFloat(picker_viewport.baseHeightForRows(sunglasses_form.control_count))),
+        routeBaseHeight(true),
+    );
+    try std.testing.expect(routeBaseHeight(true) < routeBaseHeight(false));
 }
 
 test "sunglasses state maps legacy default values onto real monitor names" {
