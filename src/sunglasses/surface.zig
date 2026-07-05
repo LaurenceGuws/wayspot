@@ -541,12 +541,23 @@ test "sunglasses image opacity and overlay composition match previous C behavior
 }
 
 test "surface buffer decision uses image only for effective image overlay" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "overlay.png",
+        .data = "",
+    });
+    const relative_image_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/overlay.png", .{&tmp.sub_path});
+    defer std.testing.allocator.free(relative_image_path);
+    const image_path = try std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, relative_image_path, std.testing.allocator);
+    defer std.testing.allocator.free(image_path);
+
     var monitor = try sunglasses_state.MonitorState.init("DP-1");
     monitor.image_enabled = true;
     monitor.setImageOpacity(40);
     try std.testing.expect(!useImageBuffer(&monitor));
 
-    try monitor.setImagePath("/tmp/wayspot-overlay.png");
+    try monitor.setImagePath(image_path);
     try std.testing.expect(useImageBuffer(&monitor));
 
     monitor.image_enabled = false;

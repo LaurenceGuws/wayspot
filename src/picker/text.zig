@@ -27,9 +27,16 @@ pub const TextStyle = struct {
 
 const GlyphPlacement = struct {
     glyph_id: u32,
+    cluster: u32,
     x_offset_px: f32,
     y_offset_px: f32,
     x_advance_px: f32,
+};
+
+/// TextRangeXOffsets is a base-coordinate x range measured from shaped text advances.
+pub const TextRangeXOffsets = struct {
+    start: f32,
+    end: f32,
 };
 
 const GlyphBounds = struct {
@@ -141,6 +148,33 @@ pub const TextEngine = struct {
         );
     }
 
+    /// Measures a byte range against the same bounded shaping path used by draw.
+    pub fn measureRangeXOffsets(
+        self: *TextEngine,
+        text: []const u8,
+        range_start: u32,
+        range_end: u32,
+        style: TextStyle,
+    ) !TextRangeXOffsets {
+        var codepoints: [max_codepoints]u32 = undefined;
+        var byte_ends: [max_codepoints]u32 = undefined;
+        const codepoint_count = boundedCodepointsWithByteEnds(&codepoints, &byte_ends, text, style.max_bytes);
+        if (codepoint_count == 0) return .{ .start = 0, .end = 0 };
+
+        const surface_scale = clampedSurfaceScale(style.surface_scale);
+        try self.setFontSize(effectiveFontSizePx(style.font_size_px, surface_scale));
+
+        var glyphs: [max_glyphs]GlyphPlacement = undefined;
+        const glyph_count = try self.shape(codepoints[0..codepoint_count], &glyphs);
+        if (glyph_count == 0) return .{ .start = 0, .end = 0 };
+
+        const start_boundary = codepointBoundaryForByteOffset(byte_ends[0..codepoint_count], range_start);
+        const end_boundary = codepointBoundaryForByteOffset(byte_ends[0..codepoint_count], range_end);
+        const start = advanceForCodepointBoundary(glyphs[0..glyph_count], start_boundary) / surface_scale;
+        const end = advanceForCodepointBoundary(glyphs[0..glyph_count], end_boundary) / surface_scale;
+        return .{ .start = start, .end = end };
+    }
+
     fn loadPrimaryFace(self: *TextEngine) !void {
         var index: u32 = 0;
         while (index < self.font_candidates.count) : (index += 1) {
@@ -200,6 +234,7 @@ pub const TextEngine = struct {
             const pos = positions[index];
             out[index] = .{
                 .glyph_id = info.codepoint,
+                .cluster = info.cluster,
                 .x_offset_px = px26Dot6(pos.x_offset),
                 .y_offset_px = px26Dot6(pos.y_offset),
                 .x_advance_px = pxAdvance(pos.x_advance),
@@ -291,12 +326,23 @@ pub const TextEngine = struct {
 };
 
 fn boundedCodepoints(out: *[max_codepoints]u32, text: []const u8, max_bytes: u32) u32 {
+    var byte_ends: [max_codepoints]u32 = undefined;
+    return boundedCodepointsWithByteEnds(out, &byte_ends, text, max_bytes);
+}
+
+fn boundedCodepointsWithByteEnds(
+    out: *[max_codepoints]u32,
+    byte_ends: *[max_codepoints]u32,
+    text: []const u8,
+    max_bytes: u32,
+) u32 {
     const byte_limit = @min(@min(max_bytes, max_text_bytes), @as(u32, @intCast(text.len)));
     var byte_index: u32 = 0;
     var out_len: u32 = 0;
     while (byte_index < byte_limit and out_len < max_codepoints) {
         const seq_len_raw = std.unicode.utf8ByteSequenceLength(text[@intCast(byte_index)]) catch {
             out[out_len] = ' ';
+            byte_ends[out_len] = byte_index + 1;
             out_len += 1;
             byte_index += 1;
             continue;
@@ -304,21 +350,38 @@ fn boundedCodepoints(out: *[max_codepoints]u32, text: []const u8, max_bytes: u32
         const seq_len: u32 = @intCast(seq_len_raw);
         if (byte_index + seq_len > byte_limit) {
             out[out_len] = ' ';
+            byte_ends[out_len] = byte_limit;
             out_len += 1;
             break;
         }
         const decoded = std.unicode.utf8Decode(text[@intCast(byte_index)..@intCast(byte_index + seq_len)]) catch {
             out[out_len] = ' ';
+            byte_ends[out_len] = byte_index + 1;
             out_len += 1;
             byte_index += 1;
             continue;
         };
         out[out_len] = if (decoded < 0x20 or decoded == 0x7f) ' ' else decoded;
+        byte_ends[out_len] = byte_index + seq_len;
         out_len += 1;
         byte_index += seq_len;
     }
     if (@as(u32, @intCast(text.len)) > byte_limit and out_len > 0) out[out_len - 1] = '~';
     return out_len;
+}
+
+fn codepointBoundaryForByteOffset(byte_ends: []const u32, byte_offset: u32) u32 {
+    var boundary: u32 = 0;
+    while (boundary < byte_ends.len and byte_ends[boundary] <= byte_offset) : (boundary += 1) {}
+    return boundary;
+}
+
+fn advanceForCodepointBoundary(glyphs: []const GlyphPlacement, boundary: u32) f32 {
+    var advance: f32 = 0;
+    for (glyphs) |glyph| {
+        if (glyph.cluster < boundary) advance += if (glyph.x_advance_px > 0) glyph.x_advance_px else missing_glyph_advance_px;
+    }
+    return advance;
 }
 
 fn placedBitmapBounds(slot: ft.FT_GlyphSlot, glyph: GlyphPlacement, pen_x: f32, baseline: i32) GlyphBounds {
@@ -509,6 +572,37 @@ test "boundedCodepoints sanitizes form fields and truncates" {
     try std.testing.expectEqual(@as(u32, 'b'), out[1]);
     try std.testing.expectEqual(@as(u32, ' '), out[2]);
     try std.testing.expectEqual(@as(u32, '~'), out[3]);
+}
+
+test "byte boundaries map substring offsets into bounded shaped text" {
+    var out: [max_codepoints]u32 = undefined;
+    var byte_ends: [max_codepoints]u32 = undefined;
+    const count = boundedCodepointsWithByteEnds(&out, &byte_ends, "aé🙂z", 32);
+
+    try std.testing.expectEqual(@as(u32, 4), count);
+    try std.testing.expectEqual(@as(u32, 1), codepointBoundaryForByteOffset(byte_ends[0..count], 1));
+    try std.testing.expectEqual(@as(u32, 2), codepointBoundaryForByteOffset(byte_ends[0..count], 3));
+    try std.testing.expectEqual(@as(u32, 3), codepointBoundaryForByteOffset(byte_ends[0..count], 7));
+    try std.testing.expectEqual(@as(u32, 4), codepointBoundaryForByteOffset(byte_ends[0..count], 8));
+}
+
+test "shaped advance offsets are monotonic for substring ranges" {
+    const glyphs = [_]GlyphPlacement{
+        .{ .glyph_id = 1, .cluster = 0, .x_offset_px = 0, .y_offset_px = 0, .x_advance_px = 9 },
+        .{ .glyph_id = 2, .cluster = 1, .x_offset_px = 0, .y_offset_px = 0, .x_advance_px = 13 },
+        .{ .glyph_id = 3, .cluster = 2, .x_offset_px = 0, .y_offset_px = 0, .x_advance_px = 17 },
+        .{ .glyph_id = 4, .cluster = 3, .x_offset_px = 0, .y_offset_px = 0, .x_advance_px = 19 },
+    };
+
+    const first = advanceForCodepointBoundary(&glyphs, 1);
+    const middle = advanceForCodepointBoundary(&glyphs, 3);
+    const end = advanceForCodepointBoundary(&glyphs, 4);
+
+    try std.testing.expectEqual(@as(f32, 9), first);
+    try std.testing.expectEqual(@as(f32, 39), middle);
+    try std.testing.expectEqual(@as(f32, 58), end);
+    try std.testing.expect(first < middle);
+    try std.testing.expect(middle < end);
 }
 
 test "packed monochrome bitmap alpha matches Howl raster proof" {

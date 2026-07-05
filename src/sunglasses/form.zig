@@ -110,8 +110,7 @@ pub const Form = struct {
         if (self.focus != .image_path) return false;
         self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
         self.path_error = false;
-        self.path_error = self.path_edit.append(text) == .overflow;
-        return true;
+        return self.applyPathEditResult(self.path_edit.insertText(text));
     }
 
     pub fn handleBackspace(self: *Form, state: *sunglasses_state.State) !bool {
@@ -119,9 +118,97 @@ pub const Form = struct {
         if (self.focus != .image_path) return false;
         self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
         self.path_error = false;
-        const edit_result = self.path_edit.backspace();
-        std.debug.assert(edit_result != .overflow);
-        return true;
+        return self.applyPathEditResult(self.path_edit.backspace());
+    }
+
+    pub fn handleDeleteForward(self: *Form, state: *sunglasses_state.State) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        return self.applyPathEditResult(self.path_edit.deleteForward());
+    }
+
+    pub fn selectPathText(self: *Form, state: *sunglasses_state.State) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        return self.path_edit.selectAll() == .changed;
+    }
+
+    pub fn pastePathText(self: *Form, state: *sunglasses_state.State, text: []const u8) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        return self.applyPathEditResult(self.path_edit.insertText(text));
+    }
+
+    pub fn selectedPathText(self: *Form, state: *sunglasses_state.State) !?[]const u8 {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return null;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        return self.path_edit.selectedText();
+    }
+
+    pub fn cutPathText(self: *Form, state: *sunglasses_state.State) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        return self.applyPathEditResult(self.path_edit.cutSelection());
+    }
+
+    pub fn movePathCursor(self: *Form, state: *sunglasses_state.State, movement: textbox.Movement, extend: bool) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        const result = switch (movement) {
+            .left => self.path_edit.moveLeft(extend),
+            .right => self.path_edit.moveRight(extend),
+            .home => self.path_edit.moveHome(extend),
+            .end => self.path_edit.moveEnd(extend),
+        };
+        return result == .changed;
+    }
+
+    pub fn beginPathMouseSelection(
+        self: *Form,
+        state: *sunglasses_state.State,
+        style: appearance.SunglassesFormAppearance,
+        layout: viewport.ResultLayout,
+        x: f32,
+        y: f32,
+    ) !?u32 {
+        try self.ensureReady(state);
+        const rect = imagePathValueRect(layout, style);
+        if (!pointInside(rect, x, y)) return null;
+        self.setFocus(state, .image_path);
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        const offset = textbox.byteOffsetForMouseX(self.pathEdit(), rect.x, rect.x + rect.w, x);
+        const changed = self.path_edit.setCursorFromByteOffset(offset);
+        if (changed == .invalid_utf8 or changed == .overflow) unreachable;
+        return offset;
+    }
+
+    pub fn dragPathMouseSelection(
+        self: *Form,
+        state: *sunglasses_state.State,
+        style: appearance.SunglassesFormAppearance,
+        layout: viewport.ResultLayout,
+        anchor: u32,
+        x: f32,
+    ) !bool {
+        try self.ensureReady(state);
+        if (self.focus != .image_path) return false;
+        self.seedPathEdit(currentMonitor(state, self.selected_monitor).imagePath());
+        self.path_error = false;
+        const rect = imagePathValueRect(layout, style);
+        const offset = textbox.byteOffsetForMouseX(self.pathEdit(), rect.x, rect.x + rect.w, x);
+        return self.path_edit.selectToByteOffset(anchor, offset) == .changed;
     }
 
     pub fn commitFocused(self: *Form, state: *sunglasses_state.State) !CommitResult {
@@ -243,7 +330,7 @@ pub const Form = struct {
         try drawFieldBackground(renderer, controlRow(layout, .dim_slider), self.focus == .dim_slider, style);
         try drawFieldBackground(renderer, controlRow(layout, .image_toggle), self.focus == .image_toggle, style);
         try drawFieldBackground(renderer, controlRow(layout, .image_opacity_slider), self.focus == .image_opacity_slider, style);
-        try drawFieldBackground(renderer, controlRow(layout, .image_path), self.focus == .image_path, style);
+        try drawFieldBackground(renderer, controlRow(layout, .image_path), false, style);
 
         try drawLabel(text, renderer, layout, .monitor, surface_scale, "Monitor", style);
         const monitor_row = controlRow(layout, .monitor);
@@ -299,6 +386,19 @@ pub const Form = struct {
         return self.path_edit.slice();
     }
 
+    fn applyPathEditResult(self: *Form, result: textbox.EditResult) bool {
+        return switch (result) {
+            .changed => true,
+            .overflow => {
+                self.path_error = true;
+                return true;
+            },
+            .no_change,
+            .invalid_utf8,
+            => false,
+        };
+    }
+
     fn drawPathValue(
         self: *const Form,
         text: *text_owner.TextEngine,
@@ -309,21 +409,61 @@ pub const Form = struct {
         style: appearance.SunglassesFormAppearance,
     ) !void {
         const row = controlRow(layout, .image_path);
-        const value = if (self.focus == .image_path and self.path_error)
-            "invalid path"
-        else if (self.focus == .image_path and self.path_editing and self.pathEdit().len == 0)
-            "empty clears"
-        else if (self.focus == .image_path and self.path_editing)
+        try drawImagePathField(renderer, row, self.focus == .image_path, style);
+        const value = if (self.focus == .image_path and self.path_editing)
             self.pathEdit()
         else
             pathSummary(saved_path);
-        const color = if (self.focus == .image_path and self.path_error) style.path_error else style.form_value;
+        const selected = self.focus == .image_path and self.path_edit.hasSelection();
+        if (selected) try self.drawPathSelection(text, renderer, row, style, surface_scale);
+        const color = if (self.focus == .image_path and self.path_error)
+            style.path_error
+        else
+            style.form_value;
         try text.draw(renderer, valueTextX(row, style), textY(layout, .image_path), value, .{
             .color = color,
             .max_bytes = sunglasses_state.max_image_path_bytes,
             .font_size_px = style.value_px,
             .surface_scale = surface_scale,
         });
+        if (self.focus == .image_path and self.path_editing) try self.drawPathCursor(text, renderer, row, style, surface_scale);
+    }
+
+    fn drawPathSelection(
+        self: *const Form,
+        text: *text_owner.TextEngine,
+        renderer: *c.SDL_Renderer,
+        row: viewport.Rect,
+        style: appearance.SunglassesFormAppearance,
+        surface_scale: f32,
+    ) !void {
+        const range = self.path_edit.selectionRange() orelse return;
+        const rect = try pathRangeRect(text, self.pathEdit(), range, row, style, surface_scale);
+        const color = setDrawColor(renderer, style.focused_row_fill);
+        const filled = c.SDL_RenderFillRect(renderer, &rect);
+        if (!color or !filled) return error.SdlRenderFailed;
+    }
+
+    fn drawPathCursor(
+        self: *const Form,
+        text: *text_owner.TextEngine,
+        renderer: *c.SDL_Renderer,
+        row: viewport.Rect,
+        style: appearance.SunglassesFormAppearance,
+        surface_scale: f32,
+    ) !void {
+        const value_rect = imagePathTextRectForRow(row, style);
+        const offsets = try text.measureRangeXOffsets(self.pathEdit(), self.path_edit.cursorOffset(), self.path_edit.cursorOffset(), .{
+            .color = style.form_value,
+            .max_bytes = sunglasses_state.max_image_path_bytes,
+            .font_size_px = style.value_px,
+            .surface_scale = surface_scale,
+        });
+        const cursor_x = value_rect.x + offsets.start;
+        const cursor_rect = c.SDL_FRect{ .x = cursor_x, .y = value_rect.y, .w = 2, .h = value_rect.h };
+        const color = setDrawColor(renderer, style.form_value);
+        const filled = c.SDL_RenderFillRect(renderer, &cursor_rect);
+        if (!color or !filled) return error.SdlRenderFailed;
     }
 
     fn adjustSelectedMonitor(self: *Form, state: *const sunglasses_state.State, delta: i32) bool {
@@ -576,6 +716,77 @@ fn valueTextX(row: viewport.Rect, style: appearance.SunglassesFormAppearance) f3
     return row.x + @max(style.value_min_x, row.w * style.value_fraction);
 }
 
+fn pathSelectionRect(row: viewport.Rect, style: appearance.SunglassesFormAppearance) c.SDL_FRect {
+    const rect = imagePathTextRectForRow(row, style);
+    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+}
+
+fn pathRangeRect(
+    text: *text_owner.TextEngine,
+    value: []const u8,
+    range: textbox.SelectionRange,
+    row: viewport.Rect,
+    style: appearance.SunglassesFormAppearance,
+    surface_scale: f32,
+) !c.SDL_FRect {
+    const value_rect = imagePathTextRectForRow(row, style);
+    const offsets = try text.measureRangeXOffsets(value, range.start, range.end, .{
+        .color = style.form_value,
+        .max_bytes = sunglasses_state.max_image_path_bytes,
+        .font_size_px = style.value_px,
+        .surface_scale = surface_scale,
+    });
+    const start_x = value_rect.x + offsets.start;
+    const end_x = value_rect.x + offsets.end;
+    return .{ .x = start_x, .y = value_rect.y, .w = @max(0, end_x - start_x), .h = value_rect.h };
+}
+
+pub fn imagePathValueRect(layout: viewport.ResultLayout, style: appearance.SunglassesFormAppearance) viewport.Rect {
+    const row = controlRow(layout, .image_path);
+    return imagePathValueRectForRow(row, style);
+}
+
+fn imagePathValueRectForRow(row: viewport.Rect, style: appearance.SunglassesFormAppearance) viewport.Rect {
+    const x = valueTextX(row, style);
+    const right = row.x + row.w - control_right_inset;
+    const text_rect = imagePathTextRectForRow(row, style);
+    return .{
+        .x = @max(row.x, x - 6),
+        .y = text_rect.y - 4,
+        .w = @max(0, right - @max(row.x, x - 6)),
+        .h = text_rect.h + 8,
+    };
+}
+
+fn imagePathTextRectForRow(row: viewport.Rect, style: appearance.SunglassesFormAppearance) viewport.Rect {
+    const x = valueTextX(row, style);
+    const right = row.x + row.w - control_right_inset;
+    return .{
+        .x = x,
+        .y = row.y + (row.h - viewport.default_result_title_line_height) / 2,
+        .w = @max(0, right - x),
+        .h = @floatFromInt(style.value_px),
+    };
+}
+
+fn drawImagePathField(renderer: *c.SDL_Renderer, row: viewport.Rect, focused: bool, style: appearance.SunglassesFormAppearance) !void {
+    const field = imagePathValueRectForRow(row, style);
+    const fill_rect = c.SDL_FRect{ .x = field.x, .y = field.y, .w = field.w, .h = field.h };
+    if (focused) {
+        const fill_color = setDrawColor(renderer, style.focused_row_fill);
+        const filled = c.SDL_RenderFillRect(renderer, &fill_rect);
+        if (!fill_color or !filled) return error.SdlRenderFailed;
+    }
+
+    const border_color = setDrawColor(renderer, if (focused) style.form_value else style.toggle_border);
+    const border_drawn = c.SDL_RenderRect(renderer, &fill_rect);
+    if (!border_color or !border_drawn) return error.SdlRenderFailed;
+}
+
+fn pointInside(rect: viewport.Rect, x: f32, y: f32) bool {
+    return x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
+}
+
 fn redBlueValueAt(row: viewport.Rect, x: f32, style: appearance.SunglassesFormAppearance) i32 {
     return redBlueRange().valueFromX(trackForRow(row, style), x);
 }
@@ -751,8 +962,9 @@ test "image path text input appends within bounded edit buffer" {
     try std.testing.expectEqualStrings("/tmp/overlay.png", form.pathEdit());
 
     form.path_edit.len = sunglasses_state.max_image_path_bytes - 1;
+    try std.testing.expectEqual(textbox.EditResult.changed, form.path_edit.moveEnd(false));
     try std.testing.expect(try form.handleTextInput(&state, "abcdef"));
-    try std.testing.expectEqual(sunglasses_state.max_image_path_bytes, form.path_edit.len);
+    try std.testing.expectEqual(sunglasses_state.max_image_path_bytes - 1, form.path_edit.len);
     try std.testing.expect(form.path_error);
 }
 
@@ -764,6 +976,7 @@ test "image path overflow does not commit truncated runtime config" {
     form.focus = .image_path;
     try std.testing.expect(try form.handleTextInput(&state, "/tmp/"));
     form.path_edit.len = sunglasses_state.max_image_path_bytes - 1;
+    try std.testing.expectEqual(textbox.EditResult.changed, form.path_edit.moveEnd(false));
 
     try std.testing.expect(try form.handleTextInput(&state, "abcdef"));
     try std.testing.expect(form.path_error);
@@ -780,6 +993,104 @@ test "image path backspace deletes from edit buffer" {
     try std.testing.expect(try form.handleTextInput(&state, "/tmp/a.png"));
     try std.testing.expect(try form.handleBackspace(&state));
     try std.testing.expectEqualStrings("/tmp/a.pn", form.pathEdit());
+}
+
+test "image path select all lets paste replace stale path" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    try state.monitors[0].setImagePath("/tmp/old.png");
+    form.focus = .image_path;
+
+    try std.testing.expect(try form.selectPathText(&state));
+    try std.testing.expect(try form.pastePathText(&state, "/tmp/new.png"));
+    try std.testing.expectEqual(CommitResult.changed, try form.commitFocused(&state));
+    try std.testing.expectEqualStrings("/tmp/new.png", state.monitors[0].imagePath());
+}
+
+test "image path select all backspace clears saved image" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    state.monitors[0].image_enabled = true;
+    try state.monitors[0].setImagePath("/tmp/old.png");
+    form.focus = .image_path;
+
+    try std.testing.expect(try form.selectPathText(&state));
+    try std.testing.expect(try form.handleBackspace(&state));
+    try std.testing.expectEqual(CommitResult.changed, try form.commitFocused(&state));
+    try std.testing.expect(!state.monitors[0].image_enabled);
+    try std.testing.expectEqualStrings("", state.monitors[0].imagePath());
+}
+
+test "image path selected text is exposed only after select all" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+
+    try form.ensureReady(&state);
+    try state.monitors[0].setImagePath("/tmp/old.png");
+    form.focus = .image_path;
+
+    try std.testing.expect(try form.selectedPathText(&state) == null);
+    try std.testing.expect(try form.selectPathText(&state));
+    try std.testing.expectEqualStrings("/tmp/old.png", (try form.selectedPathText(&state)).?);
+}
+
+test "image path selection highlight follows text lane inside value field" {
+    const style = (try appearance.currentHardcodedDefaults()).sunglasses_form;
+    const row = viewport.Rect{ .x = 10, .y = 20, .w = 300, .h = 32 };
+    const field_rect = imagePathValueRectForRow(row, style);
+    const text_rect = pathSelectionRect(row, style);
+
+    try std.testing.expect(text_rect.x >= field_rect.x);
+    try std.testing.expect(text_rect.y > field_rect.y);
+    try std.testing.expect(text_rect.x + text_rect.w <= field_rect.x + field_rect.w);
+    try std.testing.expect(text_rect.y + text_rect.h < field_rect.y + field_rect.h);
+    try std.testing.expect(text_rect.h < row.h);
+}
+
+test "image path mouse selection uses value bounds and scalar byte offsets" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+    const style = testFormStyle();
+    const layout = viewport.ResultLayout.default(control_count);
+    const rect = imagePathValueRect(layout, style);
+
+    try form.ensureReady(&state);
+    try state.monitors[0].setImagePath("/tmp/aé🙂z.png");
+    form.focus = .image_path;
+
+    try std.testing.expect(try form.beginPathMouseSelection(&state, style, layout, rect.x - 1, rect.y + 1) == null);
+    const anchor = (try form.beginPathMouseSelection(&state, style, layout, rect.x, rect.y + 1)).?;
+    try std.testing.expectEqual(@as(u32, 0), anchor);
+    try std.testing.expect(try form.dragPathMouseSelection(&state, style, layout, anchor, rect.x + rect.w));
+    try std.testing.expectEqualStrings("/tmp/aé🙂z.png", (try form.selectedPathText(&state)).?);
+}
+
+test "missing saved image path is not an effective overlay" {
+    var monitor = try sunglasses_state.MonitorState.init("DP-1");
+    monitor.image_enabled = true;
+    monitor.setImageOpacity(5);
+    try monitor.setImagePath("/tmp/wayspot-missing-sunglasses-rca.png");
+
+    try std.testing.expect(!monitor.hasEffectiveImageOverlay());
+}
+
+test "image path paste overflow stays invalid and leaves saved state" {
+    var state = sunglasses_state.defaultState();
+    var form = Form{};
+    var path: [sunglasses_state.max_image_path_bytes + 1]u8 = undefined;
+    @memset(&path, 'a');
+    path[0] = '/';
+
+    try form.ensureReady(&state);
+    form.focus = .image_path;
+    try std.testing.expect(try form.pastePathText(&state, &path));
+    try std.testing.expect(form.path_error);
+    try std.testing.expectEqual(CommitResult.invalid, try form.commitFocused(&state));
+    try std.testing.expectEqualStrings("", state.monitors[0].imagePath());
 }
 
 test "image path commit saves valid absolute path" {

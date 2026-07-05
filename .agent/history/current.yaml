@@ -8,7 +8,7 @@ product:
     Wayspot is a pragmatic DE busybox: CLI-summoned picker,
     notification DBus interface, wallpaper loop, sunglasses overlay, and focused
     surfaces.
-  active_focus: abi_reference_maturity
+  active_focus: textbox_modern_editing
   flow:
     launcher: cli -> picker -> picker_surface -> detached_command -> cleanup
     notifications: cli -> notification_dbus -> notification_state -> notification_banner_child

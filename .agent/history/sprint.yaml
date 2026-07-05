@@ -1,71 +1,73 @@
-id: abi_reference_maturity
+id: textbox_modern_editing
 state: complete
 
 purpose: >
-  Execute the reviewer-accepted ABI/reference-maturity sprint. The source of
-  truth is `.agent/history/abi-reference-maturity.yaml`.
+  Execute the reviewer-accepted textbox modernization sprint. The source of
+  truth is `.agent/history/textbox-modern-editing-sprint.yaml`.
 
-active_index: .agent/history/abi-reference-maturity.yaml
+active_index: .agent/history/textbox-modern-editing-sprint.yaml
 
 supersedes:
-  id: de_entity_model_not_picker_abuse
+  id: abi_reference_maturity
   reason: >
-    The env entity sprint completed and Sagan accepted it. User approved
-    starting delegated execution for the ABI/reference-maturity sprint.
+    ABI/reference maturity completed and reviewer accepted the textbox sprint
+    plan. The active work is now one bounded picker-owned text editing model
+    shared by picker query and sunglasses image path candidate text.
 
 law:
-  - vendored_ABI_is_direct_or_translated_at_ingestion_site
-  - Zig_maturity_claims_use_Zig_0_16_release_notes_and_local_std_build_source
-  - dev_references_is_the_bias_library
-  - reference_repo_material_is_promoted_to_dev_references_or_deleted_or_explicitly_ignored
-  - product_decisions_errors_and_lifecycle_live_in_Zig
-  - C_is_ABI_glue_only_unless_user_accepts_specific_C_product_owner
+  - one_bounded_single_line_textbox_model
+  - SDL_is_event_clipboard_and_window_adapter_only
+  - no_rope_gap_buffer_piece_table_or_generic_ui_framework
+  - picker_query_and_sunglasses_image_path_share_textbox_semantics
+  - mouse_mapping_is_deterministic_rect_to_scalar_to_byte_clamp
+  - dirty_tree_preflight_required_before_product_edits
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - live memory activation for abi_reference_maturity
-    - local dev_references promotion for exact Zig std build files
-    - local official ABI surface image and memory references
-    - reference_repo fate inspection and promote/delete/ignore recommendation
-    - accepted shallow ABI boundary decision for layer-shell and image buffers
-    - accepted sunglasses child startup failure detail preservation
+    - live memory activation for textbox_modern_editing
+    - dirty tree preflight before product edits
+    - bounded UTF-8 cursor and selection model in src/picker/textbox.zig
+    - SDL key text clipboard and mouse adapters in src/picker/surface.zig
+    - sunglasses image path candidate text routed through the same model
   out:
-    - product source or build implementation before accepted implementation slice
-    - ABI/C changes during reference-only slices
-    - broad Wayland abstraction
-    - broad ABI abstraction
-    - full upstream repo copying
-    - reference_repo as authority
+    - rope gap buffer piece table multiline undo redo rich text or IME rendering
+    - generic ui widgets controls shared or framework owner
+    - text engine glyph hit-testing
+    - changes to notification wallpaper env C build or packaging code
 
 progress:
   completed:
     - 00_plan_review
-    - 01_live_memory_activation
-    - 02a_zig_std_build_reference_promotion
-    - 02b_abi_surface_reference_download
-    - 02c_reference_repo_fate
-    - 03_zig_016_build_ingestion_lock
-    - 03a_picker_text_c_ingestion_cleanup
-    - 04_layer_shell_C_fate_decision
-    - 05_typed_C_error_boundary
-    - 06_move_product_image_policy_to_Zig
-    - 07_sunglasses_startup_error_visibility
-    - 08_surface_lifecycle_happy_unhappy_paths
-    - 09_reference_maturity_scans
-    - 02_dev_reference_bias_index
-    - 10_final_verification
+    - 00a_live_memory_activation
+    - 00b_dirty_tree_preflight
+    - 01_textbox_model
+    - 02_picker_query_adapter
+    - 03_sunglasses_path_adapter
+    - 04_mouse_and_render_receipts
+    - 05_cleanup_and_final_gate
+    - final_reviewer_gate
   current: []
   pending: []
 
 verification_floor:
-  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/abi-reference-maturity.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/textbox-modern-editing-sprint.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "git diff --check"
+
+completion_receipts:
+  - reviewer_gate_accepted
+  - "zigup run 0.16.0 fmt --check src/picker/appearance.zig src/picker/surface.zig src/picker/textbox.zig src/sunglasses/form.zig"
+  - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/textbox-modern-editing-sprint.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
+  - "! rg -n \"path_selection_fill|path_selection_text|appendArrayList|backspaceArrayList|all_selected|append-only|pathEditAction|PathEditAction\" src"
+  - "! rg -n \"\\b(anytype|anyopaque|usize)\\b|_ =\" src/picker src/sunglasses"
+  - "zigup run 0.16.0 build test --summary all"
+  - "zigup run 0.16.0 build"
   - "git diff --check"
 
 stop_conditions:
-  - product source or build implementation starts during reference-only slices
-  - C retains product behavior without explicit user approval
-  - reference_repo remains ambiguous without promote_delete_or_ignore receipt
-  - needed official references cannot be sourced with provenance
-  - reviewer rejects the final tree
+  - product edits start before dirty tree preflight completes
+  - dirty worktree changes cannot be separated from sprint edits
+  - required implementation would touch files outside accepted scope
+  - mouse hit-testing requires text engine changes
+  - reviewer rejects final implementation
   - user decision is required

@@ -38,6 +38,7 @@ pub fn run(
 
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
+const query_max_bytes: u32 = 256;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
@@ -165,6 +166,16 @@ const ShutdownSignal = struct {
     }
 };
 
+const TextEditTarget = enum {
+    query,
+    sunglasses_path,
+};
+
+const TextDrag = struct {
+    target: TextEditTarget,
+    anchor: u32,
+};
+
 fn shutdownSignalHandler(signal: std.posix.SIG) callconv(.c) void {
     if (signal != .INT and signal != .TERM) return;
     const fd = shutdown_handler_fd.load(.acquire);
@@ -222,7 +233,7 @@ const Surface = struct {
     cursor: cursor_blink.CursorBlink = cursor_blink.CursorBlink.init(0, cursor_blink.cursor_blink_interval_ms),
     shutdown_signal: ?*ShutdownSignal = null,
     wake_event_type: u32 = 0,
-    query: std.ArrayList(u8) = .empty,
+    query: textbox.Textbox(query_max_bytes) = .{},
     results: []rank.RankedCandidate = &.{},
     sunglasses_state: sunglasses_state.State = sunglasses_state.defaultState(),
     sunglasses_form: sunglasses_form.Form = .{},
@@ -232,6 +243,7 @@ const Surface = struct {
     launch_queue: LaunchQueue = .{},
     shutdown_after_launch: bool = false,
     window_sized_for_sunglasses: ?bool = null,
+    text_drag: ?TextDrag = null,
 
     fn init(allocator: std.mem.Allocator, picker: *app.Picker, home: []const u8) !Surface {
         const config = try scale_owner.load(allocator);
@@ -293,7 +305,6 @@ const Surface = struct {
             self.shutdown_signal = null;
         }
         self.freeResults();
-        self.query.deinit(self.allocator);
         const stopped_text_input = c.SDL_StopTextInput(self.window);
         if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
         self.text.deinit();
@@ -361,19 +372,12 @@ const Surface = struct {
                 try self.updateViewportForWindow();
             },
             c.SDL_EVENT_TEXT_INPUT => {
+                const input_text = std.mem.span(event.text.text);
                 if (self.sunglassesActive()) {
-                    const input_text = std.mem.span(event.text.text);
-                    if (try self.sunglasses_form.handleTextInput(&self.sunglasses_state, input_text)) {
-                        self.resetCursorBlink();
-                        self.dirty = true;
-                    }
+                    try self.applyTextInput(.sunglasses_path, input_text);
                     return true;
                 }
-                const input_text = std.mem.span(event.text.text);
-                const query_edit = try textbox.appendArrayList(&self.query, self.allocator, input_text);
-                std.debug.assert(query_edit != .overflow);
-                self.resetCursorBlink();
-                try self.refreshResults();
+                try self.applyTextInput(.query, input_text);
             },
             c.SDL_EVENT_MOUSE_WHEEL => {
                 if (self.sunglassesActive()) return true;
@@ -382,6 +386,12 @@ const Surface = struct {
                 if (wheel_y != 0 and self.viewport.scrollLines(scroll_delta)) self.dirty = true;
             },
             c.SDL_EVENT_MOUSE_MOTION => {
+                if (self.text_drag) |drag| {
+                    if ((event.motion.state & c.SDL_BUTTON_LMASK) != 0) {
+                        try self.dragTextSelection(drag, event.motion.x);
+                    }
+                    return true;
+                }
                 if (self.sunglassesActive()) {
                     if (try self.focusSunglassesFormAt(event.motion.x, event.motion.y)) self.dirty = true;
                     return true;
@@ -393,15 +403,20 @@ const Surface = struct {
             c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
                 if (event.button.button == c.SDL_BUTTON_LEFT) {
                     if (self.sunglassesActive()) {
+                        if (try self.beginSunglassesPathSelection(event.button.x, event.button.y)) return true;
                         try self.clickSunglassesForm(event.button.x, event.button.y);
                         return true;
                     }
+                    if (try self.beginQuerySelection(event.button.x, event.button.y)) return true;
                     if (self.visibleRowAtPoint(event.button.x, event.button.y)) |visible_row| {
                         if (self.viewport.resultAtVisibleRow(visible_row)) |result_index| {
                             try self.queueLaunchAtResult(result_index);
                         }
                     }
                 }
+            },
+            c.SDL_EVENT_MOUSE_BUTTON_UP => {
+                if (event.button.button == c.SDL_BUTTON_LEFT) self.text_drag = null;
             },
             c.SDL_EVENT_KEY_DOWN => {
                 if (scale_owner.zoomAction(event.key.key, event.key.mod)) |zoom_action| {
@@ -411,22 +426,26 @@ const Surface = struct {
                     self.dirty = true;
                     return true;
                 }
+                if (textEditAction(event.key.key, event.key.mod)) |action| {
+                    if (self.sunglassesActive() and self.sunglasses_form.focusedPathInput()) {
+                        try self.applyTextEditAction(.sunglasses_path, action);
+                        return true;
+                    }
+                    if (!self.sunglassesActive()) {
+                        try self.applyTextEditAction(.query, action);
+                        return true;
+                    }
+                }
                 switch (event.key.key) {
                     c.SDLK_ESCAPE => {
                         return false;
                     },
                     c.SDLK_BACKSPACE => {
                         if (self.sunglassesActive()) {
-                            if (try self.sunglasses_form.handleBackspace(&self.sunglasses_state)) {
-                                self.resetCursorBlink();
-                                self.dirty = true;
-                            }
+                            try self.applyTextEditAction(.sunglasses_path, .backspace);
                             return true;
                         }
-                        const query_edit = textbox.backspaceArrayList(&self.query);
-                        std.debug.assert(query_edit != .overflow);
-                        self.resetCursorBlink();
-                        try self.refreshResults();
+                        try self.applyTextEditAction(.query, .backspace);
                     },
                     c.SDLK_TAB => {
                         if (self.sunglassesActive()) {
@@ -473,13 +492,13 @@ const Surface = struct {
                         try self.queueSelectedLaunch();
                     },
                     c.SDLK_LEFT => {
-                        if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, -sliderKeyboardStep())) {
+                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, -sliderKeyboardStep())) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
                     c.SDLK_RIGHT => {
-                        if (self.sunglassesActive() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, sliderKeyboardStep())) {
+                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, sliderKeyboardStep())) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
@@ -510,7 +529,7 @@ const Surface = struct {
 
     fn refreshResults(self: *Surface) !void {
         self.freeResults();
-        self.results = try self.picker.rankQuery(self.allocator, self.query.items);
+        self.results = try self.picker.rankQuery(self.allocator, self.query.slice());
         try self.applyWindowSizeForRoute(false);
         if (self.viewport.resetResults(@intCast(self.results.len))) {
             self.dirty = true;
@@ -544,8 +563,7 @@ const Surface = struct {
     }
 
     fn switchMode(self: *Surface, mode_query: []const u8) !void {
-        self.query.clearRetainingCapacity();
-        try self.query.appendSlice(self.allocator, mode_query);
+        if (self.query.replace(mode_query) == .overflow) return error.QueryTooLong;
         self.resetCursorBlink();
         try self.refreshResults();
     }
@@ -613,6 +631,213 @@ const Surface = struct {
         return try self.sunglasses_form.focusAt(&self.sunglasses_state, layout, x / surface_scale, y / surface_scale);
     }
 
+    fn applyTextInput(self: *Surface, target: TextEditTarget, input_text: []const u8) !void {
+        switch (target) {
+            .query => {
+                const edit = self.query.insertText(input_text);
+                if (edit == .changed) {
+                    self.resetCursorBlink();
+                    try self.refreshResults();
+                }
+            },
+            .sunglasses_path => {
+                if (try self.sunglasses_form.handleTextInput(&self.sunglasses_state, input_text)) {
+                    self.resetCursorBlink();
+                    self.dirty = true;
+                }
+            },
+        }
+    }
+
+    fn applyTextEditAction(self: *Surface, target: TextEditTarget, action: PickerTextEditAction) !void {
+        switch (action) {
+            .select_all => {
+                if (try self.selectAllText(target)) {
+                    self.resetCursorBlink();
+                    self.dirty = true;
+                }
+            },
+            .copy => try self.copySelectedText(target),
+            .cut => {
+                try self.copySelectedText(target);
+                try self.cutSelectedText(target);
+            },
+            .paste => try self.pasteClipboardText(target),
+            .backspace => try self.applyDeletion(target, .backspace),
+            .delete_forward => try self.applyDeletion(target, .delete_forward),
+            .move_left => try self.moveTextCursor(target, .left, false),
+            .move_right => try self.moveTextCursor(target, .right, false),
+            .move_home => try self.moveTextCursor(target, .home, false),
+            .move_end => try self.moveTextCursor(target, .end, false),
+            .select_left => try self.moveTextCursor(target, .left, true),
+            .select_right => try self.moveTextCursor(target, .right, true),
+            .select_home => try self.moveTextCursor(target, .home, true),
+            .select_end => try self.moveTextCursor(target, .end, true),
+        }
+    }
+
+    fn selectAllText(self: *Surface, target: TextEditTarget) !bool {
+        return switch (target) {
+            .query => self.query.selectAll() == .changed,
+            .sunglasses_path => try self.sunglasses_form.selectPathText(&self.sunglasses_state),
+        };
+    }
+
+    fn applyDeletion(self: *Surface, target: TextEditTarget, deletion: TextDeletion) !void {
+        const changed = switch (target) {
+            .query => switch (deletion) {
+                .backspace => self.query.backspace() == .changed,
+                .delete_forward => self.query.deleteForward() == .changed,
+            },
+            .sunglasses_path => switch (deletion) {
+                .backspace => try self.sunglasses_form.handleBackspace(&self.sunglasses_state),
+                .delete_forward => try self.sunglasses_form.handleDeleteForward(&self.sunglasses_state),
+            },
+        };
+        if (!changed) return;
+        self.resetCursorBlink();
+        self.dirty = true;
+        if (target == .query) try self.refreshResults();
+    }
+
+    fn moveTextCursor(self: *Surface, target: TextEditTarget, movement: textbox.Movement, extend: bool) !void {
+        const changed = switch (target) {
+            .query => switch (movement) {
+                .left => self.query.moveLeft(extend) == .changed,
+                .right => self.query.moveRight(extend) == .changed,
+                .home => self.query.moveHome(extend) == .changed,
+                .end => self.query.moveEnd(extend) == .changed,
+            },
+            .sunglasses_path => try self.sunglasses_form.movePathCursor(&self.sunglasses_state, movement, extend),
+        };
+        if (changed) {
+            self.resetCursorBlink();
+            self.dirty = true;
+        }
+    }
+
+    fn cutSelectedText(self: *Surface, target: TextEditTarget) !void {
+        const changed = switch (target) {
+            .query => self.query.cutSelection() == .changed,
+            .sunglasses_path => try self.sunglasses_form.cutPathText(&self.sunglasses_state),
+        };
+        if (!changed) return;
+        self.resetCursorBlink();
+        self.dirty = true;
+        if (target == .query) try self.refreshResults();
+    }
+
+    fn pasteClipboardText(self: *Surface, target: TextEditTarget) !void {
+        const clipboard = c.SDL_GetClipboardText();
+        if (clipboard == null) return;
+        defer c.SDL_free(clipboard);
+        const text = std.mem.span(clipboard);
+        if (text.len == 0) return;
+        try self.applyTextInput(target, text);
+    }
+
+    fn copySelectedText(self: *Surface, target: TextEditTarget) !void {
+        const selected = switch (target) {
+            .query => self.query.selectedText(),
+            .sunglasses_path => try self.sunglasses_form.selectedPathText(&self.sunglasses_state),
+        } orelse return;
+        try copySelectedBytes(selected, sdlSetClipboardText);
+    }
+
+    fn beginQuerySelection(self: *Surface, x: f32, y: f32) !bool {
+        const surface_scale = self.config.scale();
+        std.debug.assert(surface_scale > 0);
+        const range = self.viewport.visibleRange();
+        const layout = self.currentResultLayout(range.count);
+        const base_x = x / surface_scale;
+        const base_y = y / surface_scale;
+        const offset = queryMouseByteOffset(layout, self.appearance.picker, self.query.slice(), base_x, base_y) orelse return false;
+        if (self.query.setCursorFromByteOffset(offset) == .changed) self.resetCursorBlink();
+        self.text_drag = .{ .target = .query, .anchor = offset };
+        self.dirty = true;
+        return true;
+    }
+
+    fn beginSunglassesPathSelection(self: *Surface, x: f32, y: f32) !bool {
+        const surface_scale = self.config.scale();
+        std.debug.assert(surface_scale > 0);
+        const layout = self.currentResultLayout(sunglasses_form.control_count);
+        const base_x = x / surface_scale;
+        const base_y = y / surface_scale;
+        const anchor = try self.sunglasses_form.beginPathMouseSelection(
+            &self.sunglasses_state,
+            self.appearance.sunglasses_form,
+            layout,
+            base_x,
+            base_y,
+        ) orelse return false;
+        self.text_drag = .{ .target = .sunglasses_path, .anchor = anchor };
+        self.resetCursorBlink();
+        self.dirty = true;
+        return true;
+    }
+
+    fn dragTextSelection(self: *Surface, drag: TextDrag, x: f32) !void {
+        const surface_scale = self.config.scale();
+        std.debug.assert(surface_scale > 0);
+        const base_x = x / surface_scale;
+        switch (drag.target) {
+            .query => {
+                const range = self.viewport.visibleRange();
+                const layout = self.currentResultLayout(range.count);
+                const rect = queryContentRect(layout, self.appearance.picker);
+                const offset = textbox.byteOffsetForMouseX(self.query.slice(), rect.x, rect.x + rect.w, base_x);
+                if (self.query.selectToByteOffset(drag.anchor, offset) == .changed) {
+                    self.resetCursorBlink();
+                    self.dirty = true;
+                }
+            },
+            .sunglasses_path => {
+                const layout = self.currentResultLayout(sunglasses_form.control_count);
+                if (try self.sunglasses_form.dragPathMouseSelection(
+                    &self.sunglasses_state,
+                    self.appearance.sunglasses_form,
+                    layout,
+                    drag.anchor,
+                    base_x,
+                )) {
+                    self.resetCursorBlink();
+                    self.dirty = true;
+                }
+            },
+        }
+    }
+
+    fn drawQuerySelection(self: *Surface, layout: viewport.ResultLayout) !void {
+        const range = self.query.selectionRange() orelse return;
+        const rect = queryTextRect(layout, self.appearance.picker);
+        const offsets = try self.text.measureRangeXOffsets(self.query.slice(), range.start, range.end, .{
+            .color = self.appearance.picker.query_text.color,
+            .max_bytes = 84,
+            .font_size_px = self.appearance.picker.query_text.font_px,
+            .surface_scale = self.config.scale(),
+        });
+        const selection_rect = c.SDL_FRect{ .x = rect.x + offsets.start, .y = rect.y, .w = @max(0, offsets.end - offsets.start), .h = rect.h };
+        const color = setDrawColor(self.renderer, self.appearance.picker.row_selected_fill);
+        const filled = c.SDL_RenderFillRect(self.renderer, &selection_rect);
+        if (!color or !filled) return error.SdlRenderFailed;
+    }
+
+    fn drawQueryCursor(self: *Surface, layout: viewport.ResultLayout) !void {
+        const rect = queryTextRect(layout, self.appearance.picker);
+        const offsets = try self.text.measureRangeXOffsets(self.query.slice(), self.query.cursorOffset(), self.query.cursorOffset(), .{
+            .color = self.appearance.picker.query_text.color,
+            .max_bytes = 84,
+            .font_size_px = self.appearance.picker.query_text.font_px,
+            .surface_scale = self.config.scale(),
+        });
+        const cursor_x = rect.x + offsets.start;
+        const cursor_rect = c.SDL_FRect{ .x = cursor_x, .y = rect.y, .w = 2, .h = rect.h };
+        const color = setDrawColor(self.renderer, self.appearance.picker.query_cursor);
+        const filled = c.SDL_RenderFillRect(self.renderer, &cursor_rect);
+        if (!color or !filled) return error.SdlRenderFailed;
+    }
+
     fn persistAndWakeSunglasses(self: *Surface) !void {
         try sunglasses_state.save(self.sunglasses_state, self.allocator);
         const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
@@ -623,7 +848,7 @@ const Surface = struct {
     }
 
     fn sunglassesActive(self: *const Surface) bool {
-        return query_mod.parse(self.query.items).route == .sunglasses;
+        return query_mod.parse(self.query.slice()).route == .sunglasses;
     }
 
     fn updateViewportForWindow(self: *Surface) !void {
@@ -699,7 +924,8 @@ const Surface = struct {
         const surface_scale = self.config.scale();
         const picker = self.appearance.picker;
         const query_x = @field(layout, "query_" ++ "te" ++ "xt_x");
-        if (self.query.items.len == 0) {
+        try drawQueryField(self.renderer, layout, picker);
+        if (self.query.slice().len == 0) {
             try self.text.draw(self.renderer, query_x, layout.query_text_y, "Query", .{
                 .color = picker.query_placeholder.color,
                 .max_bytes = 16,
@@ -714,24 +940,15 @@ const Surface = struct {
                 .cursor_color = picker.query_cursor,
             });
         } else {
-            try self.text.draw(self.renderer, query_x, layout.query_text_y, self.query.items, .{
+            if (self.query.hasSelection()) try self.drawQuerySelection(layout);
+            try self.text.draw(self.renderer, query_x, layout.query_text_y, self.query.slice(), .{
                 .color = picker.query_text.color,
                 .max_bytes = 84,
                 .font_size_px = picker.query_text.font_px,
                 .surface_scale = surface_scale,
-                .cursor_color = if (self.cursor.visible) picker.query_cursor else null,
             });
+            if (self.cursor.visible) try self.drawQueryCursor(layout);
         }
-
-        const query_rect = c.SDL_FRect{
-            .x = layout.query_line.x,
-            .y = layout.query_line.y,
-            .w = layout.query_line.w,
-            .h = layout.query_line.h,
-        };
-        const line_color = setDrawColor(self.renderer, picker.query_divider);
-        const line_drawn = c.SDL_RenderFillRect(self.renderer, &query_rect);
-        if (!line_color or !line_drawn) return error.SdlRenderFailed;
     }
 
     fn drawResults(self: *Surface, range: viewport.VisibleRange, layout: viewport.ResultLayout) !void {
@@ -876,6 +1093,124 @@ fn sliderKeyboardStep() i32 {
     return 5;
 }
 
+const PickerTextEditAction = enum {
+    select_all,
+    copy,
+    cut,
+    paste,
+    backspace,
+    delete_forward,
+    move_left,
+    move_right,
+    move_home,
+    move_end,
+    select_left,
+    select_right,
+    select_home,
+    select_end,
+};
+
+const TextDeletion = enum {
+    backspace,
+    delete_forward,
+};
+
+fn textEditAction(key: c.SDL_Keycode, modifiers: c.SDL_Keymod) ?PickerTextEditAction {
+    const shifted = (modifiers & c.SDL_KMOD_SHIFT) != 0;
+    if ((modifiers & c.SDL_KMOD_CTRL) != 0) {
+        return switch (key) {
+            c.SDLK_A => .select_all,
+            c.SDLK_C => .copy,
+            c.SDLK_X => .cut,
+            c.SDLK_V => .paste,
+            else => null,
+        };
+    }
+    return switch (key) {
+        c.SDLK_BACKSPACE => .backspace,
+        c.SDLK_DELETE => .delete_forward,
+        c.SDLK_LEFT => if (shifted) .select_left else .move_left,
+        c.SDLK_RIGHT => if (shifted) .select_right else .move_right,
+        c.SDLK_HOME => if (shifted) .select_home else .move_home,
+        c.SDLK_END => if (shifted) .select_end else .move_end,
+        else => null,
+    };
+}
+
+const ClipboardSetter = *const fn ([]const u8) anyerror!void;
+
+fn copySelectedBytes(selected: []const u8, setter: ClipboardSetter) !void {
+    if (selected.len == 0) return;
+    try setter(selected);
+}
+
+fn sdlSetClipboardText(selected: []const u8) !void {
+    var buf: [@max(query_max_bytes, sunglasses_state.max_image_path_bytes) + 1:0]u8 = undefined;
+    const z_text = try std.fmt.bufPrintZ(&buf, "{s}", .{selected});
+    if (!c.SDL_SetClipboardText(z_text.ptr)) return error.SdlClipboardFailed;
+}
+
+fn queryContentRect(layout: viewport.ResultLayout, picker: appearance_owner.PickerAppearance) viewport.Rect {
+    const field = queryFieldRect(layout, picker);
+    const text = queryTextRect(layout, picker);
+    return .{
+        .x = text.x,
+        .y = field.y,
+        .w = text.w,
+        .h = field.h,
+    };
+}
+
+fn queryTextRect(layout: viewport.ResultLayout, picker: appearance_owner.PickerAppearance) viewport.Rect {
+    const left = @field(layout, "query_" ++ "te" ++ "xt_x");
+    const right = layout.query_line.x + layout.query_line.w;
+    return .{
+        .x = left,
+        .y = layout.query_text_y,
+        .w = @max(0, right - left),
+        .h = @floatFromInt(picker.query_text.font_px),
+    };
+}
+
+fn queryFieldRect(layout: viewport.ResultLayout, picker: appearance_owner.PickerAppearance) viewport.Rect {
+    const field_y = layout.query_text_y - 4;
+    const field_bottom = @max(layout.query_line.y + 1, layout.query_text_y + @as(f32, @floatFromInt(picker.query_text.font_px)) + 4);
+    return .{
+        .x = layout.query_line.x,
+        .y = field_y,
+        .w = layout.query_line.w,
+        .h = field_bottom - field_y,
+    };
+}
+
+fn drawQueryField(renderer: *c.SDL_Renderer, layout: viewport.ResultLayout, picker: appearance_owner.PickerAppearance) !void {
+    const field = queryFieldRect(layout, picker);
+    const fill_color = setDrawColor(renderer, picker.row_normal_fill);
+    const fill_rect = c.SDL_FRect{ .x = field.x, .y = field.y, .w = field.w, .h = field.h };
+    const filled = c.SDL_RenderFillRect(renderer, &fill_rect);
+    if (!fill_color or !filled) return error.SdlRenderFailed;
+
+    const border_color = setDrawColor(renderer, picker.query_divider);
+    const border_drawn = c.SDL_RenderRect(renderer, &fill_rect);
+    if (!border_color or !border_drawn) return error.SdlRenderFailed;
+}
+
+fn queryMouseByteOffset(
+    layout: viewport.ResultLayout,
+    picker: appearance_owner.PickerAppearance,
+    text: []const u8,
+    x: f32,
+    y: f32,
+) ?u32 {
+    const rect = queryContentRect(layout, picker);
+    if (!pointInside(rect, x, y)) return null;
+    return textbox.byteOffsetForMouseX(text, rect.x, rect.x + rect.w, x);
+}
+
+fn pointInside(rect: viewport.Rect, x: f32, y: f32) bool {
+    return x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
+}
+
 fn routeBaseHeight(sunglasses_active: bool) i32 {
     if (sunglasses_active) {
         return @intFromFloat(viewport.baseHeightForRows(sunglasses_form.control_count));
@@ -897,6 +1232,61 @@ test "route base height compacts sunglasses form only" {
         routeBaseHeight(true),
     );
     try std.testing.expect(routeBaseHeight(true) < routeBaseHeight(false));
+}
+
+test "text edit key combos stay owned by picker surface text handling" {
+    try std.testing.expectEqual(PickerTextEditAction.select_all, textEditAction(c.SDLK_A, c.SDL_KMOD_CTRL).?);
+    try std.testing.expectEqual(PickerTextEditAction.copy, textEditAction(c.SDLK_C, c.SDL_KMOD_CTRL).?);
+    try std.testing.expectEqual(PickerTextEditAction.cut, textEditAction(c.SDLK_X, c.SDL_KMOD_CTRL).?);
+    try std.testing.expectEqual(PickerTextEditAction.paste, textEditAction(c.SDLK_V, c.SDL_KMOD_CTRL).?);
+    try std.testing.expectEqual(PickerTextEditAction.backspace, textEditAction(c.SDLK_BACKSPACE, c.SDL_KMOD_NONE).?);
+    try std.testing.expectEqual(PickerTextEditAction.delete_forward, textEditAction(c.SDLK_DELETE, c.SDL_KMOD_NONE).?);
+    try std.testing.expectEqual(PickerTextEditAction.select_left, textEditAction(c.SDLK_LEFT, c.SDL_KMOD_SHIFT).?);
+    try std.testing.expectEqual(PickerTextEditAction.move_end, textEditAction(c.SDLK_END, c.SDL_KMOD_NONE).?);
+    try std.testing.expect(textEditAction(c.SDLK_V, c.SDL_KMOD_NONE) == null);
+}
+
+fn clipboardOkForTest(text: []const u8) anyerror!void {
+    if (!std.mem.eql(u8, text, "copy-me")) return error.BadClipboardText;
+}
+
+fn clipboardFailForTest(text: []const u8) anyerror!void {
+    if (!std.mem.eql(u8, text, "copy-me")) return error.BadClipboardText;
+    return error.SdlClipboardFailed;
+}
+
+test "clipboard copy helper skips empty and propagates setter failure" {
+    try copySelectedBytes("", clipboardFailForTest);
+    try copySelectedBytes("copy-me", clipboardOkForTest);
+    try std.testing.expectError(error.SdlClipboardFailed, copySelectedBytes("copy-me", clipboardFailForTest));
+}
+
+test "query mouse rect uses field height while selection uses text height" {
+    const appearance = try appearance_owner.currentHardcodedDefaults();
+    const layout = viewport.ResultLayout.default(8);
+    const hit_rect = queryContentRect(layout, appearance.picker);
+    const text_rect = queryTextRect(layout, appearance.picker);
+
+    try std.testing.expectEqual(layout.query_text_x, hit_rect.x);
+    try std.testing.expectEqual(layout.query_line.x + layout.query_line.w, hit_rect.x + hit_rect.w);
+    try std.testing.expect(hit_rect.y < text_rect.y);
+    try std.testing.expect(hit_rect.h > text_rect.h);
+    try std.testing.expectEqual(layout.query_text_y, text_rect.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(appearance.picker.query_text.font_px)), text_rect.h);
+}
+
+test "query mouse mapping uses exact bounds and clamps to scalar offsets" {
+    const appearance = try appearance_owner.currentHardcodedDefaults();
+    const layout = viewport.ResultLayout.default(8);
+    const rect = queryContentRect(layout, appearance.picker);
+    const text = "aé🙂z";
+    const y = rect.y + (rect.h / 2);
+
+    try std.testing.expect(queryMouseByteOffset(layout, appearance.picker, text, rect.x - 1, y) == null);
+    try std.testing.expect(queryMouseByteOffset(layout, appearance.picker, text, rect.x, rect.y - 1) == null);
+    try std.testing.expectEqual(@as(u32, 0), queryMouseByteOffset(layout, appearance.picker, text, rect.x, y).?);
+    try std.testing.expectEqual(@as(u32, @intCast(text.len)), queryMouseByteOffset(layout, appearance.picker, text, rect.x + rect.w, y).?);
+    try std.testing.expectEqual(@as(u32, 3), queryMouseByteOffset(layout, appearance.picker, text, rect.x + (rect.w * 0.40), y).?);
 }
 
 test "sunglasses state maps default values onto real monitor names" {

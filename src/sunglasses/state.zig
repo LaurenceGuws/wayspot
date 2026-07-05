@@ -84,7 +84,8 @@ pub const MonitorState = struct {
             self.image_opacity > image_opacity_zero and
             self.image_path_len > 0 and
             std.fs.path.isAbsolute(self.imagePath()) and
-            !hasInvalidPathByte(self.imagePath());
+            !hasInvalidPathByte(self.imagePath()) and
+            imagePathExists(self.imagePath());
     }
 };
 
@@ -311,7 +312,16 @@ fn normalizedMonitor(monitor: MonitorState) MonitorState {
     normalized.dim_value = clampDim(normalized.dim_value);
     normalized.image_opacity = clampImageOpacity(normalized.image_opacity);
     if (normalized.image_path_len > max_image_path_bytes or !std.fs.path.isAbsolute(normalized.imagePath()) or hasInvalidPathByte(normalized.imagePath())) normalized.clearImagePath();
+    if (normalized.image_enabled and normalized.image_path_len > 0 and !imagePathExists(normalized.imagePath())) {
+        std.log.warn("sunglasses image path is missing; image overlay skipped", .{});
+    }
     return normalized;
+}
+
+fn imagePathExists(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return false;
+    std.Io.Dir.accessAbsolute(std.Options.debug_io, path, .{ .read = true }) catch return false;
+    return true;
 }
 
 fn hasInvalidPathByte(value: []const u8) bool {
@@ -428,6 +438,17 @@ test "effective filter predicate ignores disabled and zero-value FormFields" {
 }
 
 test "effective image overlay requires enabled opacity and absolute path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "overlay.png",
+        .data = "",
+    });
+    const relative_image_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/overlay.png", .{&tmp.sub_path});
+    defer std.testing.allocator.free(relative_image_path);
+    const image_path = try std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, relative_image_path, std.testing.allocator);
+    defer std.testing.allocator.free(image_path);
+
     var state = defaultState();
     var monitor = try MonitorState.init("DP-1");
     monitor.image_enabled = true;
@@ -436,7 +457,7 @@ test "effective image overlay requires enabled opacity and absolute path" {
     try std.testing.expect(!state.monitors[0].hasEffectiveImageOverlay());
     try std.testing.expect(!state.needsOverlay());
 
-    try state.monitors[0].setImagePath("/home/home/Pictures/overlay.png");
+    try state.monitors[0].setImagePath(image_path);
     try std.testing.expect(state.monitors[0].hasEffectiveImageOverlay());
     try std.testing.expect(state.needsOverlay());
 
@@ -506,7 +527,18 @@ test "parse old multi-monitor state defaults image overlay fields" {
 }
 
 test "parse valid state with image fields" {
-    const raw =
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "overlay.png",
+        .data = "",
+    });
+    const relative_image_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/overlay.png", .{&tmp.sub_path});
+    defer std.testing.allocator.free(relative_image_path);
+    const image_path = try std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, relative_image_path, std.testing.allocator);
+    defer std.testing.allocator.free(image_path);
+
+    const raw = try std.fmt.allocPrint(std.testing.allocator,
         \\monitor=DP-1
         \\red_blue_enabled=1
         \\red_blue_value=-25
@@ -514,14 +546,15 @@ test "parse valid state with image fields" {
         \\dim_value=40
         \\image_enabled=1
         \\image_opacity=65
-        \\image_path=/home/home/Pictures/overlay.png
+        \\image_path={s}
         \\
-    ;
+    , .{image_path});
+    defer std.testing.allocator.free(raw);
     const state = try parse(raw);
     try std.testing.expectEqual(@as(u32, 1), state.count);
     try std.testing.expect(state.monitors[0].image_enabled);
     try std.testing.expectEqual(@as(i32, 65), state.monitors[0].image_opacity);
-    try std.testing.expectEqualStrings("/home/home/Pictures/overlay.png", state.monitors[0].imagePath());
+    try std.testing.expectEqualStrings(image_path, state.monitors[0].imagePath());
     try std.testing.expect(state.needsOverlay());
 }
 
