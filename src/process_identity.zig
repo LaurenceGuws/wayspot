@@ -1,15 +1,17 @@
-//! Process identity owns bounded Linux comm names for long-lived Wayspot modes.
+//! Process identity owns bounded Linux comm names for Wayspot runtimes.
 
 const std = @import("std");
 
 const max_linux_comm_visible_bytes: u32 = 15;
 
 pub const notifications = "wayspot-notify";
+pub const picker = "wayspot-picker";
 pub const wallpaper = "wayspot-wall";
 pub const sunglasses = "wayspot-sunglas";
 
 comptime {
     std.debug.assert(notifications.len <= max_linux_comm_visible_bytes);
+    std.debug.assert(picker.len <= max_linux_comm_visible_bytes);
     std.debug.assert(wallpaper.len <= max_linux_comm_visible_bytes);
     std.debug.assert(sunglasses.len <= max_linux_comm_visible_bytes);
 }
@@ -26,8 +28,9 @@ pub fn set(name: []const u8) !void {
     }
 }
 
-test "daemon comm names fit Linux visible process name bound" {
+test "process comm names fit Linux visible process name bound" {
     try std.testing.expect(notifications.len <= max_linux_comm_visible_bytes);
+    try std.testing.expect(picker.len <= max_linux_comm_visible_bytes);
     try std.testing.expect(wallpaper.len <= max_linux_comm_visible_bytes);
     try std.testing.expect(sunglasses.len <= max_linux_comm_visible_bytes);
 }

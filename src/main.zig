@@ -80,6 +80,7 @@ fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
         std.process.exit(2);
     }
 
+    try wayspot.process_identity.set(wayspot.process_identity.picker);
     var runtime = try setupRuntime(allocator, home);
     runtime.wireProviders();
     defer runtime.deinit(allocator);
