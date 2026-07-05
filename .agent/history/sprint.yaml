@@ -1,65 +1,72 @@
-id: ui_controls_dry_extraction
-state: complete
+id: ui_appearance_lua_defaults
+state: active
 
 purpose: >
-  Execute the reviewer-accepted UI controls DRY extraction sprint. The source of
-  truth is `.agent/history/ui-elements-dry-sprint.yaml`.
+  Execute the reviewer-accepted UI appearance and Lua defaults sprint. The
+  source of truth is `.agent/history/ui-appearance-lua-defaults-sprint.yaml`.
 
-active_index: .agent/history/ui-elements-dry-sprint.yaml
+active_index: .agent/history/ui-appearance-lua-defaults-sprint.yaml
 
 supersedes:
-  id: monitor_glasses_media_expansion
+  id: ui_controls_dry_extraction
   reason: >
-    User accepted the UI controls DRY sprint as the next active implementation
-    sprint. Monitor-glasses media expansion remains historical planning until
-    explicitly resumed.
+    User accepted the UI appearance and Lua defaults sprint as the next active
+    implementation sprint. UI controls dry extraction is complete.
 
-accepted_controls:
-  - src/ui/controls/cursor_blink.zig
-  - src/ui/controls/textbox.zig
-  - src/ui/controls/slider.zig
+accepted_new_files:
+  - assets/lua/defaults.lua
+  - src/config/mod.zig
+  - src/config/defaults.zig
+  - src/ui/appearance.zig
+  - src/ui/controls/appearance.zig
+  - vendor/howl-lua/
 
 law:
   - implement_nothing_not_named_in_the_active_index
-  - preserve_current_ux_behavior
+  - preserve_current_visual_defaults_before_user_override
   - no_product_domain_files_under_src_ui_controls
   - no_peer_shared_ui_control_folder
   - no_compatibility_wrappers
+  - no_runtime_scripting_vm
+  - lua_defaults_are_bounded_data_only
   - reviewer_gate_required_for_completion
 
 current_scope:
   in:
-    - extract cursor blink timing from src/ui/sdl_shell.zig
-    - extract shared append/backspace text mechanics without changing query storage behavior
-    - extract generic scalar slider math used by sunglasses form
-    - update tests and production comments for touched ownership
+    - vendor howl-lua at v0.1.0-beta.2 exactly
+    - add bounded Lua defaults file and loader
+    - add inert appearance values under src/ui/controls
+    - add product appearance mapping under src/ui
+    - wire picker, banner, text, and sunglasses form to appearance state
+    - delete moved hardcoded appearance literals from renderer files
+    - update tests, memory, docs, and production comments
   out:
-    - text cursor movement expansion
-    - selection
-    - copy/cut/paste
-    - file picker
-    - list/viewport move
-    - toggle extraction
-    - product-specific shared controls
+    - generic theme framework
+    - runtime Lua callbacks or scripting features
+    - provider or mode registration through Lua
+    - product-domain files inside src/ui/controls
+    - changing picker, banner, or form behavior beyond config-owned defaults
 
 progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_supersession
-    - 01_controls_folder_and_exports
-    - 02_cursor_blink_extraction
-    - 03_textbox_extraction
-    - 04_slider_extraction
-    - 05_comment_and_test_bibliography
-    - 06_final_reviewer_gate
-  current: []
-  pending: []
+  current:
+    - 01_vendor_and_build_receipt
+  pending:
+    - 02_defaults_lua_surface
+    - 03_bounded_config_loader
+    - 04_inert_and_product_appearance
+    - 05_surface_wiring_and_deletion
+    - 06_memory_and_docs
+    - 07_final_reviewer_gate
 
 verification_floor:
-  - commands listed in .agent/history/ui-elements-dry-sprint.yaml
+  - commands listed in .agent/history/ui-appearance-lua-defaults-sprint.yaml
 
 stop_conditions:
   - any implementation need conflicts with the accepted index
-  - behavior preservation cannot be maintained
+  - visual default preservation cannot be maintained
+  - bounded Lua execution cannot be implemented without changing the accepted vendor policy
   - a reviewer rejects the final code
   - user decision is required
