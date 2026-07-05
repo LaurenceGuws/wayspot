@@ -24,6 +24,7 @@ const default_font_size_px: u16 = 17;
 const missing_glyph_advance_px: f32 = 8;
 
 const font_paths = [_][:0]const u8{
+    "/usr/share/fonts/TTF/IosevkaTermNerdFont-Regular.ttf",
     "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
     "/usr/share/fonts/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
