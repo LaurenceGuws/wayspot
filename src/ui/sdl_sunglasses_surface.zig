@@ -13,6 +13,7 @@ const anchor_all_edges: u32 = 1 | 2 | 4 | 8;
 const layer_overlay: u32 = 3;
 const tint_max_alpha: u32 = 120;
 const dim_max_alpha: u32 = 220;
+const max_image_path_z_bytes: u32 = sunglasses_state.max_image_path_bytes + 1;
 
 pub const SunglassesSurface = struct {
     window: *c.SDL_Window,
@@ -41,7 +42,7 @@ pub const SunglassesSurface = struct {
         var layer = try LayerShellRole.init(window, monitor);
         errdefer layer.deinit();
 
-        try layer.drawStateTint(monitor, monitor_state);
+        try layer.drawStateSurface(monitor, monitor_state);
 
         return .{
             .window = window,
@@ -57,7 +58,7 @@ pub const SunglassesSurface = struct {
     }
 
     pub fn redraw(self: *SunglassesSurface, monitor_state: ?*const sunglasses_state.MonitorState) !void {
-        try self.layer.drawStateTint(self.monitor, monitor_state);
+        try self.layer.drawStateSurface(self.monitor, monitor_state);
     }
 };
 
@@ -116,6 +117,33 @@ const LayerShellRole = struct {
         c.wayspot_wl_surface_commit(wl_surface);
         if (c.wayspot_wl_display_roundtrip(display) < 0) return error.LayerShellConfigureFailed;
         return role;
+    }
+
+    fn drawStateSurface(self: *LayerShellRole, monitor: hyprland.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !void {
+        if (monitor_state) |state| {
+            if (useImageBuffer(state)) {
+                try self.drawStateImage(monitor, state);
+                return;
+            }
+        }
+        try self.drawStateTint(monitor, monitor_state);
+    }
+
+    fn drawStateImage(self: *LayerShellRole, monitor: hyprland.Monitor, monitor_state: *const sunglasses_state.MonitorState) !void {
+        var path_buf: [max_image_path_z_bytes:0]u8 = undefined;
+        const image_path = try writeImagePath(&path_buf, monitor_state.imagePath());
+        var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
+        const created = c.wayspot_shm_buffer_create_sunglasses_image(
+            &self.globals,
+            &next_buffer,
+            @intCast(monitor.width),
+            @intCast(monitor.height),
+            image_path.ptr,
+            @intCast(sunglasses_state.clampImageOpacity(monitor_state.image_opacity)),
+            stateArgb(monitor_state),
+        );
+        if (created != 0) return error.SunglassesImageBufferFailed;
+        try self.attachCreatedBuffer(monitor, &next_buffer);
     }
 
     fn drawStateTint(self: *LayerShellRole, monitor: hyprland.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !void {
@@ -186,6 +214,14 @@ const LayerShellRole = struct {
 
 fn writeTitle(buf: *[max_title_bytes:0]u8, monitor_name: []const u8) ![:0]const u8 {
     return try std.fmt.bufPrintZ(buf, "wayspot-sunglasses:{s}", .{monitor_name});
+}
+
+fn writeImagePath(buf: *[max_image_path_z_bytes:0]u8, image_path: []const u8) ![:0]const u8 {
+    return try std.fmt.bufPrintZ(buf, "{s}", .{image_path});
+}
+
+fn useImageBuffer(monitor_state: *const sunglasses_state.MonitorState) bool {
+    return monitor_state.hasEffectiveImageOverlay();
 }
 
 fn stateArgb(monitor_state: ?*const sunglasses_state.MonitorState) u32 {
@@ -278,4 +314,30 @@ test "state argb uses softened red blue tint at low values" {
 
     monitor.setRedBlueValue(100);
     try std.testing.expectEqual(compositeTintAndDim(255, 34, 0, tint_max_alpha, 0), stateArgb(&monitor));
+}
+
+test "surface buffer decision uses image only for effective image overlay" {
+    var monitor = try sunglasses_state.MonitorState.init("DP-1");
+    monitor.image_enabled = true;
+    monitor.setImageOpacity(40);
+    try std.testing.expect(!useImageBuffer(&monitor));
+
+    try monitor.setImagePath("/tmp/wayspot-overlay.png");
+    try std.testing.expect(useImageBuffer(&monitor));
+
+    monitor.image_enabled = false;
+    try std.testing.expect(!useImageBuffer(&monitor));
+}
+
+test "image path formatting accepts maximum state path plus nul terminator" {
+    var monitor = try sunglasses_state.MonitorState.init("DP-1");
+    var path: [sunglasses_state.max_image_path_bytes]u8 = undefined;
+    @memset(&path, 'a');
+    path[0] = '/';
+    try monitor.setImagePath(&path);
+
+    var z_path: [max_image_path_z_bytes:0]u8 = undefined;
+    const formatted = try writeImagePath(&z_path, monitor.imagePath());
+    try std.testing.expectEqual(sunglasses_state.max_image_path_bytes, @as(u32, @intCast(formatted.len)));
+    try std.testing.expectEqual(@as(u8, 0), formatted.ptr[sunglasses_state.max_image_path_bytes]);
 }

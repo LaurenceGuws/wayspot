@@ -53,6 +53,7 @@ void wayspot_wl_surface_commit(struct wl_surface *surface);
 int wayspot_wl_display_roundtrip(struct wl_display *display);
 void wayspot_wl_display_roundtrip_cleanup(struct wl_display *display);
 int wayspot_shm_buffer_create_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path);
+int wayspot_shm_buffer_create_sunglasses_image(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, const char *path, uint32_t image_opacity, uint32_t overlay_argb);
 int wayspot_shm_buffer_create_tint(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t argb);
 void wayspot_shm_buffer_destroy(struct wayspot_shm_buffer *buffer);
 void wayspot_wl_surface_attach_buffer(struct wl_surface *surface, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height);
