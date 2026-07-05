@@ -21,6 +21,7 @@ active_files:
   surface_scale_index: /home/home/personal/wayspot/.agent/history/wayspot-surface-scale-index.yaml
   picker_viewport_index: /home/home/personal/wayspot/.agent/history/wayspot-picker-viewport-index.yaml
   control_spine_index: /home/home/personal/wayspot/.agent/history/wayspot-control-spine-shrink-index.yaml
+  ui_appearance_lua_defaults_index: /home/home/personal/wayspot/.agent/history/ui-appearance-lua-defaults-sprint.yaml
   hyprland_direct_surface_discovery: /home/home/personal/wayspot/.agent/history/hyprland-direct-surface-discovery.yaml
   wallpaper_v1_sprint_contract: /home/home/personal/wayspot/.agent/history/wallpaper-v1-sprint-contract.yaml
 
@@ -30,6 +31,16 @@ source_references:
     rule: >
       qagent provided the copied way-of-work framework. It is not live authority
       for Wayspot planning or implementation.
+    howl_lua_vendor:
+      source_copy: /home/home/personal/wayspot/vendor/howl-lua
+      upstream_remote: git@github.com:LaurenceGuws/howl-lua.git
+      tag: v0.1.0-beta.2
+      commit: 89617b9f30a595b27c2ec1cc6140026e24b25641
+      provenance_file: /home/home/personal/wayspot/vendor/howl-lua/WAYSPOT_VENDOR.txt
+      rule: >
+        Wayspot vendors howl-lua as ordinary source files, not as a Git
+        submodule or embedded checkout, so future clones include the local
+        source copy directly.
   tigerbeetle:
     root: /home/home/personal/wayspot/dev_references/style/tigerbeetle
     required_for_owner_claims:
@@ -61,6 +72,10 @@ repo_entrypoints:
     viewport: /home/home/personal/wayspot/src/ui/picker_viewport.zig
     text: /home/home/personal/wayspot/src/ui/sdl_text.zig
     surface_config: /home/home/personal/wayspot/src/ui/surface_config.zig
+    appearance: /home/home/personal/wayspot/src/ui/appearance.zig
+    inert_appearance_values: /home/home/personal/wayspot/src/ui/controls/appearance.zig
+    defaults_loader: /home/home/personal/wayspot/src/config/defaults.zig
+    embedded_defaults_lua: /home/home/personal/wayspot/assets/lua/defaults.lua
   search:
     service: /home/home/personal/wayspot/src/app/search_service.zig
     apps_provider: /home/home/personal/wayspot/src/providers/apps.zig

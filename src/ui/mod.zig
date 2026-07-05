@@ -5,6 +5,7 @@ const std = @import("std");
 
 pub const gtk_enabled = false;
 pub const sdl_enabled = build_options.enable_sdl;
+pub const appearance = @import("appearance.zig");
 pub const app_icon_cache = @import("app_icon_cache.zig");
 pub const app_icon_diag = @import("app_icon_diag.zig");
 pub const app_icons = @import("app_icons.zig");

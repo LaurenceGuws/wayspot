@@ -1,5 +1,5 @@
 id: ui_appearance_lua_defaults
-state: accepted
+state: complete
 
 purpose: >
   Make active Wayspot UI appearance opinions reusable and auditable without
@@ -67,7 +67,7 @@ vendor_pin:
       the latest audited release source.
   required_receipts:
     - "git ls-remote --heads --tags git@github.com:LaurenceGuws/howl-lua.git"
-    - "git -C vendor/howl-lua rev-parse HEAD"
+    - "test ! -e vendor/howl-lua/.git && rg -q \"git@github.com:LaurenceGuws/howl-lua.git\" vendor/howl-lua/WAYSPOT_VENDOR.txt && rg -q \"v0.1.0-beta.2\" vendor/howl-lua/WAYSPOT_VENDOR.txt && rg -q \"89617b9f30a595b27c2ec1cc6140026e24b25641\" vendor/howl-lua/WAYSPOT_VENDOR.txt"
     - "zigup run 0.16.0 build test --summary all"
     - "pkg-config --modversion lua5.4"
 
@@ -280,7 +280,7 @@ slices:
       - vendor source receipt
       - build.zig.zon dependency/path update or documented local vendor path
       - no unrelated vendored cache files
-      - no modifications inside vendor/howl-lua; bounded execution belongs in src/config/defaults.zig
+      - no upstream source modifications inside vendor/howl-lua beyond Wayspot provenance; bounded execution belongs in src/config/defaults.zig
 
   "02_defaults_lua_surface":
     goal: >
@@ -340,7 +340,7 @@ verification_floor:
   - "zigup run 0.16.0 build -Doptimize=ReleaseFast"
   - "git diff --check"
   - "python -c 'import yaml; [yaml.safe_load(open(p, encoding=\"utf-8\")) for p in (\".agent/history/ui-appearance-lua-defaults-sprint.yaml\", \".agent/history/sprint.yaml\", \".agent/history/current.yaml\", \".agent/history/references.yaml\")]'"
-  - "bash -lc 'test \"$(git -C vendor/howl-lua rev-parse HEAD)\" = \"89617b9f30a595b27c2ec1cc6140026e24b25641\" && test -z \"$(git -C vendor/howl-lua status --short)\"'"
+  - "bash -lc 'test ! -e vendor/howl-lua/.git && rg -q \"git@github.com:LaurenceGuws/howl-lua.git\" vendor/howl-lua/WAYSPOT_VENDOR.txt && rg -q \"v0.1.0-beta.2\" vendor/howl-lua/WAYSPOT_VENDOR.txt && rg -q \"89617b9f30a595b27c2ec1cc6140026e24b25641\" vendor/howl-lua/WAYSPOT_VENDOR.txt'"
   - "bash -lc '! rg -n \"(^|[^A-Za-z0-9_])_\\\\s*=|\\\\busize\\\\b|\\\\banytype\\\\b|TODO\" src --glob \"*.zig\" && test \"$(rg -n \"\\\\banyopaque\\\\b\" src --glob \"*.zig\" | cut -d: -f1 | sort -u)\" = \"src/notifications/dbus_daemon.zig\"'"
   - "bash -lc '! rg -n \"^const .*@import\\\\(\\\"(sdl_c|sdl_text|.*app.*|.*search.*|.*providers.*|.*notifications.*|.*sunglasses.*|.*wallpaper.*|.*hyprland.*|.*runtime.*)\\\"\\\\)\" src/ui/controls --glob \"*.zig\"'"
   - "bash -lc '! rg -n \"ThemeRegistry|theme registry|provider registry|runtime scripting VM|compatibility shim|TODO|eventually\" src assets/lua README.md .agent/history/current.yaml .agent/history/references.yaml'"

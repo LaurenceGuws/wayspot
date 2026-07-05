@@ -7,7 +7,7 @@ product:
   summary: >
     Wayspot is a pragmatic DE busybox: CLI-summoned SDL app launcher,
     notification daemon, wallpaper daemon, and focused runtime surfaces.
-  active_focus: sunglasses_foundations
+  active_focus: ui_appearance_lua_defaults
   flow:
     launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
     notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
@@ -38,7 +38,13 @@ ownership:
     - UTF-8 admission
     - HarfBuzz shaping buffer
     - FreeType face/raster data
+    - bounded config-owned font fallback candidates
     - per-draw SDL texture lifetime
+  ui_appearance:
+    - embedded Lua defaults from assets/lua/defaults.lua
+    - optional user overrides from $HOME/.config/wayspot/defaults.lua
+    - bounded inert appearance values under src/ui/controls/appearance.zig
+    - product picker, banner, and sunglasses form mappings under src/ui/appearance.zig
   app_icon_rendering:
     - app icon name resolution for launcher candidates
     - bounded icon image decode and SDL texture lifetime
@@ -89,6 +95,7 @@ constraints:
     - no_resident_launcher_ipc_without_fresh_approved_design
     - no_usize_anytype_anyopaque_or_discard_assignment_in_active_zig
     - comments_are_production_assertions
+    - lua_defaults_are_bounded_data_only_without_standard_libraries
   review:
     - passing_tests_are_not_acceptance
     - stale_vocabulary_is_a_bug

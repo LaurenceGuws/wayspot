@@ -95,7 +95,7 @@ fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
         std.log.err("failed to save history: {s}", .{@errorName(err)});
     };
 
-    try wayspot.ui.Shell.run(allocator, &runtime.service);
+    try wayspot.ui.Shell.run(allocator, &runtime.service, home);
 }
 
 fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {

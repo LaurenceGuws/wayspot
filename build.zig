@@ -7,11 +7,19 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_sdl", true);
     build_options.addOption([]const u8, "app_version", app_version);
+    const defaults_asset = b.addOptions();
+    const defaults_lua = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, "assets/lua/defaults.lua", b.allocator, .limited(32768)) catch @panic("failed to read assets/lua/defaults.lua");
+    defaults_asset.addOption([]const u8, "lua", defaults_lua);
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
         .optimize = optimize,
         .preferred_linkage = .static,
     });
+    const lua_dep = b.dependency("howl_lua", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const lua_mod = lua_dep.module("howl_lua");
     const sdl_include = sdl_dep.path("include");
     const sdl_c = b.addTranslateC(.{
         .root_source_file = b.path("src/c/sdl.h"),
@@ -37,6 +45,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "defaults_asset", .module = defaults_asset.createModule() },
+            .{ .name = "howl_lua", .module = lua_mod },
         },
     });
     mod.addImport("sdl_c", sdl_c.createModule());
@@ -45,6 +55,7 @@ pub fn build(b: *std.Build) void {
     mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
+    mod.linkSystemLibrary("lua5.4", .{ .use_pkg_config = .force });
     mod.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
     mod.linkLibrary(layer_shell);
 
@@ -56,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "wayspot", .module = mod },
             .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "howl_lua", .module = lua_mod },
         },
     });
     exe_mod.addImport("sdl_c", sdl_c.createModule());
@@ -64,6 +76,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("freetype2", .{ .use_pkg_config = .yes });
     exe_mod.linkSystemLibrary("harfbuzz", .{ .use_pkg_config = .yes });
+    exe_mod.linkSystemLibrary("lua5.4", .{ .use_pkg_config = .force });
     exe_mod.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
     const exe = b.addExecutable(.{
         .name = "wayspot",
@@ -139,12 +152,34 @@ pub fn build(b: *std.Build) void {
     });
     const run_notification_history_provider_tests = b.addRunArtifact(notification_history_provider_tests);
 
+    const ui_appearance_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui/appearance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ui_appearance_tests = b.addTest(.{
+        .root_module = ui_appearance_mod,
+    });
+    const run_ui_appearance_tests = b.addRunArtifact(ui_appearance_tests);
+
+    const controls_appearance_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui/controls/appearance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const controls_appearance_tests = b.addTest(.{
+        .root_module = controls_appearance_mod,
+    });
+    const run_controls_appearance_tests = b.addRunArtifact(controls_appearance_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);
     test_step.dependOn(&run_notification_history_cache_tests.step);
     test_step.dependOn(&run_notification_history_provider_tests.step);
+    test_step.dependOn(&run_ui_appearance_tests.step);
+    test_step.dependOn(&run_controls_appearance_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);

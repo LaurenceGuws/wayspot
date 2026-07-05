@@ -1,5 +1,5 @@
 id: ui_appearance_lua_defaults
-state: active
+state: complete
 
 purpose: >
   Execute the reviewer-accepted UI appearance and Lua defaults sprint. The
@@ -51,15 +51,15 @@ progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_supersession
-  current:
     - 01_vendor_and_build_receipt
-  pending:
     - 02_defaults_lua_surface
     - 03_bounded_config_loader
     - 04_inert_and_product_appearance
     - 05_surface_wiring_and_deletion
     - 06_memory_and_docs
     - 07_final_reviewer_gate
+  current: []
+  pending: []
 
 verification_floor:
   - commands listed in .agent/history/ui-appearance-lua-defaults-sprint.yaml

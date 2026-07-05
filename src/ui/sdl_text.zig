@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const sdl = @import("sdl_c");
+const appearance_values = @import("controls/appearance.zig");
 
 const c = @cImport({
     @cInclude("ft2build.h");
@@ -20,29 +21,14 @@ const max_glyphs: u32 = 384;
 const max_texture_width: u16 = 1200;
 const max_texture_height: u16 = 180;
 const max_texture_pixels: u32 = @as(u32, max_texture_width) * @as(u32, max_texture_height);
-const default_font_size_px: u16 = 17;
 const missing_glyph_advance_px: f32 = 8;
 
-const font_paths = [_][:0]const u8{
-    "/usr/share/fonts/TTF/IosevkaTermNerdFont-Regular.ttf",
-    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
-    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-};
-
-pub const Rgba8 = struct {
-    r: u8,
-    g: u8,
-    b: u8,
-    a: u8 = 255,
-};
-
 pub const TextStyle = struct {
-    color: Rgba8,
+    color: appearance_values.Rgba8,
     max_bytes: u32,
-    font_size_px: u16 = default_font_size_px,
+    font_size_px: u16,
     surface_scale: f32 = 1.0,
-    cursor_color: ?Rgba8 = null,
+    cursor_color: ?appearance_values.Rgba8 = null,
 };
 
 const GlyphPlacement = struct {
@@ -76,6 +62,7 @@ const TextBounds = struct {
 
 pub const TextEngine = struct {
     allocator: std.mem.Allocator,
+    font_candidates: appearance_values.FontCandidates,
     ft_lib: c.FT_Library = null,
     face: c.FT_Face = null,
     hb_font: ?*c.hb_font_t = null,
@@ -83,8 +70,8 @@ pub const TextEngine = struct {
     pixels: std.ArrayListUnmanaged(u8) = .empty,
     active_font_size_px: u16 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) !TextEngine {
-        var engine = TextEngine{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, font_candidates: appearance_values.FontCandidates) !TextEngine {
+        var engine = TextEngine{ .allocator = allocator, .font_candidates = font_candidates };
         const ft_rc = c.FT_Init_FreeType(&engine.ft_lib);
         if (ft_rc != 0) return error.FreeTypeInitFailed;
         errdefer engine.deinit();
@@ -161,7 +148,10 @@ pub const TextEngine = struct {
     }
 
     fn loadPrimaryFace(self: *TextEngine) !void {
-        for (font_paths) |font_path| {
+        var index: u32 = 0;
+        while (index < self.font_candidates.count) : (index += 1) {
+            const candidate = self.font_candidates.at(index) orelse continue;
+            const font_path = candidate.sliceZ();
             var face: c.FT_Face = null;
             const rc = c.FT_New_Face(self.ft_lib, font_path.ptr, 0, &face);
             if (rc != 0) continue;
@@ -261,7 +251,7 @@ pub const TextEngine = struct {
         pixels: []u8,
         bounds: TextBounds,
         glyphs: []const GlyphPlacement,
-        color: Rgba8,
+        color: appearance_values.Rgba8,
     ) !void {
         const baseline = self.baselinePx();
         var pen_x: f32 = 0;
@@ -354,7 +344,7 @@ fn copyBitmap(
     bounds: TextBounds,
     glyph_bounds: GlyphBounds,
     bitmap: c.FT_Bitmap,
-    color: Rgba8,
+    color: appearance_values.Rgba8,
 ) void {
     const pitch_abs: u16 = @intCast(@abs(bitmap.pitch));
     const bitmap_width: u16 = @intCast(bitmap.width);
@@ -378,7 +368,7 @@ fn copyBitmap(
     }
 }
 
-fn writePixel(pixels: []u8, width: u16, x: u16, y: u16, color: Rgba8, alpha: u8) void {
+fn writePixel(pixels: []u8, width: u16, x: u16, y: u16, color: appearance_values.Rgba8, alpha: u8) void {
     const off = (@as(u32, y) * @as(u32, width) + @as(u32, x)) * 4;
     const effective_alpha: u8 = @intCast((@as(u16, alpha) * @as(u16, color.a)) / 255);
     pixels[@intCast(off)] = color.r;
@@ -420,7 +410,7 @@ fn renderCursor(
     advance_px: f32,
     line_height_px: i32,
     surface_scale: f32,
-    color: Rgba8,
+    color: appearance_values.Rgba8,
 ) !void {
     const cursor_rect = textCursorRect(x, y, advance_px, line_height_px, surface_scale);
     const cursor_color = sdl.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);

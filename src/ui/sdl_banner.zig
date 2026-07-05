@@ -4,7 +4,9 @@
 //! SDL objects, Hyprland placement command, and bounded display timeout.
 
 const std = @import("std");
+const config_defaults = @import("../config/defaults.zig");
 const notification_preview = @import("../notifications/preview.zig");
+const ui_appearance = @import("appearance.zig");
 const surface_config = @import("surface_config.zig");
 const sdl_text = @import("sdl_text.zig");
 
@@ -16,11 +18,6 @@ const window_title = "Wayspot Notification";
 const app_id = "wayspot-notification";
 const base_window_width: i32 = 400;
 const base_window_height: i32 = 88;
-const accent_width: f32 = 2;
-const text_x: f32 = 8;
-const app_y: f32 = 6;
-const summary_y: f32 = 24;
-const body_y: f32 = 50;
 const default_timeout_ms: u32 = 4200;
 const min_timeout_ms: u32 = 1200;
 const max_timeout_ms: u32 = 10000;
@@ -70,6 +67,7 @@ fn bannerChild(request: Request) noreturn {
 
 fn show(request: Request) !void {
     var config = try surface_config.load(std.heap.c_allocator);
+    const appearance = try config_defaults.loadFromEnvironment(std.heap.c_allocator);
     const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, app_id);
     if (!hint_set) log.debug("SDL app id hint rejected", .{});
 
@@ -87,17 +85,17 @@ fn show(request: Request) !void {
 
     const renderer = c.SDL_CreateRenderer(window, null) orelse return error.SdlRendererFailed;
     defer c.SDL_DestroyRenderer(renderer);
-    var text = try sdl_text.TextEngine.init(std.heap.c_allocator);
+    var text = try sdl_text.TextEngine.init(std.heap.c_allocator, appearance.fonts.candidates);
     defer text.deinit();
 
     const shown = c.SDL_ShowWindow(window);
     const raised = c.SDL_RaiseWindow(window);
     if (!shown or !raised) return error.SdlShowFailed;
 
-    try render(renderer, &text, request, &config);
+    try render(renderer, &text, request, &config, appearance.banner);
 
     placeOnFocusedMonitor();
-    try eventLoop(boundedTimeout(request.expire_timeout), window, renderer, &text, request, &config);
+    try eventLoop(boundedTimeout(request.expire_timeout), window, renderer, &text, request, &config, appearance.banner);
 }
 
 fn render(
@@ -105,21 +103,22 @@ fn render(
     text: *sdl_text.TextEngine,
     request: Request,
     config: *const surface_config.SurfaceConfig,
+    appearance: ui_appearance.BannerAppearance,
 ) !void {
     const scale = config.scale();
     const scaled = c.SDL_SetRenderScale(renderer, scale, scale);
     if (!scaled) return error.SdlRenderFailed;
     const background = switch (request.urgency) {
-        2 => sdl_text.Rgba8{ .r = 70, .g = 22, .b = 26 },
-        0 => sdl_text.Rgba8{ .r = 20, .g = 24, .b = 27 },
-        else => sdl_text.Rgba8{ .r = 24, .g = 28, .b = 34 },
+        2 => appearance.critical_background,
+        0 => appearance.low_background,
+        else => appearance.normal_background,
     };
-    const background_set = c.SDL_SetRenderDrawColor(renderer, background.r, background.g, background.b, 242);
+    const background_set = setDrawColor(renderer, background);
     const cleared = c.SDL_RenderClear(renderer);
     if (!background_set or !cleared) return error.SdlRenderFailed;
 
-    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = accent_width, .h = @floatFromInt(base_window_height) };
-    const accent_color = c.SDL_SetRenderDrawColor(renderer, 105, 184, 150, 255);
+    const accent = c.SDL_FRect{ .x = 0, .y = 0, .w = appearance.accent_w, .h = @floatFromInt(base_window_height) };
+    const accent_color = setDrawColor(renderer, appearance.accent);
     const accent_drawn = c.SDL_RenderFillRect(renderer, &accent);
     if (!accent_color or !accent_drawn) return error.SdlRenderFailed;
 
@@ -127,22 +126,22 @@ fn render(
     const summary_text = notification_preview.bannerSummary(request.summary);
     const body_text = notification_preview.bannerBody(request.body);
 
-    try text.draw(renderer, text_x, app_y, app_text.slice(), .{
-        .color = .{ .r = 150, .g = 166, .b = 184 },
+    try text.draw(renderer, appearance.content_x, appearance.app_top, app_text.slice(), .{
+        .color = appearance.app_text.color,
         .max_bytes = notification_preview.banner_app_max,
-        .font_size_px = 13,
+        .font_size_px = appearance.app_text.font_px,
         .surface_scale = scale,
     });
-    try text.draw(renderer, text_x, summary_y, summary_text.slice(), .{
-        .color = .{ .r = 238, .g = 242, .b = 247 },
+    try text.draw(renderer, appearance.content_x, appearance.summary_top, summary_text.slice(), .{
+        .color = appearance.summary_text.color,
         .max_bytes = notification_preview.banner_summary_max,
-        .font_size_px = 18,
+        .font_size_px = appearance.summary_text.font_px,
         .surface_scale = scale,
     });
-    try text.draw(renderer, text_x, body_y, body_text.slice(), .{
-        .color = .{ .r = 188, .g = 198, .b = 210 },
+    try text.draw(renderer, appearance.content_x, appearance.body_top, body_text.slice(), .{
+        .color = appearance.body_text.color,
         .max_bytes = notification_preview.banner_body_max,
-        .font_size_px = 15,
+        .font_size_px = appearance.body_text.font_px,
         .surface_scale = scale,
     });
 
@@ -157,6 +156,7 @@ fn eventLoop(
     text: *sdl_text.TextEngine,
     request: Request,
     config: *surface_config.SurfaceConfig,
+    appearance: ui_appearance.BannerAppearance,
 ) !void {
     const start = monotonicMs();
     while (elapsedMs(start) < timeout_ms) {
@@ -174,7 +174,7 @@ fn eventLoop(
                     config.applyZoomAction(zoom_action);
                     try applySurfaceScale(window, renderer, config);
                     try config.save(std.heap.c_allocator);
-                    try render(renderer, text, request, config);
+                    try render(renderer, text, request, config, appearance);
                     placeOnFocusedMonitor();
                     continue;
                 }
@@ -198,6 +198,10 @@ fn applySurfaceScale(
     const scale = config.scale();
     const scaled = c.SDL_SetRenderScale(renderer, scale, scale);
     if (!scaled) return error.SdlScaleFailed;
+}
+
+fn setDrawColor(renderer: *c.SDL_Renderer, color: ui_appearance.Rgba8) bool {
+    return c.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 }
 
 fn elapsedMs(start: u64) u32 {

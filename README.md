@@ -22,8 +22,19 @@ For local development:
 ./re-run.sh
 ```
 
+## UI defaults
+
+Wayspot embeds UI defaults from `assets/lua/defaults.lua`. A user override at
+`$HOME/.config/wayspot/defaults.lua` may replace individual loaded values;
+missing fields keep the embedded defaults.
+
+Defaults loading is bounded: each Lua defaults file is capped at 32 KiB, runs
+without Lua standard libraries, and stops after 100000 Lua instructions. Invalid
+present user values are rejected instead of partially mutating the embedded
+appearance state.
+
 ## Scope
 
 - The launcher is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
 - The notification daemon is the only long-lived interface.
-- GTK, resident launcher IPC, shell modules, wallpaper tools, provider registries, and runtime scripting VMs are out of scope.
+- GTK, resident launcher IPC, shell modules, wallpaper tools, provider registries, and script engines are out of scope.

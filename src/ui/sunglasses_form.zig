@@ -4,20 +4,14 @@ const std = @import("std");
 const controls = @import("controls/mod.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const sdl_text = @import("sdl_text.zig");
+const ui_appearance = @import("appearance.zig");
 const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
 
 const default_monitor_name = "default";
 pub const control_count: u32 = 8;
-const value_column_width: f32 = 42;
 const control_right_inset: f32 = picker_viewport.default_result_icon_right_inset;
-const slider_height: f32 = 4;
-const toggle_size: f32 = 16;
-const knob_width: f32 = 8;
-const knob_height: f32 = 20;
-const text_font_px: u32 = 15;
-const value_font_px: u32 = 14;
 
 const Control = enum {
     monitor,
@@ -184,7 +178,14 @@ pub const Form = struct {
         }
     }
 
-    pub fn click(self: *Form, state: *sunglasses_state.State, layout: picker_viewport.ResultLayout, x: f32, y: f32) !bool {
+    pub fn click(
+        self: *Form,
+        state: *sunglasses_state.State,
+        style: ui_appearance.SunglassesFormAppearance,
+        layout: picker_viewport.ResultLayout,
+        x: f32,
+        y: f32,
+    ) !bool {
         try self.ensureReady(state);
         const hit = controlAt(layout, x, y) orelse return false;
         self.setFocus(state, hit.control);
@@ -204,17 +205,17 @@ pub const Form = struct {
             },
             .red_blue_slider => {
                 const before = monitor.red_blue_value;
-                monitor.setRedBlueValue(redBlueValueAt(hit.row, x));
+                monitor.setRedBlueValue(redBlueValueAt(hit.row, x, style));
                 return monitor.red_blue_value != before;
             },
             .dim_slider => {
                 const before = monitor.dim_value;
-                monitor.setDimValue(dimValueAt(hit.row, x));
+                monitor.setDimValue(dimValueAt(hit.row, x, style));
                 return monitor.dim_value != before;
             },
             .image_opacity_slider => {
                 const before = monitor.image_opacity;
-                monitor.setImageOpacity(imageOpacityValueAt(hit.row, x));
+                monitor.setImageOpacity(imageOpacityValueAt(hit.row, x, style));
                 return monitor.image_opacity != before;
             },
             .image_path => return false,
@@ -226,49 +227,50 @@ pub const Form = struct {
         self: *Form,
         renderer: *c.SDL_Renderer,
         text: *sdl_text.TextEngine,
+        style: ui_appearance.SunglassesFormAppearance,
         layout: picker_viewport.ResultLayout,
         surface_scale: f32,
         state: *sunglasses_state.State,
     ) !void {
         try self.ensureReady(state);
         const monitor = currentMonitor(state, self.selected_monitor);
-        try drawControlBackground(renderer, controlRow(layout, .monitor), self.focus == .monitor);
-        try drawControlBackground(renderer, controlRow(layout, .red_blue_toggle), self.focus == .red_blue_toggle);
-        try drawControlBackground(renderer, controlRow(layout, .red_blue_slider), self.focus == .red_blue_slider);
-        try drawControlBackground(renderer, controlRow(layout, .dim_toggle), self.focus == .dim_toggle);
-        try drawControlBackground(renderer, controlRow(layout, .dim_slider), self.focus == .dim_slider);
-        try drawControlBackground(renderer, controlRow(layout, .image_toggle), self.focus == .image_toggle);
-        try drawControlBackground(renderer, controlRow(layout, .image_opacity_slider), self.focus == .image_opacity_slider);
-        try drawControlBackground(renderer, controlRow(layout, .image_path), self.focus == .image_path);
+        try drawControlBackground(renderer, controlRow(layout, .monitor), self.focus == .monitor, style);
+        try drawControlBackground(renderer, controlRow(layout, .red_blue_toggle), self.focus == .red_blue_toggle, style);
+        try drawControlBackground(renderer, controlRow(layout, .red_blue_slider), self.focus == .red_blue_slider, style);
+        try drawControlBackground(renderer, controlRow(layout, .dim_toggle), self.focus == .dim_toggle, style);
+        try drawControlBackground(renderer, controlRow(layout, .dim_slider), self.focus == .dim_slider, style);
+        try drawControlBackground(renderer, controlRow(layout, .image_toggle), self.focus == .image_toggle, style);
+        try drawControlBackground(renderer, controlRow(layout, .image_opacity_slider), self.focus == .image_opacity_slider, style);
+        try drawControlBackground(renderer, controlRow(layout, .image_path), self.focus == .image_path, style);
 
-        try drawLabel(text, renderer, layout, .monitor, surface_scale, "Monitor");
+        try drawLabel(text, renderer, layout, .monitor, surface_scale, "Monitor", style);
         const monitor_row = controlRow(layout, .monitor);
-        try text.draw(renderer, valueTextX(monitor_row), textY(layout, .monitor), monitor.name(), .{
-            .color = .{ .r = 218, .g = 226, .b = 236 },
+        try text.draw(renderer, valueTextX(monitor_row, style), textY(layout, .monitor), monitor.name(), .{
+            .color = style.monitor_value,
             .max_bytes = sunglasses_state.max_monitor_name_bytes,
-            .font_size_px = text_font_px,
+            .font_size_px = style.label_px,
             .surface_scale = surface_scale,
         });
 
-        try drawLabel(text, renderer, layout, .red_blue_toggle, surface_scale, "Red/Blue");
-        try drawToggle(renderer, controlRow(layout, .red_blue_toggle), monitor.red_blue_enabled);
-        try drawLabel(text, renderer, layout, .red_blue_slider, surface_scale, "Blue to red");
-        try drawSignedSlider(renderer, controlRow(layout, .red_blue_slider), monitor.red_blue_value);
-        try drawSignedValue(text, renderer, layout, .red_blue_slider, surface_scale, monitor.red_blue_value);
+        try drawLabel(text, renderer, layout, .red_blue_toggle, surface_scale, "Red/Blue", style);
+        try drawToggle(renderer, controlRow(layout, .red_blue_toggle), monitor.red_blue_enabled, style);
+        try drawLabel(text, renderer, layout, .red_blue_slider, surface_scale, "Blue to red", style);
+        try drawSignedSlider(renderer, controlRow(layout, .red_blue_slider), monitor.red_blue_value, style);
+        try drawSignedValue(text, renderer, layout, .red_blue_slider, surface_scale, monitor.red_blue_value, style);
 
-        try drawLabel(text, renderer, layout, .dim_toggle, surface_scale, "Dim");
-        try drawToggle(renderer, controlRow(layout, .dim_toggle), monitor.dim_enabled);
-        try drawLabel(text, renderer, layout, .dim_slider, surface_scale, "Dim amount");
-        try drawUnsignedSlider(renderer, controlRow(layout, .dim_slider), monitor.dim_value);
-        try drawUnsignedValue(text, renderer, layout, .dim_slider, surface_scale, monitor.dim_value);
+        try drawLabel(text, renderer, layout, .dim_toggle, surface_scale, "Dim", style);
+        try drawToggle(renderer, controlRow(layout, .dim_toggle), monitor.dim_enabled, style);
+        try drawLabel(text, renderer, layout, .dim_slider, surface_scale, "Dim amount", style);
+        try drawUnsignedSlider(renderer, controlRow(layout, .dim_slider), monitor.dim_value, style);
+        try drawUnsignedValue(text, renderer, layout, .dim_slider, surface_scale, monitor.dim_value, style);
 
-        try drawLabel(text, renderer, layout, .image_toggle, surface_scale, "Image");
-        try drawToggle(renderer, controlRow(layout, .image_toggle), monitor.image_enabled);
-        try drawLabel(text, renderer, layout, .image_opacity_slider, surface_scale, "Image opacity");
-        try drawImageOpacitySlider(renderer, controlRow(layout, .image_opacity_slider), monitor.image_opacity);
-        try drawImageOpacityValue(text, renderer, layout, .image_opacity_slider, surface_scale, monitor.image_opacity);
-        try drawLabel(text, renderer, layout, .image_path, surface_scale, "Image path");
-        try self.drawPathValue(text, renderer, layout, surface_scale, monitor.imagePath());
+        try drawLabel(text, renderer, layout, .image_toggle, surface_scale, "Image", style);
+        try drawToggle(renderer, controlRow(layout, .image_toggle), monitor.image_enabled, style);
+        try drawLabel(text, renderer, layout, .image_opacity_slider, surface_scale, "Image opacity", style);
+        try drawImageOpacitySlider(renderer, controlRow(layout, .image_opacity_slider), monitor.image_opacity, style);
+        try drawImageOpacityValue(text, renderer, layout, .image_opacity_slider, surface_scale, monitor.image_opacity, style);
+        try drawLabel(text, renderer, layout, .image_path, surface_scale, "Image path", style);
+        try self.drawPathValue(text, renderer, layout, surface_scale, monitor.imagePath(), style);
     }
 
     fn setFocus(self: *Form, state: *sunglasses_state.State, control: Control) void {
@@ -302,6 +304,7 @@ pub const Form = struct {
         layout: picker_viewport.ResultLayout,
         surface_scale: f32,
         saved_path: []const u8,
+        style: ui_appearance.SunglassesFormAppearance,
     ) !void {
         const row = controlRow(layout, .image_path);
         const value = if (self.focus == .image_path and self.path_error)
@@ -312,14 +315,11 @@ pub const Form = struct {
             self.pathEdit()
         else
             pathSummary(saved_path);
-        const color = if (self.focus == .image_path and self.path_error)
-            sdl_text.Rgba8{ .r = 238, .g = 142, .b = 142 }
-        else
-            sdl_text.Rgba8{ .r = 186, .g = 202, .b = 224 };
-        try text.draw(renderer, valueTextX(row), textY(layout, .image_path), value, .{
+        const color = if (self.focus == .image_path and self.path_error) style.path_error else style.form_value;
+        try text.draw(renderer, valueTextX(row, style), textY(layout, .image_path), value, .{
             .color = color,
             .max_bytes = sunglasses_state.max_image_path_bytes,
-            .font_size_px = value_font_px,
+            .font_size_px = style.value_px,
             .surface_scale = surface_scale,
         });
     }
@@ -422,9 +422,8 @@ fn controlIndexAtPoint(layout: picker_viewport.ResultLayout, x: f32, y: f32) ?u3
     return if (y < top + layout.row_height) row else null;
 }
 
-fn drawControlBackground(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, focused: bool) !void {
-    const shade: u8 = if (focused) 64 else 31;
-    const color = c.SDL_SetRenderDrawColor(renderer, shade, shade, if (focused) 82 else 38, 255);
+fn drawControlBackground(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, focused: bool, style: ui_appearance.SunglassesFormAppearance) !void {
+    const color = setDrawColor(renderer, if (focused) style.focused_row_fill else style.normal_row_fill);
     const rect = c.SDL_FRect{ .x = row.x, .y = row.y, .w = row.w, .h = row.h };
     const filled = c.SDL_RenderFillRect(renderer, &rect);
     if (!color or !filled) return error.SdlRenderFailed;
@@ -437,59 +436,61 @@ fn drawLabel(
     control: Control,
     surface_scale: f32,
     value: []const u8,
+    style: ui_appearance.SunglassesFormAppearance,
 ) !void {
     try text.draw(renderer, layout.title_x, textY(layout, control), value, .{
-        .color = .{ .r = 216, .g = 222, .b = 230 },
+        .color = style.label,
         .max_bytes = 32,
-        .font_size_px = text_font_px,
+        .font_size_px = style.label_px,
         .surface_scale = surface_scale,
     });
 }
 
-fn drawToggle(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, enabled: bool) !void {
-    const box = toggleRect(row);
-    const border_color = c.SDL_SetRenderDrawColor(renderer, 112, 126, 144, 255);
+fn drawToggle(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, enabled: bool, style: ui_appearance.SunglassesFormAppearance) !void {
+    const box = toggleRect(row, style);
+    const border_color = setDrawColor(renderer, style.toggle_border);
     const border_rect = c.SDL_FRect{ .x = box.x, .y = box.y, .w = box.w, .h = box.h };
     const border_drawn = c.SDL_RenderRect(renderer, &border_rect);
     if (!border_color or !border_drawn) return error.SdlRenderFailed;
     if (!enabled) return;
 
-    const fill_color = c.SDL_SetRenderDrawColor(renderer, 222, 231, 242, 255);
-    const inset = c.SDL_FRect{ .x = box.x + 4, .y = box.y + 4, .w = box.w - 8, .h = box.h - 8 };
+    const fill_color = setDrawColor(renderer, style.toggle_fill);
+    const pad = style.toggle_pad;
+    const inset = c.SDL_FRect{ .x = box.x + pad, .y = box.y + pad, .w = box.w - (pad * 2), .h = box.h - (pad * 2) };
     const filled = c.SDL_RenderFillRect(renderer, &inset);
     if (!fill_color or !filled) return error.SdlRenderFailed;
 }
 
-fn drawSignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = trackForRow(row);
-    try drawSliderTrack(renderer, track);
-    try drawSliderKnob(renderer, track, redBlueRange().normalized(value));
+fn drawSignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32, style: ui_appearance.SunglassesFormAppearance) !void {
+    const track = trackForRow(row, style);
+    try drawSliderTrack(renderer, track, style);
+    try drawSliderKnob(renderer, track, redBlueRange().normalized(value), style);
 }
 
-fn drawUnsignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = trackForRow(row);
-    try drawSliderTrack(renderer, track);
-    try drawSliderKnob(renderer, track, dimRange().normalized(value));
+fn drawUnsignedSlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32, style: ui_appearance.SunglassesFormAppearance) !void {
+    const track = trackForRow(row, style);
+    try drawSliderTrack(renderer, track, style);
+    try drawSliderKnob(renderer, track, dimRange().normalized(value), style);
 }
 
-fn drawImageOpacitySlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32) !void {
-    const track = trackForRow(row);
-    try drawSliderTrack(renderer, track);
-    try drawSliderKnob(renderer, track, imageOpacityRange().normalized(value));
+fn drawImageOpacitySlider(renderer: *c.SDL_Renderer, row: picker_viewport.Rect, value: i32, style: ui_appearance.SunglassesFormAppearance) !void {
+    const track = trackForRow(row, style);
+    try drawSliderTrack(renderer, track, style);
+    try drawSliderKnob(renderer, track, imageOpacityRange().normalized(value), style);
 }
 
-fn drawSliderTrack(renderer: *c.SDL_Renderer, track: controls.slider.Track) !void {
-    const color = c.SDL_SetRenderDrawColor(renderer, 92, 104, 120, 255);
+fn drawSliderTrack(renderer: *c.SDL_Renderer, track: controls.slider.Track, style: ui_appearance.SunglassesFormAppearance) !void {
+    const color = setDrawColor(renderer, style.slider_track);
     const rect = c.SDL_FRect{ .x = track.x, .y = track.y, .w = track.w, .h = track.h };
     const filled = c.SDL_RenderFillRect(renderer, &rect);
     if (!color or !filled) return error.SdlRenderFailed;
 }
 
-fn drawSliderKnob(renderer: *c.SDL_Renderer, track: controls.slider.Track, normalized: f32) !void {
-    const x = track.x + (track.w * @min(1, @max(0, normalized))) - (knob_width / 2);
-    const y = track.y + (track.h / 2) - (knob_height / 2);
-    const color = c.SDL_SetRenderDrawColor(renderer, 228, 235, 244, 255);
-    const rect = c.SDL_FRect{ .x = x, .y = y, .w = knob_width, .h = knob_height };
+fn drawSliderKnob(renderer: *c.SDL_Renderer, track: controls.slider.Track, normalized: f32, style: ui_appearance.SunglassesFormAppearance) !void {
+    const x = track.x + (track.w * @min(1, @max(0, normalized))) - (style.knob_w / 2);
+    const y = track.y + (track.h / 2) - (style.knob_h / 2);
+    const color = setDrawColor(renderer, style.slider_knob);
+    const rect = c.SDL_FRect{ .x = x, .y = y, .w = style.knob_w, .h = style.knob_h };
     const filled = c.SDL_RenderFillRect(renderer, &rect);
     if (!color or !filled) return error.SdlRenderFailed;
 }
@@ -501,14 +502,15 @@ fn drawSignedValue(
     control: Control,
     surface_scale: f32,
     value: i32,
+    style: ui_appearance.SunglassesFormAppearance,
 ) !void {
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{redBlueRange().clamp(value)});
     const row = controlRow(layout, control);
-    try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
-        .color = .{ .r = 186, .g = 202, .b = 224 },
+    try text.draw(renderer, valueTextX(row, style), textY(layout, control), rendered, .{
+        .color = style.form_value,
         .max_bytes = 16,
-        .font_size_px = value_font_px,
+        .font_size_px = style.value_px,
         .surface_scale = surface_scale,
     });
 }
@@ -520,14 +522,15 @@ fn drawUnsignedValue(
     control: Control,
     surface_scale: f32,
     value: i32,
+    style: ui_appearance.SunglassesFormAppearance,
 ) !void {
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{dimRange().clamp(value)});
     const row = controlRow(layout, control);
-    try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
-        .color = .{ .r = 186, .g = 202, .b = 224 },
+    try text.draw(renderer, valueTextX(row, style), textY(layout, control), rendered, .{
+        .color = style.form_value,
         .max_bytes = 16,
-        .font_size_px = value_font_px,
+        .font_size_px = style.value_px,
         .surface_scale = surface_scale,
     });
 }
@@ -539,47 +542,48 @@ fn drawImageOpacityValue(
     control: Control,
     surface_scale: f32,
     value: i32,
+    style: ui_appearance.SunglassesFormAppearance,
 ) !void {
     var buf: [16]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&buf, "{d}", .{imageOpacityRange().clamp(value)});
     const row = controlRow(layout, control);
-    try text.draw(renderer, valueTextX(row), textY(layout, control), rendered, .{
-        .color = .{ .r = 186, .g = 202, .b = 224 },
+    try text.draw(renderer, valueTextX(row, style), textY(layout, control), rendered, .{
+        .color = style.form_value,
         .max_bytes = 16,
-        .font_size_px = value_font_px,
+        .font_size_px = style.value_px,
         .surface_scale = surface_scale,
     });
 }
 
-fn toggleRect(row: picker_viewport.Rect) picker_viewport.Rect {
+fn toggleRect(row: picker_viewport.Rect, style: ui_appearance.SunglassesFormAppearance) picker_viewport.Rect {
     return .{
-        .x = valueTextX(row),
-        .y = row.y + (row.h - toggle_size) / 2,
-        .w = toggle_size,
-        .h = toggle_size,
+        .x = valueTextX(row, style),
+        .y = row.y + (row.h - style.toggle_box) / 2,
+        .w = style.toggle_box,
+        .h = style.toggle_box,
     };
 }
 
-fn trackForRow(row: picker_viewport.Rect) controls.slider.Track {
-    const track_x = valueTextX(row) + value_column_width;
+fn trackForRow(row: picker_viewport.Rect, style: ui_appearance.SunglassesFormAppearance) controls.slider.Track {
+    const track_x = valueTextX(row, style) + style.value_gap;
     const track_right = row.x + row.w - control_right_inset;
-    return controls.slider.Track.init(track_x, row.y + (row.h - slider_height) / 2, track_right - track_x, slider_height);
+    return controls.slider.Track.init(track_x, row.y + (row.h - style.track_h) / 2, track_right - track_x, style.track_h);
 }
 
-fn valueTextX(row: picker_viewport.Rect) f32 {
-    return row.x + @max(122, row.w * 0.28);
+fn valueTextX(row: picker_viewport.Rect, style: ui_appearance.SunglassesFormAppearance) f32 {
+    return row.x + @max(style.value_min_x, row.w * style.value_fraction);
 }
 
-fn redBlueValueAt(row: picker_viewport.Rect, x: f32) i32 {
-    return redBlueRange().valueFromX(trackForRow(row), x);
+fn redBlueValueAt(row: picker_viewport.Rect, x: f32, style: ui_appearance.SunglassesFormAppearance) i32 {
+    return redBlueRange().valueFromX(trackForRow(row, style), x);
 }
 
-fn dimValueAt(row: picker_viewport.Rect, x: f32) i32 {
-    return dimRange().valueFromX(trackForRow(row), x);
+fn dimValueAt(row: picker_viewport.Rect, x: f32, style: ui_appearance.SunglassesFormAppearance) i32 {
+    return dimRange().valueFromX(trackForRow(row, style), x);
 }
 
-fn imageOpacityValueAt(row: picker_viewport.Rect, x: f32) i32 {
-    return imageOpacityRange().valueFromX(trackForRow(row), x);
+fn imageOpacityValueAt(row: picker_viewport.Rect, x: f32, style: ui_appearance.SunglassesFormAppearance) i32 {
+    return imageOpacityRange().valueFromX(trackForRow(row, style), x);
 }
 
 fn redBlueRange() controls.slider.ScalarRange {
@@ -602,6 +606,10 @@ fn pathSummary(path: []const u8) []const u8 {
 fn negativeMagnitude(delta: i32) u32 {
     std.debug.assert(delta < 0);
     return @as(u32, @intCast(-(delta + 1))) + 1;
+}
+
+fn setDrawColor(renderer: *c.SDL_Renderer, color: ui_appearance.Rgba8) bool {
+    return c.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 }
 
 test "form ensures a default monitor and mutates bounded controls" {
@@ -650,13 +658,14 @@ test "monitor row activation and click cycle monitors" {
     try state.append(try sunglasses_state.MonitorState.init("HDMI-A-1"));
     try state.append(try sunglasses_state.MonitorState.init("DP-1"));
     var form = Form{};
+    const style = testFormStyle();
 
     form.focus = .monitor;
     try std.testing.expect(try form.activateFocused(&state));
     try std.testing.expectEqual(@as(u32, 1), form.selected_monitor);
 
     const layout = picker_viewport.ResultLayout.default(control_count);
-    try std.testing.expect(try form.click(&state, layout, layout.row_x + 20, layout.result_top + 20));
+    try std.testing.expect(try form.click(&state, style, layout, layout.row_x + 20, layout.result_top + 20));
     try std.testing.expectEqual(@as(u32, 0), form.selected_monitor);
 }
 
@@ -664,16 +673,17 @@ test "form hit testing follows picker row geometry and gaps" {
     var state = sunglasses_state.defaultState();
     var form = Form{};
     const layout = picker_viewport.ResultLayout.default(control_count);
+    const style = testFormStyle();
     const slider = layout.rowRect(2);
     const gap_y = slider.y - (picker_viewport.default_result_row_gap / 2);
 
     try form.ensureReady(&state);
-    try std.testing.expect(!try form.click(&state, layout, slider.x + 20, gap_y));
+    try std.testing.expect(!try form.click(&state, style, layout, slider.x + 20, gap_y));
     try std.testing.expectEqual(Control.monitor, form.focus);
 
     try std.testing.expect(try form.focusAt(&state, layout, slider.x + 20, slider.y + 2));
     try std.testing.expectEqual(Control.red_blue_slider, form.focus);
-    try std.testing.expect(try form.click(&state, layout, slider.x + slider.w - 2, slider.y + (slider.h / 2)));
+    try std.testing.expect(try form.click(&state, style, layout, slider.x + slider.w - 2, slider.y + (slider.h / 2)));
     try std.testing.expectEqual(sunglasses_state.red_blue_max, state.monitors[0].red_blue_value);
 }
 
@@ -789,10 +799,15 @@ test "image opacity hit testing uses bounded slider range" {
     var state = sunglasses_state.defaultState();
     var form = Form{};
     const layout = picker_viewport.ResultLayout.default(control_count);
+    const style = testFormStyle();
     const row = controlRow(layout, .image_opacity_slider);
 
     try form.ensureReady(&state);
-    try std.testing.expect(try form.click(&state, layout, row.x + row.w - 2, row.y + (row.h / 2)));
+    try std.testing.expect(try form.click(&state, style, layout, row.x + row.w - 2, row.y + (row.h / 2)));
     try std.testing.expectEqual(Control.image_opacity_slider, form.focus);
     try std.testing.expectEqual(sunglasses_state.image_opacity_max, state.monitors[0].image_opacity);
+}
+
+fn testFormStyle() ui_appearance.SunglassesFormAppearance {
+    return (ui_appearance.currentHardcodedDefaults() catch unreachable).sunglasses_form;
 }

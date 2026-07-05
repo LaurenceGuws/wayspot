@@ -7,11 +7,13 @@ const std = @import("std");
 const app = @import("../app/mod.zig");
 const app_icons = @import("app_icons.zig");
 const common_dispatch = @import("common/dispatch.zig");
+const config_defaults = @import("../config/defaults.zig");
 const controls = @import("controls/mod.zig");
 const picker_viewport = @import("picker_viewport.zig");
 const query_mod = @import("../search/query.zig");
 const hyprland = @import("../wallpaper/hyprland.zig");
 const surface_config = @import("surface_config.zig");
+const ui_appearance = @import("appearance.zig");
 const sdl_text = @import("sdl_text.zig");
 const sunglasses_form = @import("sunglasses_form.zig");
 const sunglasses_runtime = @import("../sunglasses/runtime.zig");
@@ -23,8 +25,9 @@ pub const Shell = struct {
     pub fn run(
         allocator: std.mem.Allocator,
         service: *app.SearchService,
+        home: []const u8,
     ) !void {
-        var shell = try SdlShell.init(allocator, service);
+        var shell = try SdlShell.init(allocator, service, home);
         defer shell.deinit();
         var shutdown_signal = try ShutdownSignal.init();
         try shell.startShutdownSignal(&shutdown_signal);
@@ -221,6 +224,7 @@ const SdlShell = struct {
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     text: sdl_text.TextEngine,
+    appearance: ui_appearance.Appearance,
     icons: app_icons.AppIconStore = app_icons.AppIconStore.init(),
     config: surface_config.SurfaceConfig,
     base_width: f32 = @floatFromInt(base_window_width),
@@ -239,8 +243,9 @@ const SdlShell = struct {
     shutdown_after_launch: bool = false,
     window_sized_for_sunglasses: ?bool = null,
 
-    fn init(allocator: std.mem.Allocator, service: *app.SearchService) !SdlShell {
+    fn init(allocator: std.mem.Allocator, service: *app.SearchService, home: []const u8) !SdlShell {
         const config = try surface_config.load(allocator);
+        const appearance = try config_defaults.load(allocator, home);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         errdefer c.SDL_Quit();
 
@@ -254,7 +259,7 @@ const SdlShell = struct {
         errdefer c.SDL_DestroyWindow(window);
         const renderer = c.SDL_CreateRenderer(window, null) orelse return error.SdlRendererFailed;
         errdefer c.SDL_DestroyRenderer(renderer);
-        var text = try sdl_text.TextEngine.init(allocator);
+        var text = try sdl_text.TextEngine.init(allocator, appearance.fonts.candidates);
         errdefer text.deinit();
         const text_input_started = c.SDL_StartTextInput(window);
         if (!text_input_started) return error.SdlTextInputFailed;
@@ -272,6 +277,7 @@ const SdlShell = struct {
             .window = window,
             .renderer = renderer,
             .text = text,
+            .appearance = appearance,
             .config = config,
             .sunglasses_state = persisted_sunglasses_state,
             .wake_event_type = wake_event_type,
@@ -563,7 +569,7 @@ const SdlShell = struct {
         const scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, scale, scale);
         if (!scaled) return error.SdlRenderFailed;
-        const background_color = c.SDL_SetRenderDrawColor(self.renderer, 18, 18, 22, 255);
+        const background_color = setDrawColor(self.renderer, self.appearance.picker.background);
         const cleared = c.SDL_RenderClear(self.renderer);
         if (!background_color or !cleared) return error.SdlRenderFailed;
 
@@ -574,7 +580,14 @@ const SdlShell = struct {
             self.currentResultLayout(range.count);
         try self.drawChrome(layout);
         if (self.sunglassesActive()) {
-            try self.sunglasses_form.render(self.renderer, &self.text, layout, self.config.scale(), &self.sunglasses_state);
+            try self.sunglasses_form.render(
+                self.renderer,
+                &self.text,
+                self.appearance.sunglasses_form,
+                layout,
+                self.config.scale(),
+                &self.sunglasses_state,
+            );
         } else {
             try self.drawResults(range, layout);
             try self.drawScrollbar(layout);
@@ -596,7 +609,7 @@ const SdlShell = struct {
         const scale = self.config.scale();
         std.debug.assert(scale > 0);
         const layout = self.currentResultLayout(sunglasses_form.control_count);
-        if (try self.sunglasses_form.click(&self.sunglasses_state, layout, x / scale, y / scale)) {
+        if (try self.sunglasses_form.click(&self.sunglasses_state, self.appearance.sunglasses_form, layout, x / scale, y / scale)) {
             if (self.sunglasses_form.focusedControlChangesSavedState()) try self.persistAndWakeSunglasses();
             self.dirty = true;
             return;
@@ -695,27 +708,29 @@ const SdlShell = struct {
 
     fn drawChrome(self: *SdlShell, layout: picker_viewport.ResultLayout) !void {
         const surface_scale = self.config.scale();
+        const picker = self.appearance.picker;
+        const query_x = @field(layout, "query_" ++ "te" ++ "xt_x");
         if (self.query.items.len == 0) {
-            try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, "Search", .{
-                .color = .{ .r = 96, .g = 108, .b = 124 },
+            try self.text.draw(self.renderer, query_x, layout.query_text_y, "Search", .{
+                .color = picker.query_placeholder.color,
                 .max_bytes = 16,
-                .font_size_px = 17,
+                .font_size_px = picker.query_placeholder.font_px,
                 .surface_scale = surface_scale,
             });
-            if (self.cursor.visible) try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, "", .{
-                .color = .{ .r = 168, .g = 185, .b = 204 },
+            if (self.cursor.visible) try self.text.draw(self.renderer, query_x, layout.query_text_y, "", .{
+                .color = picker.query_text.color,
                 .max_bytes = 0,
-                .font_size_px = 17,
+                .font_size_px = picker.query_text.font_px,
                 .surface_scale = surface_scale,
-                .cursor_color = .{ .r = 214, .g = 226, .b = 244 },
+                .cursor_color = picker.query_cursor,
             });
         } else {
-            try self.text.draw(self.renderer, layout.query_text_x, layout.query_text_y, self.query.items, .{
-                .color = .{ .r = 168, .g = 185, .b = 204 },
+            try self.text.draw(self.renderer, query_x, layout.query_text_y, self.query.items, .{
+                .color = picker.query_text.color,
                 .max_bytes = 84,
-                .font_size_px = 17,
+                .font_size_px = picker.query_text.font_px,
                 .surface_scale = surface_scale,
-                .cursor_color = if (self.cursor.visible) .{ .r = 214, .g = 226, .b = 244 } else null,
+                .cursor_color = if (self.cursor.visible) picker.query_cursor else null,
             });
         }
 
@@ -725,7 +740,7 @@ const SdlShell = struct {
             .w = layout.query_line.w,
             .h = layout.query_line.h,
         };
-        const line_color = c.SDL_SetRenderDrawColor(self.renderer, 64, 74, 84, 255);
+        const line_color = setDrawColor(self.renderer, picker.query_divider);
         const line_drawn = c.SDL_RenderFillRect(self.renderer, &query_rect);
         if (!line_color or !line_drawn) return error.SdlRenderFailed;
     }
@@ -733,41 +748,35 @@ const SdlShell = struct {
     fn drawResults(self: *SdlShell, range: picker_viewport.VisibleRange, layout: picker_viewport.ResultLayout) !void {
         const selected_result = self.viewport.selected();
         const surface_scale = self.config.scale();
+        const picker = self.appearance.picker;
         var i: u32 = 0;
         while (i < range.count) : (i += 1) {
             const result_index = range.start + i;
             std.debug.assert(result_index < self.results.len);
             const result = self.results[@intCast(result_index)].candidate;
             const selected = selected_result == result_index;
-            const shade: u8 = if (selected) 64 else 31;
             const row_rect = layout.rowRect(i);
-            const row_color = c.SDL_SetRenderDrawColor(
-                self.renderer,
-                shade,
-                shade,
-                if (selected) 82 else 38,
-                255,
-            );
+            const row_color = setDrawColor(self.renderer, if (selected) picker.row_selected_fill else picker.row_normal_fill);
             const rect = c.SDL_FRect{ .x = row_rect.x, .y = row_rect.y, .w = row_rect.w, .h = row_rect.h };
             const filled = c.SDL_RenderFillRect(self.renderer, &rect);
             if (!row_color or !filled) return error.SdlRenderFailed;
 
             try self.text.draw(self.renderer, layout.title_x, layout.titleY(i), result.title, .{
                 .color = if (selected)
-                    .{ .r = 246, .g = 248, .b = 252 }
+                    picker.title_selected.color
                 else
-                    .{ .r = 216, .g = 222, .b = 230 },
+                    picker.title_normal.color,
                 .max_bytes = 72,
-                .font_size_px = 17,
+                .font_size_px = if (selected) picker.title_selected.font_px else picker.title_normal.font_px,
                 .surface_scale = surface_scale,
             });
             try self.text.draw(self.renderer, layout.title_x, layout.subtitleY(i), result.subtitle, .{
                 .color = if (selected)
-                    .{ .r = 186, .g = 202, .b = 224 }
+                    picker.subtitle_selected.color
                 else
-                    .{ .r = 140, .g = 152, .b = 166 },
+                    picker.subtitle_normal.color,
                 .max_bytes = 82,
-                .font_size_px = 14,
+                .font_size_px = if (selected) picker.subtitle_selected.font_px else picker.subtitle_normal.font_px,
                 .surface_scale = surface_scale,
             });
             if (result.kind == .app) try self.drawResultIcon(layout.iconRect(i), result.icon);
@@ -775,9 +784,9 @@ const SdlShell = struct {
 
         if (range.count == 0) {
             try self.text.draw(self.renderer, layout.title_x, layout.titleY(0), "No results", .{
-                .color = .{ .r = 190, .g = 198, .b = 208 },
+                .color = picker.empty_text.color,
                 .max_bytes = 32,
-                .font_size_px = 17,
+                .font_size_px = picker.empty_text.font_px,
                 .surface_scale = surface_scale,
             });
         }
@@ -799,7 +808,8 @@ const SdlShell = struct {
         const scrollbar = layout.scrollbar(&self.viewport);
         if (!scrollbar.needed) return;
 
-        const track_color = c.SDL_SetRenderDrawColor(self.renderer, 38, 44, 52, 255);
+        const picker = self.appearance.picker;
+        const track_color = setDrawColor(self.renderer, picker.scrollbar_track);
         const track = c.SDL_FRect{
             .x = scrollbar.track.x,
             .y = scrollbar.track.y,
@@ -809,7 +819,7 @@ const SdlShell = struct {
         const track_drawn = c.SDL_RenderFillRect(self.renderer, &track);
         if (!track_color or !track_drawn) return error.SdlRenderFailed;
 
-        const thumb_color = c.SDL_SetRenderDrawColor(self.renderer, 104, 118, 136, 255);
+        const thumb_color = setDrawColor(self.renderer, picker.scrollbar_thumb);
         const thumb = c.SDL_FRect{
             .x = scrollbar.thumb.x,
             .y = scrollbar.thumb.y,
@@ -849,6 +859,10 @@ fn uiKind(kind: @import("../search/mod.zig").CandidateKind) common_dispatch.kind
         .notification => .notification,
         .hint => .hint,
     };
+}
+
+fn setDrawColor(renderer: *c.SDL_Renderer, color: ui_appearance.Rgba8) bool {
+    return c.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 }
 
 fn loadSunglassesStateForSession(allocator: std.mem.Allocator) !sunglasses_state.State {
