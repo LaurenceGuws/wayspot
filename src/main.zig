@@ -1,4 +1,7 @@
+//! Process entry point owns CLI mode selection and top-level cleanup order.
+
 const std = @import("std");
+const build_options = @import("build_options");
 const wayspot = @import("wayspot");
 
 pub fn main(init: std.process.Init) !void {
@@ -8,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (hasArg(args, "--notifications-daemon")) {
         try wayspot.process_identity.set(wayspot.process_identity.notifications);
-        try wayspot.notifications.run(allocator);
+        try wayspot.notification.run(allocator);
         return;
     }
 
@@ -81,25 +84,25 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
-    if (!wayspot.ui.sdl_enabled) {
+    if (!build_options.enable_sdl) {
         std.log.err("UI mode requires SDL build", .{});
         std.process.exit(2);
     }
 
     try wayspot.process_identity.set(wayspot.process_identity.picker);
     var runtime = try setupRuntime(allocator, home);
-    runtime.wireProviders();
+    runtime.wirePicker();
     defer runtime.deinit(allocator);
-    try runtime.service.loadHistory(allocator);
-    defer runtime.service.saveHistory(allocator) catch |err| {
+    try runtime.picker.loadHistory(allocator);
+    defer runtime.picker.saveHistory(allocator) catch |err| {
         std.log.err("failed to save history: {s}", .{@errorName(err)});
     };
 
-    try wayspot.ui.Shell.run(allocator, &runtime.service, home);
+    try wayspot.picker.surface.run(allocator, &runtime.picker, home);
 }
 
 fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
-    if (!wayspot.ui.sdl_enabled) {
+    if (!build_options.enable_sdl) {
         std.log.err("icon diagnostic requires SDL build", .{});
         std.process.exit(2);
     }
@@ -107,31 +110,31 @@ fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
     const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
     defer allocator.free(app_cache);
 
-    var apps = wayspot.providers.AppsProvider.init(app_cache);
+    var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
     defer apps.deinit(allocator);
-    var candidates = wayspot.search.CandidateList.empty;
+    var candidates = wayspot.picker.candidate.Candidate.List.empty;
     defer candidates.deinit(allocator);
 
     try apps.collect(allocator, &candidates);
-    try wayspot.ui.app_icon_diag.writeReceipt(candidates.items);
+    try wayspot.picker.icon_diag.writeReceipt(candidates.items);
 }
 
 fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
     defer allocator.free(app_cache);
 
-    var apps = wayspot.providers.AppsProvider.init(app_cache);
+    var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
     defer apps.deinit(allocator);
-    var candidates = wayspot.search.CandidateList.empty;
+    var candidates = wayspot.picker.candidate.Candidate.List.empty;
     defer candidates.deinit(allocator);
 
     try apps.collect(allocator, &candidates);
-    const counts = try wayspot.ui.app_icon_cache.refresh(home, candidates.items);
-    try wayspot.ui.app_icon_cache.printRefreshSummary(counts);
+    const counts = try wayspot.picker.icon_cache.refresh(home, candidates.items);
+    try wayspot.picker.icon_cache.printRefreshSummary(counts);
 }
 
 fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
-    if (!wayspot.ui.sdl_enabled) {
+    if (!build_options.enable_sdl) {
         std.log.err("wallpaper daemon requires SDL build", .{});
         std.process.exit(2);
     }
@@ -141,7 +144,7 @@ fn runWallpaper(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.C
 }
 
 fn runSunglassesDaemon(allocator: std.mem.Allocator, hypr: wayspot.wallpaper.hyprland.Connection) !void {
-    if (!wayspot.ui.sdl_enabled) {
+    if (!build_options.enable_sdl) {
         std.log.err("sunglasses daemon requires SDL build", .{});
         std.process.exit(2);
     }
@@ -199,24 +202,24 @@ fn applySunglassesImageCommand(
 const Runtime = struct {
     app_cache_path: []u8,
     history_path: []u8,
-    actions: wayspot.providers.ActionsProvider = .{},
-    modes: wayspot.providers.ModesProvider = .{},
-    notification_history: wayspot.providers.NotificationHistoryProvider = .{},
-    apps: wayspot.providers.AppsProvider,
-    service: wayspot.app.SearchService,
+    opens: wayspot.picker.open.Open = .{},
+    modes: wayspot.picker.mode.Mode = .{},
+    notification_history: wayspot.notification.history_list.NotificationHistoryList = .{},
+    apps: wayspot.picker.mode.apps.Apps,
+    picker: wayspot.picker.Picker,
 
     fn deinit(self: *Runtime, allocator: std.mem.Allocator) void {
-        self.service.deinit(allocator);
+        self.picker.deinit(allocator);
         self.notification_history.deinit(allocator);
         self.apps.deinit(allocator);
         allocator.free(self.app_cache_path);
         allocator.free(self.history_path);
     }
 
-    fn wireProviders(self: *Runtime) void {
-        self.service = wayspot.app.SearchService.initWithHistoryPath(&self.actions, &self.apps, &self.modes, self.history_path);
-        self.service.notification_history = &self.notification_history;
-        self.service.max_history = 64;
+    fn wirePicker(self: *Runtime) void {
+        self.picker = wayspot.picker.Picker.initWithHistoryPath(&self.opens, &self.apps, &self.modes, self.history_path);
+        self.picker.notification_history = &self.notification_history;
+        self.picker.max_history = 64;
     }
 };
 
@@ -229,8 +232,8 @@ fn setupRuntime(allocator: std.mem.Allocator, home: []const u8) !Runtime {
     return .{
         .app_cache_path = app_cache,
         .history_path = history_path,
-        .apps = wayspot.providers.AppsProvider.init(app_cache),
-        .service = undefined,
+        .apps = wayspot.picker.mode.apps.Apps.init(app_cache),
+        .picker = undefined,
     };
 }
 

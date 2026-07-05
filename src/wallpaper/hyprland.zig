@@ -71,7 +71,7 @@ pub const EventStream = struct {
         }
     }
 
-    /// Poll socket2 with a stop fd so monitor events wake SDL without polling the CPU.
+    /// Poll socket2 with a stop fd so monitor events wake the vendor event loop without polling the CPU.
     pub fn wait(self: *EventStream, stop_fd: std.posix.fd_t) !MonitorEvent {
         while (true) {
             if (self.nextPendingEvent()) |event| return event;

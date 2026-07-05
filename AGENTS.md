@@ -48,32 +48,26 @@ the source itself.
 - `src/`
   Product source. Every file must state its role with a top-level `//!` comment.
 
-- `src/app/`
-  Application-level service owners, including search service lifetime and
-  history integration.
-
 - `src/c/`
-  Small C boundary helpers for SDL/Wayland integration.
+  Small C boundary helpers for vendor/Wayland integration.
+
+- `src/config/`
+  Bounded configuration defaults and Lua defaults loading.
 
 - `src/main.zig`
   CLI mode selection, top-level runtime wiring, and cleanup order.
 
-- `src/notifications/`
-  Freedesktop notification daemon, bounded notification state, and runtime
-  helpers.
+- `src/notification/`
+  Freedesktop notification daemon, bounded notification state, history cache,
+  history list rows, and banner surface.
 
-- `src/providers/`
-  Candidate providers for apps, actions, modes, and notification history.
-
-- `src/search/`
-  Query parsing, candidate types, and ranking.
+- `src/picker/`
+  One CLI-summoned picker lifecycle, query parsing, ranking, candidate rows,
+  mode list, icon rendering, text rendering, viewport math, appearance, and
+  concrete inert picker elements.
 
 - `src/sunglasses/`
   Monitor-glasses domain state and runtime overlay reconciliation.
-
-- `src/ui/`
-  SDL-owned UI surfaces, text rendering, viewport math, icon rendering, and
-  future inert UI control models only when they are truly generic.
 
 - `src/wallpaper/`
   Wallpaper daemon/domain code, Hyprland monitor facts, and still-image runtime.
@@ -82,7 +76,7 @@ the source itself.
   Development probes and receipt helpers. Tools are not runtime architecture.
 
 - `zig-pkg/`
-  Local Zig package cache/vendor material for SDL dependencies.
+  Local Zig package cache/vendor material for SDL dependency.
 
 ## How We Work
 
@@ -120,16 +114,17 @@ wrappers, no broad architecture kept around for later.
 
 ## Product Scope
 
-Wayspot is a pragmatic DE busybox: CLI-summoned SDL app launcher, notification
+Wayspot is a pragmatic DE busybox: CLI-summoned picker, notification
 daemon, wallpaper daemon, and focused runtime surfaces.
 
-Keep the core path small: initialize SDL for one bounded picker lifecycle, load
-app/action/mode candidates, launch the selected command, clean up once, render
-typed notification rows, and keep long-lived daemons intentional.
+Keep the core path small: initialize the vendor windowing backend for one
+bounded picker lifecycle, load app/open/mode rows, launch the selected command,
+clean up once, render typed notification rows, and keep long-lived daemons
+intentional.
 
 Out of scope unless a fresh indexed sprint accepts it: GTK, shell modules, open
-provider registries, broad WM abstractions, web/window/workspace providers,
-runtime scripting VMs, resident launcher IPC, and generic UI frameworks.
+registries, broad WM abstractions, web/window/workspace inventories, runtime
+scripting VMs, resident launcher IPC, and generic UI frameworks.
 
 ## Code Rules
 
@@ -143,9 +138,9 @@ runtime scripting VMs, resident launcher IPC, and generic UI frameworks.
   notification daemon.
 - DRY means remove duplicated intent. It does not mean moving product-specific
   vocabulary sideways into a shared folder.
-- `src/ui/controls/`, if present, is only for inert, reusable UI control
-  mechanics. No SDL, rendering, search, persistence, Hyprland, daemon, or
-  product-domain imports.
+- Picker inert mechanics live under concrete picker nouns such as `textbox`,
+  `slider`, and `cursor_blink`. No generic product bucket owns rendering,
+  persistence, Hyprland, daemon, or product-domain imports.
 
 ## Documentation Rules
 

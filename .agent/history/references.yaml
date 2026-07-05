@@ -67,23 +67,23 @@ source_references:
 repo_entrypoints:
   cli:
     main: /home/home/personal/wayspot/src/main.zig
-  launcher:
-    shell: /home/home/personal/wayspot/src/ui/sdl_shell.zig
-    viewport: /home/home/personal/wayspot/src/ui/picker_viewport.zig
-    text: /home/home/personal/wayspot/src/ui/sdl_text.zig
-    surface_config: /home/home/personal/wayspot/src/ui/surface_config.zig
-    appearance: /home/home/personal/wayspot/src/ui/appearance.zig
-    inert_appearance_values: /home/home/personal/wayspot/src/ui/controls/appearance.zig
+  picker:
+    surface: /home/home/personal/wayspot/src/picker/surface.zig
+    viewport: /home/home/personal/wayspot/src/picker/viewport.zig
+    text: /home/home/personal/wayspot/src/picker/text.zig
+    surface_config: /home/home/personal/wayspot/src/picker/scale.zig
+    appearance: /home/home/personal/wayspot/src/picker/appearance.zig
+    inert_appearance_values: /home/home/personal/wayspot/src/picker/appearance.zig
     defaults_loader: /home/home/personal/wayspot/src/config/defaults.zig
     embedded_defaults_lua: /home/home/personal/wayspot/assets/lua/defaults.lua
-  search:
-    service: /home/home/personal/wayspot/src/app/search_service.zig
-    apps_provider: /home/home/personal/wayspot/src/providers/apps.zig
-    rank: /home/home/personal/wayspot/src/search/rank.zig
+  picker_rows:
+    picker: /home/home/personal/wayspot/src/picker/mod.zig
+    apps: /home/home/personal/wayspot/src/picker/mode/apps.zig
+    rank: /home/home/personal/wayspot/src/picker/rank.zig
   notifications:
-    daemon: /home/home/personal/wayspot/src/notifications/dbus_daemon.zig
-    runtime: /home/home/personal/wayspot/src/notifications/runtime.zig
-    banner: /home/home/personal/wayspot/src/ui/sdl_banner.zig
+    daemon: /home/home/personal/wayspot/src/notification/daemon.zig
+    runtime: /home/home/personal/wayspot/src/notification/runtime.zig
+    banner: /home/home/personal/wayspot/src/notification/banner.zig
   future_wallpaper:
     discovery: /home/home/personal/wayspot/.agent/history/hyprland-direct-surface-discovery.yaml
     contract: /home/home/personal/wayspot/.agent/history/wallpaper-v1-sprint-contract.yaml

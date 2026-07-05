@@ -1,5 +1,5 @@
 id: domain_language_footing
-state: active
+state: complete
 
 purpose: >
   Execute the reviewer-accepted domain language footing sprint. The source of
@@ -16,8 +16,8 @@ supersedes:
 law:
   - implement_nothing_not_named_in_the_active_index
   - final_tree_contains_nothing_more_and_nothing_less_than_the_index
-  - no_provider_search_common_types_ui_control_command_or_action_buckets
-  - no_sdl_prefixed_product_files_or_symbols
+  - no_rejected_bucket_vocabulary
+  - no_vendor_prefixed_product_files_or_symbols
   - no_compatibility_wrappers
   - no_non_final_mapping_choices
   - reviewer_gate_required_for_completion
@@ -41,9 +41,7 @@ progress:
   completed:
     - 00_index_review_accepted
     - 00_live_memory_activation
-  current:
     - 01_notification_owner
-  pending:
     - 02_picker_query_rank_candidate
     - 03_mode_index
     - 04_picker_surface_elements
@@ -51,6 +49,8 @@ progress:
     - 06_build_memory_docs
     - 07_behavior_receipts
     - 08_final_reviewer_gate
+  current: []
+  pending: []
 
 verification_floor:
   - commands listed in .agent/history/domain-language-footing-sprint.yaml

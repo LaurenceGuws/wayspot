@@ -7,8 +7,8 @@
 const std = @import("std");
 const defaults_asset = @import("defaults_asset");
 const howl_lua = @import("howl_lua");
-const ui_appearance = @import("../ui/appearance.zig");
-const values = @import("../ui/controls/appearance.zig");
+const appearance_owner = @import("../picker/appearance.zig");
+const values = @import("../picker/appearance.zig");
 
 const c = howl_lua.c;
 
@@ -45,8 +45,8 @@ const Counters = struct {
 
 /// Loads embedded defaults, then applies `$HOME/.config/wayspot/defaults.lua` when present.
 /// Invalid user config returns an error after leaving the embedded value unmutated.
-pub fn load(allocator: std.mem.Allocator, home: []const u8) !ui_appearance.Appearance {
-    var appearance = try loadEmbedded();
+pub fn load(allocator: std.mem.Allocator, home: []const u8) !appearance_owner.Appearance {
+    var appearance_state = try loadEmbedded();
     const user_path = try std.fs.path.join(allocator, &.{ home, user_defaults_relative });
     defer allocator.free(user_path);
 
@@ -56,40 +56,40 @@ pub fn load(allocator: std.mem.Allocator, home: []const u8) !ui_appearance.Appea
         allocator,
         .limited(max_user_defaults_bytes),
     ) catch |err| switch (err) {
-        error.FileNotFound => return appearance,
+        error.FileNotFound => return appearance_state,
         else => return err,
     };
     defer allocator.free(user_bytes);
 
-    var candidate = appearance;
+    var candidate = appearance_state;
     try applyBuffer(user_bytes, .optional, &candidate);
-    appearance = candidate;
-    return appearance;
+    appearance_state = candidate;
+    return appearance_state;
 }
 
 /// Loads defaults using HOME from the process environment, falling back to embedded values.
-pub fn loadFromEnvironment(allocator: std.mem.Allocator) !ui_appearance.Appearance {
+pub fn loadFromEnvironment(allocator: std.mem.Allocator) !appearance_owner.Appearance {
     const home = if (std.c.getenv("HOME")) |home_z| std.mem.span(home_z) else ".";
     return load(allocator, home);
 }
 
 /// Parses the embedded Lua defaults and requires every production field.
-pub fn loadEmbedded() !ui_appearance.Appearance {
+pub fn loadEmbedded() !appearance_owner.Appearance {
     if (embedded_defaults.len > max_embedded_defaults_bytes) return error.EmbeddedDefaultsTooLarge;
-    var appearance = try ui_appearance.currentHardcodedDefaults();
-    try applyBuffer(embedded_defaults, .required, &appearance);
-    return appearance;
+    var appearance_state = try appearance_owner.currentHardcodedDefaults();
+    try applyBuffer(embedded_defaults, .required, &appearance_state);
+    return appearance_state;
 }
 
 /// Applies one Lua defaults buffer into `appearance` according to required or optional field mode.
-pub fn applyBuffer(buffer: []const u8, mode: ApplyMode, appearance: *ui_appearance.Appearance) !void {
+pub fn applyBuffer(buffer: []const u8, mode: ApplyMode, appearance_state: *appearance_owner.Appearance) !void {
     if (buffer.len > max_user_defaults_bytes) return error.DefaultsTooLarge;
     var state = try LuaState.init();
     defer state.deinit();
     try state.loadAndRun(buffer);
     if (!c.lua_istable(state.raw, -1)) return error.DefaultsMustReturnTable;
     var counters = Counters{};
-    try applyRoot(state.raw, c.lua_absindex(state.raw, -1), mode, appearance, &counters);
+    try applyRoot(state.raw, c.lua_absindex(state.raw, -1), mode, appearance_state, &counters);
 }
 
 const LuaState = struct {
@@ -139,28 +139,28 @@ fn luaMessageEquals(raw: *c.lua_State, expected: []const u8) bool {
     return std.mem.eql(u8, actual, expected);
 }
 
-fn applyRoot(raw: *c.lua_State, index: c_int, mode: ApplyMode, appearance: *ui_appearance.Appearance, counters: *Counters) !void {
+fn applyRoot(raw: *c.lua_State, index: c_int, mode: ApplyMode, appearance_state: *appearance_owner.Appearance, counters: *Counters) !void {
     const fields = [_][]const u8{ "fonts", "picker", "banner", "sunglasses_form" };
     try validateNamedFields(raw, index, &fields, counters);
     if (try pushTableField(raw, index, "fonts", mode)) {
         defer c.lua_pop(raw, 1);
-        try applyFonts(raw, c.lua_absindex(raw, -1), mode, &appearance.fonts, counters, 1);
+        try applyFonts(raw, c.lua_absindex(raw, -1), mode, &appearance_state.fonts, counters, 1);
     }
     if (try pushTableField(raw, index, "picker", mode)) {
         defer c.lua_pop(raw, 1);
-        try applyPicker(raw, c.lua_absindex(raw, -1), mode, &appearance.picker, counters, 1);
+        try applyPicker(raw, c.lua_absindex(raw, -1), mode, &appearance_state.picker, counters, 1);
     }
     if (try pushTableField(raw, index, "banner", mode)) {
         defer c.lua_pop(raw, 1);
-        try applyBanner(raw, c.lua_absindex(raw, -1), mode, &appearance.banner, counters, 1);
+        try applyBanner(raw, c.lua_absindex(raw, -1), mode, &appearance_state.banner, counters, 1);
     }
     if (try pushTableField(raw, index, "sunglasses_form", mode)) {
         defer c.lua_pop(raw, 1);
-        try applySunglassesForm(raw, c.lua_absindex(raw, -1), mode, &appearance.sunglasses_form, counters, 1);
+        try applySunglassesForm(raw, c.lua_absindex(raw, -1), mode, &appearance_state.sunglasses_form, counters, 1);
     }
 }
 
-fn applyFonts(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appearance.FontAppearance, counters: *Counters, depth: u32) !void {
+fn applyFonts(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.FontAppearance, counters: *Counters, depth: u32) !void {
     try ensureDepth(depth);
     const fields = [_][]const u8{ "candidates", "default_px" };
     try validateNamedFields(raw, index, &fields, counters);
@@ -168,7 +168,7 @@ fn applyFonts(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appe
     try applyFontPxField(raw, index, "default_px", mode, &target.default_px);
 }
 
-fn applyPicker(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appearance.PickerAppearance, counters: *Counters, depth: u32) !void {
+fn applyPicker(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.PickerAppearance, counters: *Counters, depth: u32) !void {
     try ensureDepth(depth);
     const fields = [_][]const u8{
         "background",
@@ -224,7 +224,7 @@ fn applyPicker(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_app
     try applyColorField(raw, index, "scrollbar_thumb", mode, &target.scrollbar_thumb, counters);
 }
 
-fn applyBanner(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appearance.BannerAppearance, counters: *Counters, depth: u32) !void {
+fn applyBanner(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.BannerAppearance, counters: *Counters, depth: u32) !void {
     try ensureDepth(depth);
     const fields = [_][]const u8{
         "critical_background",
@@ -264,7 +264,7 @@ fn applyBanner(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_app
     try applyChromeField(raw, index, "body_y", mode, &target.body_top);
 }
 
-fn applySunglassesForm(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appearance.SunglassesFormAppearance, counters: *Counters, depth: u32) !void {
+fn applySunglassesForm(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.SunglassesFormAppearance, counters: *Counters, depth: u32) !void {
     try ensureDepth(depth);
     const fields = [_][]const u8{
         "value_column_width",
@@ -311,7 +311,7 @@ fn applySunglassesForm(raw: *c.lua_State, index: c_int, mode: ApplyMode, target:
     try applyColorField(raw, index, "slider_knob", mode, &target.slider_knob, counters);
 }
 
-fn applyText(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *ui_appearance.TextAppearance, counters: *Counters, depth: u32) !void {
+fn applyText(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.TextAppearance, counters: *Counters, depth: u32) !void {
     try ensureDepth(depth);
     const fields = [_][]const u8{ "color", "font_px" };
     try validateNamedFields(raw, index, &fields, counters);
@@ -333,7 +333,7 @@ fn pushTableField(raw: *c.lua_State, parent: c_int, name: [:0]const u8, mode: Ap
     return true;
 }
 
-fn applyFontCandidates(raw: *c.lua_State, parent: c_int, mode: ApplyMode, target: *ui_appearance.FontAppearance, counters: *Counters) !void {
+fn applyFontCandidates(raw: *c.lua_State, parent: c_int, mode: ApplyMode, target: *appearance_owner.FontAppearance, counters: *Counters) !void {
     const field_type = c.lua_getfield(raw, parent, "candidates");
     defer c.lua_pop(raw, 1);
     if (field_type == c.LUA_TNIL) {
@@ -355,7 +355,7 @@ fn applyFontCandidates(raw: *c.lua_State, parent: c_int, mode: ApplyMode, target
     target.candidates = parsed;
 }
 
-fn applyColorField(raw: *c.lua_State, parent: c_int, name: [:0]const u8, mode: ApplyMode, target: *ui_appearance.Rgba8, counters: *Counters) !void {
+fn applyColorField(raw: *c.lua_State, parent: c_int, name: [:0]const u8, mode: ApplyMode, target: *appearance_owner.Rgba8, counters: *Counters) !void {
     const field_type = c.lua_getfield(raw, parent, name.ptr);
     defer c.lua_pop(raw, 1);
     if (field_type == c.LUA_TNIL) {
@@ -410,7 +410,7 @@ fn applyOpacityField(raw: *c.lua_State, parent: c_int, name: [:0]const u8, mode:
     target.* = try values.opacity(c.lua_tonumberx(raw, -1, null));
 }
 
-fn readColor(raw: *c.lua_State, index: c_int, counters: *Counters) !ui_appearance.Rgba8 {
+fn readColor(raw: *c.lua_State, index: c_int, counters: *Counters) !appearance_owner.Rgba8 {
     try counters.color();
     const table_index = c.lua_absindex(raw, index);
     var components = [_]i64{ 0, 0, 0, 0 };
@@ -551,7 +551,7 @@ fn stackString(raw: *c.lua_State, index: c_int) ?[]const u8 {
 
 test "embedded defaults parse and preserve current visual defaults" {
     const parsed = try loadEmbedded();
-    const expected = try ui_appearance.currentHardcodedDefaults();
+    const expected = try appearance_owner.currentHardcodedDefaults();
     try std.testing.expectEqual(expected.picker.background, parsed.picker.background);
     try std.testing.expectEqual(expected.banner.summary_text, parsed.banner.summary_text);
     try std.testing.expectEqual(expected.sunglasses_form.slider_knob, parsed.sunglasses_form.slider_knob);
@@ -582,7 +582,7 @@ test "user config applies partial overrides" {
     try applyBuffer(
         \\return { picker = { query_text = { color = { 1, 2, 3, 4 } } } }
     , .optional, &defaults);
-    try std.testing.expectEqual(ui_appearance.Rgba8{ .r = 1, .g = 2, .b = 3, .a = 4 }, defaults.picker.query_text.color);
+    try std.testing.expectEqual(appearance_owner.Rgba8{ .r = 1, .g = 2, .b = 3, .a = 4 }, defaults.picker.query_text.color);
     try std.testing.expectEqual(@as(u16, 17), defaults.picker.query_text.font_px);
 }
 

@@ -1,4 +1,4 @@
-//! Wallpaper owns bounded per-monitor SDL surfaces and Hyprland placement.
+//! Wallpaper owns bounded per-monitor vendor surfaces and Hyprland placement.
 
 pub const config = @import("config.zig");
 pub const hyprland = @import("hyprland.zig");

@@ -5,56 +5,56 @@ workspace:
 
 product:
   summary: >
-    Wayspot is a pragmatic DE busybox: CLI-summoned SDL app launcher,
+    Wayspot is a pragmatic DE busybox: CLI-summoned picker,
     notification daemon, wallpaper daemon, and focused runtime surfaces.
   active_focus: domain_language_footing
   flow:
-    launcher: cli -> runtime -> search_service -> sdl_shell -> detached_command -> cleanup
-    notifications: cli -> dbus_daemon -> notification_state -> sdl_banner_child
-    wallpaper: cli_or_daemon -> hyprland_monitor_facts -> sdl_custom_wayland_surfaces -> wlr_layer_shell_background
+    launcher: cli -> runtime -> picker -> picker_surface -> detached_command -> cleanup
+    notifications: cli -> notification_daemon -> notification_state -> notification_banner_child
+    wallpaper: cli_or_daemon -> hyprland_monitor_facts -> vendor_wayland_surfaces -> wlr_layer_shell_background
     sunglasses: picker_form -> persisted_filter_state -> overlay_daemon -> per_monitor_pass_through_layer_surfaces
 
 ownership:
   main:
     - CLI mode selection
-    - runtime provider wiring
+    - runtime owner wiring
     - top-level cleanup order
-  search_service:
-    - retained candidate list for one picker service lifetime
+  picker:
+    - retained candidate list for one picker lifecycle
     - slash mode candidates and daemon command rows
     - history load, snapshot, record, and save
     - query ranking entry point
-  apps_provider:
+  app_rows:
     - desktop application discovery
     - app candidate string ownership
     - app cache read, refresh, and invalidation
-  sdl_shell:
+  picker_surface:
     - one bounded picker lifecycle
-    - SDL window, renderer, event loop, dirty redraw, launch queue, and shutdown signal
+    - vendor window, renderer, event loop, dirty redraw, launch queue, and shutdown signal
   picker_viewport:
     - foot-derived base-coordinate row math
     - selected row, scroll offset, visible range, hit testing, and passive scrollbar facts
-  sdl_text:
+  picker_text:
     - UTF-8 admission
     - HarfBuzz shaping buffer
     - FreeType face/raster data
     - bounded config-owned font fallback candidates
-    - per-draw SDL texture lifetime
-  ui_appearance:
+    - per-draw vendor texture lifetime
+  picker_appearance:
     - embedded Lua defaults from assets/lua/defaults.lua
     - optional user overrides from $HOME/.config/wayspot/defaults.lua
-    - bounded inert appearance values under src/ui/controls/appearance.zig
-    - product picker, banner, and sunglasses form mappings under src/ui/appearance.zig
+    - bounded inert appearance values under src/picker/appearance.zig
+    - product picker, banner, and sunglasses form mappings under src/picker/appearance.zig
   app_icon_rendering:
     - app icon name resolution for launcher candidates
-    - bounded icon image decode and SDL texture lifetime
+    - bounded icon image decode and vendor texture lifetime
     - right-side icon drawing inside visible app rows
   notifications:
     - freedesktop D-Bus notification interface
     - bounded retained notification rows
     - banner child process lifecycle
   wallpaper:
-    - one Wayspot-owned SDL surface per monitor
+    - one Wayspot-owned vendor surface per monitor
     - Hyprland monitor discovery and wlr-layer-shell background output binding
     - still-image random alternating timer from one configured library path
   modes:
@@ -70,8 +70,8 @@ ownership:
 boundaries:
   - notification_daemon_is_the_only_long_lived_interface
   - launcher_ipc_is_not_authorized
-  - sdl_shell_is_the_picker_control_spine
-  - picker_viewport_has_no_sdl_search_dispatch_config_or_allocator_dependency
+  - picker_surface_is_the_picker_control_spine
+  - picker_viewport_has_no_vendor_dispatch_config_or_allocator_dependency
   - qagent_memory_is_not_a_runtime_or_planning_dependency
 
 design_law:
@@ -91,7 +91,7 @@ constraints:
     - every_owner_cleans_up_once
     - cpu_sleeps_unless_input_notification_work_or_deadline_exists
   code:
-    - no_gtk_shell_modules_provider_registries_web_window_workspace_providers_or_runtime_vms
+    - no_gtk_shell_modules_open_registries_web_window_workspace_open inventories_or_runtime_vms
     - no_resident_launcher_ipc_without_fresh_approved_design
     - no_usize_anytype_anyopaque_or_discard_assignment_in_active_zig
     - comments_are_production_assertions
@@ -104,10 +104,10 @@ constraints:
 accepted_discoveries:
   hyprland_direct_surfaces:
     memory: .agent/history/hyprland-direct-surface-discovery.yaml
-    wallpaper_path: sdl_custom_wayland_surface_plus_wlr_layer_shell_background
+    wallpaper_path: vendor_wayland_surface_plus_wlr_layer_shell_background
     reserved_overlay_noun: monitor_glasses
     rule: >
-      Wallpaper starts from direct Wayspot-owned SDL custom Wayland surfaces on
+      Wallpaper starts from direct Wayspot-owned vendor Wayland surfaces on
       the background layer. Normal toplevel windows are preserved only for
       monitor_glasses overlay work.
 

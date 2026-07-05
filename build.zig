@@ -27,6 +27,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sdl_c.addIncludePath(sdl_include);
+    const picker_candidate_mod = b.createModule(.{
+        .root_source_file = b.path("src/picker/candidate.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const layer_shell_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -50,6 +55,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.addImport("sdl_c", sdl_c.createModule());
+    mod.addImport("picker_candidate", picker_candidate_mod);
     mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
@@ -123,7 +129,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const notification_preview_mod = b.createModule(.{
-        .root_source_file = b.path("src/notifications/preview.zig"),
+        .root_source_file = b.path("src/notification/preview.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -133,7 +139,7 @@ pub fn build(b: *std.Build) void {
     const run_notification_preview_tests = b.addRunArtifact(notification_preview_tests);
 
     const notification_history_cache_mod = b.createModule(.{
-        .root_source_file = b.path("src/notifications/history_cache.zig"),
+        .root_source_file = b.path("src/notification/history_cache.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -142,44 +148,34 @@ pub fn build(b: *std.Build) void {
     });
     const run_notification_history_cache_tests = b.addRunArtifact(notification_history_cache_tests);
 
-    const notification_history_provider_mod = b.createModule(.{
-        .root_source_file = b.path("src/notification_history_provider_test.zig"),
+    const notification_history_list_mod = b.createModule(.{
+        .root_source_file = b.path("src/notification/history_list.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const notification_history_provider_tests = b.addTest(.{
-        .root_module = notification_history_provider_mod,
+    notification_history_list_mod.addImport("picker_candidate", picker_candidate_mod);
+    const notification_history_list_tests = b.addTest(.{
+        .root_module = notification_history_list_mod,
     });
-    const run_notification_history_provider_tests = b.addRunArtifact(notification_history_provider_tests);
+    const run_notification_history_list_tests = b.addRunArtifact(notification_history_list_tests);
 
-    const ui_appearance_mod = b.createModule(.{
-        .root_source_file = b.path("src/ui/appearance.zig"),
+    const picker_appearance_mod = b.createModule(.{
+        .root_source_file = b.path("src/picker/appearance.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const ui_appearance_tests = b.addTest(.{
-        .root_module = ui_appearance_mod,
+    const picker_appearance_tests = b.addTest(.{
+        .root_module = picker_appearance_mod,
     });
-    const run_ui_appearance_tests = b.addRunArtifact(ui_appearance_tests);
-
-    const controls_appearance_mod = b.createModule(.{
-        .root_source_file = b.path("src/ui/controls/appearance.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const controls_appearance_tests = b.addTest(.{
-        .root_module = controls_appearance_mod,
-    });
-    const run_controls_appearance_tests = b.addRunArtifact(controls_appearance_tests);
+    const run_picker_appearance_tests = b.addRunArtifact(picker_appearance_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);
     test_step.dependOn(&run_notification_history_cache_tests.step);
-    test_step.dependOn(&run_notification_history_provider_tests.step);
-    test_step.dependOn(&run_ui_appearance_tests.step);
-    test_step.dependOn(&run_controls_appearance_tests.step);
+    test_step.dependOn(&run_notification_history_list_tests.step);
+    test_step.dependOn(&run_picker_appearance_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);

@@ -65,7 +65,7 @@ pub const MonitorState = struct {
     pub fn setImagePath(self: *MonitorState, path_text: []const u8) !void {
         if (path_text.len == 0 or path_text.len > max_image_path_bytes) return error.InvalidImagePath;
         if (!std.fs.path.isAbsolute(path_text)) return error.InvalidImagePath;
-        if (hasControlByte(path_text)) return error.InvalidImagePath;
+        if (hasInvalidPathByte(path_text)) return error.InvalidImagePath;
         @memcpy(self.image_path_buf[0..path_text.len], path_text);
         self.image_path_len = @intCast(path_text.len);
     }
@@ -84,7 +84,7 @@ pub const MonitorState = struct {
             self.image_opacity > image_opacity_zero and
             self.image_path_len > 0 and
             std.fs.path.isAbsolute(self.imagePath()) and
-            !hasControlByte(self.imagePath());
+            !hasInvalidPathByte(self.imagePath());
     }
 };
 
@@ -310,11 +310,11 @@ fn normalizedMonitor(monitor: MonitorState) MonitorState {
     normalized.red_blue_value = clampRedBlue(normalized.red_blue_value);
     normalized.dim_value = clampDim(normalized.dim_value);
     normalized.image_opacity = clampImageOpacity(normalized.image_opacity);
-    if (normalized.image_path_len > max_image_path_bytes or !std.fs.path.isAbsolute(normalized.imagePath()) or hasControlByte(normalized.imagePath())) normalized.clearImagePath();
+    if (normalized.image_path_len > max_image_path_bytes or !std.fs.path.isAbsolute(normalized.imagePath()) or hasInvalidPathByte(normalized.imagePath())) normalized.clearImagePath();
     return normalized;
 }
 
-fn hasControlByte(value: []const u8) bool {
+fn hasInvalidPathByte(value: []const u8) bool {
     for (value) |byte| {
         if (byte < ' ' or byte == 0x7f) return true;
     }
@@ -403,7 +403,7 @@ test "clamp min max and zero semantics" {
     try std.testing.expectEqual(image_opacity_max, monitor.image_opacity);
 }
 
-test "effective filter predicate ignores disabled and zero-value controls" {
+test "effective filter predicate ignores disabled and zero-value FormFields" {
     var state = defaultState();
     try std.testing.expect(!state.needsDaemon());
 

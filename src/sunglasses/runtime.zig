@@ -3,7 +3,7 @@
 const std = @import("std");
 const hyprland = @import("../wallpaper/hyprland.zig");
 const sunglasses_state = @import("state.zig");
-const sdl_sunglasses_surface = @import("../ui/sdl_sunglasses_surface.zig");
+const sunglasses_surface = @import("surface.zig");
 
 const c = @import("sdl_c");
 
@@ -32,7 +32,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     slots: [hyprland.max_monitors]SurfaceSlot = undefined,
     slot_count: u32 = 0,
-    sdl_started: bool = false,
+    vendor_started: bool = false,
 
     pub fn runDaemon(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
         var runtime = Runtime{ .allocator = allocator };
@@ -78,7 +78,7 @@ pub const Runtime = struct {
         var state = try sunglasses_state.load(self.allocator);
         if (!state.needsDaemon()) return;
 
-        try self.startSdl();
+        try self.startVendor();
         var runtime_signals = try RuntimeSignals.init();
         defer runtime_signals.deinit();
         try runtime_signals.start();
@@ -93,11 +93,11 @@ pub const Runtime = struct {
         try self.runApplyLoop(hypr, &state);
     }
 
-    fn startSdl(self: *Runtime) !void {
-        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sdl_sunglasses_surface.class_name);
+    fn startVendor(self: *Runtime) !void {
+        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sunglasses_surface.class_name);
         if (!hint_set) return error.SdlHintFailed;
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
-        self.sdl_started = true;
+        self.vendor_started = true;
     }
 
     fn runApplyLoop(self: *Runtime, hypr: hyprland.Connection, state: *sunglasses_state.State) !void {
@@ -127,7 +127,7 @@ pub const Runtime = struct {
         while (index < monitors.count) : (index += 1) {
             const monitor = monitors.items[index];
             self.slots[self.slot_count] = .{
-                .surface = try sdl_sunglasses_surface.SunglassesSurface.init(monitor, state.get(monitor.name())),
+                .surface = try sunglasses_surface.SunglassesSurface.init(monitor, state.get(monitor.name())),
             };
             self.slot_count += 1;
         }
@@ -152,15 +152,15 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.clearSurfaceSlots();
-        if (self.sdl_started) {
+        if (self.vendor_started) {
             c.SDL_Quit();
-            self.sdl_started = false;
+            self.vendor_started = false;
         }
     }
 };
 
 pub const SurfaceSlot = struct {
-    surface: sdl_sunglasses_surface.SunglassesSurface,
+    surface: sunglasses_surface.SunglassesSurface,
 
     fn deinit(self: *SurfaceSlot) void {
         self.surface.deinit();
@@ -219,7 +219,7 @@ fn eventIsShutdown(event: c.SDL_Event) bool {
         event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 }
 
-/// MonitorWatcher converts Hyprland monitor events into SDL redraw wakes owned by Runtime.
+/// MonitorWatcher converts Hyprland monitor events into vendor redraw wakes owned by Runtime.
 const MonitorWatcher = struct {
     stream: hyprland.EventStream,
     stop_fd: std.posix.fd_t = -1,
@@ -264,17 +264,17 @@ fn monitorWatcherMain(watcher: *MonitorWatcher) void {
         const event = watcher.stream.wait(watcher.stop_fd) catch |err| {
             if (watcher.stop_requested.load(.acquire)) return;
             std.log.warn("sunglasses monitor event stream failed err={s}", .{@errorName(err)});
-            pushSdlQuit();
+            pushVendorQuit();
             return;
         };
         switch (event) {
             .stopped => return,
-            .monitor_changed => pushSdlUserEvent(monitor_changed_event_type),
+            .monitor_changed => pushVendorUserEvent(monitor_changed_event_type),
         }
     }
 }
 
-fn pushSdlUserEvent(event_type: u32) void {
+fn pushVendorUserEvent(event_type: u32) void {
     var event = c.SDL_Event{ .user = .{
         .type = event_type,
     } };
@@ -284,7 +284,7 @@ fn pushSdlUserEvent(event_type: u32) void {
     }
 }
 
-fn pushSdlQuit() void {
+fn pushVendorQuit() void {
     var event = c.SDL_Event{ .quit = .{
         .type = c.SDL_EVENT_QUIT,
     } };
@@ -294,7 +294,7 @@ fn pushSdlQuit() void {
     }
 }
 
-/// RuntimeSignals converts process termination into the SDL event loop shutdown path.
+/// RuntimeSignals converts process termination into the vendor event loop shutdown path.
 const RuntimeSignals = struct {
     shutdown_fd: std.posix.fd_t = -1,
     apply_fd: std.posix.fd_t = -1,

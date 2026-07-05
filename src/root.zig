@@ -1,11 +1,8 @@
-//! Wayspot owns the CLI launcher, notifications, and UI modules.
+//! Wayspot root exports accepted process, picker, notification, and daemon owners.
 const std = @import("std");
-pub const app = @import("app/mod.zig");
 pub const config = @import("config/mod.zig");
-pub const providers = @import("providers/mod.zig");
-pub const search = @import("search/mod.zig");
-pub const ui = @import("ui/mod.zig");
-pub const notifications = @import("notifications/mod.zig");
+pub const notification = @import("notification/mod.zig");
+pub const picker = @import("picker/mod.zig");
 pub const wallpaper = @import("wallpaper/mod.zig");
 pub const sunglasses = @import("sunglasses/mod.zig");
 pub const process_identity = @import("process_identity.zig");
@@ -22,6 +19,5 @@ pub fn bufferedPrint() !void {
 
 test "root references config and appearance declarations" {
     std.testing.refAllDecls(config.defaults);
-    std.testing.refAllDecls(ui.appearance);
-    std.testing.refAllDecls(ui.controls.appearance);
+    std.testing.refAllDecls(picker.appearance);
 }

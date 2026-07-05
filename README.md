@@ -4,7 +4,7 @@ Wayspot is a small Wayland launcher and notification daemon built in Zig.
 
 ## Commands
 
-Run one bounded SDL picker lifecycle:
+Run one bounded picker lifecycle:
 
 ```bash
 wayspot --ui
@@ -37,4 +37,4 @@ appearance state.
 
 - The launcher is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
 - The notification daemon is the only long-lived interface.
-- GTK, resident launcher IPC, shell modules, wallpaper tools, provider registries, and script engines are out of scope.
+- GTK, resident launcher IPC, shell modules, broad wallpaper toolkits, open registries, and script engines are out of scope.

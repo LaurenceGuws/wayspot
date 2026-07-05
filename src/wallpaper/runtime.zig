@@ -4,7 +4,7 @@ const std = @import("std");
 const config_owner = @import("config.zig");
 const hyprland = @import("hyprland.zig");
 const library_owner = @import("library.zig");
-const sdl_wallpaper_surface = @import("../ui/sdl_wallpaper_surface.zig");
+const wallpaper_surface = @import("surface.zig");
 
 const c = @import("sdl_c");
 
@@ -26,7 +26,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     slots: [hyprland.max_monitors]SurfaceSlot = undefined,
     slot_count: u32 = 0,
-    sdl_started: bool = false,
+    vendor_started: bool = false,
 
     pub fn runWallpaper(allocator: std.mem.Allocator, hypr: hyprland.Connection) !void {
         var config = try config_owner.load(allocator);
@@ -53,7 +53,7 @@ pub const Runtime = struct {
     }
 
     fn startWallpaper(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, interval_seconds: u32) !void {
-        try self.startSdl();
+        try self.startVendor();
         var runtime_signals = try RuntimeSignals.init();
         defer runtime_signals.deinit();
         try runtime_signals.start();
@@ -71,11 +71,11 @@ pub const Runtime = struct {
         try self.runRandomTimer(hypr, library, random, interval_seconds);
     }
 
-    fn startSdl(self: *Runtime) !void {
-        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, sdl_wallpaper_surface.class_name);
+    fn startVendor(self: *Runtime) !void {
+        const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, wallpaper_surface.class_name);
         if (!hint_set) return error.SdlHintFailed;
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
-        self.sdl_started = true;
+        self.vendor_started = true;
     }
 
     fn runRandomTimer(self: *Runtime, hypr: hyprland.Connection, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
@@ -108,7 +108,7 @@ pub const Runtime = struct {
         var index: u32 = 0;
         while (index < monitors.count) : (index += 1) {
             const monitor = monitors.items[index];
-            const surface = try sdl_wallpaper_surface.WallpaperSurface.init(monitor);
+            const surface = try wallpaper_surface.WallpaperSurface.init(monitor);
             self.slots[self.slot_count] = SurfaceSlot{
                 .surface = surface,
             };
@@ -135,15 +135,15 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.clearSurfaceSlots();
-        if (self.sdl_started) {
+        if (self.vendor_started) {
             c.SDL_Quit();
-            self.sdl_started = false;
+            self.vendor_started = false;
         }
     }
 };
 
 pub const SurfaceSlot = struct {
-    surface: sdl_wallpaper_surface.WallpaperSurface,
+    surface: wallpaper_surface.WallpaperSurface,
 
     fn deinit(self: *SurfaceSlot) void {
         self.surface.deinit();
@@ -190,7 +190,7 @@ fn eventIsShutdown(event: c.SDL_Event) bool {
         event.type == c.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 }
 
-/// MonitorWatcher converts Hyprland socket2 monitor events into SDL wake events owned by Runtime.
+/// MonitorWatcher converts Hyprland socket2 monitor events into vendor wake events owned by Runtime.
 const MonitorWatcher = struct {
     stream: hyprland.EventStream,
     stop_fd: std.posix.fd_t = -1,
@@ -235,17 +235,17 @@ fn monitorWatcherMain(watcher: *MonitorWatcher) void {
         const event = watcher.stream.wait(watcher.stop_fd) catch |err| {
             if (watcher.stop_requested.load(.acquire)) return;
             std.log.warn("wallpaper monitor event stream failed err={s}", .{@errorName(err)});
-            pushSdlQuit();
+            pushVendorQuit();
             return;
         };
         switch (event) {
             .stopped => return,
-            .monitor_changed => pushSdlUserEvent(monitor_changed_event_type),
+            .monitor_changed => pushVendorUserEvent(monitor_changed_event_type),
         }
     }
 }
 
-fn pushSdlUserEvent(event_type: u32) void {
+fn pushVendorUserEvent(event_type: u32) void {
     var event = c.SDL_Event{ .user = .{
         .type = event_type,
     } };
@@ -255,7 +255,7 @@ fn pushSdlUserEvent(event_type: u32) void {
     }
 }
 
-fn pushSdlQuit() void {
+fn pushVendorQuit() void {
     var event = c.SDL_Event{ .quit = .{
         .type = c.SDL_EVENT_QUIT,
     } };
@@ -265,7 +265,7 @@ fn pushSdlQuit() void {
     }
 }
 
-/// RuntimeSignals converts process signals into SDL events owned by the wallpaper loop.
+/// RuntimeSignals converts process signals into vendor events owned by the wallpaper loop.
 const RuntimeSignals = struct {
     shutdown_fd: std.posix.fd_t = -1,
     rotate_fd: std.posix.fd_t = -1,
