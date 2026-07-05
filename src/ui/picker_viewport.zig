@@ -19,9 +19,9 @@ pub const default_result_icon_right_inset: f32 = 8;
 pub const default_query_text_x: f32 = 10;
 pub const default_query_text_y: f32 = 8;
 pub const default_query_line_y: f32 = 28;
-pub const default_scrollbar_track = Rect{ .x = 752, .y = 30, .w = 4, .h = 386 };
+pub const default_scrollbar_track = Rect{ .x = 752, .y = 30, .w = 4, .h = 350 };
 pub const default_base_width: f32 = 760;
-pub const default_base_height: f32 = 420;
+pub const default_base_height: f32 = 384;
 pub const min_base_width_px: i32 = 220;
 pub const min_base_height_px: i32 = 180;
 pub const min_base_width: f32 = @floatFromInt(min_base_width_px);
@@ -552,15 +552,27 @@ test "default result layout preserves shell row geometry" {
     const layout = ResultLayout.default(8);
     const first_row = layout.rowRect(0);
     const second_row = layout.rowRect(1);
+    const last_row = layout.rowRect(7);
 
     try testing.expectEqual(Rect{ .x = 8, .y = 30, .w = 741, .h = 42 }, first_row);
     try testing.expectEqual(@as(f32, 33.5), layout.titleY(0));
     try testing.expectEqual(@as(f32, 52.5), layout.subtitleY(0));
     try testing.expectEqual(@as(f32, 74), second_row.y);
+    try testing.expectEqual(@as(f32, default_base_height - default_result_bottom_margin), last_row.y + last_row.h);
     try testing.expectEqual(Rect{ .x = 8, .y = 28, .w = 741, .h = 1 }, layout.query_line);
     try testing.expectEqual(default_scrollbar_track, layout.scrollbar_track);
     try testing.expectEqual(@as(?u32, null), layout.visibleRowAtPoint(30, 73));
     try testing.expectEqual(@as(?u32, 1), layout.visibleRowAtPoint(30, 75));
+}
+
+test "default result area is exactly the eight row grid plus gaps" {
+    const testing = std.testing;
+    const layout = ResultLayout.default(8);
+    const row_grid_height = (default_result_row_height * 8) + (default_result_row_gap * 7);
+
+    try testing.expectEqual(@as(u32, 8), layout.visible_rows);
+    try testing.expectEqual(row_grid_height, layout.resultAreaHeight());
+    try testing.expectEqual(@as(u32, 8), visibleRowsForHeight(layout.resultAreaHeight(), default_result_row_height, default_result_row_gap));
 }
 
 test "default result layout places icon inside row hit area" {

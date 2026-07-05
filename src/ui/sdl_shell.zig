@@ -32,8 +32,8 @@ pub const Shell = struct {
 };
 
 const max_command_bytes = 4096;
-const base_window_width: i32 = 760;
-const base_window_height: i32 = 420;
+const base_window_width: i32 = @intFromFloat(picker_viewport.default_base_width);
+const base_window_height: i32 = @intFromFloat(picker_viewport.default_base_height);
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
