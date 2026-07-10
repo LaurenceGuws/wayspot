@@ -1,163 +1,83 @@
-# AGENTS.md
+# Wayspot Agent Contract
 
-## Repository Map
+## Source bibles
 
-This file summarizes `tree -L 2` and the Wayspot team workflow. Product-facing
-behavior belongs in `README.md`. Source truth belongs in Zig doc comments and
-the source itself.
+- Domain shape: [`DOMAIN.yml`](DOMAIN.yml)
+- Domain implementation: [`src/`](src/)
+- Build graph: [`build.zig`](build.zig)
+- QAgent shape reference: `/home/home/personal/projects/qagent/DOMAIN.yml`
+- QAgent engineering contract: `/home/home/personal/projects/qagent/AGENTS.md`
+- QAgent implementation shape: `/home/home/personal/projects/qagent/qagent/src/`
+- TigerBeetle defensive shape: `/home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md`
+- TigerBeetle source patterns: `/home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/src/`
+- Foot direct runtime shape: `/home/home/personal/projects/dev_references/terminals/foot/`
+- Zig 0.16 official documentation: `/home/home/personal/projects/official_docs/ziglang.org/download/0.16.0/`
+- Zig 0.16 source clone: `/home/home/personal/projects/dev_references/zig_maturity/zig/`
+- Zig 0.16 standard library source: `/home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/`
+- SDL3 source clone: `/home/home/personal/projects/dev_references/backends/sdl/`
+- SDL3 documentation reference: `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/`
+- Local implementation references: `/home/home/personal/projects/dev_references/`
 
-- `.agent/history/`
-  Wayspot-local project memory. Read it before non-trivial work. Planning and
-  memory are production artifacts, not scratch notes.
+`DOMAIN.yml` is the exhaustive allowed shape. `src/` is the answer for
+behavior, ownership, bounds, cleanup, and failure meaning. A new root, noun,
+verb, field, relationship, or product surface is an operator decision.
 
-- `.zig-global-cache/`
-  Local Zig cache material. It exists because builds ran here. Do not treat it
-  as source, planning, or product state.
+Use the local bibles before browsing or inventing an API boundary. TigerBeetle,
+Foot, and QAgent are the primary shape references, in that order of emphasis:
+TigerBeetle for defensive invariants, Foot for direct systems/runtime code, and
+QAgent for current domain and ownership shape. The Zig standard library source
+is authoritative for Zig behavior and build mechanics; the SDL3 pages are
+authoritative for SDL behavior. None of these references define Wayspot product
+ownership.
 
-- `AGENTS.md`
-  Agent operating map and team protocol only.
+## Four bars
 
-- `README.md`
-  User-facing product language: what Wayspot is, how to run it, and what the
-  current user-visible features do.
+1. Simplicity: direct data, direct control flow, small code.
+2. Readability: domain code reads as English.
+3. Capability: the desktop sees and controls Wayspot’s real useful surfaces.
+4. Defensiveness: explicit ownership, cleanup, bounds, invariants, exact
+   errors, and executable boundary checks.
 
-- `assets/icons/`
-  Static assets used by packaging or focused surfaces.
+## Comment source
 
-- `build.zig`, `build.zig.zon`
-  Zig 0.16 build graph and dependency pins. Arch Linux requires
-  `exe.use_llvm = true`.
+Comments are source code and are maintained with the implementation.
 
-- `dev_references/`
-  Local source-backed references before browsing: Zig 0.16 notes, SDL docs,
-  Hyprland docs, TigerBeetle style, foot source, and manifests proving origin.
+- `///` documents an owned symbol: purpose, inputs, outputs, ownership, bounds,
+  invariants, and failure meaning.
+- `//!` documents an owned file or module: purpose, scope, boundary, and
+  behavioral contract.
+- `//` documents a local implementation decision or unusual platform branch.
 
-- `packaging/desktop/`
-  Desktop integration files.
+The comment must describe code that exists now. Missing or stale comments are
+unfinished implementation.
 
-- `packaging/systemd/`
-  Service integration files.
+## Implementation
 
-- `re-run.sh`
-  Local rebuild/sync/run helper. Keep build knobs centralized here or
-  in `.rerun.env`.
+- Keep ownership, allocation, cleanup, and failure meaning visible.
+- Bound every loop, queue, buffer, command, result page, wake slot,
+  notification, monitor list, workspace list, window list, and media list.
+- Every owner cleans up what it allocates or starts, exactly once.
+- CPU sleeps unless input, notification work, or a scheduled deadline exists.
+- Keep product vocabulary and ownership in `DOMAIN.yml`.
+- Keep compositor facts under `src/env/`; product domains do not own Hyprland
+  IPC or vendor types.
+- Delete code with no owner, call path, or place in `DOMAIN.yml`.
+- Do not use `_ =`, `usize`, `anytype`, or `anyopaque` in active Zig code.
 
-- `reference_repo/`
-  Local reference material and vendored examples. It is not live Wayspot code.
+## Progress
 
-- `src/`
-  Product source. Every file must state its role with a top-level `//!` comment.
+Read the request, domain, source, callers, and runtime path before changing
+shape. Build exactly the requested slice, then challenge it against reality.
+Complete its source, callers, tests, cleanup, and runtime path. Passing tests
+are necessary evidence; acceptance requires conformance to `DOMAIN.yml`.
 
-- `src/c/`
-  Small C boundary helpers for vendor/Wayland integration.
+Before reporting completion:
 
-- `src/config/`
-  Bounded configuration defaults and Lua defaults loading.
+```sh
+zig build test --summary all
+zig build
+git diff --check
+```
 
-- `src/main.zig`
-  CLI mode selection, top-level entrypoint wiring, and cleanup order.
-
-- `src/notification/`
-  Freedesktop notification DBus interface, bounded notification state, history cache,
-  history list rows, and banner surface.
-
-- `src/picker/`
-  One CLI-summoned picker lifecycle, query parsing, ranking, candidate rows,
-  mode list, icon rendering, text rendering, viewport math, appearance, and
-  concrete inert picker elements.
-
-- `src/sunglasses/`
-  Monitor-glasses state and overlay reconciliation.
-
-- `src/wallpaper/`
-  Wallpaper loop/domain code, Hyprland monitor facts, and still-image loop.
-
-- `tools/`
-  Development probes and receipt helpers. Tools are not architecture.
-
-- `zig-pkg/`
-  Local Zig package cache/vendor material for SDL dependency.
-
-## How We Work
-
-Broad tasks run through the indexed sprint workflow.
-
-1. The user gives a codebase task.
-2. The coordinator writes a sprint artifact before implementation.
-3. The artifact defines full scope, explicit stop conditions, files/folders,
-   symbols, comments, tests, removals, receipts, non-goals, and what must not
-   exist after completion.
-4. The coordinator splits the sprint into slice layers that cover the entire
-   ask. No slice may leave compatibility shims, stale paths, or fake progress.
-5. A single long-lived planner/coder teammate fleshes out and implements only
-   accepted work.
-6. A strict reviewer teammate gates the plan and the code.
-7. The coordinator delegates sequentially, waits, passes results between them,
-   and does not implement sprint code directly.
-8. The coordinator reports to the user only for a real user decision/blocker or
-   full sprint completion.
-
-Completion means nothing more and nothing less than the accepted sprint remains:
-no skipped cleanup, no stale comments, no dead surfaces, no compatibility
-wrappers, no broad architecture kept around for later.
-
-## Authority
-
-- Live memory is Wayspot-local: `.agent/history/README.md`,
-  `.agent/history/current.yaml`, `.agent/history/sprint.yaml`, and
-  `.agent/history/references.yaml`.
-- The qagent project is provenance for the copied workflow, not live authority.
-- Workers may propose memory edits. The user and coordinator own live memory
-  writes unless explicitly delegated.
-- Passing tests are not acceptance. Acceptance is conformance to the indexed
-  sprint and the reviewer gate.
-
-## Product Scope
-
-Wayspot is a pragmatic DE busybox: CLI-summoned picker, notification
-DBus interface, wallpaper loop, and focused focused surfaces.
-
-Keep the core path small: initialize the vendor windowing backend for one
-bounded picker lifecycle, load app/open/mode rows, launch the selected command,
-clean up once, render typed notification rows, and keep long-lived loops
-intentional.
-
-Out of scope unless a fresh indexed sprint accepts it: GTK, shell modules, open
-registries, broad WM abstractions, web/window/workspace inventories, scripting VMs, resident launcher IPC, and generic UI frameworks.
-
-## Code Rules
-
-- Everything has a bound: loops, queues, buffers, command strings, result pages,
-  wake slots, retained notifications, and discovered media.
-- Everything is cleaned up once by the owner that allocated or started it.
-- CPU sleeps unless there is input, notification work, DBus work, or a
-  scheduled deadline.
-- Do not use `_ =`, `usize`, `anytype`, or `anyopaque` in active Zig code. The
-  only known `anyopaque` exception is the GLib D-Bus callback boundary in the
-  notification DBus interface.
-- DRY means remove duplicated intent. It does not mean moving product-specific
-  vocabulary sideways into a shared folder.
-- Picker inert mechanics live under concrete picker nouns such as `textbox`,
-  `slider`, and `cursor_blink`. No generic product bucket owns rendering,
-  persistence, Hyprland, DBus, or product-domain imports.
-
-## Documentation Rules
-
-Documentation lives with the right audience.
-
-- `README.md` is user-facing language.
-- `AGENTS.md` is the repo map and team protocol.
-- Zig source comments document what exists and how it works.
-
-Zig comment law follows the standard library style:
-
-- Every Zig file starts with `//!` explaining the file role and ownership.
-- Almost every public or important private symbol has `///` explaining its
-  contract, ownership, bounds, cleanup, or caller obligation.
-- Use plain `//` only for obscure implementation commentary where the domain
-  forces a non-obvious shape.
-- Delete decorative, stale, roadmap, compatibility, TODO, legacy, and maybe-path
-  comments.
-
-Comments are production assertions. If a comment is not true enough to review,
-fix the code or delete the comment.
+Exercise the real binary path whenever it exists. Do not commit without explicit
+operator authorization.

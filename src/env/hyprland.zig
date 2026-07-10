@@ -49,6 +49,7 @@ pub const EventStream = struct {
     fd: std.posix.fd_t = -1,
     pending: [max_event_line_bytes]u8 = undefined,
     pending_len: u32 = 0,
+    pending_event: ?FactEvent = null,
 
     /// init opens the Hyprland event socket; caller must deinit.
     pub fn init(allocator: std.mem.Allocator, hypr: Connection) !EventStream {
@@ -97,6 +98,13 @@ pub const EventStream = struct {
     fn readAvailableFromBytes(self: *EventStream, bytes: []const u8) !void {
         var index: u32 = 0;
         while (index < bytes.len) : (index += 1) {
+            if (bytes[index] == '\n') {
+                if (classifyEventLine(self.pending[0..self.pending_len])) |event| {
+                    self.mergePendingEvent(event);
+                }
+                self.pending_len = 0;
+                continue;
+            }
             if (self.pending_len >= max_event_line_bytes) {
                 self.pending_len = 0;
                 return error.HyprlandEventLineTooLong;
@@ -107,6 +115,10 @@ pub const EventStream = struct {
     }
 
     fn nextPendingEvent(self: *EventStream) ?FactEvent {
+        if (self.pending_event) |event| {
+            self.pending_event = null;
+            return event;
+        }
         while (true) {
             var newline_index: u32 = 0;
             while (newline_index < self.pending_len) : (newline_index += 1) {
@@ -122,6 +134,20 @@ pub const EventStream = struct {
                 break;
             }
             if (newline_index >= self.pending_len) return null;
+        }
+    }
+
+    fn mergePendingEvent(self: *EventStream, event: FactEvent) void {
+        const current = self.pending_event orelse {
+            self.pending_event = event;
+            return;
+        };
+        if (current == .monitor_changed or event == .monitor_changed) {
+            self.pending_event = .monitor_changed;
+        } else if (current == .workspace_changed or event == .workspace_changed) {
+            self.pending_event = .workspace_changed;
+        } else {
+            self.pending_event = .window_changed;
         }
     }
 };
@@ -447,4 +473,19 @@ test "socket2 pending parser rejects overlong lines and skips ignored lines" {
     @memcpy(stream.pending[0..bytes.len], bytes);
     stream.pending_len = @intCast(bytes.len);
     try std.testing.expectEqual(@as(?FactEvent, .monitor_changed), stream.nextPendingEvent());
+}
+
+test "socket2 parser bounds line storage without rejecting a valid event burst" {
+    var stream = EventStream{};
+    var bytes: [event_read_bytes]u8 = undefined;
+    const line = "workspacev2>>7,main\n";
+    var offset: u32 = 0;
+    while (offset + line.len <= max_event_line_bytes + line.len) : (offset += @intCast(line.len)) {
+        std.mem.copyForwards(u8, bytes[offset .. offset + line.len], line);
+    }
+
+    try std.testing.expect(offset > max_event_line_bytes);
+    try stream.readAvailableFromBytes(bytes[0..offset]);
+    try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), stream.nextPendingEvent());
+    try std.testing.expectEqual(@as(u32, 0), stream.pending_len);
 }

@@ -1,71 +1,41 @@
-# wayspot
+# Wayspot
 
-Wayspot is a small Wayland launcher, command picker, notification DBus interface,
-wallpaper loop, and focused surface set built in Zig.
+Wayspot is a pragmatic Wayland desktop busybox built in Zig.
 
-## Commands
+It gives the desktop a small set of direct surfaces:
 
-Run one bounded picker lifecycle:
+- a CLI-summoned picker for opening one command;
+- a freedesktop notification D-Bus interface with retained history;
+- a still-image wallpaper loop;
+- focused per-monitor sunglasses overlays.
 
-```bash
+The picker is transient. The notification, wallpaper, and overlay loops are
+long-lived only where the desktop behavior requires them. Every retained list,
+command, surface, and lifecycle is bounded and owned.
+
+## Try it
+
+```sh
 wayspot --ui
-```
-
-List the picker command rows in the terminal:
-
-```bash
 wayspot commands
-```
-
-Query the same command rows used by the picker:
-
-```bash
 wayspot query settings
-```
-
-Open a command payload from the picker:
-
-```bash
 wayspot open settings
-```
-
-Print Nushell custom completion records:
-
-```bash
-wayspot complete nushell wayspot query set
-```
-
-Own the freedesktop notification D-Bus name:
-
-```bash
 wayspot --notifications-daemon
+wayspot --wallpaper
 ```
 
 For local development:
 
-```bash
+```sh
 ./re-run.sh
 ```
 
-## UI defaults
+## Mission
 
-Wayspot embeds UI defaults from `assets/lua/defaults.lua`. A user override at
-`$HOME/.config/wayspot/defaults.lua` may replace individual loaded values;
-missing fields keep the embedded defaults.
+Wayspot keeps useful desktop actions close to the operator and keeps the core
+path small: start, act, and clean up. It is not a resident launcher protocol,
+GTK application framework, shell module, broad window inventory, scripting VM,
+or generic UI toolkit.
 
-Defaults loading is bounded: each Lua defaults file is capped at 32 KiB, runs
-without Lua standard libraries, and stops after 100000 Lua instructions. Invalid
-present user values are rejected instead of partially mutating the embedded
-appearance state.
-
-## Current features
-
-- The picker is CLI-summoned. It starts, accepts input, launches one detached command, and cleans up.
-- Picker modes include application rows, notification history rows, wallpaper lifecycle rows, and sunglasses runtime configuration.
-- The notification D-Bus interface owns a long-lived freedesktop notification name and can show retained notification history through the picker.
-- The wallpaper loop owns one background surface per monitor and uses configured still images.
-- Sunglasses owns per-monitor overlay settings for the red/blue filter, dimming, and image opacity.
-
-## Scope
-
-- GTK, resident launcher IPC, shell modules, broad wallpaper toolkits, and script engines are out of scope.
+The complete product contract is [`DOMAIN.yml`](DOMAIN.yml). Engineering rules
+are in [`AGENTS.md`](AGENTS.md).

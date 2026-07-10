@@ -1,0 +1,101 @@
+# Wayspot domain contract.
+# Each YAML document owns one boundary of the same contract.
+
+---
+projects:
+  wayspot:
+    role: pragmatic Wayland desktop busybox
+    owns: picker, notifications, wallpaper, sunglasses, environment
+    mission: >
+      Keep a few useful desktop actions direct and bounded: summon a picker,
+      open one command, retain notifications, rotate wallpapers, and apply
+      focused monitor overlays.
+    release: design first, proof before release
+
+  picker:
+    role: CLI-summoned operator surface
+    owns: query, candidates, modes, selection, command_launch, cleanup
+    embeds: wayspot
+
+  notifications:
+    role: freedesktop notification service
+    owns: dbus_name, retained_rows, history, banner
+    embeds: wayspot
+
+  wallpaper:
+    role: still-image background loop
+    owns: image_library, monitor_surfaces, rotation_deadline
+    consumes: monitor_facts
+    embeds: wayspot
+
+  sunglasses:
+    role: focused monitor overlay
+    owns: red_blue_filter, dimming, image_opacity, overlay_surfaces
+    consumes: monitor_facts
+    embeds: wayspot
+
+  environment:
+    role: dumb desktop fact source
+    owns: monitor_facts, workspace_facts, window_facts, bounded_snapshots
+    sources: sdl, hyprland
+    embeds: wayspot
+
+---
+lifecycle:
+  process:
+    owns: mode_selection, entrypoint_wiring, top_level_cleanup
+  picker:
+    starts: one_surface
+    launches: one_detached_command
+    cleans: once
+  notifications:
+    dbus_name: long_lived
+    banner: child_owned
+  wallpaper:
+    loop: long_lived
+    surfaces: one_per_monitor
+  sunglasses:
+    surfaces: one_per_monitor
+
+---
+relationships:
+  picker:
+    consumes: environment_facts
+  wallpaper:
+    consumes: monitor_facts
+  sunglasses:
+    consumes: monitor_facts
+  environment:
+    hyprland_ipc: monitor_workspace_window_facts_only
+    product_policy: none
+
+---
+bounds:
+  loops: bounded
+  queues: bounded
+  buffers: bounded
+  command_strings: bounded
+  result_pages: bounded
+  monitor_workspace_window_lists: bounded
+  retained_notifications: bounded
+  discovered_media: bounded
+  lua_defaults_bytes: 32768
+  lua_instructions: 100000
+
+---
+rules:
+  code:
+    - direct_data_and_control_flow
+    - every_owner_cleans_up_once
+    - cpu_sleeps_without_work
+    - no_gtk_shell_modules_open_registries_web_inventories_or_scripting_vms
+    - no_resident_launcher_ipc
+    - no_generic_ui_framework
+    - no_vendor_as_domain_model
+    - no_shared_product_bucket_without_one_owner
+  proof:
+    - bounded_tests
+    - runtime_receipts
+    - exact_errors
+    - build_and_test_before_release
+
