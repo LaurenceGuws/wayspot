@@ -166,8 +166,8 @@ pub fn request(allocator: std.mem.Allocator, hypr: Connection, command: []const 
 pub fn classifyEventLine(line: []const u8) ?FactEvent {
     const marker = std.mem.indexOf(u8, line, ">>") orelse return null;
     const name = line[0..marker];
-    if (eventNameIn(name, &.{ "monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2", "focusedmon", "focusedmonv2" })) return .monitor_changed;
-    if (eventNameIn(name, &.{ "workspace", "workspacev2", "createworkspace", "createworkspacev2", "destroyworkspace", "destroyworkspacev2", "moveworkspace", "moveworkspacev2", "renameworkspace", "activespecial", "activespecialv2" })) return .workspace_changed;
+    if (eventNameIn(name, &.{ "monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2" })) return .monitor_changed;
+    if (eventNameIn(name, &.{ "workspace", "workspacev2", "createworkspace", "createworkspacev2", "destroyworkspace", "destroyworkspacev2", "moveworkspace", "moveworkspacev2", "renameworkspace", "activespecial", "activespecialv2", "focusedmon", "focusedmonv2" })) return .workspace_changed;
     if (eventNameIn(name, &.{ "activewindow", "activewindowv2", "openwindow", "closewindow", "movewindow", "movewindowv2", "windowtitle", "windowtitlev2" })) return .window_changed;
     return null;
 }
@@ -458,6 +458,7 @@ test "JSON parsers reject malformed and oversized responses" {
 
 test "socket2 classifier accepts fact-change events only" {
     try std.testing.expectEqual(@as(?FactEvent, .monitor_changed), classifyEventLine("monitoradded>>DP-1"));
+    try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), classifyEventLine("focusedmonv2>>DP-1,1"));
     try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), classifyEventLine("workspacev2>>7,main"));
     try std.testing.expectEqual(@as(?FactEvent, .window_changed), classifyEventLine("activewindowv2>>abc"));
     try std.testing.expectEqual(@as(?FactEvent, null), classifyEventLine("fullscreen>>1"));

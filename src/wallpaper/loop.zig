@@ -64,7 +64,7 @@ pub const Loop = struct {
         defer monitor_watcher.deinit();
         try monitor_watcher.start();
 
-        var prng = std.Random.DefaultPrng.init(c.SDL_GetTicks());
+        var prng = std.Random.DefaultPrng.init(try randomSeed());
         const random = prng.random();
         try self.rebuildSurfaceSlots(monitor_source, library, random);
 
@@ -485,6 +485,13 @@ fn sendSignal(pid: std.os.linux.pid_t, signal: std.os.linux.SIG) !void {
         .SRCH => error.WallpaperLoopNotRunning,
         else => error.SystemCallFailed,
     };
+}
+
+fn randomSeed() !u64 {
+    var bytes: [@sizeOf(u64)]u8 = undefined;
+    const read_count = std.os.linux.getrandom(bytes[0..].ptr, bytes.len, 0);
+    if (read_count != bytes.len) return error.WallpaperRandomSeedFailed;
+    return std.mem.readInt(u64, &bytes, .little);
 }
 
 fn drainEventFd(fd: std.posix.fd_t) !void {
