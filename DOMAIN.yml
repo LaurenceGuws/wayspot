@@ -40,6 +40,7 @@ vocabulary:
     picker:
       - query
       - candidate
+      - input
       - selection
       - textbox
       - cursor
@@ -104,6 +105,7 @@ vocabulary:
     - shm
     - layer_shell
     - freedesktop
+    - bash
   forbidden:
     nouns:
       - generic
@@ -186,6 +188,22 @@ ownership:
           - image
           - overlay_apply
 
+    command:
+      owner: picker.command
+      must_exist:
+        - candidate_union
+        - user_input_type
+        - candidate_builder
+        - bash_completion
+      owns:
+        - command_candidates
+        - command_resolution
+        - cli_consumption
+        - gui_consumption
+      consumers:
+        - cli
+        - gui
+
   notification:
     owner: notification
     must_exist:
@@ -263,7 +281,11 @@ build:
     - one_cleanup_per_owner
 
   picker:
-    path: process -> picker -> mode -> candidate -> selection -> command -> clean
+    path: process -> command -> candidate -> cli_or_gui -> selection -> command -> clean
+    command:
+      candidate: tagged_union
+      user_input: explicit_bounded_type
+      completion: bash_only
     modes:
       - app
       - notification
