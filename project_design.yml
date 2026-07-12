@@ -1,0 +1,302 @@
+# PROJECT DESIGN: Wayspot Cmd-tree architecture and ownership shape.
+# Product vocabulary and ownership remain authoritative in DOMAIN.yml.
+project:
+  name: wayspot
+  version: 0.1.3-dev
+  type: single_binary
+purpose: A small Wayland desktop-environment busybox for bare Hyprland.
+source:
+  domain: DOMAIN.yml
+  implementation: src/
+  build: build.zig
+  workflow: AGENTS.md
+  scope: project_version_scope.yml
+  debt: debt_offenders.yml
+document_precedence:
+  - project_version_scope.yml
+  - project_rules.yml
+  - DOMAIN.yml
+  - project_design.yml
+  - AGENTS.md
+  - README.md
+ownership:
+  cmd:
+    role: top-level tagged union and recursive Cmd-tree owner
+    symbol: Cmd
+    current_source: src/picker/command.zig
+  sub_cmd:
+    role: tagged union owned by the selected Cmd arm
+    symbol: SubCmd
+    current_source: src/picker/mode/
+  candidate:
+    role: next reachable Cmd-tree node or concrete executable candidate
+    symbol: Candidate
+    current_source: src/picker/candidate.zig
+  gui:
+    role: SDL lifecycle, input, candidate-tree rendering, selection, and intent
+    current_source: src/picker/surface.zig
+  cli:
+    role: candidate-tree consumption, Bash serialization, and help output
+    current_source: src/main.zig
+  process:
+    role: executable entry, identity, mode selection, and resident runtime invocation
+    current_source: src/main.zig
+  modes:
+    role: concrete Cmd arms with one candidate source and optional resident runtime
+    current_sources:
+      - src/picker/mode/
+      - src/notification/
+      - src/wallpaper/
+      - src/sunglasses/
+dependency_graph:
+  compile:
+    candidate: []
+    sub_cmd:
+      - candidate
+      - concrete mode arms
+    cmd:
+      - sub_cmd
+      - candidate
+    gui:
+      - cmd
+      - SDL
+    cli:
+      - cmd
+      - Bash serialization
+    process:
+      - resident mode runtime owners
+  mode_catalog:
+    imports:
+      - src/picker/mode/apps.zig
+      - src/picker/mode/notifications.zig
+      - src/picker/mode/wallpaper.zig
+      - src/picker/mode/sunglasses.zig
+    order:
+      - apps
+      - notifications
+      - wallpaper
+      - sunglasses
+  forbidden:
+    - cmd importing SDL
+    - cmd importing Bash serialization
+    - cmd importing GUI or CLI code
+    - GUI rebuilding the Cmd tree independently
+    - CLI rebuilding the Cmd tree independently
+    - process importing GUI or CLI code
+    - resident mode runtime importing the picker surface
+    - a generic mode registry or erased mode interface
+mode_shape:
+  cmd_shape: subcommand
+  cmd_template: "wayspot <mode> [operation] [input...]"
+  top_level: Wayspot Cmd arms
+  default_mode: apps
+  modes:
+    - apps
+    - notifications
+    - wallpaper
+    - sunglasses
+  resident_modes:
+    - notifications
+    - wallpaper
+    - sunglasses
+  consumers:
+    - gui
+    - cli
+cmd_tree:
+  cmd:
+    type: tagged_union
+    symbol: Cmd
+    arms:
+      - apps
+      - notifications
+      - wallpaper
+      - sunglasses
+    array:
+      type: bounded_ordered_array
+      order:
+        - apps
+        - notifications
+        - wallpaper
+        - sunglasses
+      default: apps
+  sub_cmd:
+    type: tagged_union
+    symbol: SubCmd
+    owner: selected Cmd arm
+    rule: each arm owns only its own nested candidate and leaf meaning
+  candidate:
+    type: tagged_union
+    symbol: Candidate
+    arms:
+      - sub_cmd
+      - concrete
+    meaning: the next reachable node of the selected Cmd tree
+    rule: a sub_cmd candidate enters another bounded union; a concrete candidate resolves to one executable intent
+  interface_rule: GUI and CLI consume the same Cmd array, SubCmd unions, and Candidate values
+mode_catalog:
+  apps:
+    mode: apps
+    role: installed desktop application launch mode
+    cmd: "wayspot apps"
+    process_entry: none
+    candidate_owner: src/picker/mode/apps.zig
+    runtime_owner: none
+    default_mode: true
+    compositor_dependency: none
+    picker_queries:
+      - /apps
+    sub_cmd_arms: []
+    candidates:
+      - kind: concrete
+        source: installed applications
+        behavior: launch selected app
+    lifecycle_candidates: []
+    direct_cmds: []
+
+  notifications:
+    mode: notifications
+    role: freedesktop notification resident mode
+    cmd: "wayspot notifications"
+    process_entry: "wayspot notifications"
+    candidate_owner: src/picker/mode/notifications.zig
+    runtime_owner: src/notification/
+    default_mode: false
+    picker_queries:
+      - /notifications
+      - /notifications history
+    sub_cmd_arms:
+      - history
+      - restart
+    candidates:
+      - kind: sub_cmd
+        name: history
+        input: /notifications history
+      - kind: concrete
+        name: restart
+        input: "lifecycle:notifications:restart"
+    lifecycle_candidates:
+      - restart
+    direct_cmds: []
+
+  wallpaper:
+    mode: wallpaper
+    role: still-image wallpaper resident mode
+    cmd: "wayspot wallpaper"
+    process_entry: "wayspot wallpaper"
+    candidate_owner: src/picker/mode/wallpaper.zig
+    runtime_owner: src/wallpaper/
+    default_mode: false
+    picker_queries:
+      - /wallpapers
+    sub_cmd_arms:
+      - restart
+      - rotate
+    candidates:
+      - kind: concrete
+        name: restart
+        input: "lifecycle:wallpapers:restart"
+      - kind: concrete
+        name: rotate
+        input: "wayspot wallpaper rotate"
+    lifecycle_candidates:
+      - restart
+    direct_cmds:
+      - "wayspot wallpaper rotate"
+
+  sunglasses:
+    mode: sunglasses
+    role: focused per-monitor overlay resident mode
+    cmd: "wayspot sunglasses"
+    process_entry: "wayspot sunglasses"
+    candidate_owner: src/picker/mode/sunglasses.zig
+    runtime_owner: src/sunglasses/
+    default_mode: false
+    picker_queries:
+      - /sunglasses
+    sub_cmd_arms:
+      - restart
+      - apply
+      - reconcile
+      - set_image
+      - clear_image
+    candidates:
+      - kind: concrete
+        name: restart
+        input: "lifecycle:sunglasses:restart"
+      - kind: concrete
+        name: apply
+        input: "wayspot sunglasses apply"
+      - kind: concrete
+        name: reconcile
+        input: "wayspot sunglasses reconcile"
+      - kind: concrete
+        name: set_image
+        input: "wayspot sunglasses set-image <monitor> <path>"
+      - kind: concrete
+        name: clear_image
+        input: "wayspot sunglasses clear-image <monitor>"
+    lifecycle_candidates:
+      - restart
+    direct_cmds:
+      - "wayspot sunglasses apply"
+      - "wayspot sunglasses reconcile"
+      - "wayspot sunglasses set-image <monitor> <path>"
+      - "wayspot sunglasses clear-image <monitor>"
+
+mode_catalog_totals:
+  modes: 4
+  resident_modes: 3
+  default_mode: apps
+  lifecycle_candidates: 3
+
+mode_catalog_capacity:
+  max_modes: 4
+  max_resident_modes: 3
+  max_candidates_per_mode: 16
+  max_sub_cmd_arms_per_mode: 8
+  max_lifecycle_candidates_per_mode: 4
+
+transition:
+  current_cmd_shape:
+    source: src/picker/command.zig
+    shape: flat Candidate.List with separate Mode collection
+    required_exit:
+      - introduce the Cmd tagged union and ordered mode array
+      - give each mode arm its SubCmd union
+      - make Candidate represent sub_cmd or concrete
+      - make apps the default picker mode
+  current_process_shape: src/main.zig flag branches
+  noncanonical_entries:
+    - --notifications-daemon
+    - --wallpaper
+    - --next-wallpaper
+    - --wallpaper-rotate-now
+    - --sunglasses-daemon
+    - --sunglasses-apply
+    - --sunglasses-reconcile
+    - --sunglasses-set-image
+    - --sunglasses-clear-image
+  canonical_process_shape: mode_catalog cmd and process_entry
+  required_exit:
+    - remove flag-based resident mode entry paths
+    - make every mode record executable through its cmd
+    - keep apps available through wayspot apps and the default picker mode
+
+interfaces:
+  cmd:
+    role: shared semantic Cmd tree and completion policy owner
+    paths:
+      - mode subcommands from mode_catalog
+      - query
+      - open
+      - complete bash
+  gui:
+    role: shared Candidate consumer and SDL picker owner
+    path: --ui
+  cli:
+    role: shared Candidate consumer and Bash/help owner
+    path: src/main.zig
+  process:
+    role: entry and resident runtime caller only
+    path: src/main.zig
+    mode_entry: mode_catalog.process_entry

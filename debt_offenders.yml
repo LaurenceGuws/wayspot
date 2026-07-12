@@ -1,0 +1,135 @@
+# REVIEWED DESIGN DEBT: current open offenders only.
+# Each entry needs reviewer approval before implementation expands the boundary.
+project: wayspot
+status: review_required
+offenders:
+  - id: mode_catalog_ownership
+    status: open
+    owner: picker.cmd
+    evidence:
+      - DOMAIN.yml
+      - project_design.yml
+      - project_version_scope.yml
+      - src/picker/mode/
+      - src/main.zig
+    invariant: The bounded ordered Cmd array has exactly four concrete arms in apps, notifications, wallpaper, sunglasses order; apps is the default, and each arm owns one SubCmd union, candidate source, and optional resident runtime.
+    exit:
+      - introduce the Cmd tagged union and ordered mode array
+      - make apps the default picker mode and expose wayspot apps
+      - give every mode arm its concrete SubCmd union
+      - make Candidate represent another SubCmd or a concrete leaf
+      - remove legacy flag entry paths rather than retaining a second shape
+      - tests prove mode order, default selection, and reachable candidates
+      - runtime receipts prove resident ownership
+
+  - id: gui_cli_candidate_composition
+    status: open
+    owner: picker.cmd
+    evidence:
+      - project_design.yml
+      - src/picker/command.zig
+      - src/picker/mode/apps.zig
+      - src/main.zig
+    invariant: GUI and CLI consume the same bounded Cmd array, SubCmd unions, and Candidate values; apps is a normal shared mode, not a GUI exception.
+    exit:
+      - one shared Cmd composition is constructed at picker or CLI entry
+      - apps is the first/default mode in both interfaces
+      - GUI /apps and CLI wayspot apps reach the same candidate source
+      - composition tests prove identical mode order and candidate meaning
+
+  - id: cmd_interface_imports
+    status: open
+    owner: project
+    evidence:
+      - project_design.yml
+      - src/picker/command.zig
+      - src/main.zig
+      - src/picker/surface.zig
+    invariant: Cmd owns meaning and reachability; CLI owns wire formatting; GUI owns SDL; process owns resident runtime invocation.
+    exit:
+      - approved dependency graph is reflected in imports
+      - Cmd has no SDL, Bash, terminal writer, or GUI import
+      - CLI and GUI consume Cmd without rebuilding it
+      - resident runtime owners do not import the picker surface
+
+  - id: bash_serialization_boundary
+    status: open
+    owner: cli
+    evidence:
+      - src/picker/command.zig
+      - src/main.zig
+      - project_design.yml
+    invariant: Cmd owns completion meaning and bounded Candidate results; CLI owns Bash quoting, newlines, and output bounds.
+    exit:
+      - Cmd returns bounded completion candidates without Bash formatting
+      - src/cli/bash_completion.zig owns shell serialization
+      - exact escaping and boundary tests pass
+
+  - id: candidate_source_vocabulary
+    status: open
+    owner: picker.cmd
+    evidence:
+      - DOMAIN.yml
+      - project_design.yml
+      - src/picker/candidate.zig
+      - src/picker/mode/
+    invariant: Every Cmd arm has one concrete candidate owner; apps is the first installed-application source, and no generic provider, registry, or erased mode interface exists.
+    exit:
+      - every mode source has one owner and one Cmd composition path
+      - apps has a normal mode arm and is not an auxiliary source
+      - no generic provider/controller/manager vocabulary is introduced
+
+  - id: candidate_failure_atomicity
+    status: open
+    owner: picker.cmd
+    evidence:
+      - src/picker/command.zig
+      - src/picker/candidate.zig
+      - src/picker/mode/apps.zig
+    invariant: Cmd tree construction either publishes one complete bounded Candidate collection or restores the pre-load state.
+    exit:
+      - overflow test forces partial producer failure
+      - retry proves no duplicates or stale borrowed slices
+      - producer cleanup order is explicit
+
+  - id: resident_mode_runtime_contract
+    status: open
+    owner: process
+    evidence:
+      - src/notification/
+      - src/wallpaper/
+      - src/sunglasses/
+      - src/main.zig
+    invariant: Each resident Cmd arm owns identity, lifecycle, cleanup, bounds, and runtime recovery through its resident runtime owner.
+    exit:
+      - mode-to-runtime ownership is documented
+      - process callers only select and invoke resident owners
+      - crash, duplicate-owner, cleanup, and recovery receipts exist
+
+  - id: gui_surface_scope
+    status: open
+    owner: gui
+    evidence:
+      - src/picker/surface.zig
+      - project_design.yml
+    invariant: GUI owns SDL lifecycle, input, Candidate rendering, selection, and intent only; it does not own Cmd or resident mode state.
+    exit:
+      - surface consumes the prepared Candidate tree
+      - /apps uses the shared apps Cmd arm
+      - no resident lifecycle policy remains in the GUI surface
+      - remaining GUI methods have one direct owner contract
+
+  - id: auditable_bounds_scope
+    status: open
+    owner: project
+    evidence:
+      - project_version_scope.yml
+      - src/picker/candidate.zig
+      - src/notification/
+      - src/wallpaper/
+      - src/sunglasses/
+    invariant: Every active Cmd, SubCmd, Candidate collection, and serialized surface has one named auditable bound.
+    exit:
+      - scope values match source constants
+      - missing bounds are identified and fixed
+      - boundary tests cover every changed bound

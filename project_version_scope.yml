@@ -1,0 +1,63 @@
+# PROJECT VERSION SCOPE: active Wayspot development scope and named bounds.
+project:
+  name: wayspot
+  version: 0.1.3-dev
+scope:
+  included:
+    - one Wayspot binary
+    - Hyprland/Wayland desktop integration
+    - one shared Cmd tree for GUI and CLI
+    - one bounded ordered mode array
+    - apps as the default picker mode
+    - notifications mode
+    - wallpaper mode
+    - sunglasses mode
+    - Bash completion
+  excluded:
+    - other compositors
+    - generic UI toolkit abstractions
+    - resident launcher protocol
+    - Nushell completion
+    - flock or fallback lifecycle daemon
+    - GUI-owned resident process lifecycle
+freeze:
+  compositor: Hyprland/Wayland only
+  interfaces:
+    cli: Bash first
+  gui: SDL picker surface
+  cmd_shape:
+    shape: subcommand
+    template: "wayspot <mode> [operation] [input...]"
+    default_mode: apps
+mode_catalog_capacity:
+  max_modes: 4
+  max_resident_modes: 3
+  max_candidates_per_mode: 16
+  max_sub_cmd_arms_per_mode: 8
+  max_lifecycle_candidates_per_mode: 4
+bounds:
+  cmd_bytes: 4096
+  query_bytes: 256
+  candidates: 1024
+  completion_candidates: 256
+  completion_output_bytes: 65536
+  notification_history_open_bytes: 64
+  wallpaper_images: 4096
+  wallpaper_path_bytes: 4096
+  wallpaper_directory_entries: 16384
+  notification_count: 256
+  notification_app_name_bytes: 256
+  notification_summary_bytes: 512
+  notification_body_bytes: 4096
+  sunglasses_monitors: 8
+  sunglasses_monitor_name_bytes: 96
+  sunglasses_state_bytes: 16384
+  sunglasses_image_path_bytes: 1024
+proof:
+  required_before_acceptance:
+    - Cmd and SubCmd construction is bounded and failure-atomic
+    - Candidate reachability is exhaustive at every selected arm
+    - completion output bound includes every emitted byte
+    - producer string lifetime is explicit and tested
+    - apps is the default picker mode in GUI and CLI
+    - CLI, GUI, and resident mode receipts are captured

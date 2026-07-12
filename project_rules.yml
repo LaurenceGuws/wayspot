@@ -1,0 +1,62 @@
+# PROJECT RULES: shared workflow, ownership, and invariants for Wayspot.
+# DOMAIN.yml remains the product authority; this file does not add vocabulary.
+document_role: global project rules; not a replacement for DOMAIN.yml
+workflow:
+  - read project_version_scope.yml before design or implementation
+  - read project_rules.yml, DOMAIN.yml, project_design.yml, source, callers, and runtime path
+  - write design, bounds, ownership, and failure meaning before code
+  - obtain reviewer approval for design and debt_offenders.yml before expansion
+  - implement the smallest direct slice
+  - complete callers, tests, cleanup, and runtime receipt
+  - keep small operator-authorized commits
+ownership:
+  product:
+    DOMAIN.yml owns vocabulary, product surface, and ownership decisions
+  cmd:
+    owns the top-level Cmd union, mode array, recursive SubCmd routing, resolution, and completion policy
+  sub_cmd:
+    is a concrete tagged union owned by its selected Cmd arm
+  candidate:
+    owns the reachable-node union, input policy, bounds, and string lifetime contract
+  gui:
+    consumes the Cmd tree and owns SDL lifecycle, rendering, input, selection, and intent
+  cli:
+    consumes the Cmd tree and owns terminal, Bash, and help wire formatting only
+  process:
+    owns identity, mode entry, resident runtime invocation, cleanup, and lifecycle invariants
+  mode:
+    owns one sharp desktop tool, one Cmd arm, one SubCmd union, one candidate source, and optional resident runtime
+  apps:
+    is the first normal mode, owns installed application candidates, has no resident runtime, and is the default picker mode
+invariants:
+  - Cmd is a tagged union with exactly apps, notifications, wallpaper, and sunglasses arms
+  - the bounded ordered mode array places apps first and selects apps as the picker default
+  - every Cmd arm owns its own SubCmd union and candidate meaning
+  - Candidate is a tagged union whose next item is either another SubCmd union or a concrete executable candidate
+  - GUI and CLI consume the same Cmd array, SubCmd unions, and Candidate values
+  - no interface rebuilds the Cmd tree or candidate source independently
+  - candidate construction is bounded and failure-atomic
+  - candidate strings outlive every consumer and are released by their producer
+  - Cmd semantics never depend on CLI, Bash, SDL, or GUI types
+  - Bash serialization is CLI-owned and completion policy is Cmd-owned
+  - every candidate tag has explicit policy coverage and either owned behavior or an explicit rejection at each applicable boundary
+  - every resident mode owns its process lifecycle and cleanup
+  - apps remains usable without compositor facts or a resident process
+  - every owner cleans up allocations, files, sockets, surfaces, and threads exactly once
+  - every external list, loop, Cmd, SubCmd, buffer, and result has a named bound
+  - CPU sleeps without input, notification work, or a scheduled deadline
+zig:
+  - usize owns indexes, lengths, capacities, byte counts, and standard-library boundaries
+  - domain quantities use types sized for their meaning
+  - error sets are exact at owner boundaries
+  - anyerror, anytype, anyopaque, and erased ownership require a direct justification
+  - every public symbol and non-obvious local decision has current comments
+  - use Foot for direct runtime shape and TigerBeetle for defensive invariants
+proof:
+  required:
+    - design approval before implementation
+    - unit tests for bounds, ownership, failure, and cleanup
+    - zig build test --summary all
+    - zig build
+    - git diff --check
+    - real CLI, GUI, and resident process receipts where applicable
