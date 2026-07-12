@@ -78,6 +78,7 @@ fn lessThan(_: void, a: RankedCandidate, b: RankedCandidate) bool {
 }
 
 fn matchesRoute(query: query_mod.Query, candidate: candidate_mod.Candidate) bool {
+    if (!candidate_mod.Candidate.accepts(.query, candidate.typeOf())) return false;
     return switch (query.route) {
         .blended => candidate.typeOf() == .app,
         .apps => candidate.typeOf() == .app,

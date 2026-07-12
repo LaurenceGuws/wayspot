@@ -135,10 +135,10 @@ fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
     var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
     defer apps.deinit(allocator);
     var candidates = wayspot.picker.candidate.Candidate.List.empty;
-    defer candidates.deinit(allocator);
+    defer candidates.deinit();
 
     try apps.collect(allocator, &candidates);
-    try wayspot.picker.icon_diag.writeReport(candidates.items);
+    try wayspot.picker.icon_diag.writeReport(candidates.slice());
 }
 
 fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
@@ -148,10 +148,10 @@ fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
     defer apps.deinit(allocator);
     var candidates = wayspot.picker.candidate.Candidate.List.empty;
-    defer candidates.deinit(allocator);
+    defer candidates.deinit();
 
     try apps.collect(allocator, &candidates);
-    const counts = try wayspot.picker.icon_cache.refresh(home, candidates.items);
+    const counts = try wayspot.picker.icon_cache.refresh(home, candidates.slice());
     try wayspot.picker.icon_cache.printRefreshSummary(counts);
 }
 

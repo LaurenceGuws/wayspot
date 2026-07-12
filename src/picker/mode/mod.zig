@@ -13,12 +13,11 @@ pub const Mode = struct {
     /// collect appends static picker modes and restart lifecycle rows.
     pub fn collect(
         self: *Mode,
-        allocator: std.mem.Allocator,
         out: *candidate.Candidate.List,
     ) !void {
         if (!self.enabled) return;
-        try notifications.collect(allocator, out);
-        try wallpaper.collect(allocator, out);
+        try notifications.collect(out);
+        try wallpaper.collect(out);
     }
 };
 
@@ -31,12 +30,12 @@ pub fn resolveRestartLifecycleCommand(open: []const u8) ?[]const u8 {
 
 test "mode exposes rows from picker mode owners" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
 
     var mode = Mode{};
-    try mode.collect(std.testing.allocator, &list);
+    try mode.collect(&list);
 
-    try std.testing.expectEqual(@as(u32, 5), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 5), list.count);
     try std.testing.expectEqual(candidate.Candidate.Type.mode, list.items[0].typeOf());
     try std.testing.expectEqualStrings("/notifications", list.items[0].openPayload());
     try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());

@@ -88,7 +88,7 @@ pub const NotificationHistoryList = struct {
         errdefer allocator.free(owned_subtitle);
 
         try self.owned_strings.ensureUnusedCapacity(allocator, 3);
-        try out.append(allocator, candidate_mod.Candidate.makeNotification(owned_title, owned_subtitle, open_payload));
+        try out.append(candidate_mod.Candidate.makeNotification(owned_title, owned_subtitle, open_payload));
         self.owned_strings.appendAssumeCapacity(open_payload);
         self.owned_strings.appendAssumeCapacity(owned_title);
         self.owned_strings.appendAssumeCapacity(owned_subtitle);
@@ -125,10 +125,10 @@ test "notification history list exposes newest cached rows first" {
     var list_owner = NotificationHistoryList{};
     defer list_owner.deinit(std.testing.allocator);
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
 
     try list_owner.collectAtPathForTest(std.testing.allocator, &list, path, now);
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expectEqual(candidate_mod.Candidate.Type.notification, list.items[0].typeOf());
     try std.testing.expectEqualStrings("new", list.items[0].title());
     try std.testing.expect(std.mem.startsWith(u8, list.items[0].openPayload(), open_prefix));

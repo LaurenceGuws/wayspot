@@ -63,7 +63,7 @@ pub const Command = struct {
     }
 
     pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
-        self.candidates.deinit(allocator);
+        self.candidates.deinit();
         deinitHistory(&self.history, allocator);
     }
 
@@ -76,7 +76,7 @@ pub const Command = struct {
         return rank.rankCandidatesWithOldestFirstHistory(
             allocator,
             query_mod.parse(raw_query),
-            self.candidates.items,
+            self.candidates.slice(),
             self.history.items,
         );
     }
@@ -109,6 +109,7 @@ pub const Command = struct {
         row: candidate.Candidate,
     ) ![]u8 {
         std.debug.assert(self.max_history > 0);
+        if (!candidate.Candidate.accepts(.open, row.typeOf())) return error.UnknownOpen;
         return switch (row.typeOf()) {
             .app => allocator.dupe(u8, row.openPayload()),
             .open => blk: {
@@ -126,7 +127,7 @@ pub const Command = struct {
     /// open returns the shell command for a terminal open payload.
     pub fn open(self: *Command, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
         try self.loadCandidatesOnce(allocator);
-        for (self.candidates.items) |row| {
+        for (self.candidates.slice()) |row| {
             if (!std.mem.eql(u8, row.openPayload(), payload)) continue;
             return self.resolveCandidateCommand(allocator, row);
         }
@@ -136,7 +137,7 @@ pub const Command = struct {
     /// commands writes the current command rows as tab-separated terminal records.
     pub fn commands(self: *Command, allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
         try self.loadCandidatesOnce(allocator);
-        for (self.candidates.items) |row| {
+        for (self.candidates.slice()) |row| {
             try printTerminalRow(out, row);
         }
     }
@@ -168,6 +169,7 @@ pub const Command = struct {
         if (ranked.len > max_completion_candidates) return error.TooManyCompletionCandidates;
         var output_bytes: u32 = 0;
         for (ranked) |item| {
+            if (!candidate.Candidate.accepts(.bash_completion, item.candidate.typeOf())) continue;
             const value = item.candidate.openPayload();
             const escaped_bytes = bashEscapedLength(value);
             if (escaped_bytes > max_completion_output_bytes -| output_bytes) return error.CompletionOutputTooLong;
@@ -179,9 +181,9 @@ pub const Command = struct {
 
     fn loadCandidatesOnce(self: *Command, allocator: std.mem.Allocator) !void {
         if (self.candidates_loaded) return;
-        if (self.modes) |owner| try owner.collect(allocator, &self.candidates);
+        if (self.modes) |owner| try owner.collect(&self.candidates);
         if (self.notification_history) |owner| try owner.collect(allocator, &self.candidates);
-        if (self.opens) |owner| try owner.collect(allocator, &self.candidates);
+        if (self.opens) |owner| try owner.collect(&self.candidates);
         if (self.apps) |owner| try owner.collect(allocator, &self.candidates);
         self.candidates_loaded = true;
     }
@@ -500,8 +502,8 @@ test "command model resolves app and lifecycle commands" {
 
 test "command model keeps app open payload behavior" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.makeApp("Terminal", "Utilities", "foot", ""));
+    defer list.deinit();
+    try list.append(candidate.Candidate.makeApp("Terminal", "Utilities", "foot", ""));
 
     var model = Command{
         .candidates = list,
@@ -517,8 +519,8 @@ test "command model keeps app open payload behavior" {
 
 test "command model collects notification history list rows" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.makeNotification("Summary", "App", "notification-history:0:1"));
+    defer list.deinit();
+    try list.append(candidate.Candidate.makeNotification("Summary", "App", "notification-history:0:1"));
 
     var model = Command{
         .candidates = list,
@@ -536,8 +538,8 @@ test "command model collects notification history list rows" {
 
 test "command model writes completion records" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.makeApp("Quote App", "Utilities", "quote'app", ""));
+    defer list.deinit();
+    try list.append(candidate.Candidate.makeApp("Quote App", "Utilities", "quote'app", ""));
 
     var model = Command{
         .candidates = list,
@@ -551,6 +553,26 @@ test "command model writes completion records" {
     try model.completeBash(std.testing.allocator, "quote", &output.writer);
 
     try std.testing.expectEqualStrings("'quote'\\''app'\n", output.written());
+}
+
+test "bash completion excludes notification records by input policy" {
+    var list = candidate.Candidate.List.empty;
+    defer list.deinit();
+    try list.append(candidate.Candidate.makeMode("/notifications history", "Lifecycle", "/notifications history"));
+    try list.append(candidate.Candidate.makeNotification("Summary", "App", "notification-history:0:1"));
+
+    var model = Command{
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try model.completeBash(std.testing.allocator, "/notifications", &output.writer);
+
+    try std.testing.expectEqualStrings("'/notifications history'\n", output.written());
 }
 
 test "command launch runner accepts successful command" {

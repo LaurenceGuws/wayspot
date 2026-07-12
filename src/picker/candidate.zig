@@ -7,12 +7,16 @@ pub const UserInput = enum {
     query,
     selection,
     open,
+    bash_completion,
 };
 
 /// user_input_types is the explicit DRY list shared by input validation and proof.
-pub const user_input_types = [_]UserInput{ .query, .selection, .open };
+pub const user_input_types = [_]UserInput{ .query, .selection, .open, .bash_completion };
+
+pub const max_candidates: u32 = 1024;
 
 /// Row stores one bounded display and open record carried by a command candidate.
+/// Every slice is borrowed; the producer retains and releases its backing bytes.
 pub const Row = struct {
     title: []const u8,
     subtitle: []const u8,
@@ -29,9 +33,55 @@ pub const Candidate = union(enum) {
     notification: Row,
     hint: Row,
 
-    pub const List = std.ArrayList(Candidate);
+    /// List stores bounded candidates and borrows every string from its producer.
+    /// Producers retain those strings until all consumers finish and then release them.
+    pub const List = struct {
+        items: [max_candidates]Candidate = undefined,
+        count: u32 = 0,
+
+        pub const empty = List{};
+
+        /// append retains one candidate without allocating or copying its strings.
+        pub fn append(self: *List, value: Candidate) !void {
+            if (!isDeclaredType(value.typeOf())) return error.UnknownCandidateType;
+            if (self.count >= max_candidates) return error.TooManyCandidates;
+            self.items[self.count] = value;
+            self.count += 1;
+        }
+
+        /// slice exposes only initialized candidates to a consumer.
+        pub fn slice(self: *const List) []const Candidate {
+            return self.items[0..self.count];
+        }
+
+        /// clearRetainingCapacity forgets records while retaining fixed storage.
+        pub fn clearRetainingCapacity(self: *List) void {
+            self.count = 0;
+        }
+
+        /// deinit clears borrowed records; the producers own and release their strings.
+        pub fn deinit(self: *List) void {
+            self.* = .empty;
+        }
+    };
     pub const Type = std.meta.Tag(Candidate);
     pub const types = [_]Type{ .app, .open, .mode, .lifecycle, .notification, .hint };
+
+    /// accepts applies the one input policy used by query, selection, open, and Bash.
+    pub fn accepts(input: UserInput, candidate_type: Type) bool {
+        if (!isDeclaredInput(input) or !isDeclaredType(candidate_type)) return false;
+        return switch (input) {
+            .query, .selection => true,
+            .open => switch (candidate_type) {
+                .app, .open, .lifecycle => true,
+                .mode, .notification, .hint => false,
+            },
+            .bash_completion => switch (candidate_type) {
+                .app, .open, .mode, .lifecycle => true,
+                .notification, .hint => false,
+            },
+        };
+    }
 
     /// makeApp creates one launchable desktop application candidate.
     pub fn makeApp(title_text: []const u8, subtitle_text: []const u8, open_payload: []const u8, icon: []const u8) Candidate {
@@ -96,9 +146,24 @@ pub const Candidate = union(enum) {
     }
 };
 
+fn isDeclaredInput(input: UserInput) bool {
+    for (user_input_types) |declared| {
+        if (declared == input) return true;
+    }
+    return false;
+}
+
+fn isDeclaredType(candidate_type: Candidate.Type) bool {
+    for (Candidate.types) |declared| {
+        if (declared == candidate_type) return true;
+    }
+    return false;
+}
+
 comptime {
-    std.debug.assert(user_input_types.len == 3);
+    std.debug.assert(user_input_types.len == 4);
     std.debug.assert(Candidate.types.len == 6);
+    std.debug.assert(max_candidates > 0);
 }
 
 test "candidate is one explicit tagged union vocabulary" {
@@ -111,5 +176,25 @@ test "candidate is one explicit tagged union vocabulary" {
 
 test "user input list is explicit and bounded" {
     try std.testing.expectEqual(UserInput.query, user_input_types[0]);
-    try std.testing.expectEqual(UserInput.open, user_input_types[user_input_types.len - 1]);
+    try std.testing.expectEqual(UserInput.bash_completion, user_input_types[user_input_types.len - 1]);
+    try std.testing.expect(Candidate.accepts(.bash_completion, .mode));
+    try std.testing.expect(!Candidate.accepts(.bash_completion, .notification));
+}
+
+test "candidate list rejects records beyond its fixed capacity" {
+    var list = Candidate.List.empty;
+    var index: u32 = 0;
+    while (index < max_candidates) : (index += 1) {
+        try list.append(Candidate.makeApp("App", "Utility", "app", ""));
+    }
+    try std.testing.expectError(error.TooManyCandidates, list.append(Candidate.makeApp("Overflow", "Utility", "overflow", "")));
+    try std.testing.expectEqual(max_candidates, list.count);
+}
+
+test "candidate list cleanup does not claim producer string ownership" {
+    var title = [_]u8{ 'A', 'p', 'p' };
+    var list = Candidate.List.empty;
+    try list.append(Candidate.makeApp(title[0..], "Utility", "app", ""));
+    list.deinit();
+    try std.testing.expectEqualStrings("App", title[0..]);
 }

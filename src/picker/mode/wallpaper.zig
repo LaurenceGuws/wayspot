@@ -6,9 +6,9 @@ const candidate = @import("picker_candidate");
 pub const restart_open = "lifecycle:wallpapers:restart";
 
 /// collect appends wallpaper mode rows to the picker list.
-pub fn collect(allocator: std.mem.Allocator, out: *candidate.Candidate.List) !void {
-    try out.append(allocator, candidate.Candidate.makeMode("/wallpapers", "Mode", "/wallpapers"));
-    try out.append(allocator, restartLifecycleRow());
+pub fn collect(out: *candidate.Candidate.List) !void {
+    try out.append(candidate.Candidate.makeMode("/wallpapers", "Mode", "/wallpapers"));
+    try out.append(restartLifecycleRow());
 }
 
 /// restartLifecycleRow returns the explicit wallpaper restart row.
@@ -23,11 +23,11 @@ pub fn restartCommand() []const u8 {
 
 test "wallpaper mode owns restart lifecycle row" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
 
-    try collect(std.testing.allocator, &list);
+    try collect(&list);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());
     try std.testing.expectEqualStrings(restart_open, list.items[1].openPayload());
 }

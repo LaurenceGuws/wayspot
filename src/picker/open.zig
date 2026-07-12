@@ -50,13 +50,11 @@ pub const Open = struct {
     /// collect appends fixed open rows whose local dependencies are present.
     pub fn collect(
         self: *Open,
-        allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
     ) !void {
         for (specs) |spec| {
             if (!self.openAvailable(spec)) continue;
             try out.append(
-                allocator,
                 candidate_mod.Candidate.openRow(
                     spec.title,
                     spec.subtitle,
@@ -147,14 +145,14 @@ test "open rows collect available entries only" {
     };
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
 
     var open = Open{
         .command_exists_fn = Fake.commandExists,
         .path_exists_fn = Fake.pathExists,
     };
-    try open.collect(std.testing.allocator, &list);
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
+    try open.collect(&list);
+    try std.testing.expectEqual(@as(u32, 1), list.count);
     try std.testing.expectEqual(candidate_mod.Candidate.Type.open, list.items[0].typeOf());
     try std.testing.expectEqualStrings("settings", list.items[0].openPayload());
     try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].iconName());

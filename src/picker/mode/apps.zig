@@ -62,7 +62,6 @@ pub const Apps = struct {
             const icon_name = trimCacheField(fields.next() orelse "");
 
             try out.append(
-                allocator,
                 candidate_mod.Candidate.makeApp(name, category, exec_cmd, icon_name),
             );
             count += 1;
@@ -98,7 +97,7 @@ pub const Apps = struct {
         allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
     ) !u32 {
-        const start_len = out.items.len;
+        const start_len = out.count;
         var scan = DesktopScanState{};
         defer scan.deinit(allocator);
         var roots = try desktopFileRoots(allocator);
@@ -112,9 +111,9 @@ pub const Apps = struct {
                 else => return err,
             };
         }
-        const added = @as(u32, @intCast(out.items.len - start_len));
+        const added = out.count - start_len;
         if (added > 0) {
-            writeAppCacheFromCandidates(self.cache_path, out.items[start_len..]) catch |err| {
+            writeAppCacheFromCandidates(self.cache_path, out.slice()[start_len..]) catch |err| {
                 std.log.warn("app rows failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
             };
         }
@@ -158,7 +157,7 @@ pub const Apps = struct {
             const kept_category = try self.keepString(allocator, category);
             const kept_exec = try self.keepString(allocator, exec_norm);
             const kept_icon = try self.keepString(allocator, parsed.icon);
-            try out.append(allocator, candidate_mod.Candidate.makeApp(kept_name, kept_category, kept_exec, kept_icon));
+            try out.append(candidate_mod.Candidate.makeApp(kept_name, kept_category, kept_exec, kept_icon));
         }
     }
 };
@@ -383,10 +382,10 @@ test "app rows collects rows from cache file" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title());
@@ -415,10 +414,10 @@ test "app rows accepts cache rows without icon metadata" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title());
@@ -436,7 +435,7 @@ test "app rows scans desktop files when cache is missing" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
 
     try std.testing.expect(apps.cache_data == null);
@@ -462,10 +461,10 @@ test "app rows returns no rows when cache has no valid rows" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 0), list.count);
     try std.testing.expect(apps.cache_data == null);
 }
 
@@ -489,7 +488,7 @@ test "app rows replaces cache data across cache collects" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
@@ -506,7 +505,7 @@ test "app rows replaces cache data across cache collects" {
     try apps.collect(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 1), list.count);
     try std.testing.expectEqualStrings("Gimp", list.items[0].title());
 
     list.clearRetainingCapacity();
@@ -536,10 +535,10 @@ test "app rows trims crlf and trailing whitespace from stored fields" {
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     try apps.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
     try std.testing.expectEqualStrings("kitty", list.items[0].openPayload());
     try std.testing.expectEqualStrings("kitty", list.items[0].iconName());
@@ -595,19 +594,19 @@ test "app rows can scan desktop root and rebuild cache rows" {
     var apps = Apps.init(cache_file);
     defer apps.deinit(std.testing.allocator);
     var list = candidate_mod.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
     var scan = DesktopScanState{};
     defer scan.deinit(std.testing.allocator);
 
     try apps.collectFromDesktopRoot(std.testing.allocator, &list, &scan, root_path);
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 1), list.count);
     try std.testing.expect(apps.cache_data == null);
     try std.testing.expectEqual(@as(u32, 4), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Test App", list.items[0].title());
     try std.testing.expectEqualStrings("Utility", list.items[0].subtitle());
     try std.testing.expectEqualStrings("test-app", list.items[0].openPayload());
 
-    try writeAppCacheFromCandidates(cache_file, list.items);
+    try writeAppCacheFromCandidates(cache_file, list.slice());
     const written = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cache_file, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(written);
     try std.testing.expect(std.mem.indexOf(u8, written, "Utility\tTest App\ttest-app\ttest-icon\n") != null);

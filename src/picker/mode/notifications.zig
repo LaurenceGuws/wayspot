@@ -7,10 +7,10 @@ pub const restart_open = "lifecycle:notifications:restart";
 pub const history_open = "/notifications history";
 
 /// collect appends notification mode rows to the picker list.
-pub fn collect(allocator: std.mem.Allocator, out: *candidate.Candidate.List) !void {
-    try out.append(allocator, candidate.Candidate.makeMode("/notifications", "Mode", "/notifications"));
-    try out.append(allocator, restartLifecycleRow());
-    try out.append(allocator, candidate.Candidate.makeMode("Notification history", "Lifecycle", history_open));
+pub fn collect(out: *candidate.Candidate.List) !void {
+    try out.append(candidate.Candidate.makeMode("/notifications", "Mode", "/notifications"));
+    try out.append(restartLifecycleRow());
+    try out.append(candidate.Candidate.makeMode("Notification history", "Lifecycle", history_open));
 }
 
 /// restartLifecycleRow returns the explicit notification restart row.
@@ -25,11 +25,11 @@ pub fn restartCommand() []const u8 {
 
 test "notification mode owns history and restart lifecycle rows" {
     var list = candidate.Candidate.List.empty;
-    defer list.deinit(std.testing.allocator);
+    defer list.deinit();
 
-    try collect(std.testing.allocator, &list);
+    try collect(&list);
 
-    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(@as(u32, 3), list.count);
     try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());
     try std.testing.expectEqualStrings(restart_open, list.items[1].openPayload());
     try std.testing.expectEqualStrings(history_open, list.items[2].openPayload());

@@ -6,6 +6,7 @@
 const std = @import("std");
 const app = @import("mod.zig");
 const app_icons = @import("icons.zig");
+const candidate_owner = @import("picker_candidate");
 const command_owner = @import("command.zig");
 const config_defaults = @import("../config/defaults.zig");
 const cursor_blink = @import("cursor_blink.zig");
@@ -303,6 +304,7 @@ const Surface = struct {
         std.debug.assert(result_index < self.results.len);
         if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
         const candidate = self.results[@intCast(result_index)].candidate;
+        if (!candidate_owner.Candidate.accepts(.selection, candidate.typeOf())) return;
         if (candidate.typeOf() == .mode) {
             try self.switchMode(candidate.openPayload());
             return;
