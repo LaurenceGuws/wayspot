@@ -42,6 +42,9 @@ vocabulary:
       - candidate
       - input
       - selection
+      - interface
+      - cli
+      - gui
       - textbox
       - cursor
       - scale
@@ -281,7 +284,7 @@ build:
     - one_cleanup_per_owner
 
   picker:
-    path: process -> command -> candidate -> cli_or_gui -> selection -> command -> clean
+    path: process -> command -> candidate -> interface -> selection -> command -> clean
     command:
       candidate: tagged_union
       user_input: explicit_bounded_type
