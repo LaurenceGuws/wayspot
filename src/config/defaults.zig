@@ -140,7 +140,7 @@ fn luaMessageEquals(raw: *c.lua_State, expected: []const u8) bool {
 }
 
 fn applyRoot(raw: *c.lua_State, index: c_int, mode: ApplyMode, appearance_state: *appearance_owner.Appearance, counters: *Counters) !void {
-    const fields = [_][]const u8{ "fonts", "picker", "banner", "sunglasses_form" };
+    const fields = [_][]const u8{ "fonts", "picker", "banner" };
     try validateNamedFields(raw, index, &fields, counters);
     if (try pushTableField(raw, index, "fonts", mode)) {
         defer c.lua_pop(raw, 1);
@@ -153,10 +153,6 @@ fn applyRoot(raw: *c.lua_State, index: c_int, mode: ApplyMode, appearance_state:
     if (try pushTableField(raw, index, "banner", mode)) {
         defer c.lua_pop(raw, 1);
         try applyBanner(raw, c.lua_absindex(raw, -1), mode, &appearance_state.banner, counters, 1);
-    }
-    if (try pushTableField(raw, index, "sunglasses_form", mode)) {
-        defer c.lua_pop(raw, 1);
-        try applySunglassesForm(raw, c.lua_absindex(raw, -1), mode, &appearance_state.sunglasses_form, counters, 1);
     }
 }
 
@@ -262,53 +258,6 @@ fn applyBanner(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appear
     try applyChromeField(raw, index, "app_y", mode, &target.app_top);
     try applyChromeField(raw, index, "summary_y", mode, &target.summary_top);
     try applyChromeField(raw, index, "body_y", mode, &target.body_top);
-}
-
-fn applySunglassesForm(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.SunglassesFormAppearance, counters: *Counters, depth: u32) !void {
-    try ensureDepth(depth);
-    const fields = [_][]const u8{
-        "value_column_width",
-        "slider_height",
-        "toggle_size",
-        "knob_width",
-        "knob_height",
-        "toggle_inset",
-        "value_column_min_x",
-        "value_column_fraction",
-        "text_font_px",
-        "value_font_px",
-        "monitor_value",
-        "path_error",
-        "form_value",
-        "focused_row_fill",
-        "normal_row_fill",
-        "label",
-        "toggle_border",
-        "toggle_fill",
-        "slider_track",
-        "slider_knob",
-    };
-    try validateNamedFields(raw, index, &fields, counters);
-    try applyChromeField(raw, index, "value_column_width", mode, &target.value_gap);
-    try applyChromeField(raw, index, "slider_height", mode, &target.track_h);
-    try applyChromeField(raw, index, "toggle_size", mode, &target.toggle_box);
-    try applyChromeField(raw, index, "knob_width", mode, &target.knob_w);
-    try applyChromeField(raw, index, "knob_height", mode, &target.knob_h);
-    try applyChromeField(raw, index, "toggle_inset", mode, &target.toggle_pad);
-    try applyLayoutField(raw, index, "value_column_min_x", mode, &target.value_min_x);
-    try applyOpacityField(raw, index, "value_column_fraction", mode, &target.value_fraction);
-    try applyFontPxField(raw, index, "text_font_px", mode, &target.label_px);
-    try applyFontPxField(raw, index, "value_font_px", mode, &target.value_px);
-    try applyColorField(raw, index, "monitor_value", mode, &target.monitor_value, counters);
-    try applyColorField(raw, index, "path_error", mode, &target.path_error, counters);
-    try applyColorField(raw, index, "form_value", mode, &target.form_value, counters);
-    try applyColorField(raw, index, "focused_row_fill", mode, &target.focused_row_fill, counters);
-    try applyColorField(raw, index, "normal_row_fill", mode, &target.normal_row_fill, counters);
-    try applyColorField(raw, index, "label", mode, &target.label, counters);
-    try applyColorField(raw, index, "toggle_border", mode, &target.toggle_border, counters);
-    try applyColorField(raw, index, "toggle_fill", mode, &target.toggle_fill, counters);
-    try applyColorField(raw, index, "slider_track", mode, &target.slider_track, counters);
-    try applyColorField(raw, index, "slider_knob", mode, &target.slider_knob, counters);
 }
 
 fn applyText(raw: *c.lua_State, index: c_int, mode: ApplyMode, target: *appearance_owner.TextAppearance, counters: *Counters, depth: u32) !void {
@@ -554,7 +503,6 @@ test "embedded defaults parse and preserve current visual defaults" {
     const expected = try appearance_owner.currentHardcodedDefaults();
     try std.testing.expectEqual(expected.picker.background, parsed.picker.background);
     try std.testing.expectEqual(expected.banner.summary_text, parsed.banner.summary_text);
-    try std.testing.expectEqual(expected.sunglasses_form.slider_knob, parsed.sunglasses_form.slider_knob);
     try std.testing.expectEqual(@as(u32, 4), parsed.fonts.candidates.count);
 }
 
@@ -617,7 +565,6 @@ test "out of range font chrome color opacity key count and depth values are reje
     try std.testing.expectError(error.FontSizeOutOfRange, applyBuffer("return { picker = { query_text = { font_px = 99 } } }", .optional, &defaults));
     try std.testing.expectError(error.ChromeOutOfRange, applyBuffer("return { banner = { accent_width = 99 } }", .optional, &defaults));
     try std.testing.expectError(error.ColorComponentOutOfRange, applyBuffer("return { picker = { background = { 300, 0, 0, 255 } } }", .optional, &defaults));
-    try std.testing.expectError(error.OpacityOutOfRange, applyBuffer("return { sunglasses_form = { value_column_fraction = 2 } }", .optional, &defaults));
     try std.testing.expectError(error.UnknownDefaultsField, applyBuffer("return { unknown = 1 }", .optional, &defaults));
     try std.testing.expectError(error.DefaultsTableTooDeep, applyBuffer("return { picker = { query_text = { color = { { 1 }, 2, 3, 4 } } } }", .optional, &defaults));
 }

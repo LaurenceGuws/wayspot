@@ -48,14 +48,14 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
     var path_buffer: [app_icons.max_icon_path_bytes + 1]u8 = undefined;
     const roots = app_icons.ResolveRoots.fromEnv();
     for (candidates) |candidate| {
-        if (candidate.kind != .app) continue;
+        if (candidate.typeOf() != .app) continue;
         counts.app_rows += 1;
         if (counts.app_rows > max_report_rows) {
             counts.skipped += 1;
             continue;
         }
 
-        const resolution = app_icons.diagnoseIcon(candidate.icon, roots, &path_buffer);
+        const resolution = app_icons.diagnoseIcon(candidate.iconName(), roots, &path_buffer);
         if (resolution.status == .resolved) {
             const path_z = path_buffer[0..resolution.path.len :0];
             const texture_result = app_icons.loadTexturePath(renderer, path_z);
@@ -69,8 +69,8 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
             try out.print(
                 "resolved\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\n",
                 .{
-                    candidate.title,
-                    candidate.icon,
+                    candidate.title(),
+                    candidate.iconName(),
                     resolution.path,
                     resolution.format(),
                     @tagName(resolution.status),
@@ -93,7 +93,7 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
         };
         try out.print(
             "{s}\t{s}\t{s}\t\t\t{s}\tnot_loaded\n",
-            .{ section, candidate.title, candidate.icon, @tagName(resolution.status) },
+            .{ section, candidate.title(), candidate.iconName(), @tagName(resolution.status) },
         );
     }
 

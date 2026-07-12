@@ -115,36 +115,11 @@ pub const BannerAppearance = struct {
     body_top: f32,
 };
 
-/// SunglassesFormAppearance names the picker-pane form values used by the sunglasses fields.
-pub const SunglassesFormAppearance = struct {
-    value_gap: f32,
-    track_h: f32,
-    toggle_box: f32,
-    knob_w: f32,
-    knob_h: f32,
-    toggle_pad: f32,
-    value_min_x: f32,
-    value_fraction: f32,
-    label_px: u16,
-    value_px: u16,
-    monitor_value: Rgba8,
-    path_error: Rgba8,
-    form_value: Rgba8,
-    focused_row_fill: Rgba8,
-    normal_row_fill: Rgba8,
-    label: Rgba8,
-    toggle_border: Rgba8,
-    toggle_fill: Rgba8,
-    slider_track: Rgba8,
-    slider_knob: Rgba8,
-};
-
 /// Appearance is the complete bounded UI appearance state consumed by current renderers.
 pub const Appearance = struct {
     fonts: FontAppearance,
     picker: PickerAppearance,
     banner: BannerAppearance,
-    sunglasses_form: SunglassesFormAppearance,
 };
 
 /// currentHardcodedDefaults mirrors the pre-config renderer defaults for parser tests.
@@ -189,28 +164,6 @@ pub fn currentHardcodedDefaults() !Appearance {
             .app_top = 6,
             .summary_top = 24,
             .body_top = 50,
-        },
-        .sunglasses_form = .{
-            .value_gap = 42,
-            .track_h = 4,
-            .toggle_box = 16,
-            .knob_w = 8,
-            .knob_h = 20,
-            .toggle_pad = 4,
-            .value_min_x = 122,
-            .value_fraction = 0.28,
-            .label_px = 15,
-            .value_px = 14,
-            .monitor_value = rgba(218, 226, 236, 255),
-            .path_error = rgba(238, 142, 142, 255),
-            .form_value = rgba(186, 202, 224, 255),
-            .focused_row_fill = rgba(64, 64, 82, 255),
-            .normal_row_fill = rgba(31, 31, 38, 255),
-            .label = rgba(216, 222, 230, 255),
-            .toggle_border = rgba(112, 126, 144, 255),
-            .toggle_fill = rgba(222, 231, 242, 255),
-            .slider_track = rgba(92, 104, 120, 255),
-            .slider_knob = rgba(228, 235, 244, 255),
         },
     };
 }
@@ -266,8 +219,6 @@ test "named product defaults preserve banner and form appearance" {
     const defaults = try currentHardcodedDefaults();
     try std.testing.expectEqual(Rgba8{ .r = 70, .g = 22, .b = 26, .a = 242 }, defaults.banner.critical_background);
     try std.testing.expectEqual(@as(f32, 2), defaults.banner.accent_w);
-    try std.testing.expectEqual(Rgba8{ .r = 218, .g = 226, .b = 236, .a = 255 }, defaults.sunglasses_form.monitor_value);
-    try std.testing.expectEqual(@as(f32, 0.28), defaults.sunglasses_form.value_fraction);
 }
 
 test "appearance validators reject values outside accepted bounds" {

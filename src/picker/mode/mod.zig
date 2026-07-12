@@ -4,7 +4,6 @@ const std = @import("std");
 const candidate = @import("picker_candidate");
 pub const apps = @import("apps.zig");
 pub const notifications = @import("notifications.zig");
-pub const sunglasses = @import("sunglasses.zig");
 pub const wallpaper = @import("wallpaper.zig");
 
 /// Mode appends the accepted slash-list rows for the picker.
@@ -19,7 +18,6 @@ pub const Mode = struct {
     ) !void {
         if (!self.enabled) return;
         try notifications.collect(allocator, out);
-        try sunglasses.collect(allocator, out);
         try wallpaper.collect(allocator, out);
     }
 };
@@ -38,14 +36,13 @@ test "mode exposes rows from picker mode owners" {
     var mode = Mode{};
     try mode.collect(std.testing.allocator, &list);
 
-    try std.testing.expectEqual(@as(u32, 6), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqual(candidate.Candidate.Kind.mode, list.items[0].kind);
-    try std.testing.expectEqualStrings("/notifications", list.items[0].open);
-    try std.testing.expectEqual(candidate.Candidate.Kind.lifecycle, list.items[1].kind);
-    try std.testing.expectEqualStrings(notifications.restart_open, list.items[1].open);
-    try std.testing.expectEqualStrings(notifications.history_open, list.items[2].open);
-    try std.testing.expectEqualStrings("/sunglasses", list.items[3].open);
-    try std.testing.expectEqualStrings(wallpaper.restart_open, list.items[5].open);
-    try std.testing.expect(resolveRestartLifecycleCommand(list.items[1].open) != null);
-    try std.testing.expect(resolveRestartLifecycleCommand(list.items[5].open) != null);
+    try std.testing.expectEqual(@as(u32, 5), @as(u32, @intCast(list.items.len)));
+    try std.testing.expectEqual(candidate.Candidate.Type.mode, list.items[0].typeOf());
+    try std.testing.expectEqualStrings("/notifications", list.items[0].openPayload());
+    try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());
+    try std.testing.expectEqualStrings(notifications.restart_open, list.items[1].openPayload());
+    try std.testing.expectEqualStrings(notifications.history_open, list.items[2].openPayload());
+    try std.testing.expectEqualStrings(wallpaper.restart_open, list.items[4].openPayload());
+    try std.testing.expect(resolveRestartLifecycleCommand(list.items[1].openPayload()) != null);
+    try std.testing.expect(resolveRestartLifecycleCommand(list.items[4].openPayload()) != null);
 }

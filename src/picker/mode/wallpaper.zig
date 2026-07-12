@@ -7,13 +7,13 @@ pub const restart_open = "lifecycle:wallpapers:restart";
 
 /// collect appends wallpaper mode rows to the picker list.
 pub fn collect(allocator: std.mem.Allocator, out: *candidate.Candidate.List) !void {
-    try out.append(allocator, candidate.Candidate.init(.mode, "/wallpapers", "Mode", "/wallpapers"));
+    try out.append(allocator, candidate.Candidate.makeMode("/wallpapers", "Mode", "/wallpapers"));
     try out.append(allocator, restartLifecycleRow());
 }
 
 /// restartLifecycleRow returns the explicit wallpaper restart row.
 pub fn restartLifecycleRow() candidate.Candidate {
-    return candidate.Candidate.init(.lifecycle, "Restart wallpaper", "Lifecycle", restart_open);
+    return candidate.Candidate.makeLifecycle("Restart wallpaper", "Lifecycle", restart_open);
 }
 
 /// restartCommand returns the shell command used by the wallpaper restart row.
@@ -28,8 +28,8 @@ test "wallpaper mode owns restart lifecycle row" {
     try collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqual(candidate.Candidate.Kind.lifecycle, list.items[1].kind);
-    try std.testing.expectEqualStrings(restart_open, list.items[1].open);
+    try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());
+    try std.testing.expectEqualStrings(restart_open, list.items[1].openPayload());
 }
 
 test "wallpaper restart starts the owner directly" {

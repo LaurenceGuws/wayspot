@@ -12,13 +12,10 @@ const cursor_blink = @import("cursor_blink.zig");
 const rank = @import("rank.zig");
 const textbox = @import("textbox.zig");
 const viewport = @import("viewport.zig");
-const query_mod = @import("query.zig");
 const scale_owner = @import("scale.zig");
 const signal_owner = @import("signal.zig");
 const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
-const sunglasses_form = @import("../sunglasses/form.zig");
-const sunglasses_overlay = @import("../sunglasses/overlay.zig");
 
 const c = @import("sdl_c");
 
@@ -38,13 +35,8 @@ pub fn run(
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
 const query_max_bytes: u32 = 256;
-const TextEditTarget = enum {
-    query,
-    sunglasses_path,
-};
 
 const TextDrag = struct {
-    target: TextEditTarget,
     anchor: u32,
 };
 
@@ -63,13 +55,11 @@ const Surface = struct {
     shutdown_signal: ?*signal_owner.Signal = null,
     query: textbox.Textbox(query_max_bytes) = .{},
     results: []rank.RankedCandidate = &.{},
-    sunglasses_form: sunglasses_form.Form = .{},
     /// The viewport is the only owner of picker selection and scroll offset.
     viewport: viewport.Viewport = viewport.Viewport.init(),
     dirty: bool = true,
     launch_queue: command_owner.LaunchQueue = .{},
     shutdown_after_launch: bool = false,
-    window_sized_for_sunglasses: ?bool = null,
     text_drag: ?TextDrag = null,
 
     fn init(allocator: std.mem.Allocator, picker: *app.Picker, home: []const u8) !Surface {
@@ -96,7 +86,6 @@ const Surface = struct {
             const stopped_text_input = c.SDL_StopTextInput(window);
             if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
         }
-        const persisted_sunglasses_form = try sunglasses_form.Form.load(allocator);
         var self = Surface{
             .allocator = allocator,
             .picker = picker,
@@ -105,14 +94,12 @@ const Surface = struct {
             .text = text_engine,
             .appearance = appearance_state,
             .config = config,
-            .sunglasses_form = persisted_sunglasses_form,
             .cursor = cursor_blink.CursorBlink.init(vendorNowMs(), cursor_blink.cursor_blink_interval_ms),
         };
         try self.refreshResults();
         const shown = c.SDL_ShowWindow(window);
         const raised = c.SDL_RaiseWindow(window);
         if (!shown or !raised) return error.SdlShowFailed;
-        try self.applyWindowSizeForRoute(true);
         try self.updateViewportForWindow();
         return self;
     }
@@ -190,14 +177,9 @@ const Surface = struct {
             },
             c.SDL_EVENT_TEXT_INPUT => {
                 const input_text = std.mem.span(event.text.text);
-                if (self.sunglassesActive()) {
-                    try self.applyTextInput(.sunglasses_path, input_text);
-                    return true;
-                }
-                try self.applyTextInput(.query, input_text);
+                try self.applyTextInput(input_text);
             },
             c.SDL_EVENT_MOUSE_WHEEL => {
-                if (self.sunglassesActive()) return true;
                 const wheel_y = event.wheel.integer_y;
                 const scroll_delta = if (wheel_y == std.math.minInt(i32)) std.math.maxInt(i32) else -wheel_y;
                 if (wheel_y != 0 and self.viewport.scrollLines(scroll_delta)) self.dirty = true;
@@ -209,21 +191,12 @@ const Surface = struct {
                     }
                     return true;
                 }
-                if (self.sunglassesActive()) {
-                    if (try self.focusSunglassesFormAt(event.motion.x, event.motion.y)) self.dirty = true;
-                    return true;
-                }
                 if (self.visibleRowAtPoint(event.motion.x, event.motion.y)) |visible_row| {
                     if (self.viewport.selectVisibleRow(visible_row)) self.dirty = true;
                 }
             },
             c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
                 if (event.button.button == c.SDL_BUTTON_LEFT) {
-                    if (self.sunglassesActive()) {
-                        if (try self.beginSunglassesPathSelection(event.button.x, event.button.y)) return true;
-                        try self.clickSunglassesForm(event.button.x, event.button.y);
-                        return true;
-                    }
                     if (try self.beginQuerySelection(event.button.x, event.button.y)) return true;
                     if (self.visibleRowAtPoint(event.button.x, event.button.y)) |visible_row| {
                         if (self.viewport.resultAtVisibleRow(visible_row)) |result_index| {
@@ -244,96 +217,23 @@ const Surface = struct {
                     return true;
                 }
                 if (textEditAction(event.key.key, event.key.mod)) |action| {
-                    if (self.sunglassesActive() and self.sunglasses_form.focusedPathInput()) {
-                        try self.applyTextEditAction(.sunglasses_path, action);
-                        return true;
-                    }
-                    if (!self.sunglassesActive()) {
-                        try self.applyTextEditAction(.query, action);
-                        return true;
-                    }
+                    try self.applyTextEditAction(action);
+                    return true;
                 }
                 switch (event.key.key) {
                     c.SDLK_ESCAPE => {
                         return false;
                     },
                     c.SDLK_BACKSPACE => {
-                        if (self.sunglassesActive()) {
-                            try self.applyTextEditAction(.sunglasses_path, .backspace);
-                            return true;
-                        }
-                        try self.applyTextEditAction(.query, .backspace);
-                    },
-                    c.SDLK_TAB => {
-                        if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, (event.key.mod & c.SDL_KMOD_SHIFT) != 0);
-                            self.dirty = true;
-                        }
-                    },
-                    c.SDLK_SPACE => {
-                        if (self.sunglassesActive() and self.sunglasses_form.focusedPathInput()) return true;
-                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_form.state)) {
-                            if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
-                            self.dirty = true;
-                            return true;
-                        }
-                        if (self.sunglassesActive()) return true;
+                        try self.applyTextEditAction(.backspace);
                     },
                     c.SDLK_RETURN, c.SDLK_KP_ENTER => {
-                        if (self.sunglassesActive()) {
-                            const was_path_input = self.sunglasses_form.focusedPathInput();
-                            switch (try self.sunglasses_form.commitFocused(&self.sunglasses_form.state)) {
-                                .changed => {
-                                    try self.persistAndWakeSunglasses();
-                                    self.dirty = true;
-                                    return true;
-                                },
-                                .invalid => {
-                                    self.dirty = true;
-                                    return true;
-                                },
-                                .no_change => {
-                                    if (was_path_input) {
-                                        self.dirty = true;
-                                        return true;
-                                    }
-                                },
-                            }
-                        }
-                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_form.state)) {
-                            if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
-                            self.dirty = true;
-                            return true;
-                        }
-                        if (self.sunglassesActive()) return true;
                         try self.queueSelectedLaunch();
                     },
-                    c.SDLK_LEFT => {
-                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_form.state, -sliderKeyboardStep())) {
-                            if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
-                            self.dirty = true;
-                        }
-                    },
-                    c.SDLK_RIGHT => {
-                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_form.state, sliderKeyboardStep())) {
-                            if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
-                            self.dirty = true;
-                        }
-                    },
                     c.SDLK_UP => {
-                        if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, true);
-                            self.dirty = true;
-                            return true;
-                        }
                         if (self.viewport.moveSelection(-1)) self.dirty = true;
                     },
                     c.SDLK_DOWN => {
-                        if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, false);
-                            self.dirty = true;
-                            return true;
-                        }
                         if (self.viewport.moveSelection(1)) self.dirty = true;
                     },
                     else => {},
@@ -347,7 +247,6 @@ const Surface = struct {
     fn refreshResults(self: *Surface) !void {
         self.freeResults();
         self.results = try self.picker.rankQuery(self.allocator, self.query.slice());
-        try self.applyWindowSizeForRoute(false);
         if (self.viewport.resetResults(@intCast(self.results.len))) {
             self.dirty = true;
             return;
@@ -365,15 +264,15 @@ const Surface = struct {
         std.debug.assert(result_index < self.results.len);
         if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
         const candidate = self.results[@intCast(result_index)].candidate;
-        if (candidate.kind == .mode) {
-            try self.switchMode(candidate.open);
+        if (candidate.typeOf() == .mode) {
+            try self.switchMode(candidate.openPayload());
             return;
         }
-        if (candidate.kind == .notification or candidate.kind == .hint) return;
+        if (candidate.typeOf() == .notification or candidate.typeOf() == .hint) return;
         const command = try self.picker.resolveCandidateCommand(self.allocator, candidate);
         defer self.allocator.free(command);
-        if (candidate.kind == .app or candidate.kind == .open) {
-            try self.picker.recordSelection(self.allocator, candidate.open);
+        if (candidate.typeOf() == .app or candidate.typeOf() == .open) {
+            try self.picker.recordSelection(self.allocator, candidate.openPayload());
         }
         try self.launch_queue.queue(command);
         self.shutdown_after_launch = true;
@@ -398,24 +297,10 @@ const Surface = struct {
         if (!background_color or !cleared) return error.SdlRenderFailed;
 
         const range = self.viewport.visibleRange();
-        const layout = if (self.sunglassesActive())
-            self.currentResultLayout(sunglasses_form.control_count)
-        else
-            self.currentResultLayout(range.count);
+        const layout = self.currentResultLayout(range.count);
         try self.drawChrome(layout);
-        if (self.sunglassesActive()) {
-            try self.sunglasses_form.render(
-                self.renderer,
-                &self.text,
-                self.appearance.sunglasses_form,
-                layout,
-                self.config.scale(),
-                &self.sunglasses_form.state,
-            );
-        } else {
-            try self.drawResults(range, layout);
-            try self.drawScrollbar(layout);
-        }
+        try self.drawResults(range, layout);
+        try self.drawScrollbar(layout);
 
         const presented = c.SDL_RenderPresent(self.renderer);
         if (!presented) return error.SdlRenderFailed;
@@ -429,103 +314,58 @@ const Surface = struct {
         return layout.visibleRowAtPoint(x / surface_scale, y / surface_scale);
     }
 
-    fn clickSunglassesForm(self: *Surface, x: f32, y: f32) !void {
-        const surface_scale = self.config.scale();
-        std.debug.assert(surface_scale > 0);
-        const layout = self.currentResultLayout(sunglasses_form.control_count);
-        if (try self.sunglasses_form.click(&self.sunglasses_form.state, self.appearance.sunglasses_form, layout, x / surface_scale, y / surface_scale)) {
-            if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
-            self.dirty = true;
-            return;
-        }
-        self.dirty = true;
-    }
-
-    fn focusSunglassesFormAt(self: *Surface, x: f32, y: f32) !bool {
-        const surface_scale = self.config.scale();
-        std.debug.assert(surface_scale > 0);
-        const layout = self.currentResultLayout(sunglasses_form.control_count);
-        return try self.sunglasses_form.focusAt(&self.sunglasses_form.state, layout, x / surface_scale, y / surface_scale);
-    }
-
-    fn applyTextInput(self: *Surface, target: TextEditTarget, input_text: []const u8) !void {
-        switch (target) {
-            .query => {
-                const edit = self.query.insertText(input_text);
-                if (edit == .changed) {
-                    self.resetCursorBlink();
-                    try self.refreshResults();
-                }
-            },
-            .sunglasses_path => {
-                if (try self.sunglasses_form.handleTextInput(&self.sunglasses_form.state, input_text)) {
-                    self.resetCursorBlink();
-                    self.dirty = true;
-                }
-            },
+    fn applyTextInput(self: *Surface, input_text: []const u8) !void {
+        const edit = self.query.insertText(input_text);
+        if (edit == .changed) {
+            self.resetCursorBlink();
+            try self.refreshResults();
         }
     }
 
-    fn applyTextEditAction(self: *Surface, target: TextEditTarget, action: PickerTextEditAction) !void {
+    fn applyTextEditAction(self: *Surface, action: PickerTextEditAction) !void {
         switch (action) {
             .select_all => {
-                if (try self.selectAllText(target)) {
+                if (self.query.selectAll() == .changed) {
                     self.resetCursorBlink();
                     self.dirty = true;
                 }
             },
-            .copy => try self.copySelectedText(target),
+            .copy => try self.copySelectedText(),
             .cut => {
-                try self.copySelectedText(target);
-                try self.cutSelectedText(target);
+                try self.copySelectedText();
+                try self.cutSelectedText();
             },
-            .paste => try self.pasteClipboardText(target),
-            .backspace => try self.applyDeletion(target, .backspace),
-            .delete_forward => try self.applyDeletion(target, .delete_forward),
-            .move_left => try self.moveTextCursor(target, .left, false),
-            .move_right => try self.moveTextCursor(target, .right, false),
-            .move_home => try self.moveTextCursor(target, .home, false),
-            .move_end => try self.moveTextCursor(target, .end, false),
-            .select_left => try self.moveTextCursor(target, .left, true),
-            .select_right => try self.moveTextCursor(target, .right, true),
-            .select_home => try self.moveTextCursor(target, .home, true),
-            .select_end => try self.moveTextCursor(target, .end, true),
+            .paste => try self.pasteClipboardText(),
+            .backspace => try self.applyDeletion(.backspace),
+            .delete_forward => try self.applyDeletion(.delete_forward),
+            .move_left => try self.moveTextCursor(.left, false),
+            .move_right => try self.moveTextCursor(.right, false),
+            .move_home => try self.moveTextCursor(.home, false),
+            .move_end => try self.moveTextCursor(.end, false),
+            .select_left => try self.moveTextCursor(.left, true),
+            .select_right => try self.moveTextCursor(.right, true),
+            .select_home => try self.moveTextCursor(.home, true),
+            .select_end => try self.moveTextCursor(.end, true),
         }
     }
 
-    fn selectAllText(self: *Surface, target: TextEditTarget) !bool {
-        return switch (target) {
-            .query => self.query.selectAll() == .changed,
-            .sunglasses_path => try self.sunglasses_form.selectPathText(&self.sunglasses_form.state),
-        };
-    }
-
-    fn applyDeletion(self: *Surface, target: TextEditTarget, deletion: TextDeletion) !void {
-        const changed = switch (target) {
-            .query => switch (deletion) {
-                .backspace => self.query.backspace() == .changed,
-                .delete_forward => self.query.deleteForward() == .changed,
-            },
-            .sunglasses_path => switch (deletion) {
-                .backspace => try self.sunglasses_form.handleBackspace(&self.sunglasses_form.state),
-                .delete_forward => try self.sunglasses_form.handleDeleteForward(&self.sunglasses_form.state),
-            },
+    fn applyDeletion(self: *Surface, deletion: TextDeletion) !void {
+        const changed = switch (deletion) {
+            .backspace => self.query.backspace() == .changed,
+            .delete_forward => self.query.deleteForward() == .changed,
         };
         if (!changed) return;
         self.resetCursorBlink();
         self.dirty = true;
-        if (target == .query) try self.refreshResults();
+        try self.refreshResults();
     }
 
-    fn moveTextCursor(self: *Surface, target: TextEditTarget, movement: textbox.Movement, extend: bool) !void {
-        const changed = switch (target) {
-            .query => switch (movement) {
-                .left => self.query.moveLeft(extend) == .changed,
-                .right => self.query.moveRight(extend) == .changed,
-                .home => self.query.moveHome(extend) == .changed,
-                .end => self.query.moveEnd(extend) == .changed,
-            },
-            .sunglasses_path => try self.sunglasses_form.movePathCursor(&self.sunglasses_form.state, movement, extend),
+    fn moveTextCursor(self: *Surface, movement: textbox.Movement, extend: bool) !void {
+        const changed = switch (movement) {
+            .left => self.query.moveLeft(extend) == .changed,
+            .right => self.query.moveRight(extend) == .changed,
+            .home => self.query.moveHome(extend) == .changed,
+            .end => self.query.moveEnd(extend) == .changed,
         };
         if (changed) {
             self.resetCursorBlink();
@@ -533,31 +373,25 @@ const Surface = struct {
         }
     }
 
-    fn cutSelectedText(self: *Surface, target: TextEditTarget) !void {
-        const changed = switch (target) {
-            .query => self.query.cutSelection() == .changed,
-            .sunglasses_path => try self.sunglasses_form.cutPathText(&self.sunglasses_form.state),
-        };
+    fn cutSelectedText(self: *Surface) !void {
+        const changed = self.query.cutSelection() == .changed;
         if (!changed) return;
         self.resetCursorBlink();
         self.dirty = true;
-        if (target == .query) try self.refreshResults();
+        try self.refreshResults();
     }
 
-    fn pasteClipboardText(self: *Surface, target: TextEditTarget) !void {
+    fn pasteClipboardText(self: *Surface) !void {
         const clipboard = c.SDL_GetClipboardText();
         if (clipboard == null) return;
         defer c.SDL_free(clipboard);
         const text = std.mem.span(clipboard);
         if (text.len == 0) return;
-        try self.applyTextInput(target, text);
+        try self.applyTextInput(text);
     }
 
-    fn copySelectedText(self: *Surface, target: TextEditTarget) !void {
-        const selected = switch (target) {
-            .query => self.query.selectedText(),
-            .sunglasses_path => try self.sunglasses_form.selectedPathText(&self.sunglasses_form.state),
-        } orelse return;
+    fn copySelectedText(self: *Surface) !void {
+        const selected = self.query.selectedText() orelse return;
         try copySelectedBytes(selected, sdlSetClipboardText);
     }
 
@@ -570,26 +404,7 @@ const Surface = struct {
         const base_y = y / surface_scale;
         const offset = queryMouseByteOffset(layout, self.appearance.picker, self.query.slice(), base_x, base_y) orelse return false;
         if (self.query.setCursorFromByteOffset(offset) == .changed) self.resetCursorBlink();
-        self.text_drag = .{ .target = .query, .anchor = offset };
-        self.dirty = true;
-        return true;
-    }
-
-    fn beginSunglassesPathSelection(self: *Surface, x: f32, y: f32) !bool {
-        const surface_scale = self.config.scale();
-        std.debug.assert(surface_scale > 0);
-        const layout = self.currentResultLayout(sunglasses_form.control_count);
-        const base_x = x / surface_scale;
-        const base_y = y / surface_scale;
-        const anchor = try self.sunglasses_form.beginPathMouseSelection(
-            &self.sunglasses_form.state,
-            self.appearance.sunglasses_form,
-            layout,
-            base_x,
-            base_y,
-        ) orelse return false;
-        self.text_drag = .{ .target = .sunglasses_path, .anchor = anchor };
-        self.resetCursorBlink();
+        self.text_drag = .{ .anchor = offset };
         self.dirty = true;
         return true;
     }
@@ -598,30 +413,13 @@ const Surface = struct {
         const surface_scale = self.config.scale();
         std.debug.assert(surface_scale > 0);
         const base_x = x / surface_scale;
-        switch (drag.target) {
-            .query => {
-                const range = self.viewport.visibleRange();
-                const layout = self.currentResultLayout(range.count);
-                const rect = queryContentRect(layout, self.appearance.picker);
-                const offset = textbox.byteOffsetForMouseX(self.query.slice(), rect.x, rect.x + rect.w, base_x);
-                if (self.query.selectToByteOffset(drag.anchor, offset) == .changed) {
-                    self.resetCursorBlink();
-                    self.dirty = true;
-                }
-            },
-            .sunglasses_path => {
-                const layout = self.currentResultLayout(sunglasses_form.control_count);
-                if (try self.sunglasses_form.dragPathMouseSelection(
-                    &self.sunglasses_form.state,
-                    self.appearance.sunglasses_form,
-                    layout,
-                    drag.anchor,
-                    base_x,
-                )) {
-                    self.resetCursorBlink();
-                    self.dirty = true;
-                }
-            },
+        const range = self.viewport.visibleRange();
+        const layout = self.currentResultLayout(range.count);
+        const rect = queryContentRect(layout, self.appearance.picker);
+        const offset = textbox.byteOffsetForMouseX(self.query.slice(), rect.x, rect.x + rect.w, base_x);
+        if (self.query.selectToByteOffset(drag.anchor, offset) == .changed) {
+            self.resetCursorBlink();
+            self.dirty = true;
         }
     }
 
@@ -653,14 +451,6 @@ const Surface = struct {
         const color = setDrawColor(self.renderer, self.appearance.picker.query_cursor);
         const filled = c.SDL_RenderFillRect(self.renderer, &cursor_rect);
         if (!color or !filled) return error.SdlRenderFailed;
-    }
-
-    fn persistAndWakeSunglasses(self: *Surface) !void {
-        try sunglasses_overlay.Overlay.saveAndApply(self.allocator, self.sunglasses_form.state);
-    }
-
-    fn sunglassesActive(self: *const Surface) bool {
-        return query_mod.parse(self.query.slice()).route == .sunglasses;
     }
 
     fn updateViewportForWindow(self: *Surface) !void {
@@ -696,40 +486,6 @@ const Surface = struct {
     fn resetCursorBlink(self: *Surface) void {
         self.cursor.reset(vendorNowMs());
         self.dirty = true;
-    }
-
-    fn applyWindowSizeForRoute(self: *Surface, force: bool) !void {
-        const sunglasses_active = self.sunglassesActive();
-        if (!force) {
-            if (self.window_sized_for_sunglasses) |sized_for_sunglasses| {
-                if (sized_for_sunglasses == sunglasses_active) return;
-            }
-        }
-
-        const base_height = routeBaseHeight(sunglasses_active);
-        const size = self.config.scaledDimensions(base_window_width, base_height);
-        try self.applyRouteSizeLimits(sunglasses_active, size);
-        const resized = c.SDL_SetWindowSize(self.window, @intCast(size.width), @intCast(size.height));
-        if (!resized) return error.SdlResizeFailed;
-        const synced = c.SDL_SyncWindow(self.window);
-        if (!synced) return error.SdlResizeFailed;
-        self.window_sized_for_sunglasses = sunglasses_active;
-        try self.updateViewportForWindow();
-    }
-
-    fn applyRouteSizeLimits(self: *Surface, sunglasses_active: bool, size: scale_owner.Dimensions) !void {
-        try self.clearWindowSizeLimits();
-        if (sunglasses_active) {
-            const min_set = c.SDL_SetWindowMinimumSize(self.window, size.width, size.height);
-            const max_set = c.SDL_SetWindowMaximumSize(self.window, size.width, size.height);
-            if (!max_set or !min_set) return error.SdlResizeFailed;
-        }
-    }
-
-    fn clearWindowSizeLimits(self: *Surface) !void {
-        const max_released = c.SDL_SetWindowMaximumSize(self.window, 0, 0);
-        const min_released = c.SDL_SetWindowMinimumSize(self.window, 0, 0);
-        if (!max_released or !min_released) return error.SdlResizeFailed;
     }
 
     fn drawChrome(self: *Surface, layout: viewport.ResultLayout) !void {
@@ -779,7 +535,7 @@ const Surface = struct {
             const filled = c.SDL_RenderFillRect(self.renderer, &rect);
             if (!row_color or !filled) return error.SdlRenderFailed;
 
-            try self.text.draw(self.renderer, layout.title_x, layout.titleY(i), result.title, .{
+            try self.text.draw(self.renderer, layout.title_x, layout.titleY(i), result.title(), .{
                 .color = if (selected)
                     picker.title_selected.color
                 else
@@ -788,7 +544,7 @@ const Surface = struct {
                 .font_size_px = if (selected) picker.title_selected.font_px else picker.title_normal.font_px,
                 .surface_scale = surface_scale,
             });
-            try self.text.draw(self.renderer, layout.title_x, layout.subtitleY(i), result.subtitle, .{
+            try self.text.draw(self.renderer, layout.title_x, layout.subtitleY(i), result.subtitle(), .{
                 .color = if (selected)
                     picker.subtitle_selected.color
                 else
@@ -797,7 +553,7 @@ const Surface = struct {
                 .font_size_px = if (selected) picker.subtitle_selected.font_px else picker.subtitle_normal.font_px,
                 .surface_scale = surface_scale,
             });
-            if (result.kind == .app) try self.drawResultIcon(layout.iconRect(i), result.icon);
+            if (result.typeOf() == .app) try self.drawResultIcon(layout.iconRect(i), result.iconName());
         }
 
         if (range.count == 0) {
@@ -856,7 +612,6 @@ const Surface = struct {
     }
 
     fn applySurfaceScale(self: *Surface) !void {
-        try self.applyWindowSizeForRoute(true);
         const surface_scale = self.config.scale();
         const scaled = c.SDL_SetRenderScale(self.renderer, surface_scale, surface_scale);
         if (!scaled) return error.SdlScaleFailed;
@@ -870,10 +625,6 @@ fn vendorNowMs() u64 {
 
 fn setDrawColor(renderer: *c.SDL_Renderer, color: appearance_owner.Rgba8) bool {
     return c.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-}
-
-fn sliderKeyboardStep() i32 {
-    return 5;
 }
 
 const PickerTextEditAction = enum {
@@ -928,7 +679,7 @@ fn copySelectedBytes(selected: []const u8, setter: ClipboardSetter) !void {
 }
 
 fn sdlSetClipboardText(selected: []const u8) !void {
-    var buf: [@max(query_max_bytes, sunglasses_form.max_image_path_bytes) + 1:0]u8 = undefined;
+    var buf: [query_max_bytes + 1:0]u8 = undefined;
     const z_text = try std.fmt.bufPrintZ(&buf, "{s}", .{selected});
     if (!c.SDL_SetClipboardText(z_text.ptr)) return error.SdlClipboardFailed;
 }
@@ -992,29 +743,6 @@ fn queryMouseByteOffset(
 
 fn pointInside(rect: viewport.Rect, x: f32, y: f32) bool {
     return x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
-}
-
-fn routeBaseHeight(sunglasses_active: bool) i32 {
-    if (sunglasses_active) {
-        return @intFromFloat(viewport.baseHeightForRows(sunglasses_form.control_count));
-    }
-    return base_window_height;
-}
-
-test "route base height keeps default picker at eight rows" {
-    try std.testing.expectEqual(base_window_height, routeBaseHeight(false));
-    try std.testing.expectEqual(
-        @as(i32, @intFromFloat(viewport.baseHeightForRows(8))),
-        routeBaseHeight(false),
-    );
-}
-
-test "route base height compacts sunglasses form only" {
-    try std.testing.expectEqual(
-        @as(i32, @intFromFloat(viewport.baseHeightForRows(sunglasses_form.control_count))),
-        routeBaseHeight(true),
-    );
-    try std.testing.expect(routeBaseHeight(true) < routeBaseHeight(false));
 }
 
 test "text edit key combos stay owned by picker surface text handling" {

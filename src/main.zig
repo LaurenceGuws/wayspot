@@ -97,8 +97,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (args.len >= 3 and std.mem.eql(u8, args[1], "complete") and std.mem.eql(u8, args[2], "nushell")) {
-        try runTerminalNushellCompletion(allocator, home, args[3..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "complete") and std.mem.eql(u8, args[2], "bash")) {
+        try runTerminalBashCompletion(allocator, home, args[3..]);
         return;
     }
 
@@ -194,15 +194,18 @@ fn runTerminalOpen(allocator: std.mem.Allocator, home: []const u8, payload: []co
     try picker_bundle.picker.saveHistory(allocator);
 }
 
-fn runTerminalNushellCompletion(allocator: std.mem.Allocator, home: []const u8, spans: []const []const u8) !void {
+fn runTerminalBashCompletion(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
     var picker_bundle = try setupPickerBundle(allocator, home);
     picker_bundle.wirePicker();
     defer picker_bundle.deinit(allocator);
     try picker_bundle.picker.loadHistory(allocator);
 
-    var stdout_buffer: [4096]u8 = undefined;
+    const raw_query = try joinCommandText(allocator, query_parts);
+    defer allocator.free(raw_query);
+
+    var stdout_buffer: [wayspot.picker.command.max_completion_output_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
-    try picker_bundle.picker.completeNushell(allocator, spans, &stdout_writer.interface);
+    try picker_bundle.picker.completeBash(allocator, raw_query, &stdout_writer.interface);
     try stdout_writer.interface.flush();
 }
 

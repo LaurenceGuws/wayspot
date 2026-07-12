@@ -53,37 +53,37 @@ pub fn refresh(home: []const u8, candidates: []const candidate_mod.Candidate) !R
     var png_buffer: [app_icons.max_icon_path_bytes + 1]u8 = undefined;
 
     for (candidates) |candidate| {
-        if (candidate.kind != .app) continue;
+        if (candidate.typeOf() != .app) continue;
         counts.app_rows += 1;
         if (counts.app_rows > max_refresh_rows) {
             counts.skipped += 1;
             continue;
         }
-        if (candidate.icon.len == 0) {
+        if (candidate.iconName().len == 0) {
             counts.missing_svg += 1;
             continue;
         }
-        if (app_icons.resolveRasterIconPath(candidate.icon, roots, &raster_buffer) != null) {
+        if (app_icons.resolveRasterIconPath(candidate.iconName(), roots, &raster_buffer) != null) {
             counts.already_raster += 1;
             continue;
         }
 
-        const svg_path = resolveSvgSource(candidate.icon, roots, &svg_buffer) orelse {
-            if (hasSvgIntent(candidate.icon)) {
+        const svg_path = resolveSvgSource(candidate.iconName(), roots, &svg_buffer) orelse {
+            if (hasSvgIntent(candidate.iconName())) {
                 counts.failed += 1;
-            } else if (hasKnownUnsupportedExtension(candidate.icon)) {
+            } else if (hasKnownUnsupportedExtension(candidate.iconName())) {
                 counts.unsupported += 1;
             } else {
                 counts.missing_svg += 1;
             }
             continue;
         };
-        const png_path = convertedPngPath(home, candidate.icon, &png_buffer) orelse {
+        const png_path = convertedPngPath(home, candidate.iconName(), &png_buffer) orelse {
             counts.failed += 1;
             continue;
         };
         if (runConverter(converter_path, svg_path, png_path)) {
-            try out.print("{s}\t{s}\t{s}\n", .{ candidate.icon, png_path, svg_path });
+            try out.print("{s}\t{s}\t{s}\n", .{ candidate.iconName(), png_path, svg_path });
             counts.converted += 1;
         } else {
             counts.failed += 1;

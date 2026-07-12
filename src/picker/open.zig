@@ -57,8 +57,7 @@ pub const Open = struct {
             if (!self.openAvailable(spec)) continue;
             try out.append(
                 allocator,
-                candidate_mod.Candidate.initWithIcon(
-                    .open,
+                candidate_mod.Candidate.openRow(
                     spec.title,
                     spec.subtitle,
                     spec.open,
@@ -156,9 +155,9 @@ test "open rows collect available entries only" {
     };
     try open.collect(std.testing.allocator, &list);
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Kind.open, list.items[0].kind);
-    try std.testing.expectEqualStrings("settings", list.items[0].open);
-    try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].icon);
+    try std.testing.expectEqual(candidate_mod.Candidate.Type.open, list.items[0].typeOf());
+    try std.testing.expectEqualStrings("settings", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("preferences-system-symbolic", list.items[0].iconName());
 }
 
 test "execute resolves command mapping" {

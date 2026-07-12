@@ -63,7 +63,7 @@ pub const Apps = struct {
 
             try out.append(
                 allocator,
-                candidate_mod.Candidate.initWithIcon(.app, name, category, exec_cmd, icon_name),
+                candidate_mod.Candidate.makeApp(name, category, exec_cmd, icon_name),
             );
             count += 1;
         }
@@ -158,7 +158,7 @@ pub const Apps = struct {
             const kept_category = try self.keepString(allocator, category);
             const kept_exec = try self.keepString(allocator, exec_norm);
             const kept_icon = try self.keepString(allocator, parsed.icon);
-            try out.append(allocator, candidate_mod.Candidate.initWithIcon(.app, kept_name, kept_category, kept_exec, kept_icon));
+            try out.append(allocator, candidate_mod.Candidate.makeApp(kept_name, kept_category, kept_exec, kept_icon));
         }
     }
 };
@@ -356,8 +356,8 @@ fn writeAppCacheFromCandidates(cache_path: []const u8, rows: []const candidate_m
     var file_buffer: [4096]u8 = undefined;
     var writer = file.writer(std.Options.debug_io, &file_buffer);
     for (rows) |row| {
-        if (row.kind != .app) continue;
-        try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ row.subtitle, row.title, row.open, row.icon });
+        if (row.typeOf() != .app) continue;
+        try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ row.subtitle(), row.title(), row.openPayload(), row.iconName() });
     }
     try writer.interface.flush();
     try file.sync(std.Options.debug_io);

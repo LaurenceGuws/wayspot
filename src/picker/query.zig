@@ -7,7 +7,6 @@ pub const Route = enum {
     apps,
     modes,
     notifications,
-    sunglasses,
     wallpapers,
     run,
 };
@@ -43,7 +42,6 @@ fn parseModeRoute(raw: []const u8) Query {
     const body = std.mem.trim(u8, raw[1..], " \t");
     if (body.len == 0) return .{ .raw = raw, .route = .modes, .term = "" };
     if (modeTerm(body, "notifications")) |term| return .{ .raw = raw, .route = .notifications, .term = term };
-    if (modeTerm(body, "sunglasses")) |term| return .{ .raw = raw, .route = .sunglasses, .term = term };
     if (modeTerm(body, "wallpapers")) |term| return .{ .raw = raw, .route = .wallpapers, .term = term };
     return .{ .raw = raw, .route = .modes, .term = body };
 }
@@ -79,10 +77,6 @@ test "parse slash modes and selected mode routes" {
     const notifications = parse("/notifications");
     try std.testing.expectEqual(Route.notifications, notifications.route);
     try std.testing.expectEqualStrings("", notifications.term);
-
-    const sunglasses = parse("/sunglasses");
-    try std.testing.expectEqual(Route.sunglasses, sunglasses.route);
-    try std.testing.expectEqualStrings("", sunglasses.term);
 
     const wallpapers = parse("/wallpapers restart");
     try std.testing.expectEqual(Route.wallpapers, wallpapers.route);

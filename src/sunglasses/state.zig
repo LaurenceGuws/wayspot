@@ -475,7 +475,7 @@ test "clamp min max and zero semantics" {
     try std.testing.expectEqual(image_opacity_max, monitor.image_opacity);
 }
 
-test "effective filter predicate ignores disabled and zero-value FormFields" {
+test "effective filter predicate ignores disabled and zero-value fields" {
     var state = defaultState();
     try std.testing.expect(!state.needsOverlay());
 

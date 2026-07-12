@@ -10,6 +10,8 @@ const query_mod = @import("query.zig");
 const rank = @import("rank.zig");
 
 pub const max_command_bytes = 4096;
+pub const max_completion_candidates: u32 = 256;
+pub const max_completion_output_bytes: u32 = 64 * 1024;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 const LaunchRunError = error{
@@ -107,14 +109,14 @@ pub const Command = struct {
         row: candidate.Candidate,
     ) ![]u8 {
         std.debug.assert(self.max_history > 0);
-        return switch (row.kind) {
-            .app => allocator.dupe(u8, row.open),
+        return switch (row.typeOf()) {
+            .app => allocator.dupe(u8, row.openPayload()),
             .open => blk: {
-                const spec = open_owner.resolveSpec(row.open) orelse return error.UnknownOpen;
+                const spec = open_owner.resolveSpec(row.openPayload()) orelse return error.UnknownOpen;
                 break :blk try open_owner.resolveExecutionCommand(allocator, spec.execution);
             },
             .lifecycle => blk: {
-                const command = mode.resolveRestartLifecycleCommand(row.open) orelse return error.UnknownOpen;
+                const command = mode.resolveRestartLifecycleCommand(row.openPayload()) orelse return error.UnknownOpen;
                 break :blk try allocator.dupe(u8, command);
             },
             .mode, .notification, .hint => error.UnknownOpen,
@@ -125,7 +127,7 @@ pub const Command = struct {
     pub fn open(self: *Command, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
         try self.loadCandidatesOnce(allocator);
         for (self.candidates.items) |row| {
-            if (!std.mem.eql(u8, row.open, payload)) continue;
+            if (!std.mem.eql(u8, row.openPayload(), payload)) continue;
             return self.resolveCandidateCommand(allocator, row);
         }
         return error.UnknownOpen;
@@ -153,27 +155,26 @@ pub const Command = struct {
         }
     }
 
-    /// completeNushell writes JSON records with value and description fields.
-    pub fn completeNushell(
+    /// completeBash writes bounded shell-quoted candidates for Bash completion.
+    pub fn completeBash(
         self: *Command,
         allocator: std.mem.Allocator,
-        spans: []const []const u8,
+        raw_query: []const u8,
         out: *std.Io.Writer,
     ) !void {
-        const raw_query = completionQuery(spans);
         const ranked = try self.rankQuery(allocator, raw_query);
         defer allocator.free(ranked);
 
-        try out.writeByte('[');
-        for (ranked, 0..) |item, index| {
-            if (index > 0) try out.writeByte(',');
-            try out.writeAll("{\"value\":");
-            try writeJsonString(out, item.candidate.open);
-            try out.writeAll(",\"description\":");
-            try writeJsonString(out, completionDescription(item.candidate));
-            try out.writeByte('}');
+        if (ranked.len > max_completion_candidates) return error.TooManyCompletionCandidates;
+        var output_bytes: u32 = 0;
+        for (ranked) |item| {
+            const value = item.candidate.openPayload();
+            const escaped_bytes = bashEscapedLength(value);
+            if (escaped_bytes > max_completion_output_bytes -| output_bytes) return error.CompletionOutputTooLong;
+            try writeBashWord(out, value);
+            try out.writeByte('\n');
+            output_bytes += escaped_bytes + 1;
         }
-        try out.writeAll("]\n");
     }
 
     fn loadCandidatesOnce(self: *Command, allocator: std.mem.Allocator) !void {
@@ -275,38 +276,28 @@ test "launch queue rejects empty and oversized commands" {
 }
 
 fn printTerminalRow(out: *std.Io.Writer, row: candidate.Candidate) !void {
-    try out.print("{s}\t{s}\t{s}\t{s}\n", .{
-        @tagName(row.kind),
-        row.open,
-        row.title,
-        row.subtitle,
+        try out.print("{s}\t{s}\t{s}\t{s}\n", .{
+        @tagName(row.typeOf()),
+        row.openPayload(),
+        row.title(),
+        row.subtitle(),
     });
 }
 
-fn completionQuery(spans: []const []const u8) []const u8 {
-    if (spans.len == 0) return "";
-    return spans[spans.len - 1];
-}
-
-fn completionDescription(row: candidate.Candidate) []const u8 {
-    if (row.subtitle.len == 0) return row.title;
-    return row.subtitle;
-}
-
-fn writeJsonString(out: *std.Io.Writer, value: []const u8) !void {
-    try out.writeByte('"');
+fn bashEscapedLength(value: []const u8) u32 {
+    var length: u32 = 2;
     for (value) |byte| {
-        switch (byte) {
-            '"' => try out.writeAll("\\\""),
-            '\\' => try out.writeAll("\\\\"),
-            '\n' => try out.writeAll("\\n"),
-            '\r' => try out.writeAll("\\r"),
-            '\t' => try out.writeAll("\\t"),
-            0...0x08, 0x0b...0x0c, 0x0e...0x1f => try out.print("\\u{x:0>4}", .{byte}),
-            else => try out.writeByte(byte),
-        }
+        length += if (byte == '\'') 4 else 1;
     }
-    try out.writeByte('"');
+    return length;
+}
+
+fn writeBashWord(out: *std.Io.Writer, value: []const u8) !void {
+    try out.writeByte('\'');
+    for (value) |byte| {
+        if (byte == '\'') try out.writeAll("'\\''") else try out.writeByte(byte);
+    }
+    try out.writeByte('\'');
 }
 
 fn recordHistory(
@@ -538,7 +529,7 @@ test "command model exposes modes without hiding default app ranking" {
     const mode_results = try model.rankQuery(std.testing.allocator, "/");
     defer std.testing.allocator.free(mode_results);
     try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(mode_results.len)));
-    try std.testing.expectEqual(candidate.Candidate.Kind.mode, mode_results[0].candidate.kind);
+    try std.testing.expectEqual(candidate.Candidate.Type.mode, mode_results[0].candidate.typeOf());
 }
 
 test "command model ranks retained history without query history allocation" {
@@ -589,7 +580,7 @@ test "command model resolves app and lifecycle commands" {
 test "command model keeps app open payload behavior" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.init(.app, "Terminal", "Utilities", "foot"));
+    try list.append(std.testing.allocator, candidate.Candidate.makeApp("Terminal", "Utilities", "foot", ""));
 
     var model = Command{
         .candidates = list,
@@ -606,7 +597,7 @@ test "command model keeps app open payload behavior" {
 test "command model collects notification history list rows" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.init(.notification, "Summary", "App", "notification-history:0:1"));
+    try list.append(std.testing.allocator, candidate.Candidate.makeNotification("Summary", "App", "notification-history:0:1"));
 
     var model = Command{
         .candidates = list,
@@ -624,10 +615,10 @@ test "command model collects notification history list rows" {
     try std.testing.expectEqualStrings("notification\tnotification-history:0:1\tSummary\tApp\n", output.items);
 }
 
-test "command model writes nushell completion records" {
+test "command model writes completion records" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit(std.testing.allocator);
-    try list.append(std.testing.allocator, candidate.Candidate.init(.app, "Quote \"App\"", "Utilities", "quote-app"));
+    try list.append(std.testing.allocator, candidate.Candidate.makeApp("Quote \"App\"", "Utilities", "quote-app", ""));
 
     var model = Command{
         .candidates = list,
@@ -639,11 +630,10 @@ test "command model writes nushell completion records" {
     var output = std.ArrayList(u8).empty;
     defer output.deinit(std.testing.allocator);
     var writer = output.writer(std.testing.allocator);
-    const spans = [_][]const u8{ "wayspot", "complete", "nushell", "quote" };
-    try model.completeNushell(std.testing.allocator, &spans, &writer.interface);
+    try model.completeBash(std.testing.allocator, "quote", &writer.interface);
     try writer.interface.flush();
 
-    try std.testing.expectEqualStrings("[{\"value\":\"quote-app\",\"description\":\"Utilities\"}]\n", output.items);
+    try std.testing.expectEqualStrings("'quote-app'\n", output.items);
 }
 
 test "command launch runner accepts successful command" {

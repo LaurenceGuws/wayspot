@@ -172,22 +172,6 @@ pub fn build(b: *std.Build) void {
     });
     const run_picker_appearance_tests = b.addRunArtifact(picker_appearance_tests);
 
-    const sunglasses_form_mod = b.createModule(.{
-        .root_source_file = b.path("src/sunglasses_form_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sunglasses_form_mod.addImport("sdl_c", sdl_c_mod);
-    sunglasses_form_mod.addImport("text_c", text_c_mod);
-    const sunglasses_form_tests = b.addTest(.{
-        .root_module = sunglasses_form_mod,
-    });
-    sunglasses_form_tests.use_llvm = true;
-    sunglasses_form_tests.use_lld = true;
-    sunglasses_form_tests.root_module.addIncludePath(sdl_include);
-    sunglasses_form_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
-    const run_sunglasses_form_tests = b.addRunArtifact(sunglasses_form_tests);
-
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -195,7 +179,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_notification_history_cache_tests.step);
     test_step.dependOn(&run_notification_history_list_tests.step);
     test_step.dependOn(&run_picker_appearance_tests.step);
-    test_step.dependOn(&run_sunglasses_form_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);
