@@ -18,7 +18,6 @@ const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
 const sunglasses_form = @import("../sunglasses/form.zig");
 const sunglasses_overlay = @import("../sunglasses/overlay.zig");
-const sunglasses_state = @import("../sunglasses/state.zig");
 
 const c = @import("sdl_c");
 
@@ -234,7 +233,6 @@ const Surface = struct {
     wake_event_type: u32 = 0,
     query: textbox.Textbox(query_max_bytes) = .{},
     results: []rank.RankedCandidate = &.{},
-    sunglasses_state: sunglasses_state.State = sunglasses_state.defaultState(),
     sunglasses_form: sunglasses_form.Form = .{},
     /// The viewport is the only owner of picker selection and scroll offset.
     viewport: viewport.Viewport = viewport.Viewport.init(),
@@ -271,7 +269,7 @@ const Surface = struct {
         const wake_event_type = c.SDL_RegisterEvents(1);
         if (wake_event_type == 0) return error.SdlWakeUnavailable;
 
-        const persisted_sunglasses_state = try sunglasses_state.State.loadForMonitors(allocator);
+        const persisted_sunglasses_form = try sunglasses_form.Form.load(allocator);
         var self = Surface{
             .allocator = allocator,
             .picker = picker,
@@ -280,7 +278,7 @@ const Surface = struct {
             .text = text_engine,
             .appearance = appearance_state,
             .config = config,
-            .sunglasses_state = persisted_sunglasses_state,
+            .sunglasses_form = persisted_sunglasses_form,
             .wake_event_type = wake_event_type,
             .cursor = cursor_blink.CursorBlink.init(vendorNowMs(), cursor_blink.cursor_blink_interval_ms),
         };
@@ -448,13 +446,13 @@ const Surface = struct {
                     },
                     c.SDLK_TAB => {
                         if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_state, (event.key.mod & c.SDL_KMOD_SHIFT) != 0);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, (event.key.mod & c.SDL_KMOD_SHIFT) != 0);
                             self.dirty = true;
                         }
                     },
                     c.SDLK_SPACE => {
                         if (self.sunglassesActive() and self.sunglasses_form.focusedPathInput()) return true;
-                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
+                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_form.state)) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                             return true;
@@ -464,7 +462,7 @@ const Surface = struct {
                     c.SDLK_RETURN, c.SDLK_KP_ENTER => {
                         if (self.sunglassesActive()) {
                             const was_path_input = self.sunglasses_form.focusedPathInput();
-                            switch (try self.sunglasses_form.commitFocused(&self.sunglasses_state)) {
+                            switch (try self.sunglasses_form.commitFocused(&self.sunglasses_form.state)) {
                                 .changed => {
                                     try self.persistAndWakeSunglasses();
                                     self.dirty = true;
@@ -482,7 +480,7 @@ const Surface = struct {
                                 },
                             }
                         }
-                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_state)) {
+                        if (self.sunglassesActive() and try self.sunglasses_form.activateFocused(&self.sunglasses_form.state)) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                             return true;
@@ -491,20 +489,20 @@ const Surface = struct {
                         try self.queueSelectedLaunch();
                     },
                     c.SDLK_LEFT => {
-                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, -sliderKeyboardStep())) {
+                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_form.state, -sliderKeyboardStep())) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
                     c.SDLK_RIGHT => {
-                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_state, sliderKeyboardStep())) {
+                        if (self.sunglassesActive() and !self.sunglasses_form.focusedPathInput() and try self.sunglasses_form.adjustFocused(&self.sunglasses_form.state, sliderKeyboardStep())) {
                             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
                             self.dirty = true;
                         }
                     },
                     c.SDLK_UP => {
                         if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_state, true);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, true);
                             self.dirty = true;
                             return true;
                         }
@@ -512,7 +510,7 @@ const Surface = struct {
                     },
                     c.SDLK_DOWN => {
                         if (self.sunglassesActive()) {
-                            try self.sunglasses_form.focusNext(&self.sunglasses_state, false);
+                            try self.sunglasses_form.focusNext(&self.sunglasses_form.state, false);
                             self.dirty = true;
                             return true;
                         }
@@ -592,7 +590,7 @@ const Surface = struct {
                 self.appearance.sunglasses_form,
                 layout,
                 self.config.scale(),
-                &self.sunglasses_state,
+                &self.sunglasses_form.state,
             );
         } else {
             try self.drawResults(range, layout);
@@ -615,7 +613,7 @@ const Surface = struct {
         const surface_scale = self.config.scale();
         std.debug.assert(surface_scale > 0);
         const layout = self.currentResultLayout(sunglasses_form.control_count);
-        if (try self.sunglasses_form.click(&self.sunglasses_state, self.appearance.sunglasses_form, layout, x / surface_scale, y / surface_scale)) {
+        if (try self.sunglasses_form.click(&self.sunglasses_form.state, self.appearance.sunglasses_form, layout, x / surface_scale, y / surface_scale)) {
             if (self.sunglasses_form.focusedFieldChangesSavedState()) try self.persistAndWakeSunglasses();
             self.dirty = true;
             return;
@@ -627,7 +625,7 @@ const Surface = struct {
         const surface_scale = self.config.scale();
         std.debug.assert(surface_scale > 0);
         const layout = self.currentResultLayout(sunglasses_form.control_count);
-        return try self.sunglasses_form.focusAt(&self.sunglasses_state, layout, x / surface_scale, y / surface_scale);
+        return try self.sunglasses_form.focusAt(&self.sunglasses_form.state, layout, x / surface_scale, y / surface_scale);
     }
 
     fn applyTextInput(self: *Surface, target: TextEditTarget, input_text: []const u8) !void {
@@ -640,7 +638,7 @@ const Surface = struct {
                 }
             },
             .sunglasses_path => {
-                if (try self.sunglasses_form.handleTextInput(&self.sunglasses_state, input_text)) {
+                if (try self.sunglasses_form.handleTextInput(&self.sunglasses_form.state, input_text)) {
                     self.resetCursorBlink();
                     self.dirty = true;
                 }
@@ -678,7 +676,7 @@ const Surface = struct {
     fn selectAllText(self: *Surface, target: TextEditTarget) !bool {
         return switch (target) {
             .query => self.query.selectAll() == .changed,
-            .sunglasses_path => try self.sunglasses_form.selectPathText(&self.sunglasses_state),
+            .sunglasses_path => try self.sunglasses_form.selectPathText(&self.sunglasses_form.state),
         };
     }
 
@@ -689,8 +687,8 @@ const Surface = struct {
                 .delete_forward => self.query.deleteForward() == .changed,
             },
             .sunglasses_path => switch (deletion) {
-                .backspace => try self.sunglasses_form.handleBackspace(&self.sunglasses_state),
-                .delete_forward => try self.sunglasses_form.handleDeleteForward(&self.sunglasses_state),
+                .backspace => try self.sunglasses_form.handleBackspace(&self.sunglasses_form.state),
+                .delete_forward => try self.sunglasses_form.handleDeleteForward(&self.sunglasses_form.state),
             },
         };
         if (!changed) return;
@@ -707,7 +705,7 @@ const Surface = struct {
                 .home => self.query.moveHome(extend) == .changed,
                 .end => self.query.moveEnd(extend) == .changed,
             },
-            .sunglasses_path => try self.sunglasses_form.movePathCursor(&self.sunglasses_state, movement, extend),
+            .sunglasses_path => try self.sunglasses_form.movePathCursor(&self.sunglasses_form.state, movement, extend),
         };
         if (changed) {
             self.resetCursorBlink();
@@ -718,7 +716,7 @@ const Surface = struct {
     fn cutSelectedText(self: *Surface, target: TextEditTarget) !void {
         const changed = switch (target) {
             .query => self.query.cutSelection() == .changed,
-            .sunglasses_path => try self.sunglasses_form.cutPathText(&self.sunglasses_state),
+            .sunglasses_path => try self.sunglasses_form.cutPathText(&self.sunglasses_form.state),
         };
         if (!changed) return;
         self.resetCursorBlink();
@@ -738,7 +736,7 @@ const Surface = struct {
     fn copySelectedText(self: *Surface, target: TextEditTarget) !void {
         const selected = switch (target) {
             .query => self.query.selectedText(),
-            .sunglasses_path => try self.sunglasses_form.selectedPathText(&self.sunglasses_state),
+            .sunglasses_path => try self.sunglasses_form.selectedPathText(&self.sunglasses_form.state),
         } orelse return;
         try copySelectedBytes(selected, sdlSetClipboardText);
     }
@@ -764,7 +762,7 @@ const Surface = struct {
         const base_x = x / surface_scale;
         const base_y = y / surface_scale;
         const anchor = try self.sunglasses_form.beginPathMouseSelection(
-            &self.sunglasses_state,
+            &self.sunglasses_form.state,
             self.appearance.sunglasses_form,
             layout,
             base_x,
@@ -794,7 +792,7 @@ const Surface = struct {
             .sunglasses_path => {
                 const layout = self.currentResultLayout(sunglasses_form.control_count);
                 if (try self.sunglasses_form.dragPathMouseSelection(
-                    &self.sunglasses_state,
+                    &self.sunglasses_form.state,
                     self.appearance.sunglasses_form,
                     layout,
                     drag.anchor,
@@ -838,7 +836,7 @@ const Surface = struct {
     }
 
     fn persistAndWakeSunglasses(self: *Surface) !void {
-        try self.sunglasses_state.save(self.allocator);
+        try self.sunglasses_form.state.save(self.allocator);
         const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
             std.mem.span(runtime_dir_z)
         else
@@ -1115,7 +1113,7 @@ fn copySelectedBytes(selected: []const u8, setter: ClipboardSetter) !void {
 }
 
 fn sdlSetClipboardText(selected: []const u8) !void {
-    var buf: [@max(query_max_bytes, sunglasses_state.max_image_path_bytes) + 1:0]u8 = undefined;
+    var buf: [@max(query_max_bytes, sunglasses_form.max_image_path_bytes) + 1:0]u8 = undefined;
     const z_text = try std.fmt.bufPrintZ(&buf, "{s}", .{selected});
     if (!c.SDL_SetClipboardText(z_text.ptr)) return error.SdlClipboardFailed;
 }

@@ -12,6 +12,8 @@ const c = @import("sdl_c");
 
 const default_monitor_name = "default";
 pub const control_count: u32 = 8;
+/// max_image_path_bytes is the form's bounded path-edit storage contract.
+pub const max_image_path_bytes: u32 = sunglasses_state.max_image_path_bytes;
 const control_right_inset: f32 = viewport.default_result_icon_right_inset;
 
 pub const FormField = enum {
@@ -32,11 +34,18 @@ pub const CommitResult = enum {
 };
 
 pub const Form = struct {
+    /// state is the saved monitor configuration edited by this form.
+    state: sunglasses_state.State = sunglasses_state.defaultState(),
     selected_monitor: u32 = 0,
     focus: FormField = .monitor,
     path_edit: textbox.Textbox(sunglasses_state.max_image_path_bytes) = .{},
     path_editing: bool = false,
     path_error: bool = false,
+
+    /// load opens the current saved state for the picker-owned form lifecycle.
+    pub fn load(allocator: std.mem.Allocator) !Form {
+        return .{ .state = try sunglasses_state.State.loadForMonitors(allocator) };
+    }
 
     pub fn ensureReady(self: *Form, state: *sunglasses_state.State) !void {
         if (state.count == 0) {
@@ -826,32 +835,31 @@ fn setDrawColor(renderer: *c.SDL_Renderer, color: appearance.Rgba8) bool {
 }
 
 test "form ensures a default monitor and mutates bounded fields" {
-    var state = sunglasses_state.defaultState();
     var form = Form{};
 
-    try form.ensureReady(&state);
-    try std.testing.expectEqual(@as(u32, 1), state.count);
-    try std.testing.expectEqualStrings(default_monitor_name, state.monitors[0].name());
+    try form.ensureReady(&form.state);
+    try std.testing.expectEqual(@as(u32, 1), form.state.count);
+    try std.testing.expectEqualStrings(default_monitor_name, form.state.monitors[0].name());
 
     form.focus = .red_blue_toggle;
-    try std.testing.expect(try form.activateFocused(&state));
-    try std.testing.expect(state.monitors[0].red_blue_enabled);
+    try std.testing.expect(try form.activateFocused(&form.state));
+    try std.testing.expect(form.state.monitors[0].red_blue_enabled);
 
     form.focus = .red_blue_slider;
-    try std.testing.expect(try form.adjustFocused(&state, 250));
-    try std.testing.expectEqual(sunglasses_state.red_blue_max, state.monitors[0].red_blue_value);
+    try std.testing.expect(try form.adjustFocused(&form.state, 250));
+    try std.testing.expectEqual(sunglasses_state.red_blue_max, form.state.monitors[0].red_blue_value);
 
     form.focus = .dim_slider;
-    try std.testing.expect(try form.adjustFocused(&state, 250));
-    try std.testing.expectEqual(sunglasses_state.dim_max, state.monitors[0].dim_value);
+    try std.testing.expect(try form.adjustFocused(&form.state, 250));
+    try std.testing.expectEqual(sunglasses_state.dim_max, form.state.monitors[0].dim_value);
 
     form.focus = .image_toggle;
-    try std.testing.expect(try form.activateFocused(&state));
-    try std.testing.expect(state.monitors[0].image_enabled);
+    try std.testing.expect(try form.activateFocused(&form.state));
+    try std.testing.expect(form.state.monitors[0].image_enabled);
 
     form.focus = .image_opacity_slider;
-    try std.testing.expect(try form.adjustFocused(&state, 250));
-    try std.testing.expectEqual(sunglasses_state.image_opacity_max, state.monitors[0].image_opacity);
+    try std.testing.expect(try form.adjustFocused(&form.state, 250));
+    try std.testing.expectEqual(sunglasses_state.image_opacity_max, form.state.monitors[0].image_opacity);
 }
 
 test "form focus wraps in both directions" {
