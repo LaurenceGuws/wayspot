@@ -29,7 +29,7 @@ pub const Loop = struct {
     vendor_started: bool = false,
 
     pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
-        var config = try config_owner.load(allocator);
+        var config = try config_owner.Config.load(allocator);
         defer config.deinit(allocator);
 
         var library = try library_owner.scan(allocator, config.library_path);
@@ -74,7 +74,7 @@ pub const Loop = struct {
     fn startVendor(self: *Loop) !void {
         const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, wallpaper_surface.class_name);
         if (!hint_set) return error.SdlHintFailed;
-        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
+        if (!c.SDL_Init(c.SDL_INIT_EVENTS)) return error.SdlInitFailed;
         self.vendor_started = true;
     }
 

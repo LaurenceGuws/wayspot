@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 
-#include "sdl.h"
+#include "wayland.h"
 
 #include <sys/mman.h>
 #include <string.h>
@@ -68,6 +68,27 @@ static const struct wl_interface zwlr_layer_surface_v1_interface = {
 static uint32_t wayspot_min_u32(uint32_t a, uint32_t b)
 {
     return a < b ? a : b;
+}
+
+struct wl_display *wayspot_wayland_connect(void)
+{
+    return wl_display_connect(NULL);
+}
+
+void wayspot_wayland_disconnect(struct wl_display *display)
+{
+    if (display != NULL) wl_display_disconnect(display);
+}
+
+struct wl_surface *wayspot_layer_create_surface(struct wayspot_layer_globals *globals)
+{
+    if (globals->compositor == NULL) return NULL;
+    return wl_compositor_create_surface(globals->compositor);
+}
+
+void wayspot_wl_surface_destroy(struct wl_surface *surface)
+{
+    if (surface != NULL) wl_surface_destroy(surface);
 }
 
 enum wayspot_layer_result wayspot_shm_buffer_create(struct wayspot_layer_globals *globals, struct wayspot_shm_buffer *buffer, uint32_t width, uint32_t height, uint32_t format)

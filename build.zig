@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
     const lua_mod = lua_dep.module("howl_lua");
     const sdl_include = sdl_dep.path("include");
     const sdl_c_mod = translateCModule(b, b.path("src/c/sdl.h"), target, optimize, &.{sdl_include});
+    const wayland_c_mod = translateCModule(b, b.path("src/c/wayland.h"), target, optimize, &.{});
     const text_c_mod = translateCModule(b, b.path("src/c/text.h"), target, optimize, &.{
         .{ .cwd_relative = "/usr/include/freetype2" },
         .{ .cwd_relative = "/usr/include/harfbuzz" },
@@ -36,7 +37,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    layer_shell_mod.addIncludePath(sdl_include);
+    layer_shell_mod.addIncludePath(b.path("src/c"));
     layer_shell_mod.addCSourceFile(.{ .file = b.path("src/c/wayspot_layer_shell.c") });
     const layer_shell = b.addLibrary(.{
         .name = "wayspot_layer_shell",
@@ -54,6 +55,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.addImport("sdl_c", sdl_c_mod);
+    mod.addImport("wayland_c", wayland_c_mod);
     mod.addImport("text_c", text_c_mod);
     mod.addImport("picker_candidate", picker_candidate_mod);
     mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
