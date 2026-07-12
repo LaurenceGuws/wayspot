@@ -81,6 +81,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "apps")) {
+        try runTerminalApps(allocator, home, args[2..]);
+        return;
+    }
+
     if (args.len >= 2 and std.mem.eql(u8, args[1], "commands")) {
         try runTerminalCommands(allocator, home);
         return;
@@ -137,7 +142,7 @@ fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
     var candidates = wayspot.picker.candidate.Candidate.List.empty;
     defer candidates.deinit();
 
-    try apps.collect(allocator, &candidates);
+    try apps.collectCandidates(allocator, &candidates);
     try wayspot.picker.icon_diag.writeReport(candidates.slice());
 }
 
@@ -150,7 +155,7 @@ fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
     var candidates = wayspot.picker.candidate.Candidate.List.empty;
     defer candidates.deinit();
 
-    try apps.collect(allocator, &candidates);
+    try apps.collectCandidates(allocator, &candidates);
     const counts = try wayspot.picker.icon_cache.refresh(home, candidates.slice());
     try wayspot.picker.icon_cache.printRefreshSummary(counts);
 }
@@ -167,18 +172,37 @@ fn runTerminalCommands(allocator: std.mem.Allocator, home: []const u8) !void {
 }
 
 fn runTerminalQuery(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
+    const raw_query = try joinCommandText(allocator, query_parts);
+    defer allocator.free(raw_query);
+    try runTerminalQueryText(allocator, home, raw_query);
+}
+
+fn runTerminalApps(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
+    const raw_query = try appsQuery(allocator, query_parts);
+    defer allocator.free(raw_query);
+    try runTerminalQueryText(allocator, home, raw_query);
+}
+
+fn runTerminalQueryText(allocator: std.mem.Allocator, home: []const u8, raw_query: []const u8) !void {
     var picker_bundle = try setupPickerBundle(allocator, home);
     picker_bundle.wirePicker();
     defer picker_bundle.deinit(allocator);
     try picker_bundle.picker.loadHistory(allocator);
 
-    const raw_query = try joinCommandText(allocator, query_parts);
-    defer allocator.free(raw_query);
-
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     try picker_bundle.picker.query(allocator, raw_query, &stdout_writer.interface);
     try stdout_writer.interface.flush();
+}
+
+fn appsQuery(allocator: std.mem.Allocator, query_parts: []const []const u8) ![]u8 {
+    if (query_parts.len == 0) return allocator.dupe(u8, "/apps");
+
+    const terms = try joinCommandText(allocator, query_parts);
+    defer allocator.free(terms);
+    const prefix = "/apps ";
+    if (terms.len > wayspot.picker.cmd.max_cmd_bytes -| prefix.len) return error.CommandTooLong;
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, terms });
 }
 
 fn runTerminalOpen(allocator: std.mem.Allocator, home: []const u8, payload: []const u8) !void {
@@ -203,7 +227,7 @@ fn runTerminalBashCompletion(allocator: std.mem.Allocator, home: []const u8, que
     const raw_query = try joinCommandText(allocator, query_parts);
     defer allocator.free(raw_query);
 
-    var stdout_buffer: [wayspot.picker.command.max_completion_output_bytes]u8 = undefined;
+    var stdout_buffer: [wayspot.picker.cmd.max_completion_output_bytes]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     try picker_bundle.picker.completeBash(allocator, raw_query, &stdout_writer.interface);
     try stdout_writer.interface.flush();
@@ -211,11 +235,11 @@ fn runTerminalBashCompletion(allocator: std.mem.Allocator, home: []const u8, que
 
 fn runCommandBytes(command: []const u8) !void {
     if (command.len == 0) return error.EmptyCommand;
-    if (command.len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
-    var command_buf: [wayspot.picker.command.max_command_bytes + 1]u8 = undefined;
+    if (command.len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
+    var command_buf: [wayspot.picker.cmd.max_cmd_bytes + 1]u8 = undefined;
     @memcpy(command_buf[0..command.len], command);
     command_buf[command.len] = 0;
-    try wayspot.picker.command.runDetachedShellCommand(command_buf[0..command.len :0].ptr);
+    try wayspot.picker.cmd.runDetachedShellCommand(command_buf[0..command.len :0].ptr);
 }
 
 fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
@@ -223,10 +247,10 @@ fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u
     var total_len: u32 = 0;
     for (parts) |part| {
         total_len += @intCast(part.len);
-        if (total_len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
+        if (total_len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
     }
     total_len += @intCast(parts.len - 1);
-    if (total_len > wayspot.picker.command.max_command_bytes) return error.CommandTooLong;
+    if (total_len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
 
     var out = try std.ArrayList(u8).initCapacity(allocator, total_len);
     errdefer out.deinit(allocator);
@@ -306,8 +330,6 @@ fn applySunglassesImageCommand(
 const PickerBundle = struct {
     app_cache_path: []u8,
     history_path: []u8,
-    opens: wayspot.picker.open.Open = .{},
-    modes: wayspot.picker.mode.Mode = .{},
     notification_history: wayspot.notification.history_list.NotificationHistoryList = .{},
     apps: wayspot.picker.mode.apps.Apps,
     picker: wayspot.picker.Picker,
@@ -321,7 +343,7 @@ const PickerBundle = struct {
     }
 
     fn wirePicker(self: *PickerBundle) void {
-        self.picker = wayspot.picker.Picker.initWithHistoryPath(&self.opens, &self.apps, &self.modes, self.history_path);
+        self.picker = wayspot.picker.Picker.initWithHistoryPath(&self.apps, self.history_path);
         self.picker.notification_history = &self.notification_history;
         self.picker.max_history = 64;
     }
@@ -373,4 +395,15 @@ test "sunglasses image command parser rejects partial hidden commands" {
 
     const extra_arg = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1", "/tmp/overlay.png" };
     try std.testing.expect(sunglassesImageCommand(&extra_arg) == null);
+}
+
+test "wayspot apps builds the canonical apps query" {
+    const empty = try appsQuery(std.testing.allocator, &.{});
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("/apps", empty);
+
+    const parts = [_][]const u8{ "Firefox", "Browser" };
+    const filtered = try appsQuery(std.testing.allocator, &parts);
+    defer std.testing.allocator.free(filtered);
+    try std.testing.expectEqualStrings("/apps Firefox Browser", filtered);
 }

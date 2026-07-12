@@ -42,7 +42,13 @@ vocabulary:
       - cmd
       - sub_cmd
       - candidate
+      - concrete
       - input
+      - scalar
+      - toggle
+      - path
+      - slider
+      - control
       - selection
       - interface
       - cli
@@ -203,13 +209,18 @@ ownership:
         - default_mode
         - sub_cmd_union
         - candidate_union
-        - user_input_type
+        - input_union
+        - typed_concrete_leaf
+        - gui_cli_input_equivalence
         - bash_completion
       owns:
         - cmd_tree
         - sub_cmd_tree
         - candidate_reachability
         - cmd_resolution
+        - input_contract
+        - typed_concrete_leaf
+        - gui_cli_input_equivalence
         - cli_consumption
         - gui_consumption
       consumers:
@@ -305,13 +316,173 @@ build:
       mode_array: bounded_and_ordered
       sub_cmd:
         type: tagged_union
-        owner: selected_cmd_arm
+        source: src/picker/sub_cmd.zig
+        arms:
+          - notifications: NotificationsSubCmd
+          - wallpaper: WallpaperSubCmd
+          - sunglasses: SunglassesSubCmd
+        apps: none
       candidate:
         type: tagged_union
+        source: src/picker/candidate.zig
         arms:
-          - sub_cmd
-          - concrete
-      user_input: explicit_bounded_type
+          - sub_cmd: SubCmd
+          - concrete: Concrete
+        rule: Candidate stores one shared SubCmd value or one Concrete leaf; no generic or erased child storage
+      input:
+        type: tagged_union
+        source: src/picker/candidate.zig
+        symbol: Input
+        arms:
+          - none
+          - scalar: ScalarInput
+          - toggle: ToggleInput
+          - path: PathInput
+        meaning: Input is the typed value contract carried by a Concrete leaf; it is not GUI widget state or resident runtime state
+        gui: GUI switches explicitly on Input and renders scalar as a slider, toggle as an on/off control, and path as a bounded textbox
+        cli: CLI parses raw argv into the same Input arm and bounds before constructing the same Concrete leaf
+        definitions:
+          none:
+            symbol: Input.none
+            fields: []
+            meaning: The leaf takes no user value.
+          scalar:
+            symbol: ScalarInput
+            fields:
+              - value: i32
+              - min: i32
+              - max: i32
+              - step: i32
+            invariant: min <= value <= max, step is positive and no greater than max - min, and (value - min) % step == 0
+            ownership: The value is copied into the Concrete leaf; GUI slider draft state is separate.
+          toggle:
+            symbol: ToggleInput
+            fields:
+              - enabled: bool
+            ownership: The value is copied into the Concrete leaf; GUI toggle draft state is separate.
+          path:
+            symbol: PathInput
+            fields:
+              - bytes: fixed_storage
+              - length: usize
+            ownership: PathInput owns one bounded copy and does not borrow GUI text or argv storage.
+            invariant: path is non-empty, absolute, and contains no invalid path byte
+        bounds:
+          arm_count: project_version_scope.yml:max_input_arms
+          scalar: project_version_scope.yml:sunglasses_scalar_bounds
+          path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
+      concrete:
+        type: tagged_union
+        source: src/picker/candidate.zig
+        arms:
+          - app
+          - open
+          - lifecycle
+          - notification
+        lifecycle_arms:
+          - notifications_restart
+          - wallpaper_restart
+          - wallpaper_rotate
+          - sunglasses_restart
+          - sunglasses_apply
+          - sunglasses_reconcile
+          - sunglasses_dim
+          - sunglasses_filter
+          - sunglasses_image
+        bounds:
+          arm_count: project_version_scope.yml:max_concrete_arms
+          lifecycle_arm_count: project_version_scope.yml:max_lifecycle_arms
+          monitor_name_bytes: project_version_scope.yml:sunglasses_monitor_name_bytes
+          image_path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
+        input_policy:
+          app: none
+          open: none
+          lifecycle:
+            notifications_restart: none
+            wallpaper_restart: none
+            wallpaper_rotate: none
+            sunglasses_restart: none
+            sunglasses_apply: none
+            sunglasses_reconcile: none
+            sunglasses_dim: scalar_or_toggle
+            sunglasses_filter: scalar_or_toggle
+            sunglasses_image: none_or_scalar_or_toggle_or_path
+          notification: none
+        leaf_shapes:
+          app:
+            input: Input.none
+            owner: apps mode
+          open:
+            input: Input.none
+            owner: apps mode
+          lifecycle:
+            typed_arms:
+              notifications_restart:
+                fields: []
+                input: Input.none
+              wallpaper_restart:
+                fields: []
+                input: Input.none
+              wallpaper_rotate:
+                fields: []
+                input: Input.none
+              sunglasses_restart:
+                fields: []
+                input: Input.none
+              sunglasses_apply:
+                fields: []
+                input: Input.none
+              sunglasses_reconcile:
+                fields: []
+                input: Input.none
+              sunglasses_dim:
+                fields:
+                  monitor: owned_bounded_monitor_name
+                  input:
+                    type: Input
+                    accepted_arms:
+                      - scalar
+                      - toggle
+                input_policy: scalar_or_toggle
+              sunglasses_filter:
+                fields:
+                  monitor: owned_bounded_monitor_name
+                  input:
+                    type: Input
+                    accepted_arms:
+                      - scalar
+                      - toggle
+                input_policy: scalar_or_toggle
+              sunglasses_image:
+                fields:
+                  monitor: owned_bounded_monitor_name
+                  input:
+                    type: Input
+                    accepted_arms:
+                      - none
+                      - scalar
+                      - toggle
+                      - path
+                input_policy: none_or_scalar_or_toggle_or_path
+          notification:
+            input: Input.none
+            owner: notification history
+        rule: Concrete is terminal and every arm has an explicit typed Input contract; notification is display-only and explicitly rejected at selection and launch boundaries
+      input_equivalence:
+        rule: CLI raw input and GUI editing construct equal Concrete values for the same mode, monitor, operation, and bounded value
+        examples:
+          - "wayspot sunglasses dim DP-1 set 35"
+          - "wayspot sunglasses dim DP-1 on"
+          - "wayspot sunglasses dim DP-1 off"
+          - "wayspot sunglasses filter DP-1 set -35"
+          - "wayspot sunglasses image DP-1 opacity 55"
+          - "wayspot sunglasses image DP-1 set /absolute/image.png"
+        tests:
+          - same scalar argv and slider commit produce equal sunglasses_dim leaves
+          - same on/off argv and toggle commit produce equal sunglasses_dim leaves
+          - same path argv and textbox commit produce equal sunglasses_image leaves
+          - GUI and CLI reject the same scalar, toggle, path, and monitor bounds
+        rejection: CLI and GUI reject the same out-of-bound scalar, toggle, path, and monitor values
       completion: bash_only
     modes:
       - apps

@@ -22,7 +22,7 @@ test "root references config and appearance declarations" {
     std.testing.refAllDecls(config.defaults);
     std.testing.refAllDecls(env);
     std.testing.refAllDecls(picker.candidate);
-    std.testing.refAllDecls(picker.command);
+    std.testing.refAllDecls(picker.cmd);
     std.testing.refAllDecls(picker.appearance);
     std.testing.refAllDecls(@import("wallpaper/surface.zig"));
     std.testing.refAllDecls(@import("sunglasses/overlay.zig"));

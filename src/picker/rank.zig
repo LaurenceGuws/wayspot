@@ -1,4 +1,4 @@
-//! Ranking owns deterministic scoring for app and picker rows.
+//! Ranking owns deterministic scoring for Apps and resident picker candidates.
 
 const std = @import("std");
 const query_mod = @import("query.zig");
@@ -78,14 +78,39 @@ fn lessThan(_: void, a: RankedCandidate, b: RankedCandidate) bool {
 }
 
 fn matchesRoute(query: query_mod.Query, candidate: candidate_mod.Candidate) bool {
-    if (!candidate_mod.Candidate.accepts(.query, candidate.typeOf())) return false;
+    if (!candidate_mod.Candidate.accepts(.query, candidate)) return false;
     return switch (query.route) {
-        .blended => candidate.typeOf() == .app,
-        .apps => candidate.typeOf() == .app,
-        .modes => candidate.typeOf() == .mode and !std.mem.eql(u8, candidate.openPayload(), "/notifications history"),
+        .blended, .apps => isAppsCandidate(candidate),
+        .modes => matchesModeRoute(candidate),
         .notifications => matchesNotificationRoute(query.term, candidate),
-        .wallpapers => candidate.typeOf() == .lifecycle and std.mem.eql(u8, candidate.openPayload(), "lifecycle:wallpapers:restart"),
+        .wallpapers => matchesWallpaperRoute(candidate),
+        .sunglasses => matchesSunglassesRoute(candidate),
         .run => true,
+    };
+}
+
+/// isAppsCandidate is the complete Apps-mode composition policy.
+fn isAppsCandidate(value: candidate_mod.Candidate) bool {
+    return value.isApp() or value.isOpen();
+}
+
+fn matchesModeRoute(value: candidate_mod.Candidate) bool {
+    return switch (value) {
+        .sub_cmd => |route| switch (route) {
+            .notifications => |child| switch (child) {
+                .restart => true,
+                .history => false,
+            },
+            .wallpaper => |child| switch (child) {
+                .restart => true,
+                .rotate => false,
+            },
+            .sunglasses => |child| switch (child) {
+                .restart => true,
+                .apply, .reconcile, .dim, .filter, .image => false,
+            },
+        },
+        .concrete => false,
     };
 }
 
@@ -111,7 +136,7 @@ fn candidateScoreOldestFirst(
 
 fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, candidate: candidate_mod.Candidate) ?i32 {
     var score: i32 = baseWeight(route, candidate.typeOf());
-    if (route == .notifications and candidate.typeOf() == .notification) {
+    if (route == .notifications and isNotification(candidate)) {
         const history_filter = notificationHistoryFilter(needle) orelse return null;
         if (history_filter.len == 0) return score + notificationHistoryOrderBoost(candidate.openPayload());
         if (indexOfAsciiFold(candidate.title(), history_filter) == null and
@@ -136,9 +161,56 @@ fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, cand
 }
 
 fn matchesNotificationRoute(term: []const u8, candidate: candidate_mod.Candidate) bool {
-    if (notificationHistoryFilter(term) != null) return candidate.typeOf() == .notification;
-    if (candidate.typeOf() == .lifecycle and std.mem.eql(u8, candidate.openPayload(), "lifecycle:notifications:restart")) return true;
-    return candidate.typeOf() == .mode and std.mem.eql(u8, candidate.openPayload(), "/notifications history");
+    const history_route = notificationHistoryFilter(term) != null;
+    if (history_route) return isNotification(candidate);
+    return switch (candidate) {
+        .sub_cmd => |value| switch (value) {
+            .notifications => |child| switch (child) {
+                .history => term.len == 0,
+                .restart => true,
+            },
+            else => false,
+        },
+        .concrete => |leaf| switch (leaf) {
+            .lifecycle => |value| switch (value) {
+                .notifications_restart => true,
+                else => false,
+            },
+            else => false,
+        },
+    };
+}
+
+fn matchesWallpaperRoute(candidate: candidate_mod.Candidate) bool {
+    return switch (candidate) {
+        .sub_cmd => |value| switch (value) {
+            .wallpaper => true,
+            else => false,
+        },
+        .concrete => |leaf| switch (leaf) {
+            .lifecycle => |value| switch (value) {
+                .wallpaper_restart, .wallpaper_rotate => true,
+                else => false,
+            },
+            else => false,
+        },
+    };
+}
+
+fn matchesSunglassesRoute(candidate: candidate_mod.Candidate) bool {
+    return switch (candidate) {
+        .sub_cmd => |value| switch (value) {
+            .sunglasses => true,
+            else => false,
+        },
+        .concrete => |leaf| switch (leaf) {
+            .lifecycle => |value| switch (value) {
+                .sunglasses_restart, .sunglasses_apply, .sunglasses_reconcile, .sunglasses_dim, .sunglasses_filter, .sunglasses_image => true,
+                else => false,
+            },
+            else => false,
+        },
+    };
 }
 
 fn notificationHistoryFilter(term: []const u8) ?[]const u8 {
@@ -196,15 +268,11 @@ fn asciiFoldByte(ch: u8) u8 {
     return if (std.ascii.isAscii(ch)) std.ascii.toLower(ch) else ch;
 }
 
-fn shortQueryBias(needle_len: u64, kind: candidate_mod.Candidate.Type) i32 {
+fn shortQueryBias(needle_len: u64, kind: std.meta.Tag(candidate_mod.Candidate)) i32 {
     if (needle_len == 0 or needle_len > 2) return 0;
     return switch (kind) {
-        .open => 50,
-        .app => 0,
-        .mode => 0,
-        .lifecycle => 0,
-        .notification => 0,
-        .hint => 0,
+        .sub_cmd => 0,
+        .concrete => 50,
     };
 }
 
@@ -236,32 +304,34 @@ fn recencyBonus(index: u32) i32 {
     return if (bonus > 0) bonus else 0;
 }
 
-fn baseWeight(route: query_mod.Route, kind: candidate_mod.Candidate.Type) i32 {
+fn baseWeight(route: query_mod.Route, kind: std.meta.Tag(candidate_mod.Candidate)) i32 {
     if (route == .run) return 0;
     if (route == .notifications) {
         return switch (kind) {
-            .app => 0,
-            .open => 0,
-            .mode => 70,
-            .lifecycle => 100,
-            .notification => 60,
-            .hint => 0,
+            .sub_cmd => 80,
+            .concrete => 100,
         };
     }
     return switch (kind) {
-        .app => 100,
-        .open => 70,
-        .mode => 90,
-        .lifecycle => 80,
-        .notification => 60,
-        .hint => 10,
+        .sub_cmd => 80,
+        .concrete => 100,
+    };
+}
+
+fn isNotification(value: candidate_mod.Candidate) bool {
+    return switch (value) {
+        .sub_cmd => false,
+        .concrete => |leaf| switch (leaf) {
+            .notification => true,
+            .app, .open, .lifecycle => false,
+        },
     };
 }
 
 test "exact match outranks prefix match" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("kitty", "Terminal", "kitty", ""),
-        candidate_mod.Candidate.makeApp("kitty-manager", "Terminal", "km", ""),
+        candidate_mod.Candidate.appLeaf("kitty", "Terminal", "kitty", ""),
+        candidate_mod.Candidate.appLeaf("kitty-manager", "Terminal", "km", ""),
     };
 
     const query = query_mod.parse("kitty");
@@ -272,86 +342,90 @@ test "exact match outranks prefix match" {
     try std.testing.expectEqualStrings("kitty", ranked[0].candidate.title());
 }
 
-test "route filter limits result kinds" {
+test "Apps route includes installed and fixed-local kinds" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("kitty", "Terminal", "kitty", ""),
-        candidate_mod.Candidate.openRow("Terminal", "kitty", "terminal-open", ""),
+        candidate_mod.Candidate.appLeaf("kitty", "Terminal", "kitty", ""),
+        candidate_mod.Candidate.openLeaf("Terminal", "kitty", "terminal-open", ""),
     };
 
     const query = query_mod.parse("@ term");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.app, ranked[0].candidate.typeOf());
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
+    try std.testing.expect(ranked[0].candidate.isOpen());
+    try std.testing.expect(ranked[1].candidate.isApp());
 }
 
-test "slash routes expose modes and lifecycle commands only" {
+test "slash routes expose typed resident routes and notification history" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeMode("/notifications", "Lifecycle mode", "/notifications"),
-        candidate_mod.Candidate.makeMode("/wallpapers", "Lifecycle mode", "/wallpapers"),
-        candidate_mod.Candidate.makeLifecycle("Restart notifications", "Lifecycle", "lifecycle:notifications:restart"),
-        candidate_mod.Candidate.makeMode("Notification history", "Lifecycle", "/notifications history"),
-        candidate_mod.Candidate.makeNotification("New message", "Mail: body", "notification-history:0:2"),
-        candidate_mod.Candidate.makeNotification("Older message", "Mail: body", "notification-history:1:1"),
-        candidate_mod.Candidate.makeLifecycle("Restart wallpaper", "Lifecycle", "lifecycle:wallpapers:restart"),
-        candidate_mod.Candidate.makeApp("Kitty", "Terminal", "kitty", ""),
+        candidate_mod.Candidate.lifecycleLeaf(candidate_mod.notificationsRestart()),
+        candidate_mod.Candidate.subCmd(.{ .notifications = .{ .history = {} } }),
+        candidate_mod.Candidate.subCmd(.{ .wallpaper = .{ .rotate = {} } }),
+        candidate_mod.Candidate.subCmd(.{ .sunglasses = .{ .apply = {} } }),
+        candidate_mod.Candidate.notificationLeaf("New message", "Mail: body", "notification-history:0:2"),
+        candidate_mod.Candidate.notificationLeaf("Older message", "Mail: body", "notification-history:1:1"),
+        candidate_mod.Candidate.lifecycleLeaf(candidate_mod.wallpaperRestart()),
+        candidate_mod.Candidate.appLeaf("Kitty", "Terminal", "kitty", ""),
     };
-
-    const modes = try rankCandidates(std.testing.allocator, query_mod.parse("/"), &candidates);
-    defer std.testing.allocator.free(modes);
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(modes.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.mode, modes[0].candidate.typeOf());
 
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(notifications.len)));
     try std.testing.expectEqualStrings("lifecycle:notifications:restart", notifications[0].candidate.openPayload());
 
+    const sunglasses = try rankCandidates(std.testing.allocator, query_mod.parse("/sunglasses apply"), &candidates);
+    defer std.testing.allocator.free(sunglasses);
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(sunglasses.len)));
+    try std.testing.expectEqualStrings("wayspot sunglasses apply", sunglasses[0].candidate.openPayload());
+
     const history = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications history"), &candidates);
     defer std.testing.allocator.free(history);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(history.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.notification, history[0].candidate.typeOf());
+    try std.testing.expectEqual(std.meta.Tag(candidate_mod.Candidate).concrete, history[0].candidate.typeOf());
     try std.testing.expectEqualStrings("notification-history:0:2", history[0].candidate.openPayload());
 }
 
-test "default route is apps only" {
+test "default route is Apps mode" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeMode("/notifications", "Lifecycle mode", "/notifications"),
-        candidate_mod.Candidate.makeLifecycle("Restart wallpaper", "Lifecycle", "lifecycle:wallpapers:restart"),
-        candidate_mod.Candidate.openRow("Settings", "System", "settings", ""),
-        candidate_mod.Candidate.makeApp("Kitty", "Terminal", "kitty", ""),
+        candidate_mod.Candidate.lifecycleLeaf(candidate_mod.notificationsRestart()),
+        candidate_mod.Candidate.lifecycleLeaf(candidate_mod.wallpaperRestart()),
+        candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
+        candidate_mod.Candidate.appLeaf("Kitty", "Terminal", "kitty", ""),
     };
 
     const ranked = try rankCandidates(std.testing.allocator, query_mod.parse(""), &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.app, ranked[0].candidate.typeOf());
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
+    try std.testing.expect(ranked[0].candidate.isApp());
+    try std.testing.expect(ranked[1].candidate.isOpen());
 }
 
-test "empty apps route keeps app-only scoring order" {
+test "empty apps route keeps installed and fixed-local scoring order" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("Firefox", "Browser", "firefox", ""),
-        candidate_mod.Candidate.openRow("Focus Firefox", "Window open", "focus-firefox-open", ""),
-        candidate_mod.Candidate.makeApp("Alacritty", "Terminal", "alacritty", ""),
+        candidate_mod.Candidate.appLeaf("Firefox", "Browser", "firefox", ""),
+        candidate_mod.Candidate.openLeaf("Focus Firefox", "Window open", "focus-firefox-open", ""),
+        candidate_mod.Candidate.appLeaf("Alacritty", "Terminal", "alacritty", ""),
     };
 
     const query = query_mod.parse("@ ");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.app, ranked[0].candidate.typeOf());
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.app, ranked[1].candidate.typeOf());
+    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(ranked.len)));
+    try std.testing.expect(ranked[0].candidate.isApp());
+    try std.testing.expect(ranked[1].candidate.isApp());
+    try std.testing.expect(ranked[2].candidate.isOpen());
     try std.testing.expectEqualStrings("Alacritty", ranked[0].candidate.title());
     try std.testing.expectEqualStrings("Firefox", ranked[1].candidate.title());
+    try std.testing.expectEqualStrings("Focus Firefox", ranked[2].candidate.title());
 }
 
 test "recency history boosts repeated open rows" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.openRow("Settings", "System", "settings", ""),
-        candidate_mod.Candidate.openRow("Power menu", "Session", "power", ""),
+        candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
+        candidate_mod.Candidate.openLeaf("Power menu", "Session", "power", ""),
     };
     const history = [_][]const u8{"power"};
     const query = query_mod.parse("> p");
@@ -364,9 +438,9 @@ test "recency history boosts repeated open rows" {
 
 test "newest-first and oldest-first histories produce equivalent recency ranking" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.openRow("Settings", "System", "settings", ""),
-        candidate_mod.Candidate.openRow("Power menu", "Session", "power", ""),
-        candidate_mod.Candidate.openRow("Terminal", "System", "terminal", ""),
+        candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
+        candidate_mod.Candidate.openLeaf("Power menu", "Session", "power", ""),
+        candidate_mod.Candidate.openLeaf("Terminal", "System", "terminal", ""),
     };
     const newest_first = [_][]const u8{ "power", "settings" };
     var settings = [_]u8{ 's', 'e', 't', 't', 'i', 'n', 'g', 's' };
@@ -388,26 +462,26 @@ test "newest-first and oldest-first histories produce equivalent recency ranking
     try std.testing.expectEqualStrings("power", ranked_oldest[0].candidate.openPayload());
 }
 
-test "default route ignores open rows" {
+test "Apps route filters fixed-local leaves by title" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("Redis Desktop Manager", "Database GUI", "redis-desktop", ""),
-        candidate_mod.Candidate.openRow("Settings", "System", "settings", ""),
+        candidate_mod.Candidate.appLeaf("Redis Desktop Manager", "Database GUI", "redis-desktop", ""),
+        candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
     };
 
-    const query = query_mod.parse("re");
+    const query = query_mod.parse("/apps set");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
-    try std.testing.expectEqual(candidate_mod.Candidate.Type.app, ranked[0].candidate.typeOf());
-    try std.testing.expectEqualStrings("Redis Desktop Manager", ranked[0].candidate.title());
+    try std.testing.expect(ranked[0].candidate.isOpen());
+    try std.testing.expectEqualStrings("Settings", ranked[0].candidate.title());
 }
 
 test "rankCandidates propagates scored result alloc failure" {
     var zero_buf: [0]u8 = .{};
     var fba = std.heap.FixedBufferAllocator.init(&zero_buf);
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("alpha", "subtitle", "alpha", ""),
+        candidate_mod.Candidate.appLeaf("alpha", "subtitle", "alpha", ""),
     };
 
     const query = query_mod.parse("a");
@@ -423,7 +497,7 @@ test "rankCandidates reports failing allocator on scored result alloc" {
     });
     const failing_allocator = failing_state.allocator();
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("alpha", "subtitle", "alpha", ""),
+        candidate_mod.Candidate.appLeaf("alpha", "subtitle", "alpha", ""),
     };
 
     const query = query_mod.parse("a");
@@ -436,8 +510,8 @@ test "rankCandidates reports failing allocator on scored result alloc" {
 
 test "equal score and title uses deterministic tie-breakers" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.makeApp("Alpha", "Same", "z-open", ""),
-        candidate_mod.Candidate.makeApp("Alpha", "Same", "a-open", ""),
+        candidate_mod.Candidate.appLeaf("Alpha", "Same", "z-open", ""),
+        candidate_mod.Candidate.appLeaf("Alpha", "Same", "a-open", ""),
     };
 
     const query = query_mod.parse("");

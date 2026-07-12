@@ -1,27 +1,68 @@
-//! Apps owns desktop application discovery and candidate string lifetimes.
+//! Apps owns the default mode, desktop application discovery, fixed local candidates, and candidate string lifetimes.
 
 const std = @import("std");
 const candidate_mod = @import("picker_candidate");
 
+const Dependency = union(enum) {
+    command: []const u8,
+};
+
+const Execution = union(enum) {
+    shell_command: []const u8,
+};
+
+const Spec = struct {
+    title: []const u8,
+    subtitle: []const u8,
+    open: []const u8,
+    icon: []const u8,
+    execution: Execution,
+    dependency: Dependency,
+};
+
+const local_specs = [_]Spec{
+    .{
+        .title = "Settings",
+        .subtitle = "System",
+        .open = "settings",
+        .icon = "preferences-system-symbolic",
+        .execution = .{ .shell_command = "wlrlui" },
+        .dependency = .{ .command = "wlrlui" },
+    },
+    .{
+        .title = "Power menu",
+        .subtitle = "Session",
+        .open = "power",
+        .icon = "system-shutdown-symbolic",
+        .execution = .{ .shell_command = "wlogout" },
+        .dependency = .{ .command = "wlogout" },
+    },
+};
+
+/// Apps is the first Cmd arm and the sole owner of app and fixed-local candidate composition.
 pub const Apps = struct {
     cache_path: []const u8,
     cache_data: ?[]u8 = null,
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
+    command_exists_fn: *const fn (name: []const u8) bool = commandExists,
 
+    /// init records the cache path; candidate strings remain owned by this Apps value after collection.
     pub fn init(cache_path: []const u8) Apps {
         return .{
             .cache_path = cache_path,
         };
     }
 
+    /// deinit releases cache bytes and every producer string exactly once.
     pub fn deinit(self: *Apps, allocator: std.mem.Allocator) void {
         self.freeCacheData(allocator);
         self.freeOwnedStrings(allocator);
         self.owned_strings.deinit(allocator);
     }
 
-    /// collect appends launchable desktop application candidates.
-    pub fn collect(
+    /// collectCandidates appends bounded installed-app and available fixed-local leaves.
+    /// Producer-owned strings are released before each retry; the caller owns the Candidate.List storage.
+    pub fn collectCandidates(
         self: *Apps,
         allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
@@ -35,15 +76,15 @@ pub const Apps = struct {
             .limited(2 * 1024 * 1024),
         ) catch |err| switch (err) {
             error.FileNotFound => {
-                const count = self.collectFromDesktopFiles(allocator, out) catch |scan_err| {
+                _ = self.collectFromDesktopFiles(allocator, out) catch |scan_err| {
                     std.log.warn("app rows desktop scan failed: {s}", .{@errorName(scan_err)});
-                    return;
                 };
-                if (count == 0) return;
+                try self.collectOpenCandidates(out);
                 return;
             },
             else => {
                 std.log.warn("app rows cache read failed: {s}", .{@errorName(err)});
+                try self.collectOpenCandidates(out);
                 return;
             },
         };
@@ -62,7 +103,7 @@ pub const Apps = struct {
             const icon_name = trimCacheField(fields.next() orelse "");
 
             try out.append(
-                candidate_mod.Candidate.makeApp(name, category, exec_cmd, icon_name),
+                candidate_mod.Candidate.appLeaf(name, category, exec_cmd, icon_name),
             );
             count += 1;
         }
@@ -70,8 +111,32 @@ pub const Apps = struct {
         if (count == 0) {
             self.freeCacheData(allocator);
             std.log.warn("app rows cache contained no parsable rows path={s}", .{self.cache_path});
-            return;
         }
+        try self.collectOpenCandidates(out);
+    }
+
+    /// resolve maps one available fixed-local leaf to an executable intent without executing it.
+    /// Unknown names return UnknownOpen; known names with missing dependencies return OpenUnavailable.
+    pub fn resolve(self: *const Apps, allocator: std.mem.Allocator, open: []const u8) ![]u8 {
+        for (local_specs) |spec| {
+            if (!std.mem.eql(u8, spec.open, open)) continue;
+            if (!self.openAvailable(spec)) return error.OpenUnavailable;
+            return resolveExecutionCommand(allocator, spec.execution);
+        }
+        return error.UnknownOpen;
+    }
+
+    fn collectOpenCandidates(self: *Apps, out: *candidate_mod.Candidate.List) !void {
+        for (local_specs) |spec| {
+            if (!self.openAvailable(spec)) continue;
+            try out.append(candidate_mod.Candidate.openLeaf(spec.title, spec.subtitle, spec.open, spec.icon));
+        }
+    }
+
+    fn openAvailable(self: *const Apps, spec: Spec) bool {
+        return switch (spec.dependency) {
+            .command => |name| self.command_exists_fn(name),
+        };
     }
 
     fn keepString(self: *Apps, allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
@@ -117,7 +182,7 @@ pub const Apps = struct {
                 std.log.warn("app rows failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
             };
         }
-        return added;
+        return @intCast(added);
     }
 
     fn collectFromDesktopRoot(
@@ -157,10 +222,30 @@ pub const Apps = struct {
             const kept_category = try self.keepString(allocator, category);
             const kept_exec = try self.keepString(allocator, exec_norm);
             const kept_icon = try self.keepString(allocator, parsed.icon);
-            try out.append(candidate_mod.Candidate.makeApp(kept_name, kept_category, kept_exec, kept_icon));
+            try out.append(candidate_mod.Candidate.appLeaf(kept_name, kept_category, kept_exec, kept_icon));
         }
     }
 };
+
+fn resolveExecutionCommand(allocator: std.mem.Allocator, execution: Execution) ![]u8 {
+    return switch (execution) {
+        .shell_command => |command| allocator.dupe(u8, command),
+    };
+}
+
+fn commandExists(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255) return false;
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path_env = if (std.c.getenv("PATH")) |value| std.mem.span(value) else return false;
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const joined = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ dir, name }) catch continue;
+        std.Io.Dir.accessAbsolute(std.Options.debug_io, joined, .{}) catch continue;
+        return true;
+    }
+    return false;
+}
 
 fn trimCacheField(value: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, value, " \t\r");
@@ -177,6 +262,17 @@ pub fn invalidateDefaultCache() void {
         error.FileNotFound => {},
         else => std.log.warn("app rows cache invalidate failed path={s} err={s}", .{ cache_path, @errorName(err) }),
     };
+}
+
+fn testApps(cache_path: []const u8) Apps {
+    return .{
+        .cache_path = cache_path,
+        .command_exists_fn = testCommandExists,
+    };
+}
+
+fn testCommandExists(_: []const u8) bool {
+    return false;
 }
 
 const DesktopScanState = struct {
@@ -355,11 +451,52 @@ fn writeAppCacheFromCandidates(cache_path: []const u8, rows: []const candidate_m
     var file_buffer: [4096]u8 = undefined;
     var writer = file.writer(std.Options.debug_io, &file_buffer);
     for (rows) |row| {
-        if (row.typeOf() != .app) continue;
+        if (!row.isApp()) continue;
         try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ row.subtitle(), row.title(), row.openPayload(), row.iconName() });
     }
     try writer.interface.flush();
     try file.sync(std.Options.debug_io);
+}
+
+test "apps owns fixed local candidates and executable resolution" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "apps.tsv",
+        .data =
+        \\Utilities\tKitty\tkitty\tkitty
+        \\
+        ,
+    });
+    const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
+    defer std.testing.allocator.free(cache_path);
+
+    const Fake = struct {
+        fn commandExists(name: []const u8) bool {
+            return std.mem.eql(u8, name, "wlrlui");
+        }
+    };
+
+    var apps = Apps{
+        .cache_path = cache_path,
+        .command_exists_fn = Fake.commandExists,
+    };
+    defer apps.deinit(std.testing.allocator);
+
+    var list = candidate_mod.Candidate.List.empty;
+    defer list.deinit();
+    try apps.collectCandidates(std.testing.allocator, &list);
+    try std.testing.expectEqual(@as(usize, 2), list.count);
+    try std.testing.expect(list.items[0].isApp());
+    try std.testing.expect(list.items[1].isOpen());
+    try std.testing.expectEqualStrings("Kitty", list.items[0].title());
+    try std.testing.expectEqualStrings("settings", list.items[1].openPayload());
+
+    const command = try apps.resolve(std.testing.allocator, "settings");
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("wlrlui", command);
+    try std.testing.expectError(error.OpenUnavailable, apps.resolve(std.testing.allocator, "power"));
+    try std.testing.expectError(error.UnknownOpen, apps.resolve(std.testing.allocator, "missing"));
 }
 
 test "app rows collects rows from cache file" {
@@ -378,12 +515,12 @@ test "app rows collects rows from cache file" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expect(apps.cache_data != null);
@@ -410,12 +547,12 @@ test "app rows accepts cache rows without icon metadata" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expect(apps.cache_data != null);
@@ -431,12 +568,12 @@ test "app rows scans desktop files when cache is missing" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/missing.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
 
     try std.testing.expect(apps.cache_data == null);
 }
@@ -457,12 +594,12 @@ test "app rows returns no rows when cache has no valid rows" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 0), list.count);
     try std.testing.expect(apps.cache_data == null);
@@ -484,12 +621,12 @@ test "app rows replaces cache data across cache collects" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title());
@@ -502,14 +639,14 @@ test "app rows replaces cache data across cache collects" {
         \\
         ,
     });
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqual(@as(u32, 1), list.count);
     try std.testing.expectEqualStrings("Gimp", list.items[0].title());
 
     list.clearRetainingCapacity();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Gimp", list.items[0].title());
@@ -531,12 +668,12 @@ test "app rows trims crlf and trailing whitespace from stored fields" {
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
     defer std.testing.allocator.free(cache_path);
 
-    var apps = Apps.init(cache_path);
+    var apps = testApps(cache_path);
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();
-    try apps.collect(std.testing.allocator, &list);
+    try apps.collectCandidates(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
@@ -591,7 +728,7 @@ test "app rows can scan desktop root and rebuild cache rows" {
     const cache_file = try std.fmt.allocPrint(std.testing.allocator, "{s}/wofi-app-launcher.tsv", .{cache_path});
     defer std.testing.allocator.free(cache_file);
 
-    var apps = Apps.init(cache_file);
+    var apps = testApps(cache_file);
     defer apps.deinit(std.testing.allocator);
     var list = candidate_mod.Candidate.List.empty;
     defer list.deinit();

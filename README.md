@@ -4,14 +4,16 @@ Wayspot is a pragmatic Wayland desktop busybox built in Zig.
 
 It gives the desktop a small set of direct surfaces:
 
-- a default apps picker mode for launching installed applications;
+- a default apps picker mode for launching installed applications and available local desktop actions;
 - a freedesktop notification D-Bus interface with retained history;
 - a still-image wallpaper loop;
 - focused per-monitor sunglasses overlays.
 
 The picker is transient and opens the apps mode first. The notification,
 wallpaper, and overlay loops are long-lived only where the desktop behavior
-requires them. GUI and CLI consume the same bounded Cmd tree.
+requires them. GUI and CLI consume the same bounded Cmd tree; scalar, toggle,
+and path leaves use the same typed Input values, with GUI controls for
+interactive tuning and raw values in the CLI.
 
 ## Try it
 

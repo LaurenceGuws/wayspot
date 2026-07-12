@@ -53,7 +53,7 @@ pub fn refresh(home: []const u8, candidates: []const candidate_mod.Candidate) !R
     var png_buffer: [app_icons.max_icon_path_bytes + 1]u8 = undefined;
 
     for (candidates) |candidate| {
-        if (candidate.typeOf() != .app) continue;
+        if (!candidate.isApp()) continue;
         counts.app_rows += 1;
         if (counts.app_rows > max_refresh_rows) {
             counts.skipped += 1;

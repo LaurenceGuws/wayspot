@@ -7,7 +7,7 @@ const std = @import("std");
 const app = @import("mod.zig");
 const app_icons = @import("icons.zig");
 const candidate_owner = @import("picker_candidate");
-const command_owner = @import("command.zig");
+const command_owner = @import("cmd.zig");
 const config_defaults = @import("../config/defaults.zig");
 const cursor_blink = @import("cursor_blink.zig");
 const rank = @import("rank.zig");
@@ -45,14 +45,14 @@ const LaunchRunner = *const fn ([*:0]const u8) command_owner.LaunchRunError!void
 
 /// LaunchQueue owns one bounded GUI command intent until the surface drains it.
 const LaunchQueue = struct {
-    command_buf: [command_owner.max_command_bytes + 1]u8 = undefined,
+    command_buf: [command_owner.max_cmd_bytes + 1]u8 = undefined,
     command_len: u32 = 0,
     state: enum { idle, queued } = .idle,
 
     /// queue stores one non-empty, NUL-terminated command without allocation.
     fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
         if (command_bytes.len == 0) return error.EmptyCommand;
-        if (command_bytes.len > command_owner.max_command_bytes) return error.CommandTooLong;
+        if (command_bytes.len > command_owner.max_cmd_bytes) return error.CommandTooLong;
         std.debug.assert(self.state == .idle);
         @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
         self.command_buf[command_bytes.len] = 0;
@@ -74,7 +74,7 @@ const LaunchQueue = struct {
     fn commandZ(self: *LaunchQueue) [*:0]const u8 {
         std.debug.assert(self.state == .queued);
         std.debug.assert(self.command_len > 0);
-        std.debug.assert(self.command_len <= command_owner.max_command_bytes);
+        std.debug.assert(self.command_len <= command_owner.max_cmd_bytes);
         std.debug.assert(self.command_buf[self.command_len] == 0);
         return self.command_buf[0..self.command_len :0].ptr;
     }
@@ -304,15 +304,16 @@ const Surface = struct {
         std.debug.assert(result_index < self.results.len);
         if (self.launch_queue.hasQueued()) return error.LaunchAlreadyPending;
         const candidate = self.results[@intCast(result_index)].candidate;
-        if (!candidate_owner.Candidate.accepts(.selection, candidate.typeOf())) return;
-        if (candidate.typeOf() == .mode) {
-            try self.switchMode(candidate.openPayload());
+        if (!candidate_owner.Candidate.accepts(.selection, candidate)) return;
+        if (candidate.isSubCmd()) {
+            const route_query = candidate.routeQuery() orelse return error.RouteMissing;
+            try self.switchMode(route_query);
             return;
         }
-        if (candidate.typeOf() == .notification or candidate.typeOf() == .hint) return;
+        if (!candidate.isLaunchable()) return;
         const command = try self.picker.resolveCandidateCommand(self.allocator, candidate);
         defer self.allocator.free(command);
-        if (candidate.typeOf() == .app or candidate.typeOf() == .open) {
+        if (candidate.isApp() or candidate.isOpen()) {
             try self.picker.recordSelection(self.allocator, candidate.openPayload());
         }
         try self.launch_queue.queue(command);
@@ -594,7 +595,7 @@ const Surface = struct {
                 .font_size_px = if (selected) picker.subtitle_selected.font_px else picker.subtitle_normal.font_px,
                 .surface_scale = surface_scale,
             });
-            if (result.typeOf() == .app) try self.drawResultIcon(layout.iconRect(i), result.iconName());
+            if (result.isApp()) try self.drawResultIcon(layout.iconRect(i), result.iconName());
         }
 
         if (range.count == 0) {
@@ -818,7 +819,7 @@ test "surface launch queue clears after failed drain" {
 test "surface launch queue rejects empty and oversized commands" {
     var queue = LaunchQueue{};
     try std.testing.expectError(error.EmptyCommand, queue.queue(""));
-    const oversized = [_]u8{ 'x' } ** (command_owner.max_command_bytes + 1);
+    const oversized = [_]u8{'x'} ** (command_owner.max_cmd_bytes + 1);
     try std.testing.expectError(error.CommandTooLong, queue.queue(&oversized));
     try std.testing.expect(!queue.hasQueued());
 }

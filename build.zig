@@ -32,6 +32,20 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const picker_sub_cmd_mod = b.createModule(.{
+        .root_source_file = b.path("src/picker/sub_cmd.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    picker_candidate_mod.addImport("picker_sub_cmd", picker_sub_cmd_mod);
+    const picker_sub_cmd_tests = b.addTest(.{
+        .root_module = picker_sub_cmd_mod,
+    });
+    const run_picker_sub_cmd_tests = b.addRunArtifact(picker_sub_cmd_tests);
+    const picker_candidate_tests = b.addTest(.{
+        .root_module = picker_candidate_mod,
+    });
+    const run_picker_candidate_tests = b.addRunArtifact(picker_candidate_tests);
     const layer_shell_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -58,6 +72,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("wayland_c", wayland_c_mod);
     mod.addImport("text_c", text_c_mod);
     mod.addImport("picker_candidate", picker_candidate_mod);
+    mod.addImport("picker_sub_cmd", picker_sub_cmd_mod);
     mod.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
     mod.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
@@ -179,6 +194,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_notification_history_cache_tests.step);
     test_step.dependOn(&run_notification_history_list_tests.step);
     test_step.dependOn(&run_picker_appearance_tests.step);
+    test_step.dependOn(&run_picker_sub_cmd_tests.step);
+    test_step.dependOn(&run_picker_candidate_tests.step);
 
     const regression_tests = b.step("regression_tests", "Run regression tests");
     regression_tests.dependOn(&run_mod_tests.step);

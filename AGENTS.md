@@ -54,10 +54,26 @@ ownership.
   `notifications`, `wallpaper`, and `sunglasses`.
 - The bounded ordered mode array places `apps` first and makes it the default
   picker mode.
-- Each selected `Cmd` arm owns one concrete `SubCmd` tagged union.
-- `Candidate` is the next reachable node: either another `SubCmd` union or a
-  concrete executable candidate.
-- GUI and CLI consume the same `Cmd`, `SubCmd`, and `Candidate` values.
+- Resident `Cmd` arms own their concrete child-union route behavior, carried by
+  one shared closed `SubCmd` union; `apps` has no child union.
+- `src/picker/sub_cmd.zig` is the sole declaration owner for `SubCmd`, the
+  resident child unions, and the nested `DimSubCmd`, `FilterSubCmd`, and
+  `ImageSubCmd` route unions.
+- `Candidate` is the next reachable node: either `sub_cmd: SubCmd` or
+  `concrete: Concrete`.
+- `Concrete` is the closed terminal union with `app`, `open`, `lifecycle`, and
+  `notification` arms. `notification` is display-only and must be explicitly
+  rejected at selection and launch boundaries.
+- Every `Concrete` leaf carries an explicit `Input` contract. `Input` is the
+  exact tagged union `none`, `scalar: ScalarInput`, `toggle: ToggleInput`, and
+  `path: PathInput`.
+- `ScalarInput` selects a reusable GUI slider, `ToggleInput` selects an on/off
+  control, and `PathInput` selects a bounded textbox. GUI draft state is not
+  resident state; a committed control constructs the typed `Concrete` leaf.
+- CLI argv and GUI control commits construct equal `Input` and `Concrete`
+  values and reject the same scalar, toggle, path, and monitor bounds.
+- GUI and CLI consume the same `Cmd`, `SubCmd`, `Candidate`, and `Input`
+  values. No `CandidateType`, `Candidate.types`, or parallel input tag exists.
 - `command` and `commands` are deprecated implementation terms; use `Cmd`,
   `SubCmd`, and `Candidate`.
 

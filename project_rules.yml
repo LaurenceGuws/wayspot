@@ -15,9 +15,11 @@ ownership:
   cmd:
     owns the top-level Cmd union, mode array, recursive SubCmd routing, resolution, and completion policy
   sub_cmd:
-    is a concrete tagged union owned by its selected Cmd arm
+    is one shared closed tagged union declared in src/picker/sub_cmd.zig; its explicit arms carry NotificationsSubCmd, WallpaperSubCmd, or SunglassesSubCmd
   candidate:
-    owns the reachable-node union, input policy, bounds, and string lifetime contract
+    owns the Candidate, Concrete, Lifecycle, and Input union declarations, typed leaf policy, bounds, and string lifetime contract
+  input:
+    is declared in src/picker/candidate.zig as Input, ScalarInput, ToggleInput, and PathInput; it is a typed Concrete leaf value, not GUI widget state or resident runtime state
   gui:
     consumes the Cmd tree and owns SDL lifecycle, rendering, input, selection, and intent
   cli:
@@ -25,19 +27,39 @@ ownership:
   process:
     owns identity, mode entry, resident runtime invocation, cleanup, and lifecycle invariants
   mode:
-    owns one sharp desktop tool, one Cmd arm, one SubCmd union, one candidate source, and optional resident runtime
+    owns one sharp desktop tool, one Cmd arm, its child SubCmd route behavior when deeper routes exist, one candidate source, and optional resident runtime
   apps:
-    is the first normal mode, owns installed application candidates, has no resident runtime, and is the default picker mode
+    is the first normal mode, owns installed application and available fixed-local Concrete leaves directly, has no SubCmd or resident runtime, and is the default picker mode
 invariants:
   - Cmd is a tagged union with exactly apps, notifications, wallpaper, and sunglasses arms
   - the bounded ordered mode array places apps first and selects apps as the picker default
-  - every Cmd arm owns its own SubCmd union and candidate meaning
-  - Candidate is a tagged union whose next item is either another SubCmd union or a concrete executable candidate
+  - resident Cmd arms own NotificationsSubCmd, WallpaperSubCmd, or SunglassesSubCmd respectively
+  - SubCmd is one explicit shared union with no generic, erased, or mode-kind storage
+  - src/picker/sub_cmd.zig is the only declaration owner for SubCmd, NotificationsSubCmd, WallpaperSubCmd, and SunglassesSubCmd
+  - src/picker/sub_cmd.zig also owns DimSubCmd, FilterSubCmd, and ImageSubCmd; mode files own their route behavior only
+  - SunglassesSubCmd is exactly restart, apply, reconcile, dim, filter, and image
+  - DimSubCmd and FilterSubCmd are exactly set, on, and off; ImageSubCmd is exactly set, opacity, on, off, and clear
+  - nested SubCmd arms select route operations only; the typed Concrete leaf builder owns Input validation and construction
+  - Candidate.sub_cmd stores SubCmd and Candidate.concrete stores Concrete
+  - Input is exactly none, scalar, toggle, and path; no parallel CandidateType or input-kind field exists
+  - ScalarInput is value, min, max, and positive step; value is inside its inclusive bounds and aligned to min by whole step increments
+  - ToggleInput is one enabled bool and PathInput owns one bounded absolute path copy
+  - Concrete is exactly app, open, lifecycle, and notification
+  - Lifecycle is exactly notifications_restart, wallpaper_restart, wallpaper_rotate, sunglasses_restart, sunglasses_apply, sunglasses_reconcile, sunglasses_dim, sunglasses_filter, and sunglasses_image
+  - every Concrete leaf carries an explicit Input contract; sunglasses_dim and sunglasses_filter accept scalar or toggle, and sunglasses_image accepts none, scalar, toggle, or path
+  - sunglasses typed leaves own a bounded monitor value and copy Input values at construction
+  - notification Concrete leaves are display-only and explicitly rejected at selection and launch boundaries
+  - hint and mode are not Concrete arms
+  - apps has no SubCmd and exposes Concrete application and fixed-local open leaves directly
   - GUI and CLI consume the same Cmd array, SubCmd unions, and Candidate values
+  - GUI slider, toggle, and textbox commits construct the same Input and Concrete values as equivalent CLI argv
+  - GUI draft/control state is temporary interface state and never owns or persists resident sunglasses state
+  - CLI and GUI reject the same invalid scalar, toggle, path, and monitor values
   - no interface rebuilds the Cmd tree or candidate source independently
   - candidate construction is bounded and failure-atomic
   - candidate strings outlive every consumer and are released by their producer
   - Cmd semantics never depend on CLI, Bash, SDL, or GUI types
+  - until the structured process argv boundary exists, every dynamic monitor and path word in a resolved shell bridge is single-quoted; invalid control bytes are rejected before resolution
   - Bash serialization is CLI-owned and completion policy is Cmd-owned
   - every candidate tag has explicit policy coverage and either owned behavior or an explicit rejection at each applicable boundary
   - every resident mode owns its process lifecycle and cleanup
@@ -56,6 +78,8 @@ proof:
   required:
     - design approval before implementation
     - unit tests for bounds, ownership, failure, and cleanup
+    - exhaustive Input arm and typed Concrete leaf tests
+    - GUI/CLI equivalence tests for scalar, toggle, path, and rejection boundaries
     - zig build test --summary all
     - zig build
     - git diff --check

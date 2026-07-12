@@ -1,4 +1,4 @@
-//! Query parsing owns the small route prefix grammar for the launcher.
+//! Query owns bounded picker input parsing for the reachable Cmd routes.
 
 const std = @import("std");
 
@@ -8,6 +8,7 @@ pub const Route = enum {
     modes,
     notifications,
     wallpapers,
+    sunglasses,
     run,
 };
 
@@ -41,8 +42,10 @@ pub fn parse(raw_query: []const u8) Query {
 fn parseModeRoute(raw: []const u8) Query {
     const body = std.mem.trim(u8, raw[1..], " \t");
     if (body.len == 0) return .{ .raw = raw, .route = .modes, .term = "" };
+    if (modeTerm(body, "apps")) |term| return .{ .raw = raw, .route = .apps, .term = term };
     if (modeTerm(body, "notifications")) |term| return .{ .raw = raw, .route = .notifications, .term = term };
     if (modeTerm(body, "wallpapers")) |term| return .{ .raw = raw, .route = .wallpapers, .term = term };
+    if (modeTerm(body, "sunglasses")) |term| return .{ .raw = raw, .route = .sunglasses, .term = term };
     return .{ .raw = raw, .route = .modes, .term = body };
 }
 
@@ -81,6 +84,14 @@ test "parse slash modes and selected mode routes" {
     const wallpapers = parse("/wallpapers restart");
     try std.testing.expectEqual(Route.wallpapers, wallpapers.route);
     try std.testing.expectEqualStrings("restart", wallpapers.term);
+
+    const sunglasses = parse("/sunglasses apply");
+    try std.testing.expectEqual(Route.sunglasses, sunglasses.route);
+    try std.testing.expectEqualStrings("apply", sunglasses.term);
+
+    const apps = parse("/apps");
+    try std.testing.expectEqual(Route.apps, apps.route);
+    try std.testing.expectEqualStrings("", apps.term);
 }
 
 test "parse non-prefixed query stays blended" {

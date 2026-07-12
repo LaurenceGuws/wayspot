@@ -13,6 +13,7 @@ scope:
     - wallpaper mode
     - sunglasses mode
     - Bash completion
+    - installable Bash completion entrypoint
   excluded:
     - other compositors
     - generic UI toolkit abstractions
@@ -34,7 +35,11 @@ mode_catalog_capacity:
   max_resident_modes: 3
   max_candidates_per_mode: 16
   max_sub_cmd_arms_per_mode: 8
-  max_lifecycle_candidates_per_mode: 4
+  max_input_arms: 4
+  max_scalar_fields: 4
+  max_concrete_arms: 4
+  max_lifecycle_arms: 9
+  max_lifecycle_candidates_per_mode: 8
 bounds:
   cmd_bytes: 4096
   query_bytes: 256
@@ -53,11 +58,28 @@ bounds:
   sunglasses_monitor_name_bytes: 96
   sunglasses_state_bytes: 16384
   sunglasses_image_path_bytes: 1024
+  sunglasses_scalar_bounds:
+    dim:
+      min: 0
+      max: 100
+      step: 1
+    filter:
+      min: -100
+      max: 100
+      step: 1
+    image_opacity:
+      min: 0
+      max: 100
+      step: 1
 proof:
   required_before_acceptance:
     - Cmd and SubCmd construction is bounded and failure-atomic
     - Candidate reachability is exhaustive at every selected arm
     - completion output bound includes every emitted byte
+    - Input exposes exactly none, scalar, toggle, and path arms
+    - every typed Concrete leaf declares its accepted Input arms
+    - scalar, toggle, path, and monitor bounds are equal in GUI and CLI
+    - GUI control commits and equivalent CLI argv produce equal Concrete values
     - producer string lifetime is explicit and tested
     - apps is the default picker mode in GUI and CLI
     - CLI, GUI, and resident mode receipts are captured

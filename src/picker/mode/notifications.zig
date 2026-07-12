@@ -1,41 +1,80 @@
-//! Notification mode owns notification history and lifecycle row facts.
+//! Notifications owns route behavior for NotificationsSubCmd.
+//!
+//! The child union is declared in picker/sub_cmd.zig. This file constructs
+//! picker candidates and bounded lifecycle meaning; DBus runtime ownership
+//! remains in src/notification/.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");
+const sub_cmd = @import("picker_sub_cmd");
 
+/// restart_open is the stable display input for the notification restart route.
 pub const restart_open = "lifecycle:notifications:restart";
+/// history_open is the stable display input for the notification history route.
 pub const history_open = "/notifications history";
 
-/// collect appends notification mode rows to the picker list.
-pub fn collect(out: *candidate.Candidate.List) !void {
-    try out.append(candidate.Candidate.makeMode("/notifications", "Mode", "/notifications"));
-    try out.append(restartLifecycleRow());
-    try out.append(candidate.Candidate.makeMode("Notification history", "Lifecycle", history_open));
+/// collectCandidates constructs the notification restart leaf and history route.
+pub fn collectCandidates(out: *candidate.Candidate.List) !void {
+    try out.append(restartLifecycleCandidate());
+    try out.append(candidate.Candidate.subCmd(historySubCmd()));
 }
 
-/// restartLifecycleRow returns the explicit notification restart row.
-pub fn restartLifecycleRow() candidate.Candidate {
-    return candidate.Candidate.makeLifecycle("Restart notifications", "Lifecycle", restart_open);
+/// restartLifecycleCandidate constructs the typed notification lifecycle leaf.
+pub fn restartLifecycleCandidate() candidate.Candidate {
+    return candidate.Candidate.lifecycleLeaf(candidate.notificationsRestart());
 }
 
-/// restartCommand returns the shell command used by the notification restart row.
+/// restartSubCmd selects the notification resident restart route.
+pub fn restartSubCmd() sub_cmd.SubCmd {
+    return .{ .notifications = .{ .restart = {} } };
+}
+
+/// historySubCmd selects the notification history child route.
+pub fn historySubCmd() sub_cmd.SubCmd {
+    return .{ .notifications = .{ .history = {} } };
+}
+
+/// resolve returns the canonical command meaning for a notification route.
+/// History is display-only and therefore has no executable intent here.
+pub fn resolve(value: sub_cmd.NotificationsSubCmd) ?[]const u8 {
+    return switch (value) {
+        .history => null,
+        .restart => restartIntent(),
+    };
+}
+
+/// restartIntent names the canonical notification resident entrypoint.
+pub fn restartIntent() []const u8 {
+    return "wayspot notifications";
+}
+
+/// restartCommand is the existing detached launch bridge retained until the
+/// process leaf boundary owns canonical execution.
 pub fn restartCommand() []const u8 {
     return "sh -lc 'bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --notifications-daemon$\" 2>/dev/null || true; sleep 0.2; setsid -f \"$bin\" --notifications-daemon'";
 }
 
-test "notification mode owns history and restart lifecycle rows" {
+test "notification mode constructs both typed child routes" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
 
-    try collect(&list);
+    try collectCandidates(&list);
 
-    try std.testing.expectEqual(@as(u32, 3), list.count);
-    try std.testing.expectEqual(candidate.Candidate.Type.lifecycle, list.items[1].typeOf());
-    try std.testing.expectEqualStrings(restart_open, list.items[1].openPayload());
-    try std.testing.expectEqualStrings(history_open, list.items[2].openPayload());
+    try std.testing.expectEqual(@as(usize, 2), list.count);
+    try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).concrete, list.items[0].typeOf());
+    try std.testing.expectEqualStrings(restart_open, list.items[0].openPayload());
+    try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).sub_cmd, list.items[1].typeOf());
+    try std.testing.expectEqualStrings(history_open, list.items[1].openPayload());
+    try std.testing.expectEqual(sub_cmd.NotificationsSubCmd.restart, std.meta.activeTag(restartSubCmd().notifications));
+    try std.testing.expectEqual(sub_cmd.NotificationsSubCmd.history, std.meta.activeTag(historySubCmd().notifications));
 }
 
-test "notification restart starts the owner directly" {
+test "notification route resolves without importing the resident runtime" {
+    try std.testing.expectEqualStrings("wayspot notifications", resolve(.restart).?);
+    try std.testing.expect(resolve(.history) == null);
+}
+
+test "notification terminal bridge remains until process resolution" {
     const command = restartCommand();
     try std.testing.expect(std.mem.indexOf(u8, command, "flock") == null);
     try std.testing.expect(std.mem.indexOf(u8, command, "--notifications-daemon") != null);

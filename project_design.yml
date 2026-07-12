@@ -23,15 +23,24 @@ ownership:
   cmd:
     role: top-level tagged union and recursive Cmd-tree owner
     symbol: Cmd
-    current_source: src/picker/command.zig
+    current_source: src/picker/cmd.zig
   sub_cmd:
-    role: tagged union owned by the selected Cmd arm
+    role: one shared closed tagged union carrying resident child unions; apps has no child union
     symbol: SubCmd
-    current_source: src/picker/mode/
+    source: src/picker/sub_cmd.zig
   candidate:
-    role: next reachable Cmd-tree node or concrete executable candidate
+    role: next reachable Cmd-tree node or concrete terminal candidate
     symbol: Candidate
     current_source: src/picker/candidate.zig
+  input:
+    role: typed value carried by a Concrete leaf; never GUI widget state or resident runtime state
+    symbols:
+      - Input
+      - ScalarInput
+      - ToggleInput
+      - PathInput
+    source: src/picker/candidate.zig
+    owner: picker.candidate
   gui:
     role: SDL lifecycle, input, candidate-tree rendering, selection, and intent
     current_source: src/picker/surface.zig
@@ -50,13 +59,16 @@ ownership:
       - src/sunglasses/
 dependency_graph:
   compile:
-    candidate: []
-    sub_cmd:
-      - candidate
-      - concrete mode arms
+    sub_cmd: []
+    input: []
+    candidate:
+      - sub_cmd
+      - input
     cmd:
       - sub_cmd
       - candidate
+      - input
+      - concrete mode route behavior
     gui:
       - cmd
       - SDL
@@ -80,8 +92,11 @@ dependency_graph:
     - cmd importing SDL
     - cmd importing Bash serialization
     - cmd importing GUI or CLI code
+    - candidate importing SDL, Bash, or GUI code
     - GUI rebuilding the Cmd tree independently
     - CLI rebuilding the Cmd tree independently
+    - GUI storing Input as resident runtime state
+    - CLI constructing a second Concrete leaf representation
     - process importing GUI or CLI code
     - resident mode runtime importing the picker surface
     - a generic mode registry or erased mode interface
@@ -122,21 +137,209 @@ cmd_tree:
   sub_cmd:
     type: tagged_union
     symbol: SubCmd
-    owner: selected Cmd arm
-    rule: each arm owns only its own nested candidate and leaf meaning
+    source: src/picker/sub_cmd.zig
+    arms:
+      - notifications: NotificationsSubCmd
+      - wallpaper: WallpaperSubCmd
+      - sunglasses: SunglassesSubCmd
+    apps: none
+    rule: this is one closed concrete union; src/picker/sub_cmd.zig declares all child unions and each resident mode owns route behavior for its explicit arm
+    child_unions:
+      NotificationsSubCmd:
+        arms:
+          - history
+          - restart
+      WallpaperSubCmd:
+        arms:
+          - restart
+          - rotate
+      SunglassesSubCmd:
+        arms:
+          - restart
+          - apply
+          - reconcile
+          - dim: DimSubCmd
+          - filter: FilterSubCmd
+          - image: ImageSubCmd
+      DimSubCmd:
+        arms:
+          - set
+          - on
+          - off
+        input_contract:
+          set: scalar
+          on: toggle
+          off: toggle
+      FilterSubCmd:
+        arms:
+          - set
+          - on
+          - off
+        input_contract:
+          set: scalar
+          on: toggle
+          off: toggle
+      ImageSubCmd:
+        arms:
+          - set
+          - opacity
+          - on
+          - off
+          - clear
+        input_contract:
+          set: path
+          opacity: scalar
+          on: toggle
+          off: toggle
+          clear: none
   candidate:
     type: tagged_union
     symbol: Candidate
+    source: src/picker/candidate.zig
     arms:
-      - sub_cmd
-      - concrete
+      - sub_cmd: SubCmd
+      - concrete: Concrete
     meaning: the next reachable node of the selected Cmd tree
-    rule: a sub_cmd candidate enters another bounded union; a concrete candidate resolves to one executable intent
-  interface_rule: GUI and CLI consume the same Cmd array, SubCmd unions, and Candidate values
+    rule: Candidate.sub_cmd stores the one shared SubCmd union; Candidate.concrete stores one terminal Concrete leaf; no generic or erased child storage exists
+  input:
+    type: tagged_union
+    symbol: Input
+    source: src/picker/candidate.zig
+    arms:
+      - none
+      - scalar: ScalarInput
+      - toggle: ToggleInput
+      - path: PathInput
+    fields:
+      ScalarInput:
+        - value: i32
+        - min: i32
+        - max: i32
+        - step: i32
+      ToggleInput:
+        - enabled: bool
+      PathInput:
+        - bytes: fixed_storage
+        - length: usize
+    scalar_invariant: min <= value <= max, step is positive and no greater than max - min, and (value - min) % step == 0
+    ownership: Input values are copied into Concrete leaves; PathInput owns its bounded path bytes
+    gui_policy:
+      none: action leaf
+      scalar: reusable slider draft, committed as Input.scalar
+      toggle: reusable on/off control, committed as Input.toggle
+      path: bounded textbox draft, committed as Input.path
+    cli_policy: raw argv is parsed into the same Input arm and bounds before leaf construction
+    bounds:
+      arm_count: project_version_scope.yml:max_input_arms
+      scalar: project_version_scope.yml:sunglasses_scalar_bounds
+      path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
+    invariant: GUI and CLI construct equal Input values for equal accepted input and reject equal invalid input
+    relation: Input is the typed value field of a Concrete leaf; it is not another Candidate arm or a parallel candidate tag
+  concrete:
+    type: tagged_union
+    symbol: Concrete
+    source: src/picker/candidate.zig
+    arms:
+      - app
+      - open
+      - lifecycle
+      - notification
+    lifecycle:
+      type: tagged_union
+      symbol: Lifecycle
+      arms:
+        - notifications_restart
+        - wallpaper_restart
+        - wallpaper_rotate
+        - sunglasses_restart
+        - sunglasses_apply
+        - sunglasses_reconcile
+        - sunglasses_dim
+        - sunglasses_filter
+        - sunglasses_image
+    typed_leaf_fields:
+      app:
+        input: Input.none
+        owner: src/picker/mode/apps.zig
+      open:
+        input: Input.none
+        owner: src/picker/mode/apps.zig
+      lifecycle:
+        notifications_restart:
+          input: Input.none
+        wallpaper_restart:
+          input: Input.none
+        wallpaper_rotate:
+          input: Input.none
+        sunglasses_restart:
+          input: Input.none
+        sunglasses_apply:
+          input: Input.none
+        sunglasses_reconcile:
+          input: Input.none
+        sunglasses_dim:
+          fields:
+            monitor: owned bounded monitor name
+            input:
+              type: Input
+              accepted_arms:
+                - scalar
+                - toggle
+          scalar_bounds: project_version_scope.yml:sunglasses_scalar_bounds.dim
+        sunglasses_filter:
+          fields:
+            monitor: owned bounded monitor name
+            input:
+              type: Input
+              accepted_arms:
+                - scalar
+                - toggle
+          scalar_bounds: project_version_scope.yml:sunglasses_scalar_bounds.filter
+        sunglasses_image:
+          fields:
+            monitor: owned bounded monitor name
+            input:
+              type: Input
+              accepted_arms:
+                - none
+                - scalar
+                - toggle
+                - path
+          scalar_bounds: project_version_scope.yml:sunglasses_scalar_bounds.image_opacity
+      notification:
+        input: Input.none
+        owner: src/notification/history_list.zig
+    ownership:
+      declaration: src/picker/candidate.zig
+      app: src/picker/mode/apps.zig
+      open: src/picker/mode/apps.zig
+      lifecycle: selected resident mode route owner
+      notification: src/notification/history_list.zig
+    resolution:
+      app: executable leaf intent
+      open: executable leaf intent
+      lifecycle: typed resident leaf intent
+      notification: explicit display-only rejection at selection and launch
+    bounds:
+      arm_count: project_version_scope.yml:max_concrete_arms
+      lifecycle_arm_count: project_version_scope.yml:max_lifecycle_arms
+      monitor_name_bytes: project_version_scope.yml:sunglasses_monitor_name_bytes
+      image_path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
+    rule: Concrete is terminal and every leaf carries an explicit Input contract; hint and mode are not Concrete arms
+  input_equivalence:
+    examples:
+      - 'wayspot sunglasses dim DP-1 set 35 equals a GUI slider commit at 35'
+      - 'wayspot sunglasses dim DP-1 on equals a GUI toggle commit enabled'
+      - 'wayspot sunglasses dim DP-1 off equals a GUI toggle commit disabled'
+      - 'wayspot sunglasses filter DP-1 set -35 equals a GUI slider commit at -35'
+      - 'wayspot sunglasses image DP-1 opacity 55 equals a GUI slider commit at 55'
+      - 'wayspot sunglasses image DP-1 set /absolute/image.png equals a GUI textbox commit'
+    rejection: GUI and CLI reject the same out-of-bound scalar, toggle, path, and monitor values
+  interface_rule: GUI and CLI consume the same Cmd array, SubCmd unions, Candidate values, and Input values
 mode_catalog:
   apps:
     mode: apps
-    role: installed desktop application launch mode
+    role: installed application and fixed-local desktop action launch mode
     cmd: "wayspot apps"
     process_entry: none
     candidate_owner: src/picker/mode/apps.zig
@@ -145,11 +348,12 @@ mode_catalog:
     compositor_dependency: none
     picker_queries:
       - /apps
-    sub_cmd_arms: []
+    sub_cmd: none
+    candidate_shape: concrete
     candidates:
       - kind: concrete
-        source: installed applications
-        behavior: launch selected app
+        source: installed applications and available fixed-local actions
+        behavior: launch selected application or fixed-local action
     lifecycle_candidates: []
     direct_cmds: []
 
@@ -164,9 +368,14 @@ mode_catalog:
     picker_queries:
       - /notifications
       - /notifications history
-    sub_cmd_arms:
-      - history
-      - restart
+    sub_cmd:
+      type: NotificationsSubCmd
+      source: src/picker/sub_cmd.zig
+      owner: src/picker/mode/notifications.zig route behavior
+      wrapper_arm: notifications
+      arms:
+        - history
+        - restart
     candidates:
       - kind: sub_cmd
         name: history
@@ -188,9 +397,14 @@ mode_catalog:
     default_mode: false
     picker_queries:
       - /wallpapers
-    sub_cmd_arms:
-      - restart
-      - rotate
+    sub_cmd:
+      type: WallpaperSubCmd
+      source: src/picker/sub_cmd.zig
+      owner: src/picker/mode/wallpaper.zig route behavior
+      wrapper_arm: wallpaper
+      arms:
+        - restart
+        - rotate
     candidates:
       - kind: concrete
         name: restart
@@ -200,6 +414,7 @@ mode_catalog:
         input: "wayspot wallpaper rotate"
     lifecycle_candidates:
       - restart
+      - rotate
     direct_cmds:
       - "wayspot wallpaper rotate"
 
@@ -213,12 +428,18 @@ mode_catalog:
     default_mode: false
     picker_queries:
       - /sunglasses
-    sub_cmd_arms:
-      - restart
-      - apply
-      - reconcile
-      - set_image
-      - clear_image
+    sub_cmd:
+      type: SunglassesSubCmd
+      source: src/picker/sub_cmd.zig
+      owner: src/picker/mode/sunglasses.zig route behavior
+      wrapper_arm: sunglasses
+      arms:
+        - restart
+        - apply
+        - reconcile
+        - dim: DimSubCmd
+        - filter: FilterSubCmd
+        - image: ImageSubCmd
     candidates:
       - kind: concrete
         name: restart
@@ -229,32 +450,100 @@ mode_catalog:
       - kind: concrete
         name: reconcile
         input: "wayspot sunglasses reconcile"
-      - kind: concrete
-        name: set_image
-        input: "wayspot sunglasses set-image <monitor> <path>"
-      - kind: concrete
-        name: clear_image
-        input: "wayspot sunglasses clear-image <monitor>"
+      - kind: sub_cmd
+        name: dim
+        input: "wayspot sunglasses dim"
+        route: SubCmd.sunglasses.dim
+      - kind: sub_cmd
+        name: filter
+        input: "wayspot sunglasses filter"
+        route: SubCmd.sunglasses.filter
+      - kind: sub_cmd
+        name: image
+        input: "wayspot sunglasses image"
+        route: SubCmd.sunglasses.image
     lifecycle_candidates:
       - restart
+      - apply
+      - reconcile
+    nested_candidates:
+      dim:
+        kind: sub_cmd
+        route: DimSubCmd
+        candidates:
+          - operation: set
+            input: scalar
+            leaf: lifecycle.sunglasses_dim
+          - operation: on
+            input: toggle
+            leaf: lifecycle.sunglasses_dim
+          - operation: off
+            input: toggle
+            leaf: lifecycle.sunglasses_dim
+      filter:
+        kind: sub_cmd
+        route: FilterSubCmd
+        candidates:
+          - operation: set
+            input: scalar
+            leaf: lifecycle.sunglasses_filter
+          - operation: on
+            input: toggle
+            leaf: lifecycle.sunglasses_filter
+          - operation: off
+            input: toggle
+            leaf: lifecycle.sunglasses_filter
+      image:
+        kind: sub_cmd
+        route: ImageSubCmd
+        candidates:
+          - operation: set
+            input: path
+            leaf: lifecycle.sunglasses_image
+          - operation: opacity
+            input: scalar
+            leaf: lifecycle.sunglasses_image
+          - operation: on
+            input: toggle
+            leaf: lifecycle.sunglasses_image
+          - operation: off
+            input: toggle
+            leaf: lifecycle.sunglasses_image
+          - operation: clear
+            input: none
+            leaf: lifecycle.sunglasses_image
     direct_cmds:
       - "wayspot sunglasses apply"
       - "wayspot sunglasses reconcile"
-      - "wayspot sunglasses set-image <monitor> <path>"
-      - "wayspot sunglasses clear-image <monitor>"
+      - "wayspot sunglasses dim <monitor> set <scalar>"
+      - "wayspot sunglasses dim <monitor> on"
+      - "wayspot sunglasses dim <monitor> off"
+      - "wayspot sunglasses filter <monitor> set <scalar>"
+      - "wayspot sunglasses filter <monitor> on"
+      - "wayspot sunglasses filter <monitor> off"
+      - "wayspot sunglasses image <monitor> set <path>"
+      - "wayspot sunglasses image <monitor> opacity <scalar>"
+      - "wayspot sunglasses image <monitor> on"
+      - "wayspot sunglasses image <monitor> off"
+      - "wayspot sunglasses image <monitor> clear"
 
 mode_catalog_totals:
   modes: 4
   resident_modes: 3
   default_mode: apps
-  lifecycle_candidates: 3
+  top_level_candidate_rows: 11
+  lifecycle_candidates: 6
+  declared_input_arms: 4
+  declared_lifecycle_arms: 9
 
 mode_catalog_capacity:
   max_modes: 4
   max_resident_modes: 3
   max_candidates_per_mode: 16
   max_sub_cmd_arms_per_mode: 8
-  max_lifecycle_candidates_per_mode: 4
+  max_input_arms: 4
+  max_scalar_fields: 4
+  max_lifecycle_candidates_per_mode: 8
 
 transition:
   current_cmd_shape:
@@ -262,8 +551,10 @@ transition:
     shape: flat Candidate.List with separate Mode collection
     required_exit:
       - introduce the Cmd tagged union and ordered mode array
-      - give each mode arm its SubCmd union
-      - make Candidate represent sub_cmd or concrete
+      - add the shared closed SubCmd wrapper with explicit resident child arms
+      - make Candidate store SubCmd or Concrete explicitly
+      - make every Concrete leaf carry an explicit Input contract
+      - make scalar, toggle, and path input bounds identical in GUI and CLI
       - make apps the default picker mode
   current_process_shape: src/main.zig flag branches
   noncanonical_entries:
@@ -291,11 +582,18 @@ interfaces:
       - open
       - complete bash
   gui:
-    role: shared Candidate consumer and SDL picker owner
+    role: shared Cmd, Candidate, and Input consumer and SDL picker owner
     path: --ui
+    input_controls:
+      - Input.none: direct action
+      - Input.scalar: reusable slider draft committed to a typed leaf
+      - Input.toggle: reusable on/off control committed to a typed leaf
+      - Input.path: bounded textbox draft committed to a typed leaf
   cli:
-    role: shared Candidate consumer and Bash/help owner
+    role: shared Cmd, Candidate, and Input consumer and Bash/help owner
     path: src/main.zig
+    completion_entrypoint: packaging/bash/wayspot.bash
+    input_contract: raw argv and GUI commit construct equal typed leaf values
   process:
     role: entry and resident runtime caller only
     path: src/main.zig
