@@ -4,7 +4,7 @@ set -euo pipefail
 # Rebuild, install the local binary, and run one picker lifecycle.
 #
 # Optional overrides:
-#   RERUN_BUILD_FLAGS="-Doptimize=ReleaseFast"
+#   RERUN_BUILD_FLAGS="-Doptimize=ReleaseSafe"
 #   RERUN_BIN="./zig-out/bin/wayspot"
 #   RERUN_INSTALL_BIN="$HOME/.local/bin/wayspot"
 #   RERUN_NOTIFICATIONS=true
@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-: "${RERUN_BUILD_FLAGS:=-Doptimize=ReleaseFast}"
+: "${RERUN_BUILD_FLAGS:=-Doptimize=ReleaseSafe}"
 : "${RERUN_BIN:=./zig-out/bin/wayspot}"
 : "${RERUN_INSTALL_BIN:=$HOME/.local/bin/wayspot}"
 : "${RERUN_NOTIFICATIONS:=true}"
