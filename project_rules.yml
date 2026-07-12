@@ -61,6 +61,11 @@ invariants:
   - Cmd semantics never depend on CLI, Bash, SDL, or GUI types
   - until the structured process argv boundary exists, every dynamic monitor and path word in a resolved shell bridge is single-quoted; invalid control bytes are rejected before resolution
   - Bash serialization is CLI-owned and completion policy is Cmd-owned
+  - Cmd completion is position-aware and returns one next shell argument without a command prefix
+  - completion positions are exactly mode, sub_cmd, operation, and app
+  - top-level completion includes apps in the fixed Cmd order
+  - Bash rejects invalid completion points, excessive words, excessive word lengths, and excessive line length before invoking Wayspot
+  - Bash rejects a COMP_POINT positioned inside a non-whitespace token because COMP_WORDS then contains text beyond the cursor
   - every candidate tag has explicit policy coverage and either owned behavior or an explicit rejection at each applicable boundary
   - every resident mode owns its process lifecycle and cleanup
   - apps remains usable without compositor facts or a resident process

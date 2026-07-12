@@ -451,6 +451,9 @@ target_files:
         - Picker
         - max_cmd_bytes
         - max_completion_candidates
+        - CompletionPosition
+        - Completion
+        - complete
         - init
         - deinit
         - rankQuery
@@ -470,8 +473,9 @@ target_files:
         - "/// Cmd is the four-arm tagged union in fixed apps-first order."
         - "/// cmds is the bounded ordered array consumed identically by GUI and CLI."
         - "/// Picker owns history and published candidate lifetime around Cmd values."
-        - "/// buildCandidatesTransactional either publishes a complete set or restores the prior set."
+        - "/// buildCandidatesTransactional publishes a complete set or leaves published storage empty after rollback."
         - "/// resolveConcrete returns an executable leaf intent or the exact rejection for a display-only Concrete arm."
+        - "/// complete returns one bounded next shell argument for an explicit Cmd-tree position."
     tests:
       - Cmd arms are exhaustive and ordered apps, notifications, wallpaper, sunglasses
       - apps is the default mode on picker initialization
@@ -485,7 +489,9 @@ target_files:
       - concrete leaves resolve without forking or shell execution
       - notification Concrete leaves reject explicitly without forking or shell execution
       - history remains bounded and cleanup is exact
-      - completion policy is delegated to CLI serialization
+      - completion semantics return position-aware next arguments and never full command payloads
+      - top-level completion includes apps in fixed Cmd order
+      - subcommand and operation completion expose only the next route word
 
   - path: src/picker/mode/apps.zig
     status: reshape
@@ -633,28 +639,26 @@ target_files:
       - adding a Candidate arm requires an explicit ranking policy
 
   - path: src/cli/entry.zig
-    status: new
+    status: implemented_checkpoint
     owner: cli
-    role: CLI consumer of the shared Cmd tree and canonical mode input
+    role: CLI consumer of the shared Cmd tree and Bash completion caller
     symbols:
       public:
+        - accepts
         - run
-        - writeHelp
+        - bash_completion
       private:
-        - parseModeInput
-        - writeCandidates
-        - resolveAndLaunch
+        - parseCompletionPosition
     comments:
-      file: "//! CLI consumes Cmd, SubCmd, and Candidate values and owns only terminal/help presentation."
+      file: "//! CLI consumes Cmd, SubCmd, and Candidate values; Bash position mapping and serialization are delegated to the completion boundary."
       symbols:
-        - "/// run matches canonical wayspot mode input before producing help for unknown input."
-        - "/// writeHelp describes only the current Cmd tree and bounded interfaces."
+        - "/// run consumes one already-wired Picker through the terminal boundary."
+        - "/// bash_completion owns shell quoting and complete-record byte accounting."
     tests:
       - wayspot apps uses the shared apps Cmd arm
-      - each resident mode input selects its own runtime entry
-      - unknown first input produces help without app fallback duplication
       - CLI candidate output matches GUI candidate meaning
-      - leaf selection hands intent to process launch exactly once
+      - CLI and GUI typed commits produce equal Concrete values and rejection
+      - completion caller passes Cmd-approved next arguments to the Bash serializer
 
   - path: src/cli/bash_completion.zig
     status: new
@@ -670,11 +674,11 @@ target_files:
     comments:
       file: "//! Bash serialization owns shell quoting and complete-record byte accounting, not Cmd meaning."
       symbols:
-        - "/// write serializes bounded Candidate results supplied by Cmd completion policy."
+        - "/// write serializes bounded next arguments supplied by Cmd completion policy."
         - "/// writeWord emits one exact Bash word with its newline included in the bound."
     tests:
       - single quotes escape exactly
-      - notification and non-completable Candidate arms are excluded by policy
+      - Cmd excludes notification and non-completable Candidate arms before serialization
       - exact maximum output including newline is accepted
       - one byte beyond maximum output is rejected
 
@@ -988,6 +992,9 @@ target_files:
         - COMP_POINT
         - COMP_WORDS
         - COMP_CWORD
+        - _WAYSPOT_COMPLETION_MAX_WORDS
+        - _WAYSPOT_COMPLETION_MAX_LINE_CHARS
+        - _WAYSPOT_COMPLETION_MAX_WORD_CHARS
     comments:
       file: "# Register the canonical Wayspot completion entrypoint without rebuilding Cmd meaning in Bash."
       symbols:
@@ -1000,6 +1007,30 @@ target_files:
       - app position reaches the shared apps candidate source
       - notification display leaves are absent
       - shell receipt exercises the installed entrypoint without eval or command-string reconstruction
+
+  - path: packaging/bash/wayspot_test.bash
+    status: new
+    owner: cli
+    role: exact real Bash COMPREPLY acceptance assertions
+    symbols:
+      shell:
+        - complete_line
+        - expect_exact
+        - top-level mode assertion
+        - sunglasses subcommand assertion
+        - sunglasses operation assertion
+        - apps assertion
+    comments:
+      file: "# Exercise the installed Bash boundary with exact next-argument assertions."
+      symbols:
+        - "# top-level and nested replies must not contain full wayspot command payloads."
+    tests:
+      - wayspot <TAB> returns apps, notifications, wallpaper, sunglasses exactly
+      - wayspot sunglasses <TAB> returns the six SunglassesSubCmd words exactly
+      - wayspot sunglasses dim <TAB> returns set, on, off exactly
+      - wayspot apps <TAB> returns a nonempty app list without a duplicated command prefix
+      - apps output excludes notification-history display records
+      - middle-of-word COMP_POINT is rejected without invoking Wayspot
 
 offenders:
   - id: cmd_union_and_order
@@ -1268,13 +1299,15 @@ offenders:
     status: open
     owner: picker.cmd
     evidence:
-      - src/picker/command.zig
+      - src/picker/cmd.zig
       - src/picker/candidate.zig
       - src/picker/mode/apps.zig
+      - src/notification/history_list.zig
     target_files:
       - src/picker/cmd.zig
       - src/picker/candidate.zig
       - src/picker/mode/apps.zig
+      - src/notification/history_list.zig
     changes:
       - construct into a temporary bounded Candidate list
       - publish only after every Cmd arm succeeds
@@ -1285,15 +1318,22 @@ offenders:
       - buildCandidatesTransactional
       - Candidate.List.clearRetainingCapacity
       - Apps.freeOwnedStrings
+      - NotificationHistoryList.clearCandidateProduction
     required_tests:
       - forced overflow after partial app production
+      - desktop scan overflow reaches Picker transaction and propagates
+      - unexpected cache read errors propagate without fixed-local partial success
       - retry has no duplicates
       - retry has no dangling borrowed strings
       - producer cleanup runs exactly once on success and failure
+      - notification producer cache and owned strings clear on rollback
     required_comments:
       - transaction publication point
       - rollback order
       - string lifetime contract
+      - producer cleanup invalidates no published Candidate
+      - only explicitly tolerated filesystem discovery errors become an empty discovery result
+      - cache read classification propagates allocation and unexpected errors
 
   - id: query_rank_and_leaf_resolution
     status: open
@@ -1301,19 +1341,20 @@ offenders:
     evidence:
       - src/picker/query.zig
       - src/picker/rank.zig
-      - src/picker/open.zig
-      - src/picker/command.zig
+      - src/picker/candidate.zig
+      - src/picker/sub_cmd.zig
+      - src/picker/cmd.zig
+      - src/picker/surface.zig
     target_files:
       - src/picker/query.zig
       - src/picker/rank.zig
       - src/picker/cmd.zig
-      - src/picker/mode/apps.zig
     changes:
-      - parse four mode routes and nested SubCmd input
+      - parse the bounded query grammar for four mode routes and nested SubCmd input
+      - reject query input beyond project_version_scope.yml query_bytes before candidate loading
       - rank Candidate union arms through explicit policy switches
-      - move fixed local leaf resolution into apps mode
       - resolve only concrete leaves and reject SubCmd leaves explicitly
-      - remove payload-string equality as the only route identity
+      - use direct Candidate route identity for GUI selection; retain terminal lookup only as the bounded CLI bridge until shared interface work
     required_symbols:
       - Route
       - Query
@@ -1322,13 +1363,15 @@ offenders:
       - resolveConcrete
     required_tests:
       - default empty input selects apps
-      - every mode and nested route is parsed
+      - every mode and nested route preserves its parsed term
+      - exact query bound is accepted and one byte beyond it returns QueryTooLong
       - every Candidate arm has ranking coverage
       - concrete leaf resolution is deterministic and bounded
-      - missing or non-launchable leaves return exact errors
+      - every SubCmd arm and every non-launchable leaf returns its exact error
     required_comments:
-      - query route grammar
+      - bounded query route grammar and borrowed lifetime
       - ranking policy per Candidate arm
+      - direct route identity versus the legacy terminal lookup
       - resolution ownership and rejection meaning
 
   - id: shared_cli_gui_consumption
@@ -1336,8 +1379,9 @@ offenders:
     owner: project
     evidence:
       - src/main.zig
-      - src/picker/surface.zig
-      - src/picker/command.zig
+      - src/cli/entry.zig
+      - src/gui/surface.zig
+      - src/picker/cmd.zig
     target_files:
       - src/cli/entry.zig
       - src/gui/surface.zig
@@ -1372,26 +1416,35 @@ offenders:
     status: open
     owner: cli
     evidence:
-      - src/picker/command.zig
-      - src/main.zig
+      - src/picker/cmd.zig
+      - src/cli/entry.zig
+      - src/cli/bash_completion.zig
+      - packaging/bash/wayspot.bash
+      - packaging/bash/wayspot_test.bash
     target_files:
       - src/cli/bash_completion.zig
       - src/cli/entry.zig
       - src/picker/cmd.zig
       - build.zig
       - packaging/bash/wayspot.bash
+      - packaging/bash/wayspot_test.bash
     changes:
+      - keep position-aware completion selection and Candidate policy in Cmd.complete
       - remove Bash quoting and output accounting from Cmd
-      - make Cmd return bounded completion Candidates or concrete inputs
+      - make Cmd return bounded Completion.argument next-shell-word values
       - serialize Bash words only in the CLI file
       - count every escaped byte and newline before writing
       - add packaging/bash/wayspot.bash as the installable Bash completion entrypoint
       - pass COMP_LINE, COMP_POINT, COMP_WORDS, and COMP_CWORD through the bounded CLI boundary
       - make the shell entrypoint consume completion records without eval or shell reconstruction
+      - bound and reject external COMP_LINE, COMP_POINT, COMP_WORDS, and COMP_CWORD state before invoking Wayspot
+      - add exact COMPREPLY assertions for top-level, nested, operation, and apps positions
       - add a direct CLI test root if required by build wiring
     required_symbols:
       - cli.bash_completion.write
       - cli.bash_completion.writeWord
+      - Cmd.CompletionPosition
+      - Cmd.Completion
       - Cmd.complete
     required_tests:
       - quote escaping
@@ -1400,6 +1453,11 @@ offenders:
       - one-byte-over maximum
       - real wayspot complete bash receipt
       - real installed packaging/bash/wayspot.bash receipt
+      - exact COMPREPLY for wayspot <TAB>
+      - exact COMPREPLY for wayspot sunglasses <TAB>
+      - exact COMPREPLY for wayspot sunglasses dim <TAB>
+      - nonempty wayspot apps <TAB> with no duplicated command prefix
+      - Bash state-bound rejection receipts
     required_comments:
       - semantic/presentation split
       - complete record bound

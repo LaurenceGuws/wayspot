@@ -46,6 +46,10 @@ bounds:
   candidates: 1024
   completion_candidates: 256
   completion_output_bytes: 65536
+  completion_positions: 4
+  bash_completion_words: 16
+  bash_completion_line_chars: 4096
+  bash_completion_word_chars: 256
   notification_history_open_bytes: 64
   wallpaper_images: 4096
   wallpaper_path_bytes: 4096
@@ -76,6 +80,11 @@ proof:
     - Cmd and SubCmd construction is bounded and failure-atomic
     - Candidate reachability is exhaustive at every selected arm
     - completion output bound includes every emitted byte
+    - Cmd completion returns only the next shell argument at each named position
+    - top-level COMPREPLY contains apps, notifications, wallpaper, and sunglasses
+    - nested COMPREPLY contains no full wayspot command prefix or notification-history leaf
+    - Bash rejects invalid COMP_POINT and excessive COMP_CWORD or COMP_WORDS state
+    - Bash rejects a middle-of-word COMP_POINT without invoking Wayspot
     - Input exposes exactly none, scalar, toggle, and path arms
     - every typed Concrete leaf declares its accepted Input arms
     - scalar, toggle, path, and monitor bounds are equal in GUI and CLI

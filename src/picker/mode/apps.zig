@@ -45,6 +45,8 @@ pub const Apps = struct {
     cache_data: ?[]u8 = null,
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
     command_exists_fn: *const fn (name: []const u8) bool = commandExists,
+    /// desktop_root narrows discovery to one borrowed root when configured; null uses standard roots.
+    desktop_root: ?[]const u8 = null,
 
     /// init records the cache path; candidate strings remain owned by this Apps value after collection.
     pub fn init(cache_path: []const u8) Apps {
@@ -75,18 +77,15 @@ pub const Apps = struct {
             allocator,
             .limited(2 * 1024 * 1024),
         ) catch |err| switch (err) {
-            error.FileNotFound => {
-                _ = self.collectFromDesktopFiles(allocator, out) catch |scan_err| {
-                    std.log.warn("app rows desktop scan failed: {s}", .{@errorName(scan_err)});
+            error.FileNotFound, error.NotDir, error.AccessDenied => {
+                self.collectFromDesktopFiles(allocator, out) catch |scan_err| switch (scan_err) {
+                    error.FileNotFound, error.NotDir, error.AccessDenied => {},
+                    else => return scan_err,
                 };
                 try self.collectOpenCandidates(out);
                 return;
             },
-            else => {
-                std.log.warn("app rows cache read failed: {s}", .{@errorName(err)});
-                try self.collectOpenCandidates(out);
-                return;
-            },
+            else => return err,
         };
 
         self.cache_data = data;
@@ -145,12 +144,14 @@ pub const Apps = struct {
         return copy;
     }
 
-    fn freeOwnedStrings(self: *Apps, allocator: std.mem.Allocator) void {
+    /// freeOwnedStrings releases producer-owned display strings after staged records are forgotten.
+    pub fn freeOwnedStrings(self: *Apps, allocator: std.mem.Allocator) void {
         for (self.owned_strings.items) |item| allocator.free(item);
         self.owned_strings.clearRetainingCapacity();
     }
 
-    fn freeCacheData(self: *Apps, allocator: std.mem.Allocator) void {
+    /// freeCacheData releases cache bytes borrowed by published Candidate rows.
+    pub fn freeCacheData(self: *Apps, allocator: std.mem.Allocator) void {
         if (self.cache_data) |data| {
             allocator.free(data);
             self.cache_data = null;
@@ -161,20 +162,24 @@ pub const Apps = struct {
         self: *Apps,
         allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
-    ) !u32 {
+    ) !void {
         const start_len = out.count;
         var scan = DesktopScanState{};
         defer scan.deinit(allocator);
-        var roots = try desktopFileRoots(allocator);
-        defer {
-            for (roots.items) |item| allocator.free(item);
-            roots.deinit(allocator);
-        }
-        for (roots.items) |root| {
-            self.collectFromDesktopRoot(allocator, out, &scan, root) catch |err| switch (err) {
-                error.FileNotFound, error.NotDir, error.AccessDenied => continue,
-                else => return err,
-            };
+        if (self.desktop_root) |root| {
+            try self.collectFromDesktopRoot(allocator, out, &scan, root);
+        } else {
+            var roots = try desktopFileRoots(allocator);
+            defer {
+                for (roots.items) |item| allocator.free(item);
+                roots.deinit(allocator);
+            }
+            for (roots.items) |root| {
+                self.collectFromDesktopRoot(allocator, out, &scan, root) catch |err| switch (err) {
+                    error.FileNotFound, error.NotDir, error.AccessDenied => continue,
+                    else => return err,
+                };
+            }
         }
         const added = out.count - start_len;
         if (added > 0) {
@@ -182,7 +187,6 @@ pub const Apps = struct {
                 std.log.warn("app rows failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
             };
         }
-        return @intCast(added);
     }
 
     fn collectFromDesktopRoot(
@@ -499,6 +503,23 @@ test "apps owns fixed local candidates and executable resolution" {
     try std.testing.expectError(error.UnknownOpen, apps.resolve(std.testing.allocator, "missing"));
 }
 
+test "unexpected app cache read errors propagate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.Options.debug_io, "cache-dir");
+    const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/cache-dir", .{tmp.sub_path});
+    defer std.testing.allocator.free(cache_path);
+
+    var apps = testApps(cache_path);
+    defer apps.deinit(std.testing.allocator);
+    var list = candidate_mod.Candidate.List.empty;
+    defer list.deinit();
+
+    try std.testing.expectError(error.IsDir, apps.collectCandidates(std.testing.allocator, &list));
+    try std.testing.expectEqual(@as(usize, 0), list.count);
+    try std.testing.expect(apps.cache_data == null);
+}
+
 test "app rows collects rows from cache file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -747,4 +768,9 @@ test "app rows can scan desktop root and rebuild cache rows" {
     const written = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cache_file, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(written);
     try std.testing.expect(std.mem.indexOf(u8, written, "Utility\tTest App\ttest-app\ttest-icon\n") != null);
+
+    apps.freeOwnedStrings(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
+    apps.freeOwnedStrings(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
 }

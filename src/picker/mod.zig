@@ -13,7 +13,6 @@ pub const rank = @import("rank.zig");
 pub const scale = @import("scale.zig");
 pub const signal = @import("signal.zig");
 pub const slider = @import("slider.zig");
-pub const surface = @import("surface.zig");
 pub const sub_cmd = @import("picker_sub_cmd");
 pub const text = @import("text.zig");
 pub const textbox = @import("textbox.zig");

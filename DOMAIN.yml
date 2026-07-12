@@ -223,6 +223,15 @@ ownership:
         - gui_cli_input_equivalence
         - cli_consumption
         - gui_consumption
+      completion:
+        owner: picker.cmd
+        positions:
+          - mode
+          - sub_cmd
+          - operation
+          - app
+        result: one next shell argument without a command prefix
+        serialization_owner: cli.bash
       consumers:
         - cli
         - gui

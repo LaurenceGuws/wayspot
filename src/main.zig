@@ -1,4 +1,4 @@
-//! Entrypoint owns CLI mode selection and top-level cleanup order.
+//! Entrypoint owns top-level mode selection, shared picker composition, and cleanup order.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -15,18 +15,25 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (hasArg(args, "--ui")) {
-        try runUi(allocator, home);
-        return;
-    }
+    if (hasArg(args, "--ui") or wayspot.cli.accepts(args)) {
+        var picker_bundle = try setupPickerBundle(allocator, home);
+        picker_bundle.wirePicker();
+        defer picker_bundle.deinit(allocator);
 
-    if (hasArg(args, "--icon-diag")) {
-        try runIconDiag(allocator, home);
-        return;
-    }
-
-    if (hasArg(args, "--icon-cache-refresh")) {
-        try runIconCacheRefresh(allocator, home);
+        if (hasArg(args, "--ui")) {
+            if (!build_options.enable_sdl) {
+                std.log.err("UI mode requires SDL build", .{});
+                std.process.exit(2);
+            }
+            try wayspot.identity.set(wayspot.identity.picker);
+            try wayspot.gui.run(allocator, &picker_bundle.picker, home);
+        } else {
+            if (hasArg(args, "--icon-diag") and !build_options.enable_sdl) {
+                std.log.err("icon diagnostic requires SDL build", .{});
+                std.process.exit(2);
+            }
+            try wayspot.cli.run(allocator, args, &picker_bundle.picker, home);
+        }
         return;
     }
 
@@ -81,184 +88,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "apps")) {
-        try runTerminalApps(allocator, home, args[2..]);
-        return;
-    }
-
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "commands")) {
-        try runTerminalCommands(allocator, home);
-        return;
-    }
-
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "query")) {
-        try runTerminalQuery(allocator, home, args[2..]);
-        return;
-    }
-
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "open")) {
-        if (args.len != 3) return error.OpenPayloadRequired;
-        try runTerminalOpen(allocator, home, args[2]);
-        return;
-    }
-
-    if (args.len >= 3 and std.mem.eql(u8, args[1], "complete") and std.mem.eql(u8, args[2], "bash")) {
-        try runTerminalBashCompletion(allocator, home, args[3..]);
-        return;
-    }
-
     try wayspot.bufferedPrint();
-}
-
-fn runUi(allocator: std.mem.Allocator, home: []const u8) !void {
-    if (!build_options.enable_sdl) {
-        std.log.err("UI mode requires SDL build", .{});
-        std.process.exit(2);
-    }
-
-    try wayspot.identity.set(wayspot.identity.picker);
-    var picker_bundle = try setupPickerBundle(allocator, home);
-    picker_bundle.wirePicker();
-    defer picker_bundle.deinit(allocator);
-    try picker_bundle.picker.loadHistory(allocator);
-    defer picker_bundle.picker.saveHistory(allocator) catch |err| {
-        std.log.err("failed to save history: {s}", .{@errorName(err)});
-    };
-
-    try wayspot.picker.surface.run(allocator, &picker_bundle.picker, home);
-}
-
-fn runIconDiag(allocator: std.mem.Allocator, home: []const u8) !void {
-    if (!build_options.enable_sdl) {
-        std.log.err("icon diagnostic requires SDL build", .{});
-        std.process.exit(2);
-    }
-
-    const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
-    defer allocator.free(app_cache);
-
-    var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
-    defer apps.deinit(allocator);
-    var candidates = wayspot.picker.candidate.Candidate.List.empty;
-    defer candidates.deinit();
-
-    try apps.collectCandidates(allocator, &candidates);
-    try wayspot.picker.icon_diag.writeReport(candidates.slice());
-}
-
-fn runIconCacheRefresh(allocator: std.mem.Allocator, home: []const u8) !void {
-    const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
-    defer allocator.free(app_cache);
-
-    var apps = wayspot.picker.mode.apps.Apps.init(app_cache);
-    defer apps.deinit(allocator);
-    var candidates = wayspot.picker.candidate.Candidate.List.empty;
-    defer candidates.deinit();
-
-    try apps.collectCandidates(allocator, &candidates);
-    const counts = try wayspot.picker.icon_cache.refresh(home, candidates.slice());
-    try wayspot.picker.icon_cache.printRefreshSummary(counts);
-}
-
-fn runTerminalCommands(allocator: std.mem.Allocator, home: []const u8) !void {
-    var picker_bundle = try setupPickerBundle(allocator, home);
-    picker_bundle.wirePicker();
-    defer picker_bundle.deinit(allocator);
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
-    try picker_bundle.picker.commands(allocator, &stdout_writer.interface);
-    try stdout_writer.interface.flush();
-}
-
-fn runTerminalQuery(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
-    const raw_query = try joinCommandText(allocator, query_parts);
-    defer allocator.free(raw_query);
-    try runTerminalQueryText(allocator, home, raw_query);
-}
-
-fn runTerminalApps(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
-    const raw_query = try appsQuery(allocator, query_parts);
-    defer allocator.free(raw_query);
-    try runTerminalQueryText(allocator, home, raw_query);
-}
-
-fn runTerminalQueryText(allocator: std.mem.Allocator, home: []const u8, raw_query: []const u8) !void {
-    var picker_bundle = try setupPickerBundle(allocator, home);
-    picker_bundle.wirePicker();
-    defer picker_bundle.deinit(allocator);
-    try picker_bundle.picker.loadHistory(allocator);
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
-    try picker_bundle.picker.query(allocator, raw_query, &stdout_writer.interface);
-    try stdout_writer.interface.flush();
-}
-
-fn appsQuery(allocator: std.mem.Allocator, query_parts: []const []const u8) ![]u8 {
-    if (query_parts.len == 0) return allocator.dupe(u8, "/apps");
-
-    const terms = try joinCommandText(allocator, query_parts);
-    defer allocator.free(terms);
-    const prefix = "/apps ";
-    if (terms.len > wayspot.picker.cmd.max_cmd_bytes -| prefix.len) return error.CommandTooLong;
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, terms });
-}
-
-fn runTerminalOpen(allocator: std.mem.Allocator, home: []const u8, payload: []const u8) !void {
-    var picker_bundle = try setupPickerBundle(allocator, home);
-    picker_bundle.wirePicker();
-    defer picker_bundle.deinit(allocator);
-    try picker_bundle.picker.loadHistory(allocator);
-
-    const command = try picker_bundle.picker.open(allocator, payload);
-    defer allocator.free(command);
-    try picker_bundle.picker.recordSelection(allocator, payload);
-    try runCommandBytes(command);
-    try picker_bundle.picker.saveHistory(allocator);
-}
-
-fn runTerminalBashCompletion(allocator: std.mem.Allocator, home: []const u8, query_parts: []const []const u8) !void {
-    var picker_bundle = try setupPickerBundle(allocator, home);
-    picker_bundle.wirePicker();
-    defer picker_bundle.deinit(allocator);
-    try picker_bundle.picker.loadHistory(allocator);
-
-    const raw_query = try joinCommandText(allocator, query_parts);
-    defer allocator.free(raw_query);
-
-    var stdout_buffer: [wayspot.picker.cmd.max_completion_output_bytes]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
-    try picker_bundle.picker.completeBash(allocator, raw_query, &stdout_writer.interface);
-    try stdout_writer.interface.flush();
-}
-
-fn runCommandBytes(command: []const u8) !void {
-    if (command.len == 0) return error.EmptyCommand;
-    if (command.len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
-    var command_buf: [wayspot.picker.cmd.max_cmd_bytes + 1]u8 = undefined;
-    @memcpy(command_buf[0..command.len], command);
-    command_buf[command.len] = 0;
-    try wayspot.picker.cmd.runDetachedShellCommand(command_buf[0..command.len :0].ptr);
-}
-
-fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
-    if (parts.len == 0) return allocator.dupe(u8, "");
-    var total_len: u32 = 0;
-    for (parts) |part| {
-        total_len += @intCast(part.len);
-        if (total_len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
-    }
-    total_len += @intCast(parts.len - 1);
-    if (total_len > wayspot.picker.cmd.max_cmd_bytes) return error.CommandTooLong;
-
-    var out = try std.ArrayList(u8).initCapacity(allocator, total_len);
-    errdefer out.deinit(allocator);
-    for (parts, 0..) |part, index| {
-        if (index > 0) try out.append(allocator, ' ');
-        try out.appendSlice(allocator, part);
-    }
-    return try out.toOwnedSlice(allocator);
 }
 
 fn runWallpaperLoop(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
@@ -395,15 +225,4 @@ test "sunglasses image command parser rejects partial hidden commands" {
 
     const extra_arg = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1", "/tmp/overlay.png" };
     try std.testing.expect(sunglassesImageCommand(&extra_arg) == null);
-}
-
-test "wayspot apps builds the canonical apps query" {
-    const empty = try appsQuery(std.testing.allocator, &.{});
-    defer std.testing.allocator.free(empty);
-    try std.testing.expectEqualStrings("/apps", empty);
-
-    const parts = [_][]const u8{ "Firefox", "Browser" };
-    const filtered = try appsQuery(std.testing.allocator, &parts);
-    defer std.testing.allocator.free(filtered);
-    try std.testing.expectEqualStrings("/apps Firefox Browser", filtered);
 }

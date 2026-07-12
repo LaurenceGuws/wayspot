@@ -316,6 +316,7 @@ pub const Candidate = union(enum) {
     concrete: Concrete,
 
     /// List stores a fixed candidate collection and borrows display strings.
+    /// Producers must outlive published records; rollback clears records before producer cleanup.
     pub const List = struct {
         /// items is fixed candidate storage.
         items: [max_candidates]Candidate = undefined,
@@ -468,7 +469,7 @@ pub const Candidate = union(enum) {
         return self.row().subtitle;
     }
 
-    /// openPayload returns the stable route identity or executable payload.
+    /// openPayload returns the stable terminal lookup bytes or route label.
     pub fn openPayload(self: Candidate) []const u8 {
         return self.row().open;
     }

@@ -113,6 +113,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
 
     b.installArtifact(exe);
+    b.installFile("packaging/bash/wayspot.bash", "share/bash-completion/completions/wayspot");
 
     const run_step = b.step("run", "Run the app");
 

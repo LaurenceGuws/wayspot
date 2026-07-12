@@ -173,13 +173,23 @@ fn statePath(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, state_relative_path });
 }
 
+fn testAbsolutePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir, child: []const u8) ![]u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(cwd);
+    return std.fs.path.join(allocator, &.{
+        cwd,
+        ".zig-cache",
+        "tmp",
+        tmp.sub_path[0..],
+        child,
+    });
+}
+
 test "default zoom state loads when file is missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
+    const path = try testAbsolutePath(std.testing.allocator, &tmp, "surface.conf");
     defer std.testing.allocator.free(path);
 
     const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
@@ -200,13 +210,11 @@ test "valid persisted zoom loads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "surface.conf",
         .data = "zoom_step=3\n",
     });
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
+    const path = try testAbsolutePath(std.testing.allocator, &tmp, "surface.conf");
     defer std.testing.allocator.free(path);
 
     const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
@@ -217,12 +225,10 @@ test "oversized state file falls back to default" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
+    const path = try testAbsolutePath(std.testing.allocator, &tmp, "surface.conf");
     defer std.testing.allocator.free(path);
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "surface.conf",
         .data = "zoom_step=1234567890123456789012345678901234567890123456789012345678901234567890",
     });
@@ -234,12 +240,10 @@ test "malformed state falls back to default" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
+    const path = try testAbsolutePath(std.testing.allocator, &tmp, "surface.conf");
     defer std.testing.allocator.free(path);
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "surface.conf",
         .data = "zoom=3\n",
     });

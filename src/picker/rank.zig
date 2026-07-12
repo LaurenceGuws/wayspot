@@ -334,7 +334,7 @@ test "exact match outranks prefix match" {
         candidate_mod.Candidate.appLeaf("kitty-manager", "Terminal", "km", ""),
     };
 
-    const query = query_mod.parse("kitty");
+    const query = try query_mod.parse("kitty");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
@@ -348,7 +348,7 @@ test "Apps route includes installed and fixed-local kinds" {
         candidate_mod.Candidate.openLeaf("Terminal", "kitty", "terminal-open", ""),
     };
 
-    const query = query_mod.parse("@ term");
+    const query = try query_mod.parse("@ term");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
@@ -369,17 +369,17 @@ test "slash routes expose typed resident routes and notification history" {
         candidate_mod.Candidate.appLeaf("Kitty", "Terminal", "kitty", ""),
     };
 
-    const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);
+    const notifications = try rankCandidates(std.testing.allocator, try query_mod.parse("/notifications"), &candidates);
     defer std.testing.allocator.free(notifications);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(notifications.len)));
     try std.testing.expectEqualStrings("lifecycle:notifications:restart", notifications[0].candidate.openPayload());
 
-    const sunglasses = try rankCandidates(std.testing.allocator, query_mod.parse("/sunglasses apply"), &candidates);
+    const sunglasses = try rankCandidates(std.testing.allocator, try query_mod.parse("/sunglasses apply"), &candidates);
     defer std.testing.allocator.free(sunglasses);
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(sunglasses.len)));
     try std.testing.expectEqualStrings("wayspot sunglasses apply", sunglasses[0].candidate.openPayload());
 
-    const history = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications history"), &candidates);
+    const history = try rankCandidates(std.testing.allocator, try query_mod.parse("/notifications history"), &candidates);
     defer std.testing.allocator.free(history);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(history.len)));
     try std.testing.expectEqual(std.meta.Tag(candidate_mod.Candidate).concrete, history[0].candidate.typeOf());
@@ -394,7 +394,7 @@ test "default route is Apps mode" {
         candidate_mod.Candidate.appLeaf("Kitty", "Terminal", "kitty", ""),
     };
 
-    const ranked = try rankCandidates(std.testing.allocator, query_mod.parse(""), &candidates);
+    const ranked = try rankCandidates(std.testing.allocator, try query_mod.parse(""), &candidates);
     defer std.testing.allocator.free(ranked);
 
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(ranked.len)));
@@ -409,7 +409,7 @@ test "empty apps route keeps installed and fixed-local scoring order" {
         candidate_mod.Candidate.appLeaf("Alacritty", "Terminal", "alacritty", ""),
     };
 
-    const query = query_mod.parse("@ ");
+    const query = try query_mod.parse("@ ");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
@@ -428,7 +428,7 @@ test "recency history boosts repeated open rows" {
         candidate_mod.Candidate.openLeaf("Power menu", "Session", "power", ""),
     };
     const history = [_][]const u8{"power"};
-    const query = query_mod.parse("> p");
+    const query = try query_mod.parse("> p");
     const ranked = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &history);
     defer std.testing.allocator.free(ranked);
 
@@ -446,7 +446,7 @@ test "newest-first and oldest-first histories produce equivalent recency ranking
     var settings = [_]u8{ 's', 'e', 't', 't', 'i', 'n', 'g', 's' };
     var power = [_]u8{ 'p', 'o', 'w', 'e', 'r' };
     const oldest_first = [_][]u8{ settings[0..], power[0..] };
-    const query = query_mod.parse("> e");
+    const query = try query_mod.parse("> e");
 
     const ranked_newest = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &newest_first);
     defer std.testing.allocator.free(ranked_newest);
@@ -468,7 +468,7 @@ test "Apps route filters fixed-local leaves by title" {
         candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
     };
 
-    const query = query_mod.parse("/apps set");
+    const query = try query_mod.parse("/apps set");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 
@@ -484,7 +484,7 @@ test "rankCandidates propagates scored result alloc failure" {
         candidate_mod.Candidate.appLeaf("alpha", "subtitle", "alpha", ""),
     };
 
-    const query = query_mod.parse("a");
+    const query = try query_mod.parse("a");
     try std.testing.expectError(
         error.OutOfMemory,
         rankCandidates(fba.allocator(), query, &candidates),
@@ -500,7 +500,7 @@ test "rankCandidates reports failing allocator on scored result alloc" {
         candidate_mod.Candidate.appLeaf("alpha", "subtitle", "alpha", ""),
     };
 
-    const query = query_mod.parse("a");
+    const query = try query_mod.parse("a");
     try std.testing.expectError(
         error.OutOfMemory,
         rankCandidates(failing_allocator, query, &candidates),
@@ -514,7 +514,7 @@ test "equal score and title uses deterministic tie-breakers" {
         candidate_mod.Candidate.appLeaf("Alpha", "Same", "a-open", ""),
     };
 
-    const query = query_mod.parse("");
+    const query = try query_mod.parse("");
     const ranked = try rankCandidates(std.testing.allocator, query, &candidates);
     defer std.testing.allocator.free(ranked);
 

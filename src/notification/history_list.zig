@@ -18,8 +18,14 @@ pub const NotificationHistoryList = struct {
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn deinit(self: *NotificationHistoryList, allocator: std.mem.Allocator) void {
-        for (self.owned_strings.items) |text| allocator.free(text);
+        self.clearCandidateProduction(allocator);
         self.owned_strings.deinit(allocator);
+    }
+
+    /// clearCandidateProduction releases rows and cache state after a staged build fails.
+    pub fn clearCandidateProduction(self: *NotificationHistoryList, allocator: std.mem.Allocator) void {
+        for (self.owned_strings.items) |text| allocator.free(text);
+        self.owned_strings.clearRetainingCapacity();
         if (self.cache) |*cache| cache.deinit();
         self.cache = null;
     }
@@ -132,4 +138,35 @@ test "notification history list exposes newest cached rows first" {
     try std.testing.expectEqual(std.meta.Tag(candidate_mod.Candidate).concrete, list.items[0].typeOf());
     try std.testing.expectEqualStrings("new", list.items[0].title());
     try std.testing.expect(std.mem.startsWith(u8, list.items[0].openPayload(), open_prefix));
+}
+
+test "notification history candidate cleanup is repeatable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/history.json", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+
+    const now = history_cache.retention_ns + 100;
+    var cache = history_cache.Cache.init(std.testing.allocator);
+    defer cache.deinit();
+    try cache.upsert(.{ .id = 1, .created_ns = 1, .updated_ns = now, .app_name = "Mail", .summary = "message" });
+    try cache.saveAtPath(path);
+
+    var list_owner = NotificationHistoryList{};
+    defer list_owner.deinit(std.testing.allocator);
+    var list = candidate_mod.Candidate.List.empty;
+    defer list.deinit();
+
+    try list_owner.collectAtPathForTest(std.testing.allocator, &list, path, now);
+    try std.testing.expect(list_owner.cache != null);
+    try std.testing.expectEqual(@as(usize, 3), list_owner.owned_strings.items.len);
+
+    list.clearRetainingCapacity();
+    list_owner.clearCandidateProduction(std.testing.allocator);
+    try std.testing.expect(list_owner.cache == null);
+    try std.testing.expectEqual(@as(usize, 0), list_owner.owned_strings.items.len);
+
+    list_owner.clearCandidateProduction(std.testing.allocator);
+    try std.testing.expect(list_owner.cache == null);
+    try std.testing.expectEqual(@as(usize, 0), list_owner.owned_strings.items.len);
 }

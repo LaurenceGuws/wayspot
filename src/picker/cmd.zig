@@ -12,10 +12,10 @@ const sunglasses_mode = @import("mode/sunglasses.zig");
 const wallpaper_mode = @import("mode/wallpaper.zig");
 const query_mod = @import("query.zig");
 const rank = @import("rank.zig");
+const sub_cmd = @import("picker_sub_cmd");
 
 pub const max_cmd_bytes = 4096;
-pub const max_completion_candidates: u32 = 256;
-pub const max_completion_output_bytes: u32 = 64 * 1024;
+pub const max_completion_candidates: usize = 256;
 const launch_child_fail_code: i32 = 127;
 const max_launch_wait_interrupts: u32 = 16;
 pub const LaunchRunError = error{
@@ -42,6 +42,24 @@ pub const Cmd = union(enum) {
     notifications: struct {},
     wallpaper: struct {},
     sunglasses: struct {},
+};
+
+/// CompletionPosition identifies the Cmd-tree level receiving one shell prefix.
+pub const CompletionPosition = enum {
+    mode,
+    sub_cmd,
+    operation,
+    app,
+};
+
+/// Completion is one borrowed shell argument selected by Cmd semantics.
+///
+/// The argument is a static Cmd/SubCmd name or a producer-owned application
+/// payload. The returned slice owns only the Completion records; the Picker
+/// and its producers outlive every argument until the caller frees the slice.
+pub const Completion = struct {
+    /// argument is exactly one next shell argument, without a command prefix.
+    argument: []const u8,
 };
 
 /// Picker owns candidate storage, history, and the concrete source pointers.
@@ -81,7 +99,7 @@ pub const Picker = struct {
 
     /// rankQuery returns ranked rows for the current query string.
     pub fn rankQuery(self: *Picker, allocator: std.mem.Allocator, raw_query: []const u8) ![]rank.RankedCandidate {
-        const parsed = query_mod.parse(raw_query);
+        const parsed = try query_mod.parse(raw_query);
         if (parsed.route != .modes) try self.loadCandidatesOnce(allocator);
 
         self.query_mu.lockUncancelable(std.Options.debug_io);
@@ -134,8 +152,16 @@ pub const Picker = struct {
     ) ![]u8 {
         std.debug.assert(self.max_history > 0);
         return switch (row) {
-            .sub_cmd => error.CandidateNotLaunchable,
+            .sub_cmd => |value| resolveSubCmd(value),
             .concrete => |leaf| self.resolveConcrete(allocator, leaf),
+        };
+    }
+
+    /// resolveSubCmd rejects a route node because selection must enter its next
+    /// Candidate list; only a Concrete leaf can produce executable intent.
+    fn resolveSubCmd(value: sub_cmd.SubCmd) ![]u8 {
+        return switch (value) {
+            .notifications, .wallpaper, .sunglasses => error.CandidateNotLaunchable,
         };
     }
 
@@ -153,11 +179,11 @@ pub const Picker = struct {
         };
     }
 
-    /// open returns the shell command for a terminal open payload.
-    pub fn open(self: *Picker, allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    /// open resolves one terminal lookup string for the current CLI bridge.
+    pub fn open(self: *Picker, allocator: std.mem.Allocator, lookup: []const u8) ![]u8 {
         try self.loadCandidatesOnce(allocator);
         for (self.candidates.slice()) |row| {
-            if (!std.mem.eql(u8, row.openPayload(), payload)) continue;
+            if (!std.mem.eql(u8, row.openPayload(), lookup)) continue;
             return self.resolveCandidateCommand(allocator, row);
         }
         return error.UnknownOpen;
@@ -185,41 +211,68 @@ pub const Picker = struct {
         }
     }
 
-    /// completeBash writes bounded shell-quoted candidates for Bash completion.
-    pub fn completeBash(
+    /// complete returns bounded next-argument values for one Cmd-tree position.
+    /// Cmd owns route selection and Candidate policy; CLI owns shell quoting.
+    pub fn complete(
         self: *Picker,
         allocator: std.mem.Allocator,
+        position: CompletionPosition,
         raw_query: []const u8,
-        out: *std.Io.Writer,
-    ) !void {
-        const ranked = try self.rankQuery(allocator, raw_query);
-        defer allocator.free(ranked);
-
-        if (ranked.len > max_completion_candidates) return error.TooManyCompletionCandidates;
-        var output_bytes: u32 = 0;
-        for (ranked) |item| {
-            if (!candidate.Candidate.accepts(.bash_completion, item.candidate)) continue;
-            const value = item.candidate.openPayload();
-            const escaped_bytes = bashEscapedLength(value);
-            if (escaped_bytes > max_completion_output_bytes -| output_bytes) return error.CompletionOutputTooLong;
-            try writeBashWord(out, value);
-            try out.writeByte('\n');
-            output_bytes += escaped_bytes + 1;
+    ) ![]Completion {
+        var values: [max_completion_candidates]Completion = undefined;
+        var count: usize = 0;
+        switch (position) {
+            .mode => try collectModeCompletions(&values, &count, raw_query),
+            .sub_cmd => try collectSubCmdCompletions(&values, &count, raw_query),
+            .operation => try collectOperationCompletions(&values, &count, raw_query),
+            .app => try self.collectAppCompletions(allocator, &values, &count, raw_query),
         }
+        return try allocator.dupe(Completion, values[0..count]);
     }
 
     fn loadCandidatesOnce(self: *Picker, allocator: std.mem.Allocator) !void {
         if (self.candidates_loaded) return;
+        try self.buildCandidatesTransactional(allocator);
+    }
+
+    /// buildCandidatesTransactional stages every producer into a fresh bounded list.
+    /// The assignment below is the only publication point; rollback clears records before
+    /// freeing producer-owned bytes so no published Candidate can dangle or be retried.
+    fn buildCandidatesTransactional(self: *Picker, allocator: std.mem.Allocator) !void {
+        self.candidates.clearRetainingCapacity();
+        var staged = candidate.Candidate.List.empty;
+        errdefer {
+            staged.clearRetainingCapacity();
+            self.candidates.clearRetainingCapacity();
+            self.candidates_loaded = false;
+            self.clearCandidateProducers(allocator);
+        }
+
         for (self.cmds) |cmd| {
             switch (cmd) {
-                .apps => |owner| if (owner) |apps| try apps.collectCandidates(allocator, &self.candidates),
-                .notifications => try notifications_mode.collectCandidates(&self.candidates),
-                .wallpaper => try wallpaper_mode.collectCandidates(&self.candidates),
-                .sunglasses => try sunglasses_mode.collectCandidates(&self.candidates),
+                .apps => |owner| if (owner) |apps| try apps.collectCandidates(allocator, &staged),
+                .notifications => try notifications_mode.collectCandidates(&staged),
+                .wallpaper => try wallpaper_mode.collectCandidates(&staged),
+                .sunglasses => try sunglasses_mode.collectCandidates(&staged),
             }
         }
-        if (self.notification_history) |owner| try owner.collect(allocator, &self.candidates);
+        if (self.notification_history) |owner| try owner.collect(allocator, &staged);
+        self.candidates = staged;
         self.candidates_loaded = true;
+    }
+
+    /// clearCandidateProducers releases every producer allocation after staged records are forgotten.
+    fn clearCandidateProducers(self: *Picker, allocator: std.mem.Allocator) void {
+        for (self.cmds) |cmd| {
+            switch (cmd) {
+                .apps => |owner| if (owner) |apps| {
+                    apps.freeCacheData(allocator);
+                    apps.freeOwnedStrings(allocator);
+                },
+                .notifications, .wallpaper, .sunglasses => {},
+            }
+        }
+        if (self.notification_history) |owner| owner.clearCandidateProduction(allocator);
     }
 
     fn appsOwner(self: *const Picker) ?*apps_mode.Apps {
@@ -229,7 +282,7 @@ pub const Picker = struct {
         };
     }
 
-    /// collectModeCandidates exposes resident Cmd arms as route candidates.
+    /// collectModeCandidates exposes resident Cmd arms as GUI route candidates.
     /// Apps is the default leaf mode and intentionally has no SubCmd arm.
     fn collectModeCandidates(self: *const Picker, out: *candidate.Candidate.List) !void {
         for (self.cmds) |cmd| {
@@ -241,7 +294,128 @@ pub const Picker = struct {
             }
         }
     }
+
+    fn collectModeCompletions(
+        out: *[max_completion_candidates]Completion,
+        count: *usize,
+        raw_query: []const u8,
+    ) !void {
+        const parsed = try query_mod.parse(raw_query);
+        if (parsed.route != .modes) return error.CompletionPositionMismatch;
+        inline for (std.meta.fields(Cmd)) |field| {
+            try appendCompletion(out, count, field.name, parsed.term);
+        }
+    }
+
+    fn collectSubCmdCompletions(
+        out: *[max_completion_candidates]Completion,
+        count: *usize,
+        raw_query: []const u8,
+    ) !void {
+        const parsed = try query_mod.parse(raw_query);
+        switch (parsed.route) {
+            .notifications => try appendNotificationSubCmdCompletions(out, count, parsed.term),
+            .wallpapers => try appendWallpaperSubCmdCompletions(out, count, parsed.term),
+            .sunglasses => try appendSunglassesSubCmdCompletions(out, count, parsed.term),
+            else => return error.CompletionPositionMismatch,
+        }
+    }
+
+    fn collectOperationCompletions(
+        out: *[max_completion_candidates]Completion,
+        count: *usize,
+        raw_query: []const u8,
+    ) !void {
+        const parsed = try query_mod.parse(raw_query);
+        if (parsed.route != .sunglasses) return error.CompletionPositionMismatch;
+
+        var terms = std.mem.tokenizeAny(u8, parsed.term, " \t");
+        const operation = terms.next() orelse return error.CompletionPositionMismatch;
+        const prefix = terms.next() orelse "";
+        if (terms.next() != null) return error.CompletionPositionMismatch;
+
+        if (std.mem.eql(u8, operation, "dim")) {
+            inline for (std.meta.fields(sub_cmd.DimSubCmd)) |field| {
+                try appendCompletion(out, count, field.name, prefix);
+            }
+            return;
+        }
+        if (std.mem.eql(u8, operation, "filter")) {
+            inline for (std.meta.fields(sub_cmd.FilterSubCmd)) |field| {
+                try appendCompletion(out, count, field.name, prefix);
+            }
+            return;
+        }
+        if (std.mem.eql(u8, operation, "image")) {
+            inline for (std.meta.fields(sub_cmd.ImageSubCmd)) |field| {
+                try appendCompletion(out, count, field.name, prefix);
+            }
+            return;
+        }
+        return error.CompletionPositionMismatch;
+    }
+
+    fn collectAppCompletions(
+        self: *Picker,
+        allocator: std.mem.Allocator,
+        out: *[max_completion_candidates]Completion,
+        count: *usize,
+        raw_query: []const u8,
+    ) !void {
+        const parsed = try query_mod.parse(raw_query);
+        if (parsed.route != .apps) return error.CompletionPositionMismatch;
+
+        const ranked = try self.rankQuery(allocator, raw_query);
+        defer allocator.free(ranked);
+        if (ranked.len > max_completion_candidates) return error.TooManyCompletionCandidates;
+        for (ranked) |item| {
+            if (!candidate.Candidate.accepts(.bash_completion, item.candidate)) continue;
+            try appendCompletion(out, count, item.candidate.openPayload(), "");
+        }
+    }
 };
+
+fn appendCompletion(
+    out: *[max_completion_candidates]Completion,
+    count: *usize,
+    argument: []const u8,
+    prefix: []const u8,
+) !void {
+    if (!std.mem.startsWith(u8, argument, prefix)) return;
+    if (count.* >= max_completion_candidates) return error.TooManyCompletionCandidates;
+    out[count.*] = .{ .argument = argument };
+    count.* += 1;
+}
+
+fn appendNotificationSubCmdCompletions(
+    out: *[max_completion_candidates]Completion,
+    count: *usize,
+    prefix: []const u8,
+) !void {
+    inline for (std.meta.fields(sub_cmd.NotificationsSubCmd)) |field| {
+        try appendCompletion(out, count, field.name, prefix);
+    }
+}
+
+fn appendWallpaperSubCmdCompletions(
+    out: *[max_completion_candidates]Completion,
+    count: *usize,
+    prefix: []const u8,
+) !void {
+    inline for (std.meta.fields(sub_cmd.WallpaperSubCmd)) |field| {
+        try appendCompletion(out, count, field.name, prefix);
+    }
+}
+
+fn appendSunglassesSubCmdCompletions(
+    out: *[max_completion_candidates]Completion,
+    count: *usize,
+    prefix: []const u8,
+) !void {
+    inline for (std.meta.fields(sub_cmd.SunglassesSubCmd)) |field| {
+        try appendCompletion(out, count, field.name, prefix);
+    }
+}
 
 fn makeCmds(apps: ?*apps_mode.Apps) [4]Cmd {
     return .{
@@ -359,22 +533,6 @@ fn printTerminalRow(out: *std.Io.Writer, row: candidate.Candidate) !void {
         row.title(),
         row.subtitle(),
     });
-}
-
-fn bashEscapedLength(value: []const u8) u32 {
-    var length: u32 = 2;
-    for (value) |byte| {
-        length += if (byte == '\'') 4 else 1;
-    }
-    return length;
-}
-
-fn writeBashWord(out: *std.Io.Writer, value: []const u8) !void {
-    try out.writeByte('\'');
-    for (value) |byte| {
-        if (byte == '\'') try out.writeAll("'\\''") else try out.writeByte(byte);
-    }
-    try out.writeByte('\'');
 }
 
 fn recordHistory(
@@ -596,6 +754,140 @@ test "command model collects candidates once per picker lifecycle" {
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
 }
 
+test "candidate loading rolls back overflow and retries without stale rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var overflow_data = std.ArrayList(u8).empty;
+    defer overflow_data.deinit(std.testing.allocator);
+    var index: usize = 0;
+    while (index <= candidate.max_candidates) : (index += 1) {
+        var line_buffer: [128]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &line_buffer,
+            "Utilities\tOverflow-{d}\tcommand-{d}\ticon\n",
+            .{ index, index },
+        );
+        try overflow_data.appendSlice(std.testing.allocator, line);
+    }
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "apps.tsv",
+        .data = overflow_data.items,
+    });
+
+    const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
+    defer std.testing.allocator.free(cache_path);
+
+    const Fake = struct {
+        fn commandExists(_: []const u8) bool {
+            return false;
+        }
+    };
+
+    var apps = apps_mode.Apps{
+        .cache_path = cache_path,
+        .command_exists_fn = Fake.commandExists,
+    };
+    defer apps.deinit(std.testing.allocator);
+
+    var model = Picker.init(&apps);
+    defer model.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.TooManyCandidates, model.rankQuery(std.testing.allocator, ""));
+    try std.testing.expectEqual(@as(usize, 0), model.candidates.count);
+    try std.testing.expect(!model.candidates_loaded);
+    try std.testing.expect(apps.cache_data == null);
+    try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
+
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "apps.tsv",
+        .data = "Utilities\tRecovered\trecovered\ticon\n",
+    });
+
+    const recovered = try model.rankQuery(std.testing.allocator, "recover");
+    defer std.testing.allocator.free(recovered);
+    try std.testing.expectEqual(@as(usize, 1), recovered.len);
+    try std.testing.expectEqualStrings("Recovered", recovered[0].candidate.title());
+    try std.testing.expectEqualStrings("recovered", recovered[0].candidate.openPayload());
+    var apps_count: usize = 0;
+    for (model.candidates.slice()) |row| {
+        if (row.isApp() or row.isOpen()) apps_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), apps_count);
+}
+
+test "desktop scan overflow reaches transaction and retries cleanly" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const overflow_root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/overflow", .{tmp.sub_path});
+    defer std.testing.allocator.free(overflow_root);
+    try tmp.dir.createDirPath(std.Options.debug_io, "overflow");
+
+    var index: usize = 0;
+    while (index <= candidate.max_candidates) : (index += 1) {
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "app-{d}.desktop", .{index});
+        var sub_path_buffer: [128]u8 = undefined;
+        const sub_path = try std.fmt.bufPrint(&sub_path_buffer, "overflow/{s}", .{name});
+        var data_buffer: [256]u8 = undefined;
+        const data = try std.fmt.bufPrint(
+            &data_buffer,
+            "[Desktop Entry]\nType=Application\nName=Overflow {d}\nExec=overflow-{d}\nIcon=icon\nCategories=Utility;\n",
+            .{ index, index },
+        );
+        try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = sub_path, .data = data });
+    }
+
+    const recovered_root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/recovered", .{tmp.sub_path});
+    defer std.testing.allocator.free(recovered_root);
+    try tmp.dir.createDirPath(std.Options.debug_io, "recovered");
+    try tmp.dir.writeFile(std.Options.debug_io, .{
+        .sub_path = "recovered/recovered.desktop",
+        .data =
+        \\[Desktop Entry]
+        \\Type=Application
+        \\Name=Recovered Desktop App
+        \\Exec=recovered-desktop
+        \\Icon=icon
+        \\Categories=Utility;
+        \\
+        ,
+    });
+
+    const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps-cache.tsv", .{tmp.sub_path});
+    defer std.testing.allocator.free(cache_path);
+
+    const Fake = struct {
+        fn commandExists(_: []const u8) bool {
+            return false;
+        }
+    };
+
+    var apps = apps_mode.Apps{
+        .cache_path = cache_path,
+        .command_exists_fn = Fake.commandExists,
+        .desktop_root = overflow_root,
+    };
+    defer apps.deinit(std.testing.allocator);
+
+    var model = Picker.init(&apps);
+    defer model.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.TooManyCandidates, model.rankQuery(std.testing.allocator, ""));
+    try std.testing.expectEqual(@as(usize, 0), model.candidates.count);
+    try std.testing.expect(!model.candidates_loaded);
+    try std.testing.expect(apps.cache_data == null);
+    try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
+
+    apps.desktop_root = recovered_root;
+    const recovered = try model.rankQuery(std.testing.allocator, "recovered");
+    defer std.testing.allocator.free(recovered);
+    try std.testing.expectEqual(@as(usize, 1), recovered.len);
+    try std.testing.expectEqualStrings("Recovered Desktop App", recovered[0].candidate.title());
+    try std.testing.expectEqualStrings("recovered-desktop", recovered[0].candidate.openPayload());
+}
+
 test "Cmd array is exhaustive, bounded, and apps-first" {
     const expected = [_]std.meta.Tag(Cmd){ .apps, .notifications, .wallpaper, .sunglasses };
     var picker = Picker.init(null);
@@ -647,6 +939,16 @@ test "command model exposes every resident mode at the modes route" {
     try std.testing.expect(saw_notifications);
     try std.testing.expect(saw_wallpapers);
     try std.testing.expect(saw_sunglasses);
+}
+
+test "command query enforces the bounded query input" {
+    var model = Picker{};
+    defer model.deinit(std.testing.allocator);
+
+    var oversized: [query_mod.max_query_bytes + 1]u8 = undefined;
+    @memset(oversized[0..], 'x');
+    try std.testing.expectError(error.QueryTooLong, model.rankQuery(std.testing.allocator, oversized[0..]));
+    try std.testing.expect(!model.candidates_loaded);
 }
 
 test "command Apps route reaches installed and fixed-local leaves" {
@@ -839,12 +1141,18 @@ test "command model rejects newline dynamic words before resolution" {
     try std.testing.expectError(error.PathByteInvalid, candidate.Input.pathInput("/tmp/a\nb"));
 }
 
-test "command model explicitly rejects routes and display-only notifications" {
+test "command model explicitly rejects every route and display-only notification" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
-    const route = candidate.Candidate.subCmd(.{ .sunglasses = .{ .dim = .{ .set = {} } } });
-    try std.testing.expectError(error.CandidateNotLaunchable, model.resolveCandidateCommand(std.testing.allocator, route));
+    const routes = [_]candidate.Candidate{
+        candidate.Candidate.subCmd(.{ .notifications = .{ .history = {} } }),
+        candidate.Candidate.subCmd(.{ .wallpaper = .{ .rotate = {} } }),
+        candidate.Candidate.subCmd(.{ .sunglasses = .{ .dim = .{ .set = {} } } }),
+    };
+    for (routes) |route| {
+        try std.testing.expectError(error.CandidateNotLaunchable, model.resolveCandidateCommand(std.testing.allocator, route));
+    }
 
     const notification = candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1");
     try std.testing.expectError(error.NotificationDisplayOnly, model.resolveCandidateCommand(std.testing.allocator, notification));
@@ -915,7 +1223,7 @@ test "command model collects notification history list rows" {
     try std.testing.expectEqualStrings("concrete\tnotification-history:0:1\tSummary\tApp\n", output.written());
 }
 
-test "command model writes completion records" {
+test "command model returns next app arguments" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.appLeaf("Quote App", "Utilities", "quote'app", ""));
@@ -927,14 +1235,13 @@ test "command model writes completion records" {
     list = .empty;
     defer model.deinit(std.testing.allocator);
 
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    try model.completeBash(std.testing.allocator, "quote", &output.writer);
-
-    try std.testing.expectEqualStrings("'quote'\\''app'\n", output.written());
+    const completed = try model.complete(std.testing.allocator, .app, "/apps quote");
+    defer std.testing.allocator.free(completed);
+    try std.testing.expectEqual(@as(usize, 1), completed.len);
+    try std.testing.expectEqualStrings("quote'app", completed[0].argument);
 }
 
-test "bash completion excludes notification records by input policy" {
+test "command completion returns route words and excludes notification records" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.subCmd(.{ .notifications = .{ .history = {} } }));
@@ -947,11 +1254,62 @@ test "bash completion excludes notification records by input policy" {
     list = .empty;
     defer model.deinit(std.testing.allocator);
 
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    try model.completeBash(std.testing.allocator, "/notifications", &output.writer);
+    const completed = try model.complete(std.testing.allocator, .sub_cmd, "/notifications");
+    defer std.testing.allocator.free(completed);
+    try std.testing.expectEqual(@as(usize, 2), completed.len);
+    try std.testing.expectEqualStrings("history", completed[0].argument);
+    try std.testing.expectEqualStrings("restart", completed[1].argument);
+    for (completed) |value| {
+        try std.testing.expect(std.mem.indexOf(u8, value.argument, "notification-history") == null);
+    }
+}
 
-    try std.testing.expectEqualStrings("'/notifications history'\n", output.written());
+test "command completion enforces its bounded app result" {
+    var list = candidate.Candidate.List.empty;
+    defer list.deinit();
+    var index: usize = 0;
+    while (index <= max_completion_candidates) : (index += 1) {
+        try list.append(candidate.Candidate.appLeaf("App", "Utilities", "app", ""));
+    }
+
+    var model = Picker{
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.TooManyCompletionCandidates, model.complete(std.testing.allocator, .app, "/apps"));
+}
+
+test "command completion returns one next word at every routed position" {
+    var model = Picker{};
+    defer model.deinit(std.testing.allocator);
+
+    const modes = try model.complete(std.testing.allocator, .mode, "/");
+    defer std.testing.allocator.free(modes);
+    try std.testing.expectEqual(@as(usize, 4), modes.len);
+    try std.testing.expectEqualStrings("apps", modes[0].argument);
+    try std.testing.expectEqualStrings("notifications", modes[1].argument);
+    try std.testing.expectEqualStrings("wallpaper", modes[2].argument);
+    try std.testing.expectEqualStrings("sunglasses", modes[3].argument);
+
+    const sub_commands = try model.complete(std.testing.allocator, .sub_cmd, "/sunglasses ");
+    defer std.testing.allocator.free(sub_commands);
+    try std.testing.expectEqual(@as(usize, 6), sub_commands.len);
+    try std.testing.expectEqualStrings("restart", sub_commands[0].argument);
+    try std.testing.expectEqualStrings("apply", sub_commands[1].argument);
+    try std.testing.expectEqualStrings("reconcile", sub_commands[2].argument);
+    try std.testing.expectEqualStrings("dim", sub_commands[3].argument);
+    try std.testing.expectEqualStrings("filter", sub_commands[4].argument);
+    try std.testing.expectEqualStrings("image", sub_commands[5].argument);
+
+    const operations = try model.complete(std.testing.allocator, .operation, "/sunglasses dim ");
+    defer std.testing.allocator.free(operations);
+    try std.testing.expectEqual(@as(usize, 3), operations.len);
+    try std.testing.expectEqualStrings("set", operations[0].argument);
+    try std.testing.expectEqualStrings("on", operations[1].argument);
+    try std.testing.expectEqualStrings("off", operations[2].argument);
 }
 
 test "command launch runner accepts successful command" {

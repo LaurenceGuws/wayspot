@@ -1,7 +1,9 @@
-//! Wayspot root exports accepted env, identity, picker, notification, wallpaper, and overlay owners.
+//! Wayspot root exports accepted interfaces, env, identity, picker, and resident owners.
 const std = @import("std");
+pub const cli = @import("cli/entry.zig");
 pub const config = @import("config/mod.zig");
 pub const env = @import("env/mod.zig");
+pub const gui = @import("gui/surface.zig");
 pub const notification = @import("notification/mod.zig");
 pub const picker = @import("picker/mod.zig");
 pub const wallpaper = @import("wallpaper/mod.zig");
@@ -21,6 +23,9 @@ pub fn bufferedPrint() !void {
 test "root references config and appearance declarations" {
     std.testing.refAllDecls(config.defaults);
     std.testing.refAllDecls(env);
+    std.testing.refAllDecls(cli);
+    std.testing.refAllDecls(cli.bash_completion);
+    std.testing.refAllDecls(gui);
     std.testing.refAllDecls(picker.candidate);
     std.testing.refAllDecls(picker.cmd);
     std.testing.refAllDecls(picker.appearance);

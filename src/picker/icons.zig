@@ -374,6 +374,18 @@ fn endsWithIgnoreCase(bytes: []const u8, suffix: []const u8) bool {
     return std.ascii.eqlIgnoreCase(bytes[bytes.len - suffix.len ..], suffix);
 }
 
+fn testAbsolutePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir, child: []const u8) ![]u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(cwd);
+    return std.fs.path.join(allocator, &.{
+        cwd,
+        ".zig-cache",
+        "tmp",
+        tmp.sub_path[0..],
+        child,
+    });
+}
+
 fn envBytes(name: [*:0]const u8) ?[]const u8 {
     const value = std.c.getenv(name) orelse return null;
     return std.mem.span(value);
@@ -414,8 +426,8 @@ test "icon resolver accepts bounded absolute png path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "app.png", .data = "" });
-    const absolute = try tmp.dir.realpathAlloc(std.testing.allocator, "app.png");
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "app.png", .data = "" });
+    const absolute = try testAbsolutePath(std.testing.allocator, &tmp, "app.png");
     defer std.testing.allocator.free(absolute);
 
     var buffer: [max_icon_path_bytes + 1]u8 = undefined;
@@ -427,13 +439,12 @@ test "icon resolver searches bounded hicolor and pixmaps roots" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("data/icons/hicolor/48x48/apps");
-    try tmp.dir.writeFile(.{ .sub_path = "data/icons/hicolor/48x48/apps/kitty.png", .data = "" });
-    try tmp.dir.makePath("data/pixmaps");
-    try tmp.dir.writeFile(.{ .sub_path = "data/pixmaps/foot.bmp", .data = "" });
-
-    const data_root = try tmp.dir.realpathAlloc(std.testing.allocator, "data");
+    try tmp.dir.createDirPath(std.Options.debug_io, "data/icons/hicolor/48x48/apps");
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "data/icons/hicolor/48x48/apps/kitty.png", .data = "" });
+    try tmp.dir.createDirPath(std.Options.debug_io, "data/pixmaps");
+    const data_root = try testAbsolutePath(std.testing.allocator, &tmp, "data");
     defer std.testing.allocator.free(data_root);
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "data/pixmaps/foot.bmp", .data = "" });
 
     var buffer: [max_icon_path_bytes + 1]u8 = undefined;
     const roots = ResolveRoots{ .xdg_data_home = data_root, .xdg_data_dirs = data_root };

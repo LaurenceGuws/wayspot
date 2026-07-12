@@ -1,31 +1,35 @@
-//! Picker surface owns the GUI consumer lifecycle from SDL creation to cleanup.
+//! GUI surface owns the SDL consumer lifecycle from creation to cleanup.
 //!
 //! It edits one query, consumes command candidates, renders rows, and queues
 //! one resolved command for the surface-owned shutdown handoff.
 
 const std = @import("std");
-const app = @import("mod.zig");
-const app_icons = @import("icons.zig");
+const app_icons = @import("../picker/icons.zig");
 const candidate_owner = @import("picker_candidate");
-const command_owner = @import("cmd.zig");
+const command_owner = @import("../picker/cmd.zig");
 const config_defaults = @import("../config/defaults.zig");
-const cursor_blink = @import("cursor_blink.zig");
-const rank = @import("rank.zig");
-const textbox = @import("textbox.zig");
-const viewport = @import("viewport.zig");
-const scale_owner = @import("scale.zig");
-const signal_owner = @import("signal.zig");
-const appearance_owner = @import("appearance.zig");
-const text_owner = @import("text.zig");
+const cursor_blink = @import("../picker/cursor_blink.zig");
+const rank = @import("../picker/rank.zig");
+const textbox = @import("../picker/textbox.zig");
+const viewport = @import("../picker/viewport.zig");
+const scale_owner = @import("../picker/scale.zig");
+const signal_owner = @import("../picker/signal.zig");
+const appearance_owner = @import("../picker/appearance.zig");
+const text_owner = @import("../picker/text.zig");
 
 const c = @import("sdl_c");
 
-/// run owns one picker surface lifecycle from window creation through cleanup.
+/// run owns one GUI picker lifecycle from window creation through cleanup.
 pub fn run(
     allocator: std.mem.Allocator,
-    picker: *app.Picker,
+    picker: *command_owner.Picker,
     home: []const u8,
 ) !void {
+    try picker.loadHistory(allocator);
+    defer picker.saveHistory(allocator) catch |err| {
+        std.log.err("failed to save history: {s}", .{@errorName(err)});
+    };
+
     var surface = try Surface.init(allocator, picker, home);
     defer surface.deinit();
     var shutdown_signal = try signal_owner.Signal.init();
@@ -35,7 +39,8 @@ pub fn run(
 
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
-const query_max_bytes: u32 = 256;
+const query_owner = @import("../picker/query.zig");
+const query_max_bytes: u32 = @intCast(query_owner.max_query_bytes);
 
 const TextDrag = struct {
     anchor: u32,
@@ -43,7 +48,7 @@ const TextDrag = struct {
 
 const LaunchRunner = *const fn ([*:0]const u8) command_owner.LaunchRunError!void;
 
-/// LaunchQueue owns one bounded GUI command intent until the surface drains it.
+/// LaunchQueue owns one bounded GUI leaf intent until the interface drains it.
 const LaunchQueue = struct {
     command_buf: [command_owner.max_cmd_bytes + 1]u8 = undefined,
     command_len: u32 = 0,
@@ -82,7 +87,7 @@ const LaunchQueue = struct {
 
 const Surface = struct {
     allocator: std.mem.Allocator,
-    picker: *app.Picker,
+    picker: *command_owner.Picker,
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     text: text_owner.TextEngine,
@@ -102,7 +107,7 @@ const Surface = struct {
     shutdown_after_launch: bool = false,
     text_drag: ?TextDrag = null,
 
-    fn init(allocator: std.mem.Allocator, picker: *app.Picker, home: []const u8) !Surface {
+    fn init(allocator: std.mem.Allocator, picker: *command_owner.Picker, home: []const u8) !Surface {
         const config = try scale_owner.SurfaceConfig.load(allocator);
         const appearance_state = try config_defaults.load(allocator, home);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
@@ -299,6 +304,7 @@ const Surface = struct {
         try self.queueLaunchAtResult(result_index);
     }
 
+    /// queueLaunchAtResult enters a SubCmd route directly or queues one resolved Concrete leaf.
     fn queueLaunchAtResult(self: *Surface, result_index: u32) !void {
         if (result_index >= self.results.len) return error.ResultIndexOutOfBounds;
         std.debug.assert(result_index < self.results.len);
@@ -306,8 +312,7 @@ const Surface = struct {
         const candidate = self.results[@intCast(result_index)].candidate;
         if (!candidate_owner.Candidate.accepts(.selection, candidate)) return;
         if (candidate.isSubCmd()) {
-            const route_query = candidate.routeQuery() orelse return error.RouteMissing;
-            try self.switchMode(route_query);
+            try self.switchMode(try routeQueryForSelection(candidate));
             return;
         }
         if (!candidate.isLaunchable()) return;
@@ -787,6 +792,12 @@ fn pointInside(rect: viewport.Rect, x: f32, y: f32) bool {
     return x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
 }
 
+/// routeQueryForSelection converts only a reachable SubCmd Candidate into the
+/// next GUI query; Concrete leaves never enter another route.
+fn routeQueryForSelection(value: candidate_owner.Candidate) ![]const u8 {
+    return value.routeQuery() orelse error.RouteMissing;
+}
+
 fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) command_owner.LaunchRunError!void {
     if (!queue.hasQueued()) return;
     defer queue.clear();
@@ -824,7 +835,17 @@ test "surface launch queue rejects empty and oversized commands" {
     try std.testing.expect(!queue.hasQueued());
 }
 
-test "text edit key combos stay owned by picker surface text handling" {
+test "GUI route selection consumes shared Candidate without changing Cmd order" {
+    const picker = command_owner.Picker{};
+    const before = picker.cmds;
+    const route = candidate_owner.Candidate.subCmd(.{ .sunglasses = .{ .image = .{ .opacity = {} } } });
+
+    try std.testing.expectEqualStrings("/sunglasses image", try routeQueryForSelection(route));
+    try std.testing.expectEqual(before, picker.cmds);
+    try std.testing.expectError(error.RouteMissing, routeQueryForSelection(candidate_owner.Candidate.appLeaf("Kitty", "Terminal", "kitty", "")));
+}
+
+test "text edit key combos stay owned by GUI text handling" {
     try std.testing.expectEqual(PickerTextEditAction.select_all, textEditAction(c.SDLK_A, c.SDL_KMOD_CTRL).?);
     try std.testing.expectEqual(PickerTextEditAction.copy, textEditAction(c.SDLK_C, c.SDL_KMOD_CTRL).?);
     try std.testing.expectEqual(PickerTextEditAction.cut, textEditAction(c.SDLK_X, c.SDL_KMOD_CTRL).?);

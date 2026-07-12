@@ -43,10 +43,10 @@ ownership:
     owner: picker.candidate
   gui:
     role: SDL lifecycle, input, candidate-tree rendering, selection, and intent
-    current_source: src/picker/surface.zig
+    current_source: src/gui/surface.zig
   cli:
     role: candidate-tree consumption, Bash serialization, and help output
-    current_source: src/main.zig
+    current_source: src/cli/entry.zig
   process:
     role: executable entry, identity, mode selection, and resident runtime invocation
     current_source: src/main.zig
@@ -546,7 +546,7 @@ mode_catalog_capacity:
   max_lifecycle_candidates_per_mode: 8
 
 transition:
-  current_cmd_shape:
+  previous_cmd_shape:
     source: src/picker/command.zig
     shape: flat Candidate.List with separate Mode collection
     required_exit:
@@ -556,6 +556,9 @@ transition:
       - make every Concrete leaf carry an explicit Input contract
       - make scalar, toggle, and path input bounds identical in GUI and CLI
       - make apps the default picker mode
+  current_cmd_shape:
+    source: src/picker/cmd.zig
+    shape: bounded Cmd array consumed by CLI and GUI
   current_process_shape: src/main.zig flag branches
   noncanonical_entries:
     - --notifications-daemon
@@ -581,17 +584,27 @@ interfaces:
       - query
       - open
       - complete bash
+    completion:
+      symbol: Completion
+      positions:
+        - mode
+        - sub_cmd
+        - operation
+        - app
+      result: one borrowed next shell argument without a wayspot command prefix
+      ownership: Cmd selects the argument; CLI serializes and quotes it
   gui:
     role: shared Cmd, Candidate, and Input consumer and SDL picker owner
-    path: --ui
+    path: src/gui/surface.zig
     input_controls:
       - Input.none: direct action
       - Input.scalar: reusable slider draft committed to a typed leaf
       - Input.toggle: reusable on/off control committed to a typed leaf
       - Input.path: bounded textbox draft committed to a typed leaf
   cli:
-    role: shared Cmd, Candidate, and Input consumer and Bash/help owner
-    path: src/main.zig
+    role: shared Cmd, Candidate, and Input consumer and Bash/help wire owner
+    path: src/cli/entry.zig
+    serialization_source: src/cli/bash_completion.zig
     completion_entrypoint: packaging/bash/wayspot.bash
     input_contract: raw argv and GUI commit construct equal typed leaf values
   process:

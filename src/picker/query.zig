@@ -2,6 +2,15 @@
 
 const std = @import("std");
 
+/// max_query_bytes bounds one borrowed picker query before route parsing.
+pub const max_query_bytes: usize = 256;
+
+/// QueryError is the exact failure vocabulary for bounded query parsing.
+pub const QueryError = error{
+    QueryTooLong,
+};
+
+/// Route is the closed picker route grammar before a SubCmd is selected.
 pub const Route = enum {
     blended,
     apps,
@@ -12,13 +21,21 @@ pub const Route = enum {
     run,
 };
 
+/// Query borrows one bounded raw string and its parsed route term.
 pub const Query = struct {
+    /// raw is the trimmed query slice retained for interface use.
     raw: []const u8,
+    /// route is the selected top-level picker route.
     route: Route,
+    /// term is the route-local text used by ranking.
     term: []const u8,
 };
 
-pub fn parse(raw_query: []const u8) Query {
+/// parse maps the accepted query grammar to one reachable Cmd route.
+/// The returned strings borrow raw_query; callers retain it while using Query.
+pub fn parse(raw_query: []const u8) QueryError!Query {
+    if (raw_query.len > max_query_bytes) return error.QueryTooLong;
+
     const raw = std.mem.trim(u8, raw_query, " \t\r\n");
     if (raw.len == 0) {
         return .{
@@ -57,45 +74,73 @@ fn modeTerm(body: []const u8, mode_name: []const u8) ?[]const u8 {
 }
 
 test "parse empty query uses blended route" {
-    const q = parse("   ");
+    const q = try parse("   ");
     try std.testing.expectEqual(Route.blended, q.route);
     try std.testing.expectEqualStrings("", q.term);
 }
 
 test "parse prefixed query routes correctly" {
-    const q = parse("@ kitty");
+    const q = try parse("@ kitty");
     try std.testing.expectEqual(Route.apps, q.route);
     try std.testing.expectEqualStrings("kitty", q.term);
 }
 
 test "parse slash modes and selected mode routes" {
-    const modes = parse("/");
+    const modes = try parse("/");
     try std.testing.expectEqual(Route.modes, modes.route);
     try std.testing.expectEqualStrings("", modes.term);
 
-    const filtered_modes = parse("/not");
+    const filtered_modes = try parse("/not");
     try std.testing.expectEqual(Route.modes, filtered_modes.route);
     try std.testing.expectEqualStrings("not", filtered_modes.term);
 
-    const notifications = parse("/notifications");
+    const notifications = try parse("/notifications");
     try std.testing.expectEqual(Route.notifications, notifications.route);
     try std.testing.expectEqualStrings("", notifications.term);
 
-    const wallpapers = parse("/wallpapers restart");
+    const wallpapers = try parse("/wallpapers restart");
     try std.testing.expectEqual(Route.wallpapers, wallpapers.route);
     try std.testing.expectEqualStrings("restart", wallpapers.term);
 
-    const sunglasses = parse("/sunglasses apply");
+    const sunglasses = try parse("/sunglasses apply");
     try std.testing.expectEqual(Route.sunglasses, sunglasses.route);
     try std.testing.expectEqualStrings("apply", sunglasses.term);
 
-    const apps = parse("/apps");
+    const apps = try parse("/apps");
     try std.testing.expectEqual(Route.apps, apps.route);
     try std.testing.expectEqualStrings("", apps.term);
 }
 
 test "parse non-prefixed query stays blended" {
-    const q = parse("firefox");
+    const q = try parse("firefox");
     try std.testing.expectEqual(Route.blended, q.route);
     try std.testing.expectEqualStrings("firefox", q.term);
+}
+
+test "parse preserves every nested route term" {
+    const notifications = try parse("/notifications history");
+    try std.testing.expectEqual(Route.notifications, notifications.route);
+    try std.testing.expectEqualStrings("history", notifications.term);
+
+    const wallpapers = try parse("/wallpapers rotate");
+    try std.testing.expectEqual(Route.wallpapers, wallpapers.route);
+    try std.testing.expectEqualStrings("rotate", wallpapers.term);
+
+    const sunglasses = try parse("/sunglasses image opacity");
+    try std.testing.expectEqual(Route.sunglasses, sunglasses.route);
+    try std.testing.expectEqualStrings("image opacity", sunglasses.term);
+}
+
+test "parse rejects one byte beyond the query bound" {
+    var oversized: [max_query_bytes + 1]u8 = undefined;
+    @memset(oversized[0..], 'x');
+    try std.testing.expectError(error.QueryTooLong, parse(oversized[0..]));
+}
+
+test "parse accepts the exact query bound" {
+    var exact: [max_query_bytes]u8 = undefined;
+    @memset(exact[0..], 'x');
+    const q = try parse(exact[0..]);
+    try std.testing.expectEqual(Route.blended, q.route);
+    try std.testing.expectEqual(max_query_bytes, q.term.len);
 }
