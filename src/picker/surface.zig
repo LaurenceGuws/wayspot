@@ -14,6 +14,7 @@ const textbox = @import("textbox.zig");
 const viewport = @import("viewport.zig");
 const query_mod = @import("query.zig");
 const scale_owner = @import("scale.zig");
+const signal_owner = @import("signal.zig");
 const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
 const sunglasses_form = @import("../sunglasses/form.zig");
@@ -29,7 +30,7 @@ pub fn run(
 ) !void {
     var surface = try Surface.init(allocator, picker, home);
     defer surface.deinit();
-    var shutdown_signal = try ShutdownSignal.init();
+    var shutdown_signal = try signal_owner.Signal.init();
     try surface.startShutdownSignal(&shutdown_signal);
     try surface.loop();
 }
@@ -37,96 +38,6 @@ pub fn run(
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
 const query_max_bytes: u32 = 256;
-const shutdown_signal_poll_timeout_ms: i32 = -1;
-const shutdown_eventfd_stop_value: u64 = 1;
-const shutdown_eventfd_signal_value: u64 = 1;
-var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
-
-comptime {
-    std.debug.assert(shutdown_eventfd_stop_value > 0);
-    std.debug.assert(shutdown_eventfd_signal_value > 0);
-}
-
-/// ShutdownSignal turns SIGINT and SIGTERM into one vendor wake event owned by the picker surface.
-const ShutdownSignal = struct {
-    event_fd: std.posix.fd_t = -1,
-    old_int_action: std.posix.Sigaction = undefined,
-    old_term_action: std.posix.Sigaction = undefined,
-    thread: ?std.Thread = null,
-    installed: bool = false,
-    stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    wake_event_type: u32 = 0,
-
-    fn init() !ShutdownSignal {
-        return .{
-            .event_fd = try osEventFd(),
-        };
-    }
-
-    fn start(self: *ShutdownSignal, wake_event_type: u32) !void {
-        std.debug.assert(wake_event_type != 0);
-        std.debug.assert(self.event_fd != -1);
-        self.wake_event_type = wake_event_type;
-        shutdown_handler_fd.store(self.event_fd, .release);
-        self.installHandlers();
-        self.thread = try std.Thread.spawn(.{}, shutdownSignalMain, .{self});
-    }
-
-    fn stop(self: *ShutdownSignal) void {
-        self.stop_requested.store(true, .release);
-        if (self.installed) {
-            self.restoreHandlers();
-            self.installed = false;
-        }
-        shutdown_handler_fd.store(-1, .release);
-        if (self.thread) |thread| {
-            signalEventFd(self.event_fd, shutdown_eventfd_stop_value);
-            thread.join();
-            self.thread = null;
-        }
-        if (self.event_fd != -1) {
-            osClose(self.event_fd);
-            self.event_fd = -1;
-        }
-    }
-
-    fn deinit(self: *ShutdownSignal) void {
-        self.stop();
-    }
-
-    fn installHandlers(self: *ShutdownSignal) void {
-        var action = std.posix.Sigaction{
-            .handler = .{ .handler = shutdownSignalHandler },
-            .mask = std.posix.sigemptyset(),
-            .flags = 0,
-        };
-        std.posix.sigaction(.INT, &action, &self.old_int_action);
-        std.posix.sigaction(.TERM, &action, &self.old_term_action);
-        self.installed = true;
-    }
-
-    fn restoreHandlers(self: *ShutdownSignal) void {
-        std.posix.sigaction(.INT, &self.old_int_action, null);
-        std.posix.sigaction(.TERM, &self.old_term_action, null);
-    }
-
-    fn pushShutdownWake(self: *ShutdownSignal, signo: u32) void {
-        self.shutdown_requested.store(true, .release);
-        var event = c.SDL_Event{ .quit = .{
-            .type = c.SDL_EVENT_QUIT,
-        } };
-        const pushed = c.SDL_PushEvent(&event);
-        if (!pushed) {
-            std.log.warn("shutdown wake event push failed signo={d}", .{signo});
-        }
-    }
-
-    fn requested(self: *ShutdownSignal) bool {
-        return self.shutdown_requested.load(.acquire);
-    }
-};
-
 const TextEditTarget = enum {
     query,
     sunglasses_path,
@@ -136,49 +47,6 @@ const TextDrag = struct {
     target: TextEditTarget,
     anchor: u32,
 };
-
-fn shutdownSignalHandler(signal: std.posix.SIG) callconv(.c) void {
-    if (signal != .INT and signal != .TERM) return;
-    const fd = shutdown_handler_fd.load(.acquire);
-    if (fd == -1) return;
-    var value: u64 = shutdown_eventfd_signal_value;
-    const written = std.os.linux.write(fd, std.mem.asBytes(&value).ptr, @sizeOf(u64));
-    if (std.os.linux.errno(written) != .SUCCESS) return;
-}
-
-fn shutdownSignalMain(shutdown_signal: *ShutdownSignal) void {
-    var poll_fds = [_]std.posix.pollfd{
-        .{
-            .fd = shutdown_signal.event_fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        },
-    };
-
-    while (!shutdown_signal.stop_requested.load(.acquire)) {
-        poll_fds[0].revents = 0;
-        const ready = osPoll(&poll_fds, shutdown_signal_poll_timeout_ms) catch |err| {
-            std.log.warn("shutdown signal poll failed err={s}", .{@errorName(err)});
-            return;
-        };
-        if (ready == 0) continue;
-        if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
-
-        var event_count: u64 = 0;
-        const event_bytes = osRead(shutdown_signal.event_fd, std.mem.asBytes(&event_count)) catch |err| {
-            if (err == error.WouldBlock) continue;
-            std.log.warn("shutdown event read failed err={s}", .{@errorName(err)});
-            return;
-        };
-        if (event_bytes != @as(u32, @intCast(@sizeOf(u64)))) {
-            std.log.warn("shutdown event short read bytes={d}", .{event_bytes});
-            return;
-        }
-        if (shutdown_signal.stop_requested.load(.acquire)) return;
-        shutdown_signal.pushShutdownWake(@intFromEnum(std.posix.SIG.TERM));
-        return;
-    }
-}
 
 const Surface = struct {
     allocator: std.mem.Allocator,
@@ -192,8 +60,7 @@ const Surface = struct {
     base_width: f32 = @floatFromInt(base_window_width),
     base_height: f32 = @floatFromInt(base_window_height),
     cursor: cursor_blink.CursorBlink = cursor_blink.CursorBlink.init(0, cursor_blink.cursor_blink_interval_ms),
-    shutdown_signal: ?*ShutdownSignal = null,
-    wake_event_type: u32 = 0,
+    shutdown_signal: ?*signal_owner.Signal = null,
     query: textbox.Textbox(query_max_bytes) = .{},
     results: []rank.RankedCandidate = &.{},
     sunglasses_form: sunglasses_form.Form = .{},
@@ -229,9 +96,6 @@ const Surface = struct {
             const stopped_text_input = c.SDL_StopTextInput(window);
             if (!stopped_text_input) std.log.warn("sdl text input stop failed", .{});
         }
-        const wake_event_type = c.SDL_RegisterEvents(1);
-        if (wake_event_type == 0) return error.SdlWakeUnavailable;
-
         const persisted_sunglasses_form = try sunglasses_form.Form.load(allocator);
         var self = Surface{
             .allocator = allocator,
@@ -242,7 +106,6 @@ const Surface = struct {
             .appearance = appearance_state,
             .config = config,
             .sunglasses_form = persisted_sunglasses_form,
-            .wake_event_type = wake_event_type,
             .cursor = cursor_blink.CursorBlink.init(vendorNowMs(), cursor_blink.cursor_blink_interval_ms),
         };
         try self.refreshResults();
@@ -254,9 +117,9 @@ const Surface = struct {
         return self;
     }
 
-    fn startShutdownSignal(self: *Surface, shutdown_signal: *ShutdownSignal) !void {
+    fn startShutdownSignal(self: *Surface, shutdown_signal: *signal_owner.Signal) !void {
         self.shutdown_signal = shutdown_signal;
-        try shutdown_signal.start(self.wake_event_type);
+        try shutdown_signal.start();
     }
 
     fn deinit(self: *Surface) void {
@@ -314,12 +177,6 @@ const Surface = struct {
     }
 
     fn handleEvent(self: *Surface, event: *const c.SDL_Event) !bool {
-        if (event.type == self.wake_event_type) {
-            if (self.shutdown_signal) |shutdown_signal| {
-                if (shutdown_signal.requested()) return false;
-            }
-            return true;
-        }
         switch (event.type) {
             c.SDL_EVENT_QUIT,
             c.SDL_EVENT_TERMINATING,
@@ -1218,60 +1075,4 @@ test "query mouse mapping uses exact bounds and clamps to scalar offsets" {
     try std.testing.expectEqual(@as(u32, 0), queryMouseByteOffset(layout, appearance.picker, text, rect.x, y).?);
     try std.testing.expectEqual(@as(u32, @intCast(text.len)), queryMouseByteOffset(layout, appearance.picker, text, rect.x + rect.w, y).?);
     try std.testing.expectEqual(@as(u32, 3), queryMouseByteOffset(layout, appearance.picker, text, rect.x + (rect.w * 0.40), y).?);
-}
-
-fn osEventFd() !std.posix.fd_t {
-    const rc = std.os.linux.eventfd(
-        0,
-        std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK,
-    );
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        else => error.SystemCallFailed,
-    };
-}
-
-fn signalEventFd(fd: std.posix.fd_t, value: u64) void {
-    if (fd == -1) return;
-    var writable_value = value;
-    const written = osWrite(fd, std.mem.asBytes(&writable_value)) catch |err| {
-        std.log.debug("shutdown event write failed err={s}", .{@errorName(err)});
-        return;
-    };
-    if (written != @as(u32, @intCast(@sizeOf(u64)))) {
-        std.log.debug("shutdown event short write bytes={d}", .{written});
-    }
-}
-
-fn osClose(fd: std.posix.fd_t) void {
-    const rc = std.os.linux.close(fd);
-    if (std.os.linux.errno(rc) != .SUCCESS) {
-        std.log.debug("shutdown fd close failed fd={d}", .{fd});
-    }
-}
-
-fn osPoll(fds: []std.posix.pollfd, timeout_ms: i32) !u32 {
-    const rc = std.os.linux.poll(fds.ptr, @intCast(fds.len), timeout_ms);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .INTR => error.SignalInterrupted,
-        else => error.SystemCallFailed,
-    };
-}
-
-fn osRead(fd: std.posix.fd_t, buf: []u8) !u32 {
-    const rc = std.os.linux.read(fd, buf.ptr, buf.len);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .AGAIN => error.WouldBlock,
-        else => error.SystemCallFailed,
-    };
-}
-
-fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
-    const rc = std.os.linux.write(fd, bytes.ptr, bytes.len);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        else => error.SystemCallFailed,
-    };
 }

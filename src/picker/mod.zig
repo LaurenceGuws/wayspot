@@ -12,6 +12,7 @@ pub const open = @import("open.zig");
 pub const query = @import("query.zig");
 pub const rank = @import("rank.zig");
 pub const scale = @import("scale.zig");
+pub const signal = @import("signal.zig");
 pub const slider = @import("slider.zig");
 pub const surface = @import("surface.zig");
 pub const text = @import("text.zig");
