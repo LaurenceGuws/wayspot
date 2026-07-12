@@ -17,7 +17,6 @@ const sunglasses_apply_event_type: u32 = @intCast(c.SDL_EVENT_USER + 42);
 const pid_dir_name = "wayspot";
 const pid_file_name = "sunglasses.pid";
 const startup_status_file_name = "sunglasses.startup.status";
-const reconcile_lock_file_name = "sunglasses.reconcile.lock";
 const max_pid_file_bytes: u32 = 32;
 const max_startup_status_bytes: u32 = 96;
 const max_proc_cmdline_bytes: u32 = 4096;
@@ -54,9 +53,6 @@ pub const Overlay = struct {
     }
 
     pub fn reconcileSavedState(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
-        var lock = try ReconcileLock.acquire(allocator, runtime_dir);
-        defer lock.deinit(allocator);
-
         const state = try sunglasses_state.State.load(allocator);
         const pid_path = try sunglassesPidPath(allocator, runtime_dir);
         defer allocator.free(pid_path);
@@ -491,7 +487,10 @@ const PidFile = struct {
         errdefer allocator.free(pid_path);
 
         const io = std.Options.debug_io;
-        const file = try std.Io.Dir.createFileAbsolute(io, pid_path, .{ .truncate = true });
+        const file = std.Io.Dir.createFileAbsolute(io, pid_path, .{ .truncate = true, .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.SunglassesOverlayAlreadyRunning,
+            else => return err,
+        };
         defer file.close(io);
 
         var buf: [max_pid_file_bytes]u8 = undefined;
@@ -507,42 +506,12 @@ const PidFile = struct {
     }
 };
 
-const ReconcileLock = struct {
-    path: []u8,
-    file: std.Io.File,
-
-    fn acquire(allocator: std.mem.Allocator, runtime_dir: []const u8) !ReconcileLock {
-        const dir_path = try sunglassesPidDirPath(allocator, runtime_dir);
-        defer allocator.free(dir_path);
-        try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, dir_path);
-
-        const lock_path = try sunglassesReconcileLockPath(allocator, runtime_dir);
-        errdefer allocator.free(lock_path);
-
-        const io = std.Options.debug_io;
-        const file = try std.Io.Dir.createFileAbsolute(io, lock_path, .{ .truncate = false });
-        errdefer file.close(io);
-        try flockExclusive(file.handle);
-        return .{ .path = lock_path, .file = file };
-    }
-
-    fn deinit(self: *ReconcileLock, allocator: std.mem.Allocator) void {
-        unlockFile(self.file.handle);
-        self.file.close(std.Options.debug_io);
-        allocator.free(self.path);
-    }
-};
-
 fn sunglassesPidDirPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ runtime_dir, pid_dir_name });
 }
 
 fn sunglassesPidPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, pid_file_name });
-}
-
-fn sunglassesReconcileLockPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ runtime_dir, pid_dir_name, reconcile_lock_file_name });
 }
 
 fn sunglassesStartupStatusPath(allocator: std.mem.Allocator, runtime_dir: []const u8) ![]u8 {
@@ -879,26 +848,6 @@ fn waitChild(pid: std.c.pid_t) !void {
     if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
 }
 
-fn flockExclusive(fd: std.c.fd_t) !void {
-    while (true) switch (std.c.errno(std.c.flock(fd, std.c.LOCK.EX))) {
-        .SUCCESS => return,
-        .INTR => {},
-        .BADF => return error.SystemCallFailed,
-        .INVAL => return error.SystemCallFailed,
-        .NOLCK => return error.SystemCallFailed,
-        .OPNOTSUPP => return error.SystemCallFailed,
-        else => return error.SystemCallFailed,
-    };
-}
-
-fn unlockFile(fd: std.c.fd_t) void {
-    while (true) switch (std.c.errno(std.c.flock(fd, std.c.LOCK.UN))) {
-        .SUCCESS => return,
-        .INTR => {},
-        else => return,
-    };
-}
-
 fn sleepNs(ns: u64) void {
     var request = std.c.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
@@ -992,10 +941,15 @@ test "sunglasses overlay slots are bounded by env monitor facts" {
     try std.testing.expectEqual(@as(u32, env.monitor.max_monitors), @as(u32, @intCast(overlay.slots.len)));
 }
 
-test "sunglasses reconcile lock path stays beside pid file" {
-    const path = try sunglassesReconcileLockPath(std.testing.allocator, "/run/user/1000");
-    defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/run/user/1000/wayspot/sunglasses.reconcile.lock", path);
+test "sunglasses owner rejects a second live pid file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime_dir = try testRuntimeDir(std.testing.allocator, &tmp);
+    defer std.testing.allocator.free(runtime_dir);
+
+    var owner = try PidFile.create(std.testing.allocator, runtime_dir);
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectError(error.SunglassesOverlayAlreadyRunning, PidFile.create(std.testing.allocator, runtime_dir));
 }
 
 test "sunglasses startup status path stays beside pid file" {

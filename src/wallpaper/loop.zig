@@ -428,7 +428,10 @@ const PidFile = struct {
         errdefer allocator.free(pid_path);
 
         const io = std.Options.debug_io;
-        const file = try std.Io.Dir.createFileAbsolute(io, pid_path, .{ .truncate = true });
+        const file = std.Io.Dir.createFileAbsolute(io, pid_path, .{ .truncate = true, .exclusive = true }) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.WallpaperAlreadyRunning,
+            else => return err,
+        };
         defer file.close(io);
 
         var buf: [max_pid_file_bytes]u8 = undefined;
@@ -551,4 +554,15 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
 test "wallpaper slots are bounded by env monitor facts" {
     const loop = Loop{ .allocator = std.testing.allocator };
     try std.testing.expectEqual(@as(u32, env.monitor.max_monitors), @as(u32, @intCast(loop.slots.len)));
+}
+
+test "wallpaper owner rejects a second live pid file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(runtime_dir);
+
+    var owner = try PidFile.create(std.testing.allocator, runtime_dir);
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectError(error.WallpaperAlreadyRunning, PidFile.create(std.testing.allocator, runtime_dir));
 }

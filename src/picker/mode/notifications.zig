@@ -20,7 +20,7 @@ pub fn restartLifecycleRow() candidate.Candidate {
 
 /// restartCommand returns the shell command used by the notification restart row.
 pub fn restartCommand() []const u8 {
-    return "sh -lc 'state=\"${XDG_STATE_HOME:-$HOME/.local/state}/wayspot\"; bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --notifications-daemon$\" 2>/dev/null || true; sleep 0.2; mkdir -p \"$state\"; setsid -f flock -n \"$state/notifications.lock\" \"$bin\" --notifications-daemon'";
+    return "sh -lc 'bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --notifications-daemon$\" 2>/dev/null || true; sleep 0.2; setsid -f \"$bin\" --notifications-daemon'";
 }
 
 test "notification mode owns history and restart lifecycle rows" {
@@ -33,4 +33,10 @@ test "notification mode owns history and restart lifecycle rows" {
     try std.testing.expectEqual(candidate.Candidate.Kind.lifecycle, list.items[1].kind);
     try std.testing.expectEqualStrings(restart_open, list.items[1].open);
     try std.testing.expectEqualStrings(history_open, list.items[2].open);
+}
+
+test "notification restart starts the owner directly" {
+    const command = restartCommand();
+    try std.testing.expect(std.mem.indexOf(u8, command, "flock") == null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "--notifications-daemon") != null);
 }

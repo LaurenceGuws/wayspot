@@ -149,6 +149,8 @@ ownership:
       - mode_selection
       - entrypoint
       - cleanup
+      - direct_lifecycle_ownership
+      - owner_identity_assertion
     owns:
       - picker_lifecycle
       - notification_lifecycle
@@ -196,6 +198,7 @@ ownership:
       - close
       - close_all
       - expire
+      - one_live_owner
 
   wallpaper:
     owner: wallpaper
@@ -207,6 +210,8 @@ ownership:
       - image_load
       - image_rotate
       - monitor_reconcile
+      - one_live_owner
+      - event_source_recovery
 
   sunglasses:
     owner: sunglasses
@@ -270,6 +275,10 @@ build:
 
   wallpaper:
     path: process -> wallpaper -> monitor -> image -> rotate -> clean
+    invariants:
+      - one_live_owner
+      - pid_identity_matches_mode
+      - event_socket_close_is_recoverable
 
   sunglasses:
     path: picker -> sunglasses -> monitor -> filter_or_dim_or_image -> overlay -> clean
@@ -277,6 +286,13 @@ build:
   environment:
     path: source -> monitor_workspace_window_facts -> bounded_snapshot
     product_policy: none
+
+  lifecycle:
+    path: process -> owner_identity -> direct_start_or_signal -> clean
+    invariants:
+      - no_shell_lock_owns_a_lifecycle
+      - duplicate_owner_is_an_explicit_error
+      - stale_identity_is_rejected
 
 ---
 bounds:
@@ -341,4 +357,3 @@ forbidden_shape:
   - gtk
   - scripting_vm
   - generic_ui_framework
-

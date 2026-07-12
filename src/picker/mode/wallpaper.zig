@@ -18,7 +18,7 @@ pub fn restartLifecycleRow() candidate.Candidate {
 
 /// restartCommand returns the shell command used by the wallpaper restart row.
 pub fn restartCommand() []const u8 {
-    return "sh -lc 'state=\"${XDG_STATE_HOME:-$HOME/.local/state}/wayspot\"; bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --wallpaper$\" 2>/dev/null || true; sleep 0.2; mkdir -p \"$state\"; setsid -f flock -n \"$state/wallpaper.lock\" \"$bin\" --wallpaper'";
+    return "sh -lc 'bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --wallpaper$\" 2>/dev/null || true; sleep 0.2; setsid -f \"$bin\" --wallpaper'";
 }
 
 test "wallpaper mode owns restart lifecycle row" {
@@ -30,4 +30,10 @@ test "wallpaper mode owns restart lifecycle row" {
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expectEqual(candidate.Candidate.Kind.lifecycle, list.items[1].kind);
     try std.testing.expectEqualStrings(restart_open, list.items[1].open);
+}
+
+test "wallpaper restart starts the owner directly" {
+    const command = restartCommand();
+    try std.testing.expect(std.mem.indexOf(u8, command, "flock") == null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "--wallpaper") != null);
 }

@@ -17,7 +17,7 @@ const gsize = c_ulong;
 const GBusType = c_int;
 const GBusNameOwnerFlags = c_uint;
 const G_BUS_TYPE_SESSION: GBusType = 2;
-const G_BUS_NAME_OWNER_FLAGS_REPLACE: GBusNameOwnerFlags = 1 << 1;
+const G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE: GBusNameOwnerFlags = 1 << 2;
 
 const GDBusConnection = opaque {};
 const GDBusMethodInvocation = opaque {};
@@ -269,7 +269,7 @@ pub const DBus = struct {
         self.owner_id = g_bus_own_name(
             G_BUS_TYPE_SESSION,
             service_name,
-            G_BUS_NAME_OWNER_FLAGS_REPLACE,
+            G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE,
             onBusAcquired,
             onNameAcquired,
             onNameLost,
@@ -443,6 +443,7 @@ fn onNameLost(_: ?*GDBusConnection, name: [*c]const u8, user_data: ?*anyopaque) 
     if (user_data == null) return;
     const self: *DBus = @ptrCast(@alignCast(user_data.?));
     self.registration_id = 0;
+    std.process.exit(1);
 }
 
 fn onMethodCall(
