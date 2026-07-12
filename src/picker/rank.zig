@@ -299,7 +299,7 @@ test "slash routes expose modes and lifecycle commands only" {
 
     const modes = try rankCandidates(std.testing.allocator, query_mod.parse("/"), &candidates);
     defer std.testing.allocator.free(modes);
-    try std.testing.expectEqual(@as(u32, 3), @as(u32, @intCast(modes.len)));
+    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(modes.len)));
     try std.testing.expectEqual(candidate_mod.Candidate.Type.mode, modes[0].candidate.typeOf());
 
     const notifications = try rankCandidates(std.testing.allocator, query_mod.parse("/notifications"), &candidates);

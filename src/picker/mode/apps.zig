@@ -389,10 +389,10 @@ test "app rows collects rows from cache file" {
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqualStrings("Kitty", list.items[0].title);
-    try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
-    try std.testing.expectEqualStrings("kitty", list.items[0].open);
-    try std.testing.expectEqualStrings("kitty", list.items[0].icon);
+    try std.testing.expectEqualStrings("Kitty", list.items[0].title());
+    try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
+    try std.testing.expectEqualStrings("kitty", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("kitty", list.items[0].iconName());
 }
 
 test "app rows accepts cache rows without icon metadata" {
@@ -421,9 +421,9 @@ test "app rows accepts cache rows without icon metadata" {
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqualStrings("Kitty", list.items[0].title);
-    try std.testing.expectEqualStrings("", list.items[0].icon);
-    try std.testing.expectEqualStrings("firefox", list.items[1].icon);
+    try std.testing.expectEqualStrings("Kitty", list.items[0].title());
+    try std.testing.expectEqualStrings("", list.items[0].iconName());
+    try std.testing.expectEqualStrings("firefox", list.items[1].iconName());
 }
 
 test "app rows scans desktop files when cache is missing" {
@@ -493,7 +493,7 @@ test "app rows replaces cache data across cache collects" {
     try apps.collect(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqualStrings("Kitty", list.items[0].title);
+    try std.testing.expectEqualStrings("Kitty", list.items[0].title());
 
     list.clearRetainingCapacity();
     try tmp.dir.writeFile(std.Options.debug_io, .{
@@ -507,13 +507,13 @@ test "app rows replaces cache data across cache collects" {
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqualStrings("Gimp", list.items[0].title);
+    try std.testing.expectEqualStrings("Gimp", list.items[0].title());
 
     list.clearRetainingCapacity();
     try apps.collect(std.testing.allocator, &list);
     try std.testing.expect(apps.cache_data != null);
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqualStrings("Gimp", list.items[0].title);
+    try std.testing.expectEqualStrings("Gimp", list.items[0].title());
 }
 
 test "app rows trims crlf and trailing whitespace from stored fields" {
@@ -540,10 +540,10 @@ test "app rows trims crlf and trailing whitespace from stored fields" {
     try apps.collect(std.testing.allocator, &list);
 
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(list.items.len)));
-    try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle);
-    try std.testing.expectEqualStrings("kitty", list.items[0].open);
-    try std.testing.expectEqualStrings("kitty", list.items[0].icon);
-    try std.testing.expectEqualStrings("firefox", list.items[1].open);
+    try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
+    try std.testing.expectEqualStrings("kitty", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("kitty", list.items[0].iconName());
+    try std.testing.expectEqualStrings("firefox", list.items[1].openPayload());
 }
 
 test "desktop entry parser extracts app metadata and strips exec field codes" {
@@ -603,9 +603,9 @@ test "app rows can scan desktop root and rebuild cache rows" {
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(list.items.len)));
     try std.testing.expect(apps.cache_data == null);
     try std.testing.expectEqual(@as(u32, 4), @as(u32, @intCast(apps.owned_strings.items.len)));
-    try std.testing.expectEqualStrings("Test App", list.items[0].title);
-    try std.testing.expectEqualStrings("Utility", list.items[0].subtitle);
-    try std.testing.expectEqualStrings("test-app", list.items[0].open);
+    try std.testing.expectEqualStrings("Test App", list.items[0].title());
+    try std.testing.expectEqualStrings("Utility", list.items[0].subtitle());
+    try std.testing.expectEqualStrings("test-app", list.items[0].openPayload());
 
     try writeAppCacheFromCandidates(cache_file, list.items);
     const written = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cache_file, std.testing.allocator, .limited(4096));

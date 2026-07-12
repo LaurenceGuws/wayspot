@@ -1,7 +1,7 @@
-//! Picker surface owns one bounded picker lifecycle from CLI entry to cleanup.
+//! Picker surface owns the GUI consumer lifecycle from SDL creation to cleanup.
 //!
-//! Approved happy path: create one vendor window, rank picker candidates,
-//! launch one detached command when selected, and release every owned resource.
+//! It edits one query, consumes command candidates, renders rows, and queues
+//! one resolved command for the surface-owned shutdown handoff.
 
 const std = @import("std");
 const app = @import("mod.zig");
@@ -40,6 +40,45 @@ const TextDrag = struct {
     anchor: u32,
 };
 
+const LaunchRunner = *const fn ([*:0]const u8) command_owner.LaunchRunError!void;
+
+/// LaunchQueue owns one bounded GUI command intent until the surface drains it.
+const LaunchQueue = struct {
+    command_buf: [command_owner.max_command_bytes + 1]u8 = undefined,
+    command_len: u32 = 0,
+    state: enum { idle, queued } = .idle,
+
+    /// queue stores one non-empty, NUL-terminated command without allocation.
+    fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
+        if (command_bytes.len == 0) return error.EmptyCommand;
+        if (command_bytes.len > command_owner.max_command_bytes) return error.CommandTooLong;
+        std.debug.assert(self.state == .idle);
+        @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
+        self.command_buf[command_bytes.len] = 0;
+        self.command_len = @intCast(command_bytes.len);
+        self.state = .queued;
+    }
+
+    fn clear(self: *LaunchQueue) void {
+        std.debug.assert(self.state == .queued);
+        self.command_buf[0] = 0;
+        self.command_len = 0;
+        self.state = .idle;
+    }
+
+    fn hasQueued(self: *const LaunchQueue) bool {
+        return self.state == .queued;
+    }
+
+    fn commandZ(self: *LaunchQueue) [*:0]const u8 {
+        std.debug.assert(self.state == .queued);
+        std.debug.assert(self.command_len > 0);
+        std.debug.assert(self.command_len <= command_owner.max_command_bytes);
+        std.debug.assert(self.command_buf[self.command_len] == 0);
+        return self.command_buf[0..self.command_len :0].ptr;
+    }
+};
+
 const Surface = struct {
     allocator: std.mem.Allocator,
     picker: *app.Picker,
@@ -58,7 +97,7 @@ const Surface = struct {
     /// The viewport is the only owner of picker selection and scroll offset.
     viewport: viewport.Viewport = viewport.Viewport.init(),
     dirty: bool = true,
-    launch_queue: command_owner.LaunchQueue = .{},
+    launch_queue: LaunchQueue = .{},
     shutdown_after_launch: bool = false,
     text_drag: ?TextDrag = null,
 
@@ -285,7 +324,7 @@ const Surface = struct {
     }
 
     fn drainPendingLaunch(self: *Surface) !void {
-        try command_owner.drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
+        try drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
     }
 
     fn render(self: *Surface) !void {
@@ -743,6 +782,43 @@ fn queryMouseByteOffset(
 
 fn pointInside(rect: viewport.Rect, x: f32, y: f32) bool {
     return x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
+}
+
+fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) command_owner.LaunchRunError!void {
+    if (!queue.hasQueued()) return;
+    defer queue.clear();
+    try runner(queue.commandZ());
+}
+
+fn launchQueueRunnerOkForTest(command: [*:0]const u8) command_owner.LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+}
+
+fn launchQueueRunnerFailForTest(command: [*:0]const u8) command_owner.LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+    return error.CommandFailed;
+}
+
+test "surface launch queue clears after successful drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try drainLaunchQueue(&queue, launchQueueRunnerOkForTest);
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "surface launch queue clears after failed drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try std.testing.expectError(error.CommandFailed, drainLaunchQueue(&queue, launchQueueRunnerFailForTest));
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "surface launch queue rejects empty and oversized commands" {
+    var queue = LaunchQueue{};
+    try std.testing.expectError(error.EmptyCommand, queue.queue(""));
+    const oversized = [_]u8{ 'x' } ** (command_owner.max_command_bytes + 1);
+    try std.testing.expectError(error.CommandTooLong, queue.queue(&oversized));
+    try std.testing.expect(!queue.hasQueued());
 }
 
 test "text edit key combos stay owned by picker surface text handling" {
