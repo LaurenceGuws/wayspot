@@ -656,12 +656,7 @@ const Surface = struct {
     }
 
     fn persistAndWakeSunglasses(self: *Surface) !void {
-        try self.sunglasses_form.state.save(self.allocator);
-        const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
-            std.mem.span(runtime_dir_z)
-        else
-            return error.HyprlandRuntimeDirMissing;
-        try sunglasses_overlay.Overlay.reconcileSavedState(self.allocator, runtime_dir);
+        try sunglasses_overlay.Overlay.saveAndApply(self.allocator, self.sunglasses_form.state);
     }
 
     fn sunglassesActive(self: *const Surface) bool {

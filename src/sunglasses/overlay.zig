@@ -74,6 +74,13 @@ pub const Overlay = struct {
         }
     }
 
+    /// saveAndApply persists edited state, then starts, wakes, or stops the one overlay owner.
+    pub fn saveAndApply(allocator: std.mem.Allocator, state: sunglasses_state.State) !void {
+        try state.save(allocator);
+        const runtime_dir_z = std.c.getenv("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
+        try reconcileSavedState(allocator, std.mem.span(runtime_dir_z));
+    }
+
     /// Records one bounded child startup failure beside the pid file for the parent poller.
     pub fn recordStartupFailure(allocator: std.mem.Allocator, runtime_dir: []const u8, err: anyerror) void {
         writeStartupStatus(allocator, runtime_dir, err) catch |write_err| {
