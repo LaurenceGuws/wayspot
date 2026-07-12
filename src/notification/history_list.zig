@@ -63,7 +63,7 @@ pub const NotificationHistoryList = struct {
         now_ns: u64,
     ) !void {
         if (self.cache != null) return;
-        self.cache = try history_cache.loadAtPath(allocator, path, now_ns);
+        self.cache = try history_cache.Cache.loadAtPath(allocator, path, now_ns);
         std.mem.sort(history_cache.Row, self.cache.?.rows.items, {}, rowNewer);
         for (self.cache.?.rows.items, 0..) |row, idx| {
             try self.appendRow(allocator, out, row, @intCast(idx));

@@ -632,7 +632,7 @@ fn handleNotify(self: *DBus, parameters: ?*GVariant, invocation: *GDBusMethodInv
 
 fn persistHistory(allocator: std.mem.Allocator, input: history_cache.RowInput) !void {
     const now_ns = realtimeNs();
-    var cache = try history_cache.load(allocator, now_ns);
+    var cache = try history_cache.Cache.load(allocator, now_ns);
     defer cache.deinit();
     var row = input;
     row.created_ns = now_ns;

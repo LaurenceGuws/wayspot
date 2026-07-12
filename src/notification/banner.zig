@@ -62,7 +62,7 @@ fn bannerChild(request: Request) noreturn {
 }
 
 fn show(request: Request) !void {
-    var config = try scale_owner.load(std.heap.c_allocator);
+    var config = try scale_owner.SurfaceConfig.load(std.heap.c_allocator);
     const appearance_state = try config_defaults.loadFromEnvironment(std.heap.c_allocator);
     const hint_set = c.SDL_SetHint(c.SDL_HINT_APP_ID, app_id);
     if (!hint_set) log.debug("vendor app id hint rejected", .{});

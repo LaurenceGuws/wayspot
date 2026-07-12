@@ -284,7 +284,7 @@ fn applySunglassesImageCommand(
     runtime_dir: []const u8,
     command: SunglassesImageCommand,
 ) !void {
-    var state = try wayspot.sunglasses.state.load(allocator);
+    var state = try wayspot.sunglasses.state.State.load(allocator);
     switch (command) {
         .set => |set| {
             const monitor = try state.ensureMonitor(set.monitor);
@@ -296,7 +296,7 @@ fn applySunglassesImageCommand(
             monitor.clearImagePath();
         },
     }
-    try wayspot.sunglasses.state.save(state, allocator);
+    try state.save(allocator);
     try wayspot.sunglasses.Overlay.reconcileSavedState(allocator, runtime_dir);
 }
 

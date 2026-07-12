@@ -57,7 +57,7 @@ pub const Overlay = struct {
         var lock = try ReconcileLock.acquire(allocator, runtime_dir);
         defer lock.deinit(allocator);
 
-        const state = try sunglasses_state.load(allocator);
+        const state = try sunglasses_state.State.load(allocator);
         const pid_path = try sunglassesPidPath(allocator, runtime_dir);
         defer allocator.free(pid_path);
         const status_path = try sunglassesStartupStatusPath(allocator, runtime_dir);
@@ -86,7 +86,7 @@ pub const Overlay = struct {
     }
 
     fn startOverlay(self: *Overlay, monitor_source: env.MonitorSource) !void {
-        var state = try sunglasses_state.load(self.allocator);
+        var state = try sunglasses_state.State.load(self.allocator);
         if (!state.needsOverlay()) return;
 
         try self.startVendor();
@@ -116,12 +116,12 @@ pub const Overlay = struct {
             switch (try waitForWake()) {
                 .shutdown => return,
                 .apply => {
-                    state.* = try sunglasses_state.load(self.allocator);
+                    state.* = try sunglasses_state.State.load(self.allocator);
                     if (!state.needsOverlay()) return;
                     try self.redrawSurfaceSlots(state);
                 },
                 .monitor_changed => {
-                    state.* = try sunglasses_state.load(self.allocator);
+                    state.* = try sunglasses_state.State.load(self.allocator);
                     if (!state.needsOverlay()) return;
                     try self.rebuildSurfaceSlots(monitor_source, state);
                 },

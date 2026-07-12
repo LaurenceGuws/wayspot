@@ -13,7 +13,6 @@ const rank = @import("rank.zig");
 const textbox = @import("textbox.zig");
 const viewport = @import("viewport.zig");
 const query_mod = @import("query.zig");
-const env = @import("../env/mod.zig");
 const scale_owner = @import("scale.zig");
 const appearance_owner = @import("appearance.zig");
 const text_owner = @import("text.zig");
@@ -246,7 +245,7 @@ const Surface = struct {
     text_drag: ?TextDrag = null,
 
     fn init(allocator: std.mem.Allocator, picker: *app.Picker, home: []const u8) !Surface {
-        const config = try scale_owner.load(allocator);
+        const config = try scale_owner.SurfaceConfig.load(allocator);
         const appearance_state = try config_defaults.load(allocator, home);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         errdefer c.SDL_Quit();
@@ -272,7 +271,7 @@ const Surface = struct {
         const wake_event_type = c.SDL_RegisterEvents(1);
         if (wake_event_type == 0) return error.SdlWakeUnavailable;
 
-        const persisted_sunglasses_state = try loadSunglassesStateForSession(allocator);
+        const persisted_sunglasses_state = try sunglasses_state.State.loadForMonitors(allocator);
         var self = Surface{
             .allocator = allocator,
             .picker = picker,
@@ -839,7 +838,7 @@ const Surface = struct {
     }
 
     fn persistAndWakeSunglasses(self: *Surface) !void {
-        try sunglasses_state.save(self.sunglasses_state, self.allocator);
+        try self.sunglasses_state.save(self.allocator);
         const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
             std.mem.span(runtime_dir_z)
         else
@@ -1060,35 +1059,6 @@ fn setDrawColor(renderer: *c.SDL_Renderer, color: appearance_owner.Rgba8) bool {
     return c.SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 }
 
-fn loadSunglassesStateForSession(allocator: std.mem.Allocator) !sunglasses_state.State {
-    const loaded = try sunglasses_state.load(allocator);
-    const monitor_source = env.MonitorSource.fromProcessEnv() orelse return loaded;
-    const monitors = monitor_source.queryMonitors(allocator) catch |err| {
-        std.log.warn("sunglasses monitor state seed skipped err={s}", .{@errorName(err)});
-        return loaded;
-    };
-    if (monitors.count == 0) return loaded;
-
-    return normalizeSunglassesStateForMonitors(loaded, monitors);
-}
-
-fn normalizeSunglassesStateForMonitors(loaded: sunglasses_state.State, monitors: env.monitor.MonitorList) !sunglasses_state.State {
-    var normalized = sunglasses_state.defaultState();
-    var index: u32 = 0;
-    while (index < monitors.count) : (index += 1) {
-        const monitor_name = monitors.items[index].nameText();
-        var monitor_state = if (loaded.get(monitor_name)) |existing|
-            existing.*
-        else if (loaded.get("default")) |default_monitor_state|
-            default_monitor_state.*
-        else
-            try sunglasses_state.MonitorState.init(monitor_name);
-        try monitor_state.setName(monitor_name);
-        try normalized.append(monitor_state);
-    }
-    return normalized;
-}
-
 fn sliderKeyboardStep() i32 {
     return 5;
 }
@@ -1287,25 +1257,6 @@ test "query mouse mapping uses exact bounds and clamps to scalar offsets" {
     try std.testing.expectEqual(@as(u32, 0), queryMouseByteOffset(layout, appearance.picker, text, rect.x, y).?);
     try std.testing.expectEqual(@as(u32, @intCast(text.len)), queryMouseByteOffset(layout, appearance.picker, text, rect.x + rect.w, y).?);
     try std.testing.expectEqual(@as(u32, 3), queryMouseByteOffset(layout, appearance.picker, text, rect.x + (rect.w * 0.40), y).?);
-}
-
-test "sunglasses state maps default values onto real monitor names" {
-    var loaded = sunglasses_state.defaultState();
-    var default_monitor_state = try sunglasses_state.MonitorState.init("default");
-    default_monitor_state.red_blue_enabled = true;
-    default_monitor_state.setRedBlueValue(35);
-    try loaded.append(default_monitor_state);
-
-    var monitors = env.monitor.MonitorList{};
-    const monitor_name = "DP-1";
-    try monitors.append(try env.monitor.Monitor.init(.{ .value = 1 }, monitor_name, try env.monitor.MonitorSize.init(1920, 1080)));
-
-    const normalized = try normalizeSunglassesStateForMonitors(loaded, monitors);
-    try std.testing.expectEqual(@as(u32, 1), normalized.count);
-    const monitor = normalized.get("DP-1") orelse return error.MissingMonitorState;
-    try std.testing.expect(monitor.red_blue_enabled);
-    try std.testing.expectEqual(@as(i32, 35), monitor.red_blue_value);
-    try std.testing.expect(normalized.get("default") == null);
 }
 
 fn osEventFd() !std.posix.fd_t {

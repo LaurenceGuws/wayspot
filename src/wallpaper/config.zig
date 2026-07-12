@@ -2,39 +2,43 @@
 
 const std = @import("std");
 
+/// max_file_bytes bounds one wallpaper configuration file.
 pub const max_file_bytes: u32 = 4096;
+/// min_interval_seconds is the smallest accepted rotation interval.
 pub const min_interval_seconds: u32 = 30;
+/// max_interval_seconds is the largest accepted rotation interval.
 pub const max_interval_seconds: u32 = 86400;
+/// default_interval_seconds is used when no interval is configured.
 pub const default_interval_seconds: u32 = 900;
 
 const config_relative_path = ".config/wayspot/wallpaper.conf";
 
+/// Config owns one absolute wallpaper library path and one bounded interval.
 pub const Config = struct {
+    /// load reads the configured wallpaper file.
     library_path: []u8,
     interval_seconds: u32 = default_interval_seconds,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
         const path = try defaultPath(allocator);
         defer allocator.free(path);
-        return loadAtPath(allocator, path);
+        return Config.loadAtPath(allocator, path);
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.library_path);
         self.library_path = "";
     }
+
+    /// loadAtPath reads one bounded wallpaper configuration path.
+    pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !Config {
+        const raw = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_file_bytes));
+        defer allocator.free(raw);
+        return parse(allocator, raw);
+    }
 };
 
-pub fn load(allocator: std.mem.Allocator) !Config {
-    return Config.load(allocator);
-}
-
-pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !Config {
-    const raw = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(max_file_bytes));
-    defer allocator.free(raw);
-    return parse(allocator, raw);
-}
-
+/// parse validates one bounded wallpaper configuration buffer.
 pub fn parse(allocator: std.mem.Allocator, raw: []const u8) !Config {
     var library_path: ?[]const u8 = null;
     var interval_seconds = default_interval_seconds;
@@ -106,5 +110,5 @@ test "config loader rejects oversized file" {
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/wallpaper.conf", .{base});
     defer std.testing.allocator.free(path);
 
-    try std.testing.expectError(error.StreamTooLong, loadAtPath(std.testing.allocator, path));
+    try std.testing.expectError(error.StreamTooLong, Config.loadAtPath(std.testing.allocator, path));
 }

@@ -1,23 +1,38 @@
 //! Sunglasses state owns bounded per-monitor red/blue and dim filter values.
 
 const std = @import("std");
+const env = @import("../env/mod.zig");
 
+/// max_monitors bounds retained sunglasses monitor states.
 pub const max_monitors: u32 = 8;
+/// max_monitor_name_bytes bounds one retained monitor name.
 pub const max_monitor_name_bytes: u32 = 96;
+/// max_file_bytes bounds one serialized sunglasses state.
 pub const max_file_bytes: u32 = 16384;
+/// max_image_path_bytes bounds one retained absolute image path.
 pub const max_image_path_bytes: u32 = 1024;
+/// red_blue_min is the smallest accepted filter value.
 pub const red_blue_min: i32 = -100;
+/// red_blue_zero is the neutral filter value.
 pub const red_blue_zero: i32 = 0;
+/// red_blue_max is the largest accepted filter value.
 pub const red_blue_max: i32 = 100;
+/// dim_min is the smallest accepted dimming value.
 pub const dim_min: i32 = 0;
+/// dim_zero is the neutral dimming value.
 pub const dim_zero: i32 = 0;
+/// dim_max is the largest accepted dimming value.
 pub const dim_max: i32 = 100;
+/// image_opacity_min is the smallest accepted image opacity.
 pub const image_opacity_min: i32 = 0;
+/// image_opacity_zero is the neutral image opacity.
 pub const image_opacity_zero: i32 = 0;
+/// image_opacity_max is the largest accepted image opacity.
 pub const image_opacity_max: i32 = 100;
 
 const state_relative_path = ".local/state/wayspot/sunglasses.conf";
 
+/// MonitorState owns bounded sunglasses values for one monitor.
 pub const MonitorState = struct {
     name_buf: [max_monitor_name_bytes]u8 = undefined,
     name_len: u32 = 0,
@@ -30,38 +45,46 @@ pub const MonitorState = struct {
     image_path_buf: [max_image_path_bytes]u8 = undefined,
     image_path_len: u32 = 0,
 
+    /// init accepts one bounded monitor name and initializes neutral values.
     pub fn init(name_text: []const u8) !MonitorState {
         var monitor = MonitorState{};
         try monitor.setName(name_text);
         return monitor;
     }
 
+    /// name returns the retained monitor name.
     pub fn name(self: *const MonitorState) []const u8 {
         return self.name_buf[0..self.name_len];
     }
 
+    /// setName replaces the bounded monitor name.
     pub fn setName(self: *MonitorState, name_text: []const u8) !void {
         if (name_text.len == 0 or name_text.len > max_monitor_name_bytes) return error.InvalidMonitorName;
         @memcpy(self.name_buf[0..name_text.len], name_text);
         self.name_len = @intCast(name_text.len);
     }
 
+    /// setRedBlueValue clamps and stores the red/blue value.
     pub fn setRedBlueValue(self: *MonitorState, value: i32) void {
         self.red_blue_value = clampRedBlue(value);
     }
 
+    /// setDimValue clamps and stores the dimming value.
     pub fn setDimValue(self: *MonitorState, value: i32) void {
         self.dim_value = clampDim(value);
     }
 
+    /// imagePath returns the retained bounded absolute image path.
     pub fn imagePath(self: *const MonitorState) []const u8 {
         return self.image_path_buf[0..self.image_path_len];
     }
 
+    /// setImageOpacity clamps and stores image opacity.
     pub fn setImageOpacity(self: *MonitorState, value: i32) void {
         self.image_opacity = clampImageOpacity(value);
     }
 
+    /// setImagePath accepts only a bounded absolute path without invalid bytes.
     pub fn setImagePath(self: *MonitorState, path_text: []const u8) !void {
         if (path_text.len == 0 or path_text.len > max_image_path_bytes) return error.InvalidImagePath;
         if (!std.fs.path.isAbsolute(path_text)) return error.InvalidImagePath;
@@ -70,15 +93,18 @@ pub const MonitorState = struct {
         self.image_path_len = @intCast(path_text.len);
     }
 
+    /// clearImagePath removes the retained image path.
     pub fn clearImagePath(self: *MonitorState) void {
         self.image_path_len = 0;
     }
 
+    /// hasEffectiveFilter reports whether the stored filter changes pixels.
     pub fn hasEffectiveFilter(self: *const MonitorState) bool {
         return (self.red_blue_enabled and self.red_blue_value != red_blue_zero) or
             (self.dim_enabled and self.dim_value != dim_zero);
     }
 
+    /// hasEffectiveImageOverlay reports whether a valid image overlay can draw.
     pub fn hasEffectiveImageOverlay(self: *const MonitorState) bool {
         return self.image_enabled and
             self.image_opacity > image_opacity_zero and
@@ -89,28 +115,33 @@ pub const MonitorState = struct {
     }
 };
 
+/// State owns bounded per-monitor sunglasses values and their serialized form.
 pub const State = struct {
     monitors: [max_monitors]MonitorState = undefined,
     count: u32 = 0,
 
+    /// load reads the configured state file through this owner.
     pub fn load(allocator: std.mem.Allocator) !State {
         const path = try statePath(allocator);
         defer allocator.free(path);
-        return loadAtPath(allocator, path);
+        return State.loadAtPath(allocator, path);
     }
 
+    /// save writes this state to the configured state file.
     pub fn save(self: State, allocator: std.mem.Allocator) !void {
         const path = try statePath(allocator);
         defer allocator.free(path);
-        try saveAtPath(self, path);
+        try State.saveAtPath(self, path);
     }
 
+    /// append retains one normalized monitor state within the fixed bound.
     pub fn append(self: *State, monitor: MonitorState) !void {
         if (self.count >= max_monitors) return error.TooManyMonitors;
         self.monitors[self.count] = normalizedMonitor(monitor);
         self.count += 1;
     }
 
+    /// get returns immutable state for a retained monitor name.
     pub fn get(self: *const State, name_text: []const u8) ?*const MonitorState {
         var index: u32 = 0;
         while (index < self.count) : (index += 1) {
@@ -119,16 +150,31 @@ pub const State = struct {
         return null;
     }
 
+    /// monitorAt returns immutable state at a bounded index.
     pub fn monitorAt(self: *const State, index: u32) ?*const MonitorState {
         if (index >= self.count) return null;
         return &self.monitors[index];
     }
 
+    /// monitorAtMutable returns mutable state at a bounded index.
     pub fn monitorAtMutable(self: *State, index: u32) ?*MonitorState {
         if (index >= self.count) return null;
         return &self.monitors[index];
     }
 
+    /// loadForMonitors loads saved values and maps them onto current monitor facts.
+    pub fn loadForMonitors(allocator: std.mem.Allocator) !State {
+        const loaded = try State.load(allocator);
+        const monitor_source = env.MonitorSource.fromProcessEnv() orelse return loaded;
+        const monitors = monitor_source.queryMonitors(allocator) catch |err| {
+            std.log.warn("sunglasses monitor state seed skipped err={s}", .{@errorName(err)});
+            return loaded;
+        };
+        if (monitors.count == 0) return loaded;
+        return normalizeForMonitors(loaded, monitors);
+    }
+
+    /// getMutable returns mutable state for a retained monitor name.
     pub fn getMutable(self: *State, name_text: []const u8) ?*MonitorState {
         var index: u32 = 0;
         while (index < self.count) : (index += 1) {
@@ -137,7 +183,7 @@ pub const State = struct {
         return null;
     }
 
-    /// Forms and overlays mutate retained monitor slots through this owner.
+    /// ensureMonitor returns an existing monitor or appends one within the bound.
     pub fn ensureMonitor(self: *State, name_text: []const u8) !*MonitorState {
         if (self.getMutable(name_text)) |monitor| return monitor;
         if (self.count >= max_monitors) return error.TooManyMonitors;
@@ -148,6 +194,7 @@ pub const State = struct {
         return &self.monitors[index];
     }
 
+    /// serialize writes bounded state into caller-owned fixed storage.
     pub fn serialize(self: State, out: *[max_file_bytes]u8) ![]const u8 {
         var offset: u32 = 0;
         var index: u32 = 0;
@@ -168,6 +215,7 @@ pub const State = struct {
         return out[0..offset];
     }
 
+    /// needsOverlay reports whether any retained monitor needs an overlay.
     pub fn needsOverlay(self: *const State) bool {
         var index: u32 = 0;
         while (index < self.count) : (index += 1) {
@@ -175,45 +223,42 @@ pub const State = struct {
         }
         return false;
     }
+
+    /// loadAtPath reads bounded state from one explicit path.
+    pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !State {
+        const raw = readStateAnyPath(allocator, path) catch |err| switch (err) {
+            error.FileNotFound => return defaultState(),
+            error.StreamTooLong => return defaultState(),
+            else => return err,
+        };
+        defer allocator.free(raw);
+        return parse(raw) catch defaultState();
+    }
+
+    /// saveAtPath serializes bounded state to one explicit path.
+    pub fn saveAtPath(self: State, path: []const u8) !void {
+        var state_buf: [max_file_bytes]u8 = undefined;
+        const serialized = try self.serialize(&state_buf);
+        try writeStateAnyPath(path, serialized);
+    }
 };
 
+/// defaultState returns empty bounded sunglasses state.
 pub fn defaultState() State {
     return .{};
 }
 
-pub fn load(allocator: std.mem.Allocator) !State {
-    return State.load(allocator);
-}
-
-pub fn save(state: State, allocator: std.mem.Allocator) !void {
-    try state.save(allocator);
-}
-
-pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !State {
-    const raw = readStateAnyPath(allocator, path) catch |err| switch (err) {
-        error.FileNotFound => return defaultState(),
-        error.StreamTooLong => return defaultState(),
-        else => return err,
-    };
-    defer allocator.free(raw);
-
-    return parse(raw) catch defaultState();
-}
-
-pub fn saveAtPath(state: State, path: []const u8) !void {
-    var state_buf: [max_file_bytes]u8 = undefined;
-    const serialized = try state.serialize(&state_buf);
-    try writeStateAnyPath(path, serialized);
-}
-
+/// clampRedBlue keeps red/blue adjustment inside its accepted range.
 pub fn clampRedBlue(value: i32) i32 {
     return @min(red_blue_max, @max(red_blue_min, value));
 }
 
+/// clampDim keeps dimming inside its accepted range.
 pub fn clampDim(value: i32) i32 {
     return @min(dim_max, @max(dim_min, value));
 }
 
+/// clampImageOpacity keeps image opacity inside its accepted range.
 pub fn clampImageOpacity(value: i32) i32 {
     return @min(image_opacity_max, @max(image_opacity_min, value));
 }
@@ -253,6 +298,23 @@ fn parse(raw: []const u8) !State {
         try state.append(monitor);
     }
     return state;
+}
+
+fn normalizeForMonitors(loaded: State, monitors: env.monitor.MonitorList) !State {
+    var normalized = defaultState();
+    var index: u32 = 0;
+    while (index < monitors.count) : (index += 1) {
+        const monitor_name = monitors.items[index].nameText();
+        var monitor_state = if (loaded.get(monitor_name)) |existing|
+            existing.*
+        else if (loaded.get("default")) |default_monitor_state|
+            default_monitor_state.*
+        else
+            try MonitorState.init(monitor_name);
+        try monitor_state.setName(monitor_name);
+        try normalized.append(monitor_state);
+    }
+    return normalized;
 }
 
 fn nextValue(lines: *std.mem.SplitIterator(u8, .scalar), prefix: []const u8) ![]const u8 {
@@ -569,7 +631,7 @@ test "malformed state load falls back to default" {
     const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/sunglasses.conf", .{&tmp.sub_path});
     defer std.testing.allocator.free(path);
 
-    const state = try loadAtPath(std.testing.allocator, path);
+    const state = try State.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(@as(u32, 0), state.count);
 }
 
@@ -580,7 +642,7 @@ test "missing state load falls back to default" {
     const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/missing-sunglasses.conf", .{&tmp.sub_path});
     defer std.testing.allocator.free(path);
 
-    const state = try loadAtPath(std.testing.allocator, path);
+    const state = try State.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(@as(u32, 0), state.count);
 }
 
@@ -599,7 +661,7 @@ test "oversized state load falls back to default" {
     const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/sunglasses.conf", .{&tmp.sub_path});
     defer std.testing.allocator.free(path);
 
-    const state = try loadAtPath(std.testing.allocator, path);
+    const state = try State.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(@as(u32, 0), state.count);
 }
 
@@ -671,4 +733,26 @@ test "ensure monitor returns existing slot and preserves bound" {
         try std.testing.expectEqualStrings(name_text, monitor.name());
     }
     try std.testing.expectError(error.TooManyMonitors, state.ensureMonitor("extra"));
+}
+
+test "normalizeForMonitors maps default state onto current monitor names" {
+    var loaded = defaultState();
+    var default_monitor = try MonitorState.init("default");
+    default_monitor.red_blue_enabled = true;
+    default_monitor.setRedBlueValue(35);
+    try loaded.append(default_monitor);
+
+    var monitors = env.monitor.MonitorList{};
+    try monitors.append(try env.monitor.Monitor.init(
+        .{ .value = 1 },
+        "DP-1",
+        try env.monitor.MonitorSize.init(1920, 1080),
+    ));
+
+    const normalized = try normalizeForMonitors(loaded, monitors);
+    try std.testing.expectEqual(@as(u32, 1), normalized.count);
+    const monitor = normalized.get("DP-1") orelse return error.MissingMonitorState;
+    try std.testing.expect(monitor.red_blue_enabled);
+    try std.testing.expectEqual(@as(i32, 35), monitor.red_blue_value);
+    try std.testing.expect(normalized.get("default") == null);
 }

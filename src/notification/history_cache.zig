@@ -23,6 +23,7 @@ comptime {
     std.debug.assert(retention_ns > 0);
 }
 
+/// RowInput is one bounded notification update supplied to Cache.
 pub const RowInput = struct {
     id: u32,
     created_ns: u64,
@@ -37,6 +38,7 @@ pub const RowInput = struct {
     closed_reason: u32 = 0,
 };
 
+/// Row owns one retained notification history row.
 pub const Row = struct {
     id: u32,
     created_ns: u64,
@@ -51,24 +53,29 @@ pub const Row = struct {
     closed_reason: u32,
 };
 
+/// Cache owns bounded retained notification rows and their persistence.
 pub const Cache = struct {
     allocator: std.mem.Allocator,
     rows: std.ArrayListUnmanaged(Row) = .empty,
     updated_ns: u64 = 0,
 
+    /// init creates an empty cache owned by allocator.
     pub fn init(allocator: std.mem.Allocator) Cache {
         return .{ .allocator = allocator };
     }
 
+    /// deinit frees every retained row and the backing list.
     pub fn deinit(self: *Cache) void {
         for (self.rows.items) |row| freeRow(self.allocator, row);
         self.rows.deinit(self.allocator);
     }
 
+    /// len returns the bounded retained row count.
     pub fn len(self: *const Cache) u32 {
         return @intCast(self.rows.items.len);
     }
 
+    /// upsert replaces or appends one row, then enforces retention bounds.
     pub fn upsert(self: *Cache, input: RowInput) !void {
         if (findIndex(self.rows.items, input.id)) |idx| {
             const replacement = try duplicateRow(self.allocator, input);
@@ -83,6 +90,7 @@ pub const Cache = struct {
         self.keepNewestRows();
     }
 
+    /// pruneOld removes rows older than the retention window.
     pub fn pruneOld(self: *Cache, now_ns: u64) void {
         const oldest_kept = now_ns -| retention_ns;
         var idx: u32 = 0;
@@ -96,6 +104,7 @@ pub const Cache = struct {
         }
     }
 
+    /// saveAtPath writes the cache atomically to one explicit path.
     pub fn saveAtPath(self: *const Cache, path: []const u8) !void {
         const data = try serialize(self.allocator, self);
         defer self.allocator.free(data);
@@ -113,28 +122,31 @@ pub const Cache = struct {
             freeRow(self.allocator, removed);
         }
     }
+
+    /// load reads the configured notification history path.
+    pub fn load(allocator: std.mem.Allocator, now_ns: u64) !Cache {
+        const path = try cachePath(allocator);
+        defer allocator.free(path);
+        return Cache.loadAtPath(allocator, path, now_ns);
+    }
+
+    /// loadAtPath reads one explicit history path and applies retention bounds.
+    pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8, now_ns: u64) !Cache {
+        var cache = Cache.init(allocator);
+        const raw = readAnyPath(allocator, path) catch return cache;
+        defer allocator.free(raw);
+
+        parseInto(&cache, raw) catch {
+            cache.deinit();
+            return Cache.init(allocator);
+        };
+        cache.pruneOld(now_ns);
+        cache.keepNewestRows();
+        return cache;
+    }
 };
 
-pub fn load(allocator: std.mem.Allocator, now_ns: u64) !Cache {
-    const path = try cachePath(allocator);
-    defer allocator.free(path);
-    return loadAtPath(allocator, path, now_ns);
-}
-
-pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8, now_ns: u64) !Cache {
-    var cache = Cache.init(allocator);
-    const raw = readAnyPath(allocator, path) catch return cache;
-    defer allocator.free(raw);
-
-    parseInto(&cache, raw) catch {
-        cache.deinit();
-        return Cache.init(allocator);
-    };
-    cache.pruneOld(now_ns);
-    cache.keepNewestRows();
-    return cache;
-}
-
+/// cachePath returns the configured notification history path.
 pub fn cachePath(allocator: std.mem.Allocator) ![]u8 {
     if (std.c.getenv("XDG_STATE_HOME")) |state_home_z| {
         return std.fmt.allocPrint(allocator, "{s}/{s}", .{ std.mem.span(state_home_z), cache_relative_path });
@@ -402,7 +414,7 @@ test "missing history cache file loads empty" {
     const path = try testPath(tmp, "missing.json");
     defer std.testing.allocator.free(path);
 
-    var cache = try loadAtPath(std.testing.allocator, path, 100);
+    var cache = try Cache.loadAtPath(std.testing.allocator, path, 100);
     defer cache.deinit();
     try std.testing.expectEqual(@as(u32, 0), cache.len());
 }
@@ -413,7 +425,7 @@ test "invalid JSON loads empty" {
     const path = try writeTestFile(tmp, "history.json", "{");
     defer std.testing.allocator.free(path);
 
-    var cache = try loadAtPath(std.testing.allocator, path, 100);
+    var cache = try Cache.loadAtPath(std.testing.allocator, path, 100);
     defer cache.deinit();
     try std.testing.expectEqual(@as(u32, 0), cache.len());
 }
@@ -424,7 +436,7 @@ test "unsupported version loads empty" {
     const path = try writeTestFile(tmp, "history.json", "{\"version\":2,\"updated_ns\":1,\"rows\":[]}");
     defer std.testing.allocator.free(path);
 
-    var cache = try loadAtPath(std.testing.allocator, path, 100);
+    var cache = try Cache.loadAtPath(std.testing.allocator, path, 100);
     defer cache.deinit();
     try std.testing.expectEqual(@as(u32, 0), cache.len());
 }
@@ -435,14 +447,14 @@ test "wrong or missing rows loads empty" {
     const path = try writeTestFile(tmp, "history.json", "{\"version\":1,\"updated_ns\":1,\"rows\":{}}");
     defer std.testing.allocator.free(path);
 
-    var cache = try loadAtPath(std.testing.allocator, path, 100);
+    var cache = try Cache.loadAtPath(std.testing.allocator, path, 100);
     defer cache.deinit();
     try std.testing.expectEqual(@as(u32, 0), cache.len());
 
     const missing_path = try writeTestFile(tmp, "missing-rows.json", "{\"version\":1,\"updated_ns\":1}");
     defer std.testing.allocator.free(missing_path);
 
-    var missing_cache = try loadAtPath(std.testing.allocator, missing_path, 100);
+    var missing_cache = try Cache.loadAtPath(std.testing.allocator, missing_path, 100);
     defer missing_cache.deinit();
     try std.testing.expectEqual(@as(u32, 0), missing_cache.len());
 }
@@ -459,7 +471,7 @@ test "malformed row is skipped while valid row survives" {
     const path = try writeTestFile(tmp, "history.json", json);
     defer std.testing.allocator.free(path);
 
-    var cache = try loadAtPath(std.testing.allocator, path, 10);
+    var cache = try Cache.loadAtPath(std.testing.allocator, path, 10);
     defer cache.deinit();
     try std.testing.expectEqual(@as(u32, 1), cache.len());
     try std.testing.expectEqual(@as(u32, 7), cache.rows.items[0].id);
@@ -571,7 +583,7 @@ test "save writes one JSON object with version and rows" {
     try std.testing.expect(std.mem.startsWith(u8, raw, "{\"version\":1,"));
     try std.testing.expect(std.mem.indexOf(u8, raw, "\"rows\":[{") != null);
 
-    var loaded = try loadAtPath(std.testing.allocator, path, 2);
+    var loaded = try Cache.loadAtPath(std.testing.allocator, path, 2);
     defer loaded.deinit();
     try std.testing.expectEqual(@as(u32, 1), loaded.len());
     try std.testing.expectEqualStrings("line\nbody", loaded.rows.items[0].body);
@@ -592,7 +604,7 @@ test "save creates nested absolute parent directories" {
     try cache.upsert(.{ .id = 11, .created_ns = 1, .updated_ns = 2, .summary = "created" });
     try cache.saveAtPath(path);
 
-    var loaded = try loadAtPath(std.testing.allocator, path, 2);
+    var loaded = try Cache.loadAtPath(std.testing.allocator, path, 2);
     defer loaded.deinit();
     try std.testing.expectEqual(@as(u32, 1), loaded.len());
     try std.testing.expectEqual(@as(u32, 11), loaded.rows.items[0].id);

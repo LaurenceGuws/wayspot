@@ -6,38 +6,47 @@
 const std = @import("std");
 const c = @import("sdl_c");
 
+/// min_zoom_step bounds the smallest persisted zoom step.
 pub const min_zoom_step: i32 = -2;
+/// max_zoom_step bounds the largest persisted zoom step.
 pub const max_zoom_step: i32 = 5;
+/// default_zoom_step is the neutral persisted zoom step.
 pub const default_zoom_step: i32 = 0;
+/// max_file_bytes bounds one persisted zoom file.
 pub const max_file_bytes: u32 = 64;
 
 const state_relative_path = ".local/state/wayspot/surface.conf";
 const zoom_step_percent: i32 = 15;
 
+/// ZoomAction names the only zoom mutations accepted by the picker.
 pub const ZoomAction = enum {
     zoom_in,
     zoom_out,
     reset,
 };
 
+/// Dimensions stores one positive scaled window size.
 pub const Dimensions = struct {
     width: i32,
     height: i32,
 };
 
+/// SurfaceConfig owns one bounded picker zoom value and its dimensions.
 pub const SurfaceConfig = struct {
     zoom_step: i32 = default_zoom_step,
 
+    /// load reads the configured zoom state.
     pub fn load(allocator: std.mem.Allocator) !SurfaceConfig {
         const path = try statePath(allocator);
         defer allocator.free(path);
-        return loadAtPath(allocator, path);
+        return SurfaceConfig.loadAtPath(allocator, path);
     }
 
+    /// save writes this zoom state to the configured path.
     pub fn save(self: SurfaceConfig, allocator: std.mem.Allocator) !void {
         const path = try statePath(allocator);
         defer allocator.free(path);
-        try saveAtPath(self, path);
+        try SurfaceConfig.saveAtPath(self, path);
     }
 
     pub fn scale(self: SurfaceConfig) f32 {
@@ -58,16 +67,27 @@ pub const SurfaceConfig = struct {
             .height = scaledLength(self, height),
         };
     }
+
+    /// loadAtPath reads one bounded zoom state path.
+    pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !SurfaceConfig {
+        const raw = readStateAnyPath(allocator, path) catch |err| switch (err) {
+            error.FileNotFound => return .{},
+            error.StreamTooLong => return .{},
+            else => return err,
+        };
+        defer allocator.free(raw);
+        return parseState(raw) catch .{};
+    }
+
+    /// saveAtPath serializes this zoom state to one explicit path.
+    pub fn saveAtPath(self: SurfaceConfig, path: []const u8) !void {
+        var state_buf: [max_file_bytes]u8 = undefined;
+        const state = try std.fmt.bufPrint(&state_buf, "zoom_step={d}\n", .{self.zoom_step});
+        try writeStateAnyPath(path, state);
+    }
 };
 
-pub fn load(allocator: std.mem.Allocator) !SurfaceConfig {
-    return SurfaceConfig.load(allocator);
-}
-
-pub fn save(self: SurfaceConfig, allocator: std.mem.Allocator) !void {
-    try self.save(allocator);
-}
-
+/// zoomAction maps one key chord to one bounded zoom action.
 pub fn zoomAction(key: c.SDL_Keycode, modifiers: c.SDL_Keymod) ?ZoomAction {
     if ((modifiers & c.SDL_KMOD_CTRL) == 0) return null;
     return switch (key) {
@@ -78,36 +98,22 @@ pub fn zoomAction(key: c.SDL_Keycode, modifiers: c.SDL_Keymod) ?ZoomAction {
     };
 }
 
+/// clampZoomStep keeps a zoom step within the accepted range.
 pub fn clampZoomStep(step: i32) i32 {
     return @min(max_zoom_step, @max(min_zoom_step, step));
 }
 
+/// scaleFromStep converts a bounded zoom step to a render scale.
 pub fn scaleFromStep(step: i32) f32 {
     const clamped_step = clampZoomStep(step);
     const percent = 100 + (clamped_step * zoom_step_percent);
     return @as(f32, @floatFromInt(percent)) / 100.0;
 }
 
+/// scaledLength converts one dimension through the owned scale.
 pub fn scaledLength(self: SurfaceConfig, value: i32) i32 {
     const scaled = @round(@as(f32, @floatFromInt(value)) * self.scale());
     return @intFromFloat(@max(scaled, 1.0));
-}
-
-pub fn loadAtPath(allocator: std.mem.Allocator, path: []const u8) !SurfaceConfig {
-    const raw = readStateAnyPath(allocator, path) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        error.StreamTooLong => return .{},
-        else => return err,
-    };
-    defer allocator.free(raw);
-
-    return parseState(raw) catch .{};
-}
-
-pub fn saveAtPath(self: SurfaceConfig, path: []const u8) !void {
-    var state_buf: [max_file_bytes]u8 = undefined;
-    const state = try std.fmt.bufPrint(&state_buf, "zoom_step={d}\n", .{self.zoom_step});
-    try writeStateAnyPath(path, state);
 }
 
 fn parseState(raw: []const u8) !SurfaceConfig {
@@ -176,7 +182,7 @@ test "default zoom state loads when file is missing" {
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
     defer std.testing.allocator.free(path);
 
-    const config = try loadAtPath(std.testing.allocator, path);
+    const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(default_zoom_step, config.zoom_step);
 }
 
@@ -203,7 +209,7 @@ test "valid persisted zoom loads" {
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/surface.conf", .{base});
     defer std.testing.allocator.free(path);
 
-    const config = try loadAtPath(std.testing.allocator, path);
+    const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(@as(i32, 3), config.zoom_step);
 }
 
@@ -220,7 +226,7 @@ test "oversized state file falls back to default" {
         .sub_path = "surface.conf",
         .data = "zoom_step=1234567890123456789012345678901234567890123456789012345678901234567890",
     });
-    const config = try loadAtPath(std.testing.allocator, path);
+    const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(default_zoom_step, config.zoom_step);
 }
 
@@ -237,6 +243,6 @@ test "malformed state falls back to default" {
         .sub_path = "surface.conf",
         .data = "zoom=3\n",
     });
-    const config = try loadAtPath(std.testing.allocator, path);
+    const config = try SurfaceConfig.loadAtPath(std.testing.allocator, path);
     try std.testing.expectEqual(default_zoom_step, config.zoom_step);
 }
