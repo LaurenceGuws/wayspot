@@ -40,49 +40,12 @@ const query_max_bytes: u32 = 256;
 const shutdown_signal_poll_timeout_ms: i32 = -1;
 const shutdown_eventfd_stop_value: u64 = 1;
 const shutdown_eventfd_signal_value: u64 = 1;
-const LaunchRunner = *const fn ([*:0]const u8) anyerror!void;
 var shutdown_handler_fd = std.atomic.Value(std.posix.fd_t).init(-1);
 
 comptime {
     std.debug.assert(shutdown_eventfd_stop_value > 0);
     std.debug.assert(shutdown_eventfd_signal_value > 0);
 }
-
-/// LaunchQueue owns one detached command intent between picker activation and controlled drain.
-const LaunchQueue = struct {
-    command_buf: [command_owner.max_command_bytes + 1]u8 = undefined,
-    command_len: u32 = 0,
-    state: enum { idle, queued } = .idle,
-
-    fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
-        if (command_bytes.len == 0) return error.EmptyCommand;
-        if (command_bytes.len > command_owner.max_command_bytes) return error.CommandTooLong;
-        std.debug.assert(self.state == .idle);
-        @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
-        self.command_buf[command_bytes.len] = 0;
-        self.command_len = @intCast(command_bytes.len);
-        self.state = .queued;
-    }
-
-    fn clear(self: *LaunchQueue) void {
-        std.debug.assert(self.state == .queued);
-        self.command_buf[0] = 0;
-        self.command_len = 0;
-        self.state = .idle;
-    }
-
-    fn hasQueued(self: *const LaunchQueue) bool {
-        return self.state == .queued;
-    }
-
-    fn commandZ(self: *LaunchQueue) [*:0]const u8 {
-        std.debug.assert(self.state == .queued);
-        std.debug.assert(self.command_len > 0);
-        std.debug.assert(self.command_len <= command_owner.max_command_bytes);
-        std.debug.assert(self.command_buf[self.command_len] == 0);
-        return self.command_buf[0..self.command_len :0].ptr;
-    }
-};
 
 /// ShutdownSignal turns SIGINT and SIGTERM into one vendor wake event owned by the picker surface.
 const ShutdownSignal = struct {
@@ -237,7 +200,7 @@ const Surface = struct {
     /// The viewport is the only owner of picker selection and scroll offset.
     viewport: viewport.Viewport = viewport.Viewport.init(),
     dirty: bool = true,
-    launch_queue: LaunchQueue = .{},
+    launch_queue: command_owner.LaunchQueue = .{},
     shutdown_after_launch: bool = false,
     window_sized_for_sunglasses: ?bool = null,
     text_drag: ?TextDrag = null,
@@ -566,7 +529,7 @@ const Surface = struct {
     }
 
     fn drainPendingLaunch(self: *Surface) !void {
-        try drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
+        try command_owner.drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
     }
 
     fn render(self: *Surface) !void {
@@ -1311,33 +1274,4 @@ fn osWrite(fd: std.posix.fd_t, bytes: []const u8) !u32 {
         .SUCCESS => @intCast(rc),
         else => error.SystemCallFailed,
     };
-}
-
-fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) anyerror!void {
-    if (!queue.hasQueued()) return;
-    defer queue.clear();
-    try runner(queue.commandZ());
-}
-
-fn launchRunnerOkForTest(command: [*:0]const u8) anyerror!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
-}
-
-fn launchRunnerFailForTest(command: [*:0]const u8) anyerror!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
-    return error.CommandFailed;
-}
-
-test "launch queue clears after successful drain" {
-    var queue = LaunchQueue{};
-    try queue.queue("run-me");
-    try drainLaunchQueue(&queue, launchRunnerOkForTest);
-    try std.testing.expect(!queue.hasQueued());
-}
-
-test "launch queue clears after failed drain" {
-    var queue = LaunchQueue{};
-    try queue.queue("run-me");
-    try std.testing.expectError(error.CommandFailed, drainLaunchQueue(&queue, launchRunnerFailForTest));
-    try std.testing.expect(!queue.hasQueued());
 }

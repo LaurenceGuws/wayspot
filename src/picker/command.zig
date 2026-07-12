@@ -195,6 +195,85 @@ pub fn runDetachedShellCommand(command: [*:0]const u8) LaunchRunError!void {
     try launchWait(wrapper_pid);
 }
 
+const LaunchRunner = *const fn ([*:0]const u8) LaunchRunError!void;
+
+/// LaunchQueue owns one bounded detached command intent between picker activation and drain.
+pub const LaunchQueue = struct {
+    command_buf: [max_command_bytes + 1]u8 = undefined,
+    command_len: u32 = 0,
+    state: enum { idle, queued } = .idle,
+
+    /// queue stores one non-empty, NUL-terminated command without allocation.
+    pub fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
+        if (command_bytes.len == 0) return error.EmptyCommand;
+        if (command_bytes.len > max_command_bytes) return error.CommandTooLong;
+        std.debug.assert(self.state == .idle);
+        @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
+        self.command_buf[command_bytes.len] = 0;
+        self.command_len = @intCast(command_bytes.len);
+        self.state = .queued;
+    }
+
+    /// clear returns the queue to idle after the command has been attempted.
+    pub fn clear(self: *LaunchQueue) void {
+        std.debug.assert(self.state == .queued);
+        self.command_buf[0] = 0;
+        self.command_len = 0;
+        self.state = .idle;
+    }
+
+    /// hasQueued reports whether a command is waiting for its single controlled drain.
+    pub fn hasQueued(self: *const LaunchQueue) bool {
+        return self.state == .queued;
+    }
+
+    fn commandZ(self: *LaunchQueue) [*:0]const u8 {
+        std.debug.assert(self.state == .queued);
+        std.debug.assert(self.command_len > 0);
+        std.debug.assert(self.command_len <= max_command_bytes);
+        std.debug.assert(self.command_buf[self.command_len] == 0);
+        return self.command_buf[0..self.command_len :0].ptr;
+    }
+};
+
+/// drainLaunchQueue attempts the queued command and clears it on success or failure.
+pub fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) LaunchRunError!void {
+    if (!queue.hasQueued()) return;
+    defer queue.clear();
+    try runner(queue.commandZ());
+}
+
+fn launchQueueRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+}
+
+fn launchQueueRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
+    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+    return error.CommandFailed;
+}
+
+test "launch queue clears after successful drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try drainLaunchQueue(&queue, launchQueueRunnerOkForTest);
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "launch queue clears after failed drain" {
+    var queue = LaunchQueue{};
+    try queue.queue("run-me");
+    try std.testing.expectError(error.CommandFailed, drainLaunchQueue(&queue, launchQueueRunnerFailForTest));
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "launch queue rejects empty and oversized commands" {
+    var queue = LaunchQueue{};
+    try std.testing.expectError(error.EmptyCommand, queue.queue(""));
+    const oversized = [_]u8{ 'x' } ** (max_command_bytes + 1);
+    try std.testing.expectError(error.CommandTooLong, queue.queue(&oversized));
+    try std.testing.expect(!queue.hasQueued());
+}
+
 fn printTerminalRow(out: *std.Io.Writer, row: candidate.Candidate) !void {
     try out.print("{s}\t{s}\t{s}\t{s}\n", .{
         @tagName(row.kind),
