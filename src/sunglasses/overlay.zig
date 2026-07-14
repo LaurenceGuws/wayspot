@@ -1,7 +1,7 @@
 //! Sunglasses overlay owns overlay slots, apply wakes, and shutdown cleanup order.
 
 const std = @import("std");
-const env = @import("../env/mod.zig");
+const env = @import("wayspot_env");
 const sunglasses_state = @import("state.zig");
 const sunglasses_surface = @import("surface.zig");
 

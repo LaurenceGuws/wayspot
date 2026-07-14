@@ -5,13 +5,13 @@
 
 const std = @import("std");
 const candidate = @import("picker_candidate");
-const apps_mode = @import("mode/apps.zig");
-const history_list = @import("../notification/history_list.zig");
-const notifications_mode = @import("mode/notifications.zig");
-const sunglasses_mode = @import("mode/sunglasses.zig");
-const wallpaper_mode = @import("mode/wallpaper.zig");
-const query_mod = @import("query.zig");
-const rank = @import("rank.zig");
+const apps_mode = @import("wayspot_apps_mode");
+const history_list = @import("wayspot_history_list");
+const notifications_mode = @import("wayspot_notifications_mode");
+const sunglasses_mode = @import("wayspot_sunglasses_mode");
+const wallpaper_mode = @import("wayspot_wallpaper_mode");
+const query_mod = @import("wayspot_query");
+const rank = @import("wayspot_rank");
 const sub_cmd = @import("picker_sub_cmd");
 
 pub const max_cmd_bytes = 4096;

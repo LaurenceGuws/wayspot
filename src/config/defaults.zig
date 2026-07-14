@@ -7,8 +7,8 @@
 const std = @import("std");
 const defaults_asset = @import("defaults_asset");
 const howl_lua = @import("howl_lua");
-const appearance_owner = @import("../picker/appearance.zig");
-const values = @import("../picker/appearance.zig");
+const appearance_owner = @import("wayspot_appearance");
+const values = @import("wayspot_appearance");
 
 const c = howl_lua.c;
 

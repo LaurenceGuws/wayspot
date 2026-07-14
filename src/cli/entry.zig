@@ -6,13 +6,14 @@
 //! to the command completion boundary and bash_completion.
 
 const std = @import("std");
-const cmd_owner = @import("../picker/cmd.zig");
-const process_owner = @import("../process/launch.zig");
-const apps_mode = @import("../picker/mode/apps.zig");
-const candidate = @import("picker_candidate");
-const icon_cache = @import("../picker/icon_cache.zig");
-const icon_diag = @import("../picker/icon_diag.zig");
-const sunglasses_mode = @import("../picker/mode/sunglasses.zig");
+const picker_owner = @import("wayspot_picker");
+const cmd_owner = picker_owner.cmd;
+const process_owner = @import("wayspot_process");
+const apps_mode = picker_owner.mode.apps;
+const candidate = picker_owner.candidate;
+const icon_cache = picker_owner.icon_cache;
+const icon_diag = picker_owner.icon_diag;
+const sunglasses_mode = picker_owner.mode.sunglasses;
 pub const bash_completion = @import("bash_completion.zig");
 
 /// accepts reports whether args select one CLI consumer path.

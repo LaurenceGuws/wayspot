@@ -622,3 +622,65 @@ interfaces:
     launch_source: src/process/launch.zig
     mode_entry: mode_catalog.process_entry
     launch_input: bounded []const u8; process owns sentinel construction
+
+build_graph:
+  owner: build.zig
+  executable_root: src/main.zig
+  exported_root: src/root.zig
+  direct_module_roots:
+    - src/cli/entry.zig
+    - src/cli/bash_completion.zig
+    - src/config/mod.zig
+    - src/config/defaults.zig
+    - src/env/mod.zig
+    - src/gui/surface.zig
+    - src/notification/mod.zig
+    - src/picker/cmd.zig
+    - src/picker/mod.zig
+    - src/picker/mode/apps.zig
+    - src/picker/mode/notifications.zig
+    - src/picker/mode/sunglasses.zig
+    - src/picker/mode/wallpaper.zig
+    - src/process/launch.zig
+    - src/sunglasses/mod.zig
+    - src/wallpaper/mod.zig
+  rule: each direct root declares its named imports and native backend links; deleted picker roots are absent
+  test_roots:
+    - src/aggregate_test.zig source-tree aggregate root
+    - Cmd and picker mode roots
+    - CLI and Bash serialization roots
+    - GUI and process roots
+    - notification, wallpaper, and sunglasses resident roots
+  test_coverage:
+    command: "zig build test --summary all"
+    accepted_minimum: 320
+    current_verified: 339
+    aggregate_root_tests: 168
+    direct_root_tests: 171
+    note: aggregate source imports run together; direct module roots remain additional checks; the accepted 320 count is a total baseline, not an aggregate-only count
+  packaging:
+    systemd_exec_start: "wayspot notifications"
+    completion: packaging/bash/wayspot.bash
+  rerun:
+    owner: re-run.sh
+    isolated_receipt: tools/re-run_test.sh
+    canonical_argv:
+      notifications: "wayspot notifications"
+      wallpaper: "wayspot wallpaper"
+    identity:
+      comm:
+        notifications: wayspot-notify
+        wallpaper: wayspot-wall
+      argv: exact binary basename plus one exact mode word
+    transition:
+      legacy_argv:
+        notifications: "wayspot --notifications-daemon"
+        wallpaper: "wayspot --wallpaper"
+      policy: exact legacy argv may be stopped before canonical start, but is never launched or accepted as canonical identity
+      matching: exact /proc comm and complete NUL-separated argv; no fuzzy process matching
+    bounds:
+      pid_records: 8
+      proc_argv_words: 4
+      pid_value: 4194304
+      pid_file_lines: 2
+      wait_checks: 40

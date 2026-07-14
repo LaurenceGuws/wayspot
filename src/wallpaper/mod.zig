@@ -4,8 +4,8 @@
 //! recovery, and cleanup. Picker mode code carries only typed route meaning.
 
 const std = @import("std");
-const env = @import("../env/mod.zig");
-const identity = @import("../identity.zig");
+const env = @import("wayspot_env");
+const identity = @import("wayspot_identity");
 
 pub const config = @import("config.zig");
 

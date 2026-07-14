@@ -15,6 +15,7 @@ scope:
     - Bash completion
     - installable Bash completion entrypoint
     - resolved Concrete leaf launch boundary
+    - canonical resident packaging and bounded rerun wiring
   excluded:
     - other compositors
     - generic UI toolkit abstractions
@@ -53,6 +54,11 @@ bounds:
   bash_completion_word_chars: 256
   process_intent_bytes: 4096
   launch_wait_interrupts: 16
+  rerun_pid_records: 8
+  rerun_proc_argv_words: 4
+  rerun_pid_value: 4194304
+  rerun_pid_file_lines: 2
+  rerun_wait_checks: 40
   notification_history_open_bytes: 64
   wallpaper_images: 4096
   wallpaper_path_bytes: 4096
@@ -78,6 +84,13 @@ bounds:
       min: 0
       max: 100
       step: 1
+test_coverage:
+  aggregate_root: src/aggregate_test.zig
+  accepted_minimum: 320
+  current_verified: 339
+  aggregate_root_tests: 168
+  direct_root_tests: 171
+  proof_command: "zig build test --summary all"
 proof:
   required_before_acceptance:
     - Cmd and SubCmd construction is bounded and failure-atomic
@@ -105,3 +118,9 @@ proof:
     - producer string lifetime is explicit and tested
     - apps is the default picker mode in GUI and CLI
     - CLI, GUI, and resident mode receipts are captured
+    - build.zig exposes the current direct CLI, GUI, process, Cmd, mode, and resident roots
+    - systemd uses the exact canonical notifications argv
+    - rerun starts only exact canonical resident argv
+    - rerun recognizes exact legacy argv only for bounded stop and cleanup
+    - rerun rejects malformed, stale, duplicate, and over-bound PID data
+    - tools/re-run_test.sh exercises legacy and canonical stop paths in isolation

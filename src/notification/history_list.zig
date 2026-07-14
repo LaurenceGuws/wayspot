@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const history_cache = @import("../notification/history_cache.zig");
-const preview = @import("../notification/preview.zig");
+const history_cache = @import("wayspot_history_cache");
+const preview = @import("wayspot_notification_preview");
 const candidate_mod = @import("picker_candidate");
 
 const open_prefix = "notification-history:";

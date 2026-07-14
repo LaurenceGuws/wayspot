@@ -1,16 +1,16 @@
 //! Wayspot root exports accepted interfaces, environment facts, picker values,
 //! and resident runtime owners.
 const std = @import("std");
-pub const cli = @import("cli/entry.zig");
-pub const config = @import("config/mod.zig");
-pub const env = @import("env/mod.zig");
-pub const gui = @import("gui/surface.zig");
-pub const notification = @import("notification/mod.zig");
-pub const process = @import("process/launch.zig");
-pub const picker = @import("picker/mod.zig");
-pub const wallpaper = @import("wallpaper/mod.zig");
-pub const sunglasses = @import("sunglasses/mod.zig");
-pub const identity = @import("identity.zig");
+pub const cli = @import("wayspot_cli");
+pub const config = @import("wayspot_config");
+pub const env = @import("wayspot_env");
+pub const gui = @import("wayspot_gui");
+pub const notification = @import("wayspot_notification");
+pub const process = @import("wayspot_process");
+pub const picker = @import("wayspot_picker");
+pub const wallpaper = @import("wayspot_wallpaper");
+pub const sunglasses = @import("wayspot_sunglasses");
+pub const identity = @import("wayspot_identity");
 
 const help_text =
     "Usage: wayspot <mode> [operation] [input...]\n" ++
@@ -64,7 +64,4 @@ test "root references config and appearance declarations" {
     std.testing.refAllDecls(picker.candidate);
     std.testing.refAllDecls(picker.cmd);
     std.testing.refAllDecls(picker.appearance);
-    std.testing.refAllDecls(@import("wallpaper/surface.zig"));
-    std.testing.refAllDecls(@import("sunglasses/overlay.zig"));
-    std.testing.refAllDecls(@import("sunglasses/surface.zig"));
 }

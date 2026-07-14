@@ -1,7 +1,7 @@
 //! Ranking owns deterministic scoring for Apps and resident picker candidates.
 
 const std = @import("std");
-const query_mod = @import("query.zig");
+const query_mod = @import("wayspot_query");
 const candidate_mod = @import("picker_candidate");
 
 pub const RankedCandidate = struct {

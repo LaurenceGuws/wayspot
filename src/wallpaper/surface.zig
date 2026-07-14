@@ -1,7 +1,7 @@
 //! Wallpaper surface owns one layer-shell surface and one attached shm buffer.
 
 const std = @import("std");
-const monitor_facts = @import("../env/monitor.zig");
+const monitor_facts = @import("wayspot_env").monitor;
 
 const c = @import("sdl_c");
 const wayland = @import("wayland_c");

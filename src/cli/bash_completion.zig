@@ -5,7 +5,7 @@
 //! terminating newline.
 
 const std = @import("std");
-const cmd_owner = @import("../picker/cmd.zig");
+const cmd_owner = @import("wayspot_cmd");
 
 /// max_completion_output_bytes bounds complete Bash records, including newlines.
 pub const max_completion_output_bytes: usize = 64 * 1024;

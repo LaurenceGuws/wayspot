@@ -5,16 +5,16 @@
 //! typed route meaning and does not import this runtime.
 
 const std = @import("std");
-const identity = @import("../identity.zig");
+const identity = @import("wayspot_identity");
 
 pub const banner = @import("banner.zig");
 pub const state = @import("state.zig");
 pub const dbus = @import("dbus.zig");
 pub const DBus = dbus.DBus;
 pub const rows = @import("rows.zig");
-pub const preview = @import("preview.zig");
-pub const history_cache = @import("history_cache.zig");
-pub const history_list = @import("history_list.zig");
+pub const preview = @import("wayspot_notification_preview");
+pub const history_cache = @import("wayspot_history_cache");
+pub const history_list = @import("wayspot_history_list");
 
 /// run owns one notification resident process lifecycle from identity setup
 /// through DBus acquisition, event processing, and cleanup.

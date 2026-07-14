@@ -5,19 +5,20 @@
 //! notification, wallpaper, or sunglasses implementation files.
 
 const std = @import("std");
-const app_icons = @import("../picker/icons.zig");
-const candidate_owner = @import("picker_candidate");
-const command_owner = @import("../picker/cmd.zig");
-const process_owner = @import("../process/launch.zig");
-const config_defaults = @import("../config/defaults.zig");
-const cursor_blink = @import("../picker/cursor_blink.zig");
-const rank = @import("../picker/rank.zig");
-const textbox = @import("../picker/textbox.zig");
-const viewport = @import("../picker/viewport.zig");
-const scale_owner = @import("../picker/scale.zig");
-const signal_owner = @import("../picker/signal.zig");
-const appearance_owner = @import("../picker/appearance.zig");
-const text_owner = @import("../picker/text.zig");
+const picker_owner = @import("wayspot_picker");
+const app_icons = picker_owner.icons;
+const candidate_owner = picker_owner.candidate;
+const command_owner = picker_owner.cmd;
+const process_owner = @import("wayspot_process");
+const config_defaults = @import("wayspot_config_defaults");
+const cursor_blink = picker_owner.cursor_blink;
+const rank = picker_owner.rank;
+const textbox = picker_owner.textbox;
+const viewport = picker_owner.viewport;
+const scale_owner = picker_owner.scale;
+const signal_owner = picker_owner.signal;
+const appearance_owner = picker_owner.appearance;
+const text_owner = picker_owner.text;
 
 const c = @import("sdl_c");
 
@@ -41,7 +42,7 @@ pub fn run(
 
 const base_window_width: i32 = @intFromFloat(viewport.default_base_width);
 const base_window_height: i32 = @intFromFloat(viewport.default_base_height);
-const query_owner = @import("../picker/query.zig");
+const query_owner = picker_owner.query;
 const query_max_bytes: u32 = @intCast(query_owner.max_query_bytes);
 
 const TextDrag = struct {

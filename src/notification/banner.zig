@@ -4,12 +4,12 @@
 //! vendor objects, monitor placement action, and bounded display timeout.
 
 const std = @import("std");
-const config_defaults = @import("../config/defaults.zig");
-const env = @import("../env/mod.zig");
-const notification_preview = @import("../notification/preview.zig");
-const appearance_owner = @import("../picker/appearance.zig");
-const scale_owner = @import("../picker/scale.zig");
-const text_owner = @import("../picker/text.zig");
+const config_defaults = @import("wayspot_config_defaults");
+const env = @import("wayspot_env");
+const notification_preview = @import("wayspot_notification_preview");
+const appearance_owner = @import("wayspot_appearance");
+const scale_owner = @import("wayspot_scale");
+const text_owner = @import("wayspot_text");
 
 const c = @import("sdl_c");
 

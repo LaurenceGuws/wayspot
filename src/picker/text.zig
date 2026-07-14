@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const c = @import("sdl_c");
-const appearance_values = @import("appearance.zig");
+const appearance_values = @import("wayspot_appearance");
 const ft = @import("text_c");
 
 const max_text_bytes: u32 = 512;

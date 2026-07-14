@@ -5,7 +5,8 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/wayspot --notifications-daemon
+# This service owns only the canonical notifications resident entry.
+ExecStart=/usr/bin/wayspot notifications
 Restart=on-failure
 RestartSec=1
 

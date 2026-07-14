@@ -1,7 +1,7 @@
 //! Notification DBus owns the Freedesktop interface and banner dispatch.
 
 const std = @import("std");
-const history_cache = @import("history_cache.zig");
+const history_cache = @import("wayspot_history_cache");
 const notifications_state = @import("state.zig");
 const notification_rows = @import("rows.zig");
 const banner = @import("banner.zig");

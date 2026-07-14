@@ -1,7 +1,7 @@
 //! Sunglasses state owns bounded per-monitor red/blue and dim filter values.
 
 const std = @import("std");
-const env = @import("../env/mod.zig");
+const env = @import("wayspot_env");
 
 /// max_monitors bounds retained sunglasses monitor states.
 pub const max_monitors: u32 = 8;

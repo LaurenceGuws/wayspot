@@ -1,14 +1,13 @@
 # WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
 # This is a design index, not an implementation authorization.
 project: wayspot
-checkpoint: 2b11c99
-status: implementation_in_progress
-implementation_status: runtime_entrypoint_separation_uncommitted
+checkpoint: 250ad5b
+status: ready_for_review
+implementation_status: build_packaging_and_rerun_wiring_uncommitted
 review_gate:
-  current_slice: runtime_entrypoint_separation
+  current_slice: build_packaging_and_rerun_wiring
   implementation_authorized: true
   forbidden_before_approval:
-    - build_packaging_and_rerun_wiring
     - stale_shape_cleanup
 
 shape_bars:
@@ -250,6 +249,7 @@ target_tree:
     - assets/icons/wayspot.svg
     - assets/lua/defaults.lua
     - tools/hypr-wallpaper-window-probe.py
+    - tools/re-run_test.sh
     - tools/wayspot-sample-process.sh
     - vendor/howl-lua/build.zig
     - vendor/howl-lua/build.zig.zon
@@ -1578,7 +1578,7 @@ offenders:
       - legacy main-branch removal is intentional; runtime compatibility is bounded transition state
 
   - id: runtime_entrypoint_separation
-    status: ready_for_review
+    status: closed
     owner: process
     evidence:
       - src/notification/mod.zig
@@ -1632,39 +1632,70 @@ offenders:
       - mode //! semantic-only ownership
 
   - id: build_packaging_and_rerun_wiring
-    status: open
+    status: ready_for_review
     owner: build
     evidence:
       - build.zig
+      - src/aggregate_test.zig
       - packaging/systemd/wayspot.service
       - re-run.sh
       - src/root.zig
     target_files:
       - build.zig
+      - src/aggregate_test.zig
       - packaging/systemd/wayspot.service
       - re-run.sh
+      - tools/re-run_test.sh
       - src/root.zig
       - src/main.zig
     changes:
-      - add new CLI, GUI, process, Cmd, and sunglasses mode roots to the build graph
-      - remove deleted picker module paths
-      - update test roots and direct backend links
-      - change systemd notification entry to wayspot notifications
-      - change rerun PID discovery and launch to canonical mode argv
-      - update root help and direct receipts
+      - declare direct CLI, GUI, process, Cmd, picker mode, and resident roots with named imports
+      - preserve src/aggregate_test.zig as the source-tree aggregate test root alongside direct module roots
+      - give each direct test root its native backend links and make the aggregate test step depend on all roots
+      - remove deleted picker module paths from the build graph
+      - change systemd notification ExecStart to wayspot notifications
+      - make rerun stop exact legacy argv only during the bounded transition to canonical mode argv
+      - make rerun validate exact comm plus complete argv identity before every stop or start decision
+      - bound pgrep records, /proc argv words, PID-file lines, PID values, and stop/start wait loops
+      - add an isolated rerun PID receipt that cannot select live desktop residents
     required_symbols:
       - build
       - translateCModule
       - root exports
+      - src/cli/entry.zig direct module root
+      - src/cli/bash_completion.zig direct module root
+      - src/gui/surface.zig direct module root
+      - src/process/launch.zig direct module root
+      - src/picker/cmd.zig direct module root
+      - src/notification/mod.zig direct module root
+      - src/wallpaper/mod.zig direct module root
+      - src/sunglasses/mod.zig direct module root
+      - pid_has_canonical_mode
+      - pid_has_legacy_mode
+      - collect_mode_pids
+      - collect_wallpaper_pids
+      - stop_pid_list
+      - wait_for_pid_list
+      - max_pid_candidates
+      - max_pid_argv
+      - max_pid_value
+      - max_wait_cycles
     required_tests:
-      - zig build test --summary all
+      - zig build test --summary all reports 339/339 tests and remains at or above the accepted 320-test baseline; the aggregate root reports 168 tests and direct roots report 171 tests
       - zig build
       - bash -n re-run.sh
-      - systemd command receipt
-      - rerun notification and wallpaper receipts
+      - systemd-analyze verify packaging/systemd/wayspot.service
+      - exact systemd ExecStart receipt for wayspot notifications
+      - rerun notification receipt with RERUN_UI=false
+      - rerun wallpaper receipt with RERUN_UI=false
+      - tools/re-run_test.sh
+      - exact legacy notification and wallpaper cleanup before canonical start
+      - malformed and stale PID data is rejected without a kill
+      - duplicate and over-bound PID records are rejected
+      - no rerun receipt process remains after cleanup
     required_comments:
       - build import rationale
-      - rerun ownership and PID identity rationale
+      - rerun ownership, exact canonical identity, and one-way legacy transition rationale
 
   - id: stale_shape_cleanup
     status: open

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const config_owner = @import("config.zig");
-const env = @import("../env/mod.zig");
+const env = @import("wayspot_env");
 const library_owner = @import("library.zig");
 const wallpaper_surface = @import("surface.zig");
 

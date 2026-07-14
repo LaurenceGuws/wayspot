@@ -6,8 +6,8 @@
 
 const std = @import("std");
 const candidate = @import("picker_candidate");
-const env = @import("../env/mod.zig");
-const identity = @import("../identity.zig");
+const env = @import("wayspot_env");
+const identity = @import("wayspot_identity");
 
 pub const Overlay = @import("overlay.zig").Overlay;
 pub const state = @import("state.zig");
