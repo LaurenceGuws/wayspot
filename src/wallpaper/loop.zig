@@ -467,8 +467,33 @@ fn pidMatchesWallpaper(pid: std.os.linux.pid_t) bool {
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
     var cmdline_buf: [max_proc_cmdline_bytes]u8 = undefined;
     const cmdline = std.Io.Dir.cwd().readFile(std.Options.debug_io, path, &cmdline_buf) catch return false;
-    return std.mem.indexOf(u8, cmdline, "wayspot") != null and
-        std.mem.indexOf(u8, cmdline, "--wallpaper") != null;
+    return cmdlineMatchesWallpaper(cmdline);
+}
+
+/// Returns true only for one exact wallpaper resident argv. The old flag form
+/// remains accepted as an exact transitional identity until packaging cleanup.
+fn cmdlineMatchesWallpaper(cmdline: []const u8) bool {
+    var has_binary = false;
+    var resident_arg: []const u8 = "";
+    var extra_argument = false;
+    var argument_index: usize = 0;
+    var arg_start: usize = 0;
+    while (arg_start < cmdline.len) {
+        var arg_end = arg_start;
+        while (arg_end < cmdline.len and cmdline[arg_end] != 0) : (arg_end += 1) {}
+        const arg = cmdline[arg_start..arg_end];
+        switch (argument_index) {
+            0 => has_binary = std.mem.eql(u8, std.fs.path.basename(arg), "wayspot"),
+            1 => resident_arg = arg,
+            else => extra_argument = true,
+        }
+        argument_index += 1;
+        if (arg_end == cmdline.len) break;
+        arg_start = arg_end + 1;
+    }
+    if (!has_binary or extra_argument or argument_index != 2) return false;
+    return std.mem.eql(u8, resident_arg, "wallpaper") or
+        std.mem.eql(u8, resident_arg, "--wallpaper");
 }
 
 fn removePidFile(pid_path: []const u8) void {
@@ -572,4 +597,15 @@ test "wallpaper owner rejects a second live pid file" {
     var owner = try PidFile.create(std.testing.allocator, runtime_dir);
     defer owner.deinit(std.testing.allocator);
     try std.testing.expectError(error.WallpaperAlreadyRunning, PidFile.create(std.testing.allocator, runtime_dir));
+}
+
+test "wallpaper pid identity accepts canonical root and rejects rotate leaf" {
+    try std.testing.expect(cmdlineMatchesWallpaper("/usr/bin/wayspot\x00wallpaper\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("/usr/bin/wayspot\x00wallpaper\x00rotate\x00"));
+    try std.testing.expect(cmdlineMatchesWallpaper("/usr/bin/wayspot\x00--wallpaper\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("bash\x00-c\x00wayspot wallpaper\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("/usr/bin/wayspot\x00foo\x00wallpaper\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("/usr/bin/wayspot\x00wallpaper\x00unknown\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("/usr/bin/wayspot\x00wallpaper\x00extra\x00args\x00"));
+    try std.testing.expect(!cmdlineMatchesWallpaper("/usr/bin/wayspot\x00--wallpaper\x00extra\x00"));
 }

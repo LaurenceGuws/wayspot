@@ -420,8 +420,8 @@ fn makeCmds(apps: ?*apps_mode.Apps) [4]Cmd {
 /// resolveLifecycleCommand exhaustively dispatches each resident leaf arm.
 fn resolveLifecycleCommand(allocator: std.mem.Allocator, value: candidate.Lifecycle) ![]u8 {
     return switch (value) {
-        .notifications_restart => allocator.dupe(u8, notifications_mode.restartCommand()),
-        .wallpaper_restart => allocator.dupe(u8, wallpaper_mode.restartCommand()),
+        .notifications_restart => allocator.dupe(u8, notifications_mode.restartIntent()),
+        .wallpaper_restart => allocator.dupe(u8, wallpaper_mode.restartIntent()),
         .wallpaper_rotate => allocator.dupe(u8, "wayspot wallpaper rotate"),
         .sunglasses_restart => allocator.dupe(u8, "wayspot sunglasses"),
         .sunglasses_apply => allocator.dupe(u8, "wayspot sunglasses apply"),
@@ -926,7 +926,7 @@ test "command model resolves app and lifecycle commands" {
 
     const lifecycle = try model.open(std.testing.allocator, notifications_mode.restart_open);
     defer std.testing.allocator.free(lifecycle);
-    try std.testing.expect(std.mem.indexOf(u8, lifecycle, "--notifications-daemon") != null);
+    try std.testing.expectEqualStrings("wayspot notifications", lifecycle);
 
     try std.testing.expectError(error.UnknownOpen, model.open(std.testing.allocator, "missing-open"));
 }
@@ -937,7 +937,7 @@ test "command model resolves resident lifecycle owners" {
 
     const wallpaper = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRestart()));
     defer std.testing.allocator.free(wallpaper);
-    try std.testing.expect(std.mem.indexOf(u8, wallpaper, "--wallpaper") != null);
+    try std.testing.expectEqualStrings("wayspot wallpaper", wallpaper);
 
     const rotate = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRotate()));
     defer std.testing.allocator.free(rotate);

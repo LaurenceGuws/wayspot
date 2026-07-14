@@ -568,8 +568,8 @@ transition:
   current_cmd_shape:
     source: src/picker/cmd.zig
     shape: bounded Cmd array consumed by CLI and GUI
-  current_process_shape: src/main.zig flag branches
-  noncanonical_entries:
+  current_process_shape: src/main.zig exact canonical argv selection and resident owner calls
+  rejected_legacy_entries:
     - --notifications-daemon
     - --wallpaper
     - --next-wallpaper
@@ -579,10 +579,10 @@ transition:
     - --sunglasses-reconcile
     - --sunglasses-set-image
     - --sunglasses-clear-image
-  canonical_process_shape: mode_catalog cmd and process_entry
+  canonical_process_shape: mode_catalog Cmd/SubCmd/Concrete values and resident process_entry calls
   required_exit:
-    - remove flag-based resident mode entry paths
-    - make every mode record executable through its cmd
+    - keep flag-based resident mode entry paths rejected by main and shown in canonical help
+    - make every resident mode root and owned operation select its Cmd-tree value before the owner call
     - keep apps available through wayspot apps and the default picker mode
 
 interfaces:

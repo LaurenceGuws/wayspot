@@ -48,12 +48,6 @@ pub fn restartIntent() []const u8 {
     return "wayspot notifications";
 }
 
-/// restartCommand is the existing detached launch bridge retained until the
-/// process leaf boundary owns canonical execution.
-pub fn restartCommand() []const u8 {
-    return "sh -lc 'bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --notifications-daemon$\" 2>/dev/null || true; sleep 0.2; setsid -f \"$bin\" --notifications-daemon'";
-}
-
 test "notification mode constructs both typed child routes" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
@@ -74,8 +68,6 @@ test "notification route resolves without importing the resident runtime" {
     try std.testing.expect(resolve(.history) == null);
 }
 
-test "notification terminal bridge remains until process resolution" {
-    const command = restartCommand();
-    try std.testing.expect(std.mem.indexOf(u8, command, "flock") == null);
-    try std.testing.expect(std.mem.indexOf(u8, command, "--notifications-daemon") != null);
+test "notification restart intent is canonical" {
+    try std.testing.expectEqualStrings("wayspot notifications", restartIntent());
 }

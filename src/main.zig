@@ -1,94 +1,227 @@
-//! Entrypoint owns top-level mode selection, shared picker composition, and cleanup order.
+//! Entrypoint owns exact argv selection, resident call wiring, shared picker composition, and cleanup order.
 
 const std = @import("std");
 const build_options = @import("build_options");
 const wayspot = @import("wayspot");
+const candidate = wayspot.picker.candidate;
+const sub_cmd = wayspot.picker.sub_cmd;
+const notifications_mode = wayspot.picker.mode.notifications;
+const sunglasses_mode = wayspot.picker.mode.sunglasses;
+const wallpaper_mode = wayspot.picker.mode.wallpaper;
+
+/// CanonicalEntry is the exact top-level process selection result.
+/// Resident values are already typed Cmd-tree values; no flag scan or second
+/// command representation exists after selection.
+const CanonicalEntry = union(enum) {
+    help,
+    ui,
+    cli,
+    resident: candidate.Candidate,
+};
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const home = init.minimal.environ.getPosix("HOME") orelse ".";
-
-    if (hasArg(args, "--notifications-daemon")) {
-        try wayspot.identity.set(wayspot.identity.notifications);
-        try wayspot.notification.run(allocator);
-        return;
+    switch (selectEntry(args)) {
+        .help => try wayspot.bufferedPrint(),
+        .ui => try runPicker(allocator, args, &init, true),
+        .cli => try runPicker(allocator, args, &init, false),
+        .resident => |value| try runResident(allocator, &init, value),
     }
+}
 
-    if (hasArg(args, "--ui") or wayspot.cli.accepts(args)) {
-        var picker_bundle = try setupPickerBundle(allocator, home);
-        picker_bundle.wirePicker();
-        defer picker_bundle.deinit(allocator);
+/// selectEntry accepts only exact canonical argv positions.
+/// `--ui` is the sole GUI entry flag; resident modes are positional Cmd routes.
+fn selectEntry(args: []const []const u8) CanonicalEntry {
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--ui")) return .ui;
+    if (wayspot.cli.accepts(args)) return .cli;
+    if (args.len < 2) return .help;
 
-        if (hasArg(args, "--ui")) {
-            if (!build_options.enable_sdl) {
-                std.log.err("UI mode requires SDL build", .{});
-                std.process.exit(2);
-            }
-            try wayspot.identity.set(wayspot.identity.picker);
-            try wayspot.gui.run(allocator, &picker_bundle.picker, home);
-        } else {
-            if (hasArg(args, "--icon-diag") and !build_options.enable_sdl) {
-                std.log.err("icon diagnostic requires SDL build", .{});
-                std.process.exit(2);
-            }
-            try wayspot.cli.run(allocator, args, &picker_bundle.picker, home);
+    if (std.mem.eql(u8, args[1], "notifications")) {
+        if (args.len != 2) return .help;
+        return .{ .resident = candidate.Candidate.subCmd(notifications_mode.restartSubCmd()) };
+    }
+    if (std.mem.eql(u8, args[1], "wallpaper")) {
+        if (selectWallpaper(args)) |value| return .{ .resident = value };
+        return .help;
+    }
+    if (std.mem.eql(u8, args[1], "sunglasses")) {
+        if (selectSunglasses(args)) |value| return .{ .resident = value };
+        return .help;
+    }
+    return .help;
+}
+
+fn selectWallpaper(args: []const []const u8) ?candidate.Candidate {
+    if (args.len == 2) return candidate.Candidate.subCmd(wallpaper_mode.restartSubCmd());
+    if (args.len == 3 and std.mem.eql(u8, args[2], "rotate")) {
+        return candidate.Candidate.subCmd(wallpaper_mode.rotateSubCmd());
+    }
+    return null;
+}
+
+fn selectSunglasses(args: []const []const u8) ?candidate.Candidate {
+    if (args.len == 2) return candidate.Candidate.subCmd(sunglasses_mode.restartSubCmd());
+    if (args.len == 3 and std.mem.eql(u8, args[2], "apply")) {
+        return candidate.Candidate.subCmd(sunglasses_mode.applySubCmd());
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[2], "reconcile")) {
+        return candidate.Candidate.subCmd(sunglasses_mode.reconcileSubCmd());
+    }
+    if (args.len < 5) return null;
+
+    const monitor = args[3];
+    const operation = args[4];
+    if (std.mem.eql(u8, args[2], "dim")) {
+        if (std.mem.eql(u8, operation, "set")) {
+            if (args.len != 6) return null;
+            const input = scalarInput(args[5], 0, 100) orelse return null;
+            return sunglasses_mode.select(.{ .dim = .{ .set = {} } }, monitor, input) catch null;
         }
-        return;
+        if (args.len != 5) return null;
+        return toggleSelection(.{ .dim = .{ .on = {} } }, monitor, operation) orelse
+            toggleSelection(.{ .dim = .{ .off = {} } }, monitor, operation);
     }
-
-    if (hasArg(args, "--next-wallpaper") or hasArg(args, "--wallpaper-rotate-now")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.wallpaper.Loop.rotateNow(allocator, runtime_dir);
-        return;
+    if (std.mem.eql(u8, args[2], "filter")) {
+        if (std.mem.eql(u8, operation, "set")) {
+            if (args.len != 6) return null;
+            const input = scalarInput(args[5], -100, 100) orelse return null;
+            return sunglasses_mode.select(.{ .filter = .{ .set = {} } }, monitor, input) catch null;
+        }
+        if (args.len != 5) return null;
+        return toggleSelection(.{ .filter = .{ .on = {} } }, monitor, operation) orelse
+            toggleSelection(.{ .filter = .{ .off = {} } }, monitor, operation);
     }
+    if (std.mem.eql(u8, args[2], "image")) {
+        if (std.mem.eql(u8, operation, "set")) {
+            if (args.len != 6) return null;
+            const input = candidate.Input.pathInput(args[5]) catch return null;
+            return sunglasses_mode.select(.{ .image = .{ .set = {} } }, monitor, input) catch null;
+        }
+        if (std.mem.eql(u8, operation, "opacity")) {
+            if (args.len != 6) return null;
+            const input = scalarInput(args[5], 0, 100) orelse return null;
+            return sunglasses_mode.select(.{ .image = .{ .opacity = {} } }, monitor, input) catch null;
+        }
+        if (std.mem.eql(u8, operation, "clear")) {
+            if (args.len != 5) return null;
+            return sunglasses_mode.select(.{ .image = .{ .clear = {} } }, monitor, .none) catch null;
+        }
+        if (args.len != 5) return null;
+        return toggleSelection(.{ .image = .{ .on = {} } }, monitor, operation) orelse
+            toggleSelection(.{ .image = .{ .off = {} } }, monitor, operation);
+    }
+    return null;
+}
 
-    if (hasArg(args, "--wallpaper")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runWallpaperLoop(allocator, wayspot.env.MonitorSource.init(.{
-            .runtime_dir = runtime_dir,
-            .signature = signature,
-        })) catch |err| {
-            std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});
+fn scalarInput(text: []const u8, min: i32, max: i32) ?candidate.Input {
+    const value = std.fmt.parseInt(i32, text, 10) catch return null;
+    return candidate.Input.scalarInput(value, min, max, 1) catch null;
+}
+
+fn toggleSelection(route: sub_cmd.SunglassesSubCmd, monitor: []const u8, operation: []const u8) ?candidate.Candidate {
+    const enabled = if (std.mem.eql(u8, operation, "on")) true else if (std.mem.eql(u8, operation, "off")) false else return null;
+    return sunglasses_mode.select(route, monitor, candidate.Input.toggleInput(enabled)) catch null;
+}
+
+fn runPicker(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    init: *const std.process.Init,
+    ui: bool,
+) !void {
+    const home = init.minimal.environ.getPosix("HOME") orelse ".";
+    var picker_bundle = try setupPickerBundle(allocator, home);
+    picker_bundle.wirePicker();
+    defer picker_bundle.deinit(allocator);
+
+    if (ui) {
+        if (!build_options.enable_sdl) {
+            std.log.err("UI mode requires SDL build", .{});
             std.process.exit(2);
-        };
-        return;
-    }
-
-    if (hasArg(args, "--sunglasses-apply")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.sunglasses.Overlay.applyNow(allocator, runtime_dir);
-        return;
-    }
-
-    if (hasArg(args, "--sunglasses-reconcile")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try wayspot.sunglasses.Overlay.reconcileSavedState(allocator, runtime_dir);
-        return;
-    }
-
-    if (sunglassesImageCommand(args)) |command| {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        try applySunglassesImageCommand(allocator, runtime_dir, command);
-        return;
-    }
-
-    if (hasArg(args, "--sunglasses-daemon")) {
-        const runtime_dir = init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse return error.HyprlandRuntimeDirMissing;
-        const signature = init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandInstanceSignatureMissing;
-        runSunglassesOverlay(allocator, wayspot.env.MonitorSource.init(.{
-            .runtime_dir = runtime_dir,
-            .signature = signature,
-        })) catch |err| {
-            wayspot.sunglasses.Overlay.recordStartupFailure(allocator, runtime_dir, err);
-            std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
+        }
+        try wayspot.identity.set(wayspot.identity.picker);
+        try wayspot.gui.run(allocator, &picker_bundle.picker, home);
+    } else {
+        if (std.mem.eql(u8, args[1], "--icon-diag") and !build_options.enable_sdl) {
+            std.log.err("icon diagnostic requires SDL build", .{});
             std.process.exit(2);
-        };
-        return;
+        }
+        try wayspot.cli.run(allocator, args, &picker_bundle.picker, home);
     }
+}
 
-    try wayspot.bufferedPrint();
+fn runResident(allocator: std.mem.Allocator, init: *const std.process.Init, value: candidate.Candidate) !void {
+    switch (value) {
+        .sub_cmd => |route| try runSubCmd(allocator, init, route),
+        .concrete => |leaf| try runConcrete(allocator, init, leaf),
+    }
+}
+
+fn runSubCmd(allocator: std.mem.Allocator, init: *const std.process.Init, route: sub_cmd.SubCmd) !void {
+    try wayspot.identity.set(subCmdIdentity(route));
+    switch (route) {
+        .notifications => |value| switch (value) {
+            .restart => try wayspot.notification.run(allocator),
+            .history => return error.NotificationDisplayOnly,
+        },
+        .wallpaper => |value| try runWallpaper(allocator, init, value),
+        .sunglasses => |value| try runSunglasses(allocator, init, value),
+    }
+}
+
+fn runConcrete(allocator: std.mem.Allocator, init: *const std.process.Init, value: candidate.Concrete) !void {
+    switch (value) {
+        .lifecycle => |leaf| try runLifecycle(allocator, init, leaf),
+        .app, .open => return error.CandidateNotLaunchable,
+        .notification => return error.NotificationDisplayOnly,
+    }
+}
+
+fn runLifecycle(allocator: std.mem.Allocator, init: *const std.process.Init, value: candidate.Lifecycle) !void {
+    try wayspot.identity.set(lifecycleIdentity(value));
+    switch (value) {
+        .notifications_restart => try wayspot.notification.run(allocator),
+        .wallpaper_restart => try runWallpaper(allocator, init, .restart),
+        .wallpaper_rotate => try runWallpaper(allocator, init, .rotate),
+        .sunglasses_restart => try runSunglasses(allocator, init, .restart),
+        .sunglasses_apply => try runSunglasses(allocator, init, .apply),
+        .sunglasses_reconcile => try runSunglasses(allocator, init, .reconcile),
+        .sunglasses_dim, .sunglasses_filter, .sunglasses_image => {
+            const runtime_dir = try runtimeDir(init);
+            try wayspot.sunglasses.applyLeaf(allocator, runtime_dir, value);
+        },
+    }
+}
+
+fn runWallpaper(allocator: std.mem.Allocator, init: *const std.process.Init, value: sub_cmd.WallpaperSubCmd) !void {
+    const runtime_dir = try runtimeDir(init);
+    switch (value) {
+        .restart => {
+            const signature = try instanceSignature(init);
+            try runWallpaperLoop(allocator, wayspot.env.MonitorSource.init(.{
+                .runtime_dir = runtime_dir,
+                .signature = signature,
+            }));
+        },
+        .rotate => try wayspot.wallpaper.rotateNow(allocator, runtime_dir),
+    }
+}
+
+fn runSunglasses(allocator: std.mem.Allocator, init: *const std.process.Init, value: sub_cmd.SunglassesSubCmd) !void {
+    switch (value) {
+        .restart => {
+            const runtime_dir = try runtimeDir(init);
+            const signature = try instanceSignature(init);
+            try runSunglassesOverlay(allocator, runtime_dir, wayspot.env.MonitorSource.init(.{
+                .runtime_dir = runtime_dir,
+                .signature = signature,
+            }));
+        },
+        .apply => try wayspot.sunglasses.applyNow(allocator, try runtimeDir(init)),
+        .reconcile => try wayspot.sunglasses.reconcileSavedState(allocator, try runtimeDir(init)),
+        .dim, .filter, .image => return error.CandidateNotLaunchable,
+    }
 }
 
 fn runWallpaperLoop(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
@@ -97,64 +230,57 @@ fn runWallpaperLoop(allocator: std.mem.Allocator, monitor_source: wayspot.env.Mo
         std.process.exit(2);
     }
 
-    try wayspot.identity.set(wayspot.identity.wallpaper);
-    try wayspot.wallpaper.Loop.run(allocator, monitor_source);
+    wayspot.wallpaper.run(allocator, monitor_source) catch |err| {
+        std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});
+        std.process.exit(2);
+    };
 }
 
-fn runSunglassesOverlay(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
+fn runSunglassesOverlay(
+    allocator: std.mem.Allocator,
+    runtime_dir: []const u8,
+    monitor_source: wayspot.env.MonitorSource,
+) !void {
     if (!build_options.enable_sdl) {
         std.log.err("sunglasses overlay requires SDL build", .{});
         std.process.exit(2);
     }
 
-    try wayspot.identity.set(wayspot.identity.sunglasses);
-    try wayspot.sunglasses.Overlay.runOverlay(allocator, monitor_source);
+    wayspot.sunglasses.run(allocator, monitor_source) catch |err| {
+        wayspot.sunglasses.recordStartupFailure(allocator, runtime_dir, err);
+        std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
+        std.process.exit(2);
+    };
 }
 
-const SunglassesImageCommand = union(enum) {
-    set: struct {
-        monitor: []const u8,
-        path: []const u8,
-    },
-    clear: struct {
-        monitor: []const u8,
-    },
-};
-
-fn sunglassesImageCommand(args: []const []const u8) ?SunglassesImageCommand {
-    if (args.len == 4 and std.mem.eql(u8, args[1], "--sunglasses-set-image")) {
-        return .{ .set = .{
-            .monitor = args[2],
-            .path = args[3],
-        } };
-    }
-    if (args.len == 3 and std.mem.eql(u8, args[1], "--sunglasses-clear-image")) {
-        return .{ .clear = .{
-            .monitor = args[2],
-        } };
-    }
-    return null;
+fn runtimeDir(init: *const std.process.Init) ![]const u8 {
+    return init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse error.HyprlandRuntimeDirMissing;
 }
 
-fn applySunglassesImageCommand(
-    allocator: std.mem.Allocator,
-    runtime_dir: []const u8,
-    command: SunglassesImageCommand,
-) !void {
-    var state = try wayspot.sunglasses.state.State.load(allocator);
-    switch (command) {
-        .set => |set| {
-            const monitor = try state.ensureMonitor(set.monitor);
-            try monitor.setImagePath(set.path);
-        },
-        .clear => |clear| {
-            const monitor = try state.ensureMonitor(clear.monitor);
-            monitor.image_enabled = false;
-            monitor.clearImagePath();
-        },
-    }
-    try state.save(allocator);
-    try wayspot.sunglasses.Overlay.reconcileSavedState(allocator, runtime_dir);
+fn instanceSignature(init: *const std.process.Init) ![]const u8 {
+    return init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse error.HyprlandInstanceSignatureMissing;
+}
+
+fn subCmdIdentity(route: sub_cmd.SubCmd) []const u8 {
+    return switch (route) {
+        .notifications => wayspot.identity.notifications,
+        .wallpaper => wayspot.identity.wallpaper,
+        .sunglasses => wayspot.identity.sunglasses,
+    };
+}
+
+fn lifecycleIdentity(value: candidate.Lifecycle) []const u8 {
+    return switch (value) {
+        .notifications_restart => wayspot.identity.notifications,
+        .wallpaper_restart, .wallpaper_rotate => wayspot.identity.wallpaper,
+        .sunglasses_restart,
+        .sunglasses_apply,
+        .sunglasses_reconcile,
+        .sunglasses_dim,
+        .sunglasses_filter,
+        .sunglasses_image,
+        => wayspot.identity.sunglasses,
+    };
 }
 
 const PickerBundle = struct {
@@ -193,36 +319,95 @@ fn setupPickerBundle(allocator: std.mem.Allocator, home: []const u8) !PickerBund
     };
 }
 
-fn hasArg(args: []const []const u8, needle: []const u8) bool {
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, needle)) return true;
+fn expectHelp(args: []const []const u8) !void {
+    switch (selectEntry(args)) {
+        .help => {},
+        else => return error.ExpectedHelp,
     }
-    return false;
 }
 
-test "sunglasses image command parser accepts exact hidden setter and clearer" {
-    const set_args = [_][]const u8{ "wayspot", "--sunglasses-set-image", "DP-1", "/tmp/overlay.png" };
-    const set = sunglassesImageCommand(&set_args) orelse return error.ExpectedSetImageCommand;
-    switch (set) {
-        .set => |value| {
-            try std.testing.expectEqualStrings("DP-1", value.monitor);
-            try std.testing.expectEqualStrings("/tmp/overlay.png", value.path);
+fn expectSubCmd(args: []const []const u8, expected: sub_cmd.SubCmd) !void {
+    switch (selectEntry(args)) {
+        .resident => |value| switch (value) {
+            .sub_cmd => |route| try std.testing.expectEqual(expected, route),
+            .concrete => return error.ExpectedSubCmd,
         },
-        .clear => return error.ExpectedSetImageCommand,
-    }
-
-    const clear_args = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1" };
-    const clear = sunglassesImageCommand(&clear_args) orelse return error.ExpectedClearImageCommand;
-    switch (clear) {
-        .set => return error.ExpectedClearImageCommand,
-        .clear => |value| try std.testing.expectEqualStrings("DP-1", value.monitor),
+        else => return error.ExpectedSubCmd,
     }
 }
 
-test "sunglasses image command parser rejects partial hidden commands" {
-    const missing_path = [_][]const u8{ "wayspot", "--sunglasses-set-image", "DP-1" };
-    try std.testing.expect(sunglassesImageCommand(&missing_path) == null);
+test "selectEntry routes canonical resident modes through owning SubCmds" {
+    try expectSubCmd(&.{ "wayspot", "notifications" }, notifications_mode.restartSubCmd());
+    try expectSubCmd(&.{ "wayspot", "wallpaper" }, wallpaper_mode.restartSubCmd());
+    try expectSubCmd(&.{ "wayspot", "wallpaper", "rotate" }, wallpaper_mode.rotateSubCmd());
+    try expectSubCmd(&.{ "wayspot", "sunglasses" }, sunglasses_mode.restartSubCmd());
+    try expectSubCmd(&.{ "wayspot", "sunglasses", "apply" }, sunglasses_mode.applySubCmd());
+    try expectSubCmd(&.{ "wayspot", "sunglasses", "reconcile" }, sunglasses_mode.reconcileSubCmd());
+}
 
-    const extra_arg = [_][]const u8{ "wayspot", "--sunglasses-clear-image", "DP-1", "/tmp/overlay.png" };
-    try std.testing.expect(sunglassesImageCommand(&extra_arg) == null);
+test "selectEntry constructs typed sunglasses leaves from canonical argv" {
+    switch (selectEntry(&.{ "wayspot", "sunglasses", "dim", "DP-1", "set", "35" })) {
+        .resident => |value| switch (value) {
+            .concrete => |leaf| switch (leaf) {
+                .lifecycle => |lifecycle| switch (lifecycle) {
+                    .sunglasses_dim => |monitor| {
+                        try std.testing.expectEqualStrings("DP-1", monitor.monitor.slice());
+                        try std.testing.expectEqual(std.meta.Tag(candidate.Input).scalar, std.meta.activeTag(monitor.input));
+                    },
+                    else => return error.ExpectedDimLeaf,
+                },
+                else => return error.ExpectedLifecycleLeaf,
+            },
+            .sub_cmd => return error.ExpectedConcreteLeaf,
+        },
+        else => return error.ExpectedConcreteLeaf,
+    }
+
+    switch (selectEntry(&.{ "wayspot", "sunglasses", "image", "DP-1", "clear" })) {
+        .resident => |value| switch (value) {
+            .concrete => |leaf| switch (leaf) {
+                .lifecycle => |lifecycle| switch (lifecycle) {
+                    .sunglasses_image => |monitor| try std.testing.expectEqual(std.meta.Tag(candidate.Input).none, std.meta.activeTag(monitor.input)),
+                    else => return error.ExpectedImageLeaf,
+                },
+                else => return error.ExpectedLifecycleLeaf,
+            },
+            .sub_cmd => return error.ExpectedConcreteLeaf,
+        },
+        else => return error.ExpectedConcreteLeaf,
+    }
+}
+
+test "selectEntry keeps apps CLI and UI entry boundaries exact" {
+    switch (selectEntry(&.{ "wayspot", "apps" })) {
+        .cli => {},
+        else => return error.ExpectedCliEntry,
+    }
+    switch (selectEntry(&.{ "wayspot", "--ui" })) {
+        .ui => {},
+        else => return error.ExpectedUiEntry,
+    }
+    try expectHelp(&.{ "wayspot", "--ui", "apps" });
+    try expectHelp(&.{ "wayspot", "unknown" });
+}
+
+test "selectEntry rejects every legacy resident flag" {
+    try expectHelp(&.{ "wayspot", "--notifications-daemon" });
+    try expectHelp(&.{ "wayspot", "--wallpaper" });
+    try expectHelp(&.{ "wayspot", "--next-wallpaper" });
+    try expectHelp(&.{ "wayspot", "--wallpaper-rotate-now" });
+    try expectHelp(&.{ "wayspot", "--sunglasses-daemon" });
+    try expectHelp(&.{ "wayspot", "--sunglasses-apply" });
+    try expectHelp(&.{ "wayspot", "--sunglasses-reconcile" });
+    try expectHelp(&.{ "wayspot", "--sunglasses-set-image", "DP-1", "/tmp/image.png" });
+    try expectHelp(&.{ "wayspot", "--sunglasses-clear-image", "DP-1" });
+}
+
+test "canonical resident identities remain explicit" {
+    try std.testing.expectEqualStrings(wayspot.identity.notifications, subCmdIdentity(notifications_mode.restartSubCmd()));
+    try std.testing.expectEqualStrings(wayspot.identity.wallpaper, subCmdIdentity(wallpaper_mode.restartSubCmd()));
+    try std.testing.expectEqualStrings(wayspot.identity.sunglasses, subCmdIdentity(sunglasses_mode.restartSubCmd()));
+    try std.testing.expectEqualStrings(wayspot.identity.notifications, lifecycleIdentity(candidate.notificationsRestart()));
+    try std.testing.expectEqualStrings(wayspot.identity.wallpaper, lifecycleIdentity(candidate.wallpaperRotate()));
+    try std.testing.expectEqualStrings(wayspot.identity.sunglasses, lifecycleIdentity(candidate.sunglassesApply()));
 }

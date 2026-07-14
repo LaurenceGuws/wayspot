@@ -45,12 +45,6 @@ pub fn restartIntent() []const u8 {
     return "wayspot wallpaper";
 }
 
-/// restartCommand is the existing detached launch bridge retained until the
-/// process leaf boundary owns canonical execution.
-pub fn restartCommand() []const u8 {
-    return "sh -lc 'bin=\"$HOME/.local/bin/wayspot\"; pkill -TERM -f \"^${bin} --wallpaper$\" 2>/dev/null || true; sleep 0.2; setsid -f \"$bin\" --wallpaper'";
-}
-
 test "wallpaper mode constructs both typed child routes" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
@@ -69,8 +63,6 @@ test "wallpaper routes resolve without importing the resident runtime" {
     try std.testing.expectEqualStrings("wayspot wallpaper rotate", resolve(.rotate));
 }
 
-test "wallpaper terminal bridge remains until process resolution" {
-    const command = restartCommand();
-    try std.testing.expect(std.mem.indexOf(u8, command, "flock") == null);
-    try std.testing.expect(std.mem.indexOf(u8, command, "--wallpaper") != null);
+test "wallpaper restart intent is canonical" {
+    try std.testing.expectEqualStrings("wayspot wallpaper", restartIntent());
 }

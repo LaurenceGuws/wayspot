@@ -11,14 +11,43 @@ pub const wallpaper = @import("wallpaper/mod.zig");
 pub const sunglasses = @import("sunglasses/mod.zig");
 pub const identity = @import("identity.zig");
 
+const help_text =
+    "Usage: wayspot <mode> [operation] [input...]\n" ++
+    "\n" ++
+    "Modes:\n" ++
+    "  apps [terms...]                         default picker source\n" ++
+    "  notifications                           resident notification process\n" ++
+    "  wallpaper                               resident wallpaper process\n" ++
+    "  wallpaper rotate                        request one wallpaper rotation\n" ++
+    "  sunglasses                              resident overlay process\n" ++
+    "  sunglasses apply|reconcile              apply saved overlay state\n" ++
+    "  sunglasses dim|filter|image ...         edit one monitor value\n" ++
+    "\n" ++
+    "Interfaces:\n" ++
+    "  wayspot --ui                            GUI picker\n" ++
+    "  wayspot query <text>                    CLI query\n" ++
+    "  wayspot open <candidate>                CLI launch\n" ++
+    "  wayspot complete bash <position> <text> Bash completion\n";
+
 pub fn bufferedPrint() !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("Usage: wayspot commands \n query <text> \n open <payload> \n complete bash <text> \n --ui \n --notifications-daemon \n --icon-diag \n --icon-cache-refresh \n --wallpaper \n --next-wallpaper \n --wallpaper-rotate-now \n --sunglasses-daemon \n --sunglasses-apply\n", .{});
+    try stdout.writeAll(help_text);
 
     try stdout.flush();
+}
+
+test "root help exposes canonical modes and no resident flags" {
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "  apps [terms...]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "  notifications") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "  wallpaper") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "  sunglasses") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "wayspot --ui") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "--notifications-daemon") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "--wallpaper") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "--sunglasses") == null);
 }
 
 test "root references config and appearance declarations" {

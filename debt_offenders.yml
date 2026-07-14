@@ -1,19 +1,16 @@
 # WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
 # This is a design index, not an implementation authorization.
 project: wayspot
-checkpoint: 2cc2b43
-status: review_required
-implementation_status: blocked_until_this_index_is_approved
+checkpoint: fbf89c8
+status: implementation_in_progress
+implementation_status: canonical_mode_entrypoints_uncommitted
 review_gate:
-  current_slice: candidate_input_contract_and_typed_leaves
-  implementation_authorized: false
+  current_slice: canonical_mode_entrypoints
+  implementation_authorized: true
   forbidden_before_approval:
-    - Concrete implementation
-    - Lifecycle implementation
-    - Input implementation
-    - SubCmd implementation
-    - GUI input-control coding
-    - Bash completion coding
+    - runtime_entrypoint_separation
+    - build_packaging_and_rerun_wiring
+    - stale_shape_cleanup
 
 shape_bars:
   required_vocabulary:
@@ -1523,7 +1520,7 @@ offenders:
       - Cmd never executes a leaf
 
   - id: canonical_mode_entrypoints
-    status: open
+    status: ready_for_review
     owner: process
     evidence:
       - src/main.zig
@@ -1531,12 +1528,17 @@ offenders:
       - src/notification/mod.zig
       - src/wallpaper/mod.zig
       - src/sunglasses/mod.zig
+      - src/wallpaper/loop.zig
+      - src/sunglasses/overlay.zig
     target_files:
       - src/main.zig
+      - src/picker/cmd.zig
       - src/root.zig
       - src/notification/mod.zig
       - src/wallpaper/mod.zig
       - src/sunglasses/mod.zig
+      - src/wallpaper/loop.zig
+      - src/sunglasses/overlay.zig
       - src/picker/mode/notifications.zig
       - src/picker/mode/wallpaper.zig
       - src/picker/mode/sunglasses.zig
@@ -1544,26 +1546,37 @@ offenders:
       - route wayspot notifications to notification.run
       - route wayspot wallpaper to wallpaper.run
       - route wayspot sunglasses to sunglasses.run
-      - route operations through the owning mode SubCmd resolver
-      - remove every legacy resident flag branch
+      - route wallpaper rotate and sunglasses operations through owning SubCmd or typed Concrete values
+      - make resolved resident lifecycle leaves emit canonical mode argv
+      - make resident pid identity recognize canonical root argv while retaining bounded legacy compatibility
+      - remove every legacy resident flag branch from src/main.zig
       - keep --ui as the GUI entry flag only
       - replace root help with canonical mode entries
+      - keep packaging/systemd and rerun migration for build_packaging_and_rerun_wiring
     required_symbols:
       - main
       - selectEntry
+      - resolveLifecycleCommand
       - notification.run
       - wallpaper.run
+      - wallpaper.rotateNow
       - sunglasses.run
+      - sunglasses.applyNow
+      - sunglasses.reconcileSavedState
+      - sunglasses.applyLeaf
     required_tests:
       - each canonical mode argv path
+      - wallpaper rotate and typed sunglasses argv construction
       - each resident identity
+      - canonical resident pid identity and child argv
       - each legacy flag rejection
       - unknown input help
-      - systemd and direct runtime receipts
+      - direct canonical runtime receipts
+      - systemd receipt deferred to build_packaging_and_rerun_wiring without source changes here
     required_comments:
       - main owns selection only
       - each resident mod owns its runtime lifecycle
-      - legacy flag removal is intentional
+      - legacy main-branch removal is intentional; runtime compatibility is bounded transition state
 
   - id: runtime_entrypoint_separation
     status: open

@@ -6,6 +6,7 @@ pub const banner = @import("banner.zig");
 pub const state = @import("state.zig");
 pub const dbus = @import("dbus.zig");
 pub const DBus = dbus.DBus;
+/// run owns one notification resident process lifecycle.
 pub const run = dbus.run;
 pub const rows = @import("rows.zig");
 pub const preview = @import("preview.zig");

@@ -94,6 +94,10 @@ proof:
     - process launch maps child success, child failure, fork failure, and wait interruption bounds exactly
     - process launch imports no Cmd, GUI, or CLI code
     - GUI LaunchQueue clears after process success and failure
+    - wayspot notifications, wayspot wallpaper, and wayspot sunglasses select their owning resident entrypoints
+    - wallpaper rotate and sunglasses typed operations select the owning SubCmd or Concrete leaf meaning
+    - root help lists apps first and all canonical modes without resident flags
+    - every legacy resident flag is rejected to help while --ui remains the exact GUI entry
     - Input exposes exactly none, scalar, toggle, and path arms
     - every typed Concrete leaf declares its accepted Input arms
     - scalar, toggle, path, and monitor bounds are equal in GUI and CLI
