@@ -48,8 +48,14 @@ ownership:
     role: candidate-tree consumption, Bash serialization, and help output
     current_source: src/cli/entry.zig
   process:
-    role: executable entry, identity, mode selection, and resident runtime invocation
-    current_source: src/main.zig
+    role: resolved leaf launch ownership plus executable entry, identity, mode selection, and resident runtime invocation
+    current_source: src/process/launch.zig
+    entry_source: src/main.zig
+    intent:
+      input: bounded []const u8 resolved leaf intent
+      bound: project_version_scope.yml:process_intent_bytes
+      rejection: empty, overlong, and embedded NUL input before fork
+      sentinel: constructed and owned by src/process/launch.zig
   modes:
     role: concrete Cmd arms with one candidate source and optional resident runtime
     current_sources:
@@ -71,11 +77,14 @@ dependency_graph:
       - concrete mode route behavior
     gui:
       - cmd
+      - process launch
       - SDL
     cli:
       - cmd
+      - process launch
       - Bash serialization
     process:
+      - resolved leaf intent
       - resident mode runtime owners
   mode_catalog:
     imports:
@@ -97,7 +106,7 @@ dependency_graph:
     - CLI rebuilding the Cmd tree independently
     - GUI storing Input as resident runtime state
     - CLI constructing a second Concrete leaf representation
-    - process importing GUI or CLI code
+    - process importing Cmd, GUI, or CLI code
     - resident mode runtime importing the picker surface
     - a generic mode registry or erased mode interface
 mode_shape:
@@ -608,6 +617,8 @@ interfaces:
     completion_entrypoint: packaging/bash/wayspot.bash
     input_contract: raw argv and GUI commit construct equal typed leaf values
   process:
-    role: entry and resident runtime caller only
+    role: resolved leaf launch owner and resident runtime caller
     path: src/main.zig
+    launch_source: src/process/launch.zig
     mode_entry: mode_catalog.process_entry
+    launch_input: bounded []const u8; process owns sentinel construction

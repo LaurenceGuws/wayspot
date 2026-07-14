@@ -161,11 +161,13 @@ ownership:
     must_exist:
       - mode_selection
       - entrypoint
+      - leaf_launch
       - cleanup
       - direct_lifecycle_ownership
       - owner_identity_assertion
     owns:
       - picker_lifecycle
+      - leaf_launch
       - notification_lifecycle
       - wallpaper_lifecycle
       - sunglasses_lifecycle

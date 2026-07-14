@@ -16,18 +16,9 @@ const sub_cmd = @import("picker_sub_cmd");
 
 pub const max_cmd_bytes = 4096;
 pub const max_completion_candidates: usize = 256;
-const launch_child_fail_code: i32 = 127;
-const max_launch_wait_interrupts: u32 = 16;
-pub const LaunchRunError = error{
-    CommandFailed,
-    ForkFailed,
-    WaitFailed,
-    WaitInterruptedTooOften,
-};
 
 comptime {
     std.debug.assert(max_cmd_bytes > 0);
-    std.debug.assert(max_launch_wait_interrupts > 0);
     const fields = std.meta.fields(Cmd);
     std.debug.assert(fields.len == 4);
     std.debug.assert(std.mem.eql(u8, fields[0].name, "apps"));
@@ -517,15 +508,6 @@ fn appendShellQuoted(out: *std.ArrayList(u8), allocator: std.mem.Allocator, valu
     try out.append(allocator, '\'');
 }
 
-/// runDetachedShellCommand starts a shell command and waits only for the launcher wrapper.
-pub fn runDetachedShellCommand(command: [*:0]const u8) LaunchRunError!void {
-    const wrapper_pid = try launchFork();
-    if (wrapper_pid == 0) {
-        launchWrapperChild(command);
-    }
-    try launchWait(wrapper_pid);
-}
-
 fn printTerminalRow(out: *std.Io.Writer, row: candidate.Candidate) !void {
     try out.print("{s}\t{s}\t{s}\t{s}\n", .{
         @tagName(row.typeOf()),
@@ -635,91 +617,6 @@ fn syncParentDir(path: []const u8) !void {
 fn deinitHistory(history: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allocator) void {
     for (history.items) |item| allocator.free(item);
     history.deinit(allocator);
-}
-
-fn launchWrapperChild(command: [*:0]const u8) noreturn {
-    const stdio_ok = launchRedirectStdio();
-    if (!stdio_ok) std.c._exit(launch_child_fail_code);
-
-    const session_id = std.c.setsid();
-    if (session_id == -1) std.c._exit(launch_child_fail_code);
-
-    const app_pid = launchFork() catch std.c._exit(launch_child_fail_code);
-    if (app_pid == 0) launchExecShell(command);
-
-    std.c._exit(0);
-}
-
-fn launchExecShell(command: [*:0]const u8) noreturn {
-    const shell_path = "/bin/sh";
-    const shell_name = "sh";
-    const shell_arg = "-lc";
-    const argv: [4:null]?[*:0]const u8 = .{
-        shell_name,
-        shell_arg,
-        command,
-        null,
-    };
-    const exec_rc = std.c.execve(shell_path, &argv, std.c.environ);
-    if (exec_rc == -1) std.c._exit(launch_child_fail_code);
-    std.c._exit(launch_child_fail_code);
-}
-
-fn launchRedirectStdio() bool {
-    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = false });
-    if (dev_null == -1) return false;
-
-    const stdin_rc = std.c.dup2(dev_null, 0);
-    const stdout_rc = std.c.dup2(dev_null, 1);
-    const stderr_rc = std.c.dup2(dev_null, 2);
-    const close_rc = std.c.close(dev_null);
-    if (stdin_rc == -1) return false;
-    if (stdout_rc == -1) return false;
-    if (stderr_rc == -1) return false;
-    if (close_rc == -1) return false;
-    return true;
-}
-
-fn launchFork() LaunchRunError!std.c.pid_t {
-    const pid = std.c.fork();
-    if (pid == -1) return error.ForkFailed;
-    return pid;
-}
-
-fn launchWait(pid: std.c.pid_t) LaunchRunError!void {
-    var status: i32 = 0;
-    var interrupts: u32 = 0;
-    while (interrupts < max_launch_wait_interrupts) {
-        const waited = std.c.waitpid(pid, &status, 0);
-        if (waited == pid) break;
-        if (waited == -1) {
-            const errno = std.c._errno().*;
-            if (errno == @intFromEnum(std.c.E.INTR)) {
-                interrupts += 1;
-                continue;
-            }
-            return error.WaitFailed;
-        }
-        return error.WaitFailed;
-    } else {
-        return error.WaitInterruptedTooOften;
-    }
-    const status_bits: u32 = @bitCast(status);
-    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
-    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
-}
-
-fn launchRunnerOkForTest(command: [*:0]const u8) LaunchRunError!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
-}
-
-fn launchRunnerFailForTest(command: [*:0]const u8) LaunchRunError!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
-    return error.CommandFailed;
-}
-
-fn drainLaunchForTest(command: [*:0]const u8, runner: *const fn ([*:0]const u8) LaunchRunError!void) LaunchRunError!void {
-    try runner(command);
 }
 
 test "command model collects candidates once per picker lifecycle" {
@@ -1310,12 +1207,4 @@ test "command completion returns one next word at every routed position" {
     try std.testing.expectEqualStrings("set", operations[0].argument);
     try std.testing.expectEqualStrings("on", operations[1].argument);
     try std.testing.expectEqualStrings("off", operations[2].argument);
-}
-
-test "command launch runner accepts successful command" {
-    try drainLaunchForTest("run-me", launchRunnerOkForTest);
-}
-
-test "command launch runner returns failures" {
-    try std.testing.expectError(error.CommandFailed, drainLaunchForTest("run-me", launchRunnerFailForTest));
 }

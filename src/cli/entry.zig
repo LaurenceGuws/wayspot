@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const cmd_owner = @import("../picker/cmd.zig");
+const process_owner = @import("../process/launch.zig");
 const apps_mode = @import("../picker/mode/apps.zig");
 const candidate = @import("picker_candidate");
 const icon_cache = @import("../picker/icon_cache.zig");
@@ -150,10 +151,10 @@ fn appsQuery(allocator: std.mem.Allocator, query_parts: []const []const u8) ![]u
 
 fn runOpen(allocator: std.mem.Allocator, picker: *cmd_owner.Picker, lookup: []const u8) !void {
     try picker.loadHistory(allocator);
-    const command = try picker.open(allocator, lookup);
-    defer allocator.free(command);
+    const intent = try picker.open(allocator, lookup);
+    defer allocator.free(intent);
     try picker.recordSelection(allocator, lookup);
-    try runCommandBytes(command);
+    try runIntentBytes(intent);
     try picker.saveHistory(allocator);
 }
 
@@ -186,13 +187,8 @@ fn parseCompletionPosition(value: []const u8) !cmd_owner.CompletionPosition {
     return error.CompletionPositionInvalid;
 }
 
-fn runCommandBytes(command: []const u8) !void {
-    if (command.len == 0) return error.EmptyCommand;
-    if (command.len > cmd_owner.max_cmd_bytes) return error.CommandTooLong;
-    var command_buf: [cmd_owner.max_cmd_bytes + 1]u8 = undefined;
-    @memcpy(command_buf[0..command.len], command);
-    command_buf[command.len] = 0;
-    try cmd_owner.runDetachedShellCommand(command_buf[0..command.len :0].ptr);
+fn runIntentBytes(intent: []const u8) !void {
+    try process_owner.runDetached(intent);
 }
 
 fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {

@@ -692,8 +692,10 @@ target_files:
       private:
         - Surface
         - LaunchQueue
+        - LaunchRunner
         - refreshResults
         - queueLaunchAtResult
+        - drainLaunchQueue
         - switchSubCmd
         - render
         - handleEvent
@@ -709,6 +711,7 @@ target_files:
       - selecting a SubCmd enters its next list without launching
       - selecting a concrete leaf queues exactly one intent
       - queue success, failure, empty, and overflow cleanup remain proven
+      - LaunchQueue passes only resolved intent to process.runDetached
       - text, clipboard, viewport, and SDL lifecycle tests remain beside Surface
 
   - path: src/process/launch.zig
@@ -717,22 +720,32 @@ target_files:
     role: bounded executable leaf launch and child-wait ownership
     symbols:
       public:
+        - max_intent_bytes
+        - max_wait_interrupts
         - LaunchError
         - runDetached
       private:
         - launchFork
         - launchChild
+        - launchExecShell
         - launchWait
+        - launchWaitWith
     comments:
       file: "//! Process launch owns fork, shell execution, wait bounds, and exact failure mapping."
       symbols:
-        - "/// runDetached executes one already-resolved bounded leaf intent."
+        - "/// runDetached accepts one bounded []const u8 resolved leaf intent, rejects empty, overlong, and embedded NUL input before fork, and owns sentinel construction."
         - "/// LaunchError distinguishes child, fork, wait, and interrupt failures."
     tests:
-      - successful child launch returns after the wrapper wait
-      - child failure maps to the exact LaunchError
-      - interrupted wait reaches its explicit limit
+      - successful launch returns after the wrapper wait
+      - successful child wait returns normally
+      - child failure maps to CommandFailed
+      - fork failure maps before child creation
+      - wait interruption reaches max_wait_interrupts exactly
+      - wait failure maps to WaitFailed
       - empty and overlong leaf intents are rejected before fork
+      - embedded NUL leaf intents are rejected before sentinel construction
+      - exact maximum intent is accepted and one byte beyond it is rejected
+      - process module imports no Cmd, GUI, or CLI code
 
   - path: src/main.zig
     status: reshape
@@ -1466,32 +1479,46 @@ offenders:
     status: open
     owner: process
     evidence:
-      - src/picker/command.zig
-      - src/picker/surface.zig
-      - src/main.zig
+      - src/picker/cmd.zig
+      - src/cli/entry.zig
+      - src/gui/surface.zig
+      - src/process/launch.zig
     target_files:
       - src/process/launch.zig
       - src/gui/surface.zig
+      - src/cli/entry.zig
       - src/picker/cmd.zig
-      - src/main.zig
     changes:
       - move fork, shell, wait, and launch error mapping out of picker Cmd
+      - give process launch ownership of the bounded resolved-intent size
+      - accept one bounded []const u8 intent and reject embedded NUL before sentinel construction
+      - construct the shell sentinel only inside process launch
       - keep GUI LaunchQueue as a bounded GUI shutdown handoff
       - pass only resolved concrete leaf intent to process launch
-      - forbid Cmd and resident runtime imports from process GUI code
+      - make CLI and GUI call process.runDetached without rebuilding intent
+      - forbid Cmd, GUI, and CLI imports from process launch code
     required_symbols:
       - LaunchError
+      - max_intent_bytes
+      - max_wait_interrupts
       - runDetached
+      - IntentContainsNul
       - LaunchQueue
       - resolveConcrete
     required_tests:
       - successful launch
-      - child failure
+      - successful child wait
+      - child failure maps to CommandFailed
       - fork failure
       - wait interruption bound
+      - wait failure maps to WaitFailed
+      - empty and overlong intent rejection before fork
+      - embedded NUL rejection before fork and sentinel construction
+      - exact maximum intent acceptance and one-byte overflow rejection
       - queue cleanup after success and failure
     required_comments:
       - process owns child lifecycle
+      - process owns sentinel construction from the bounded intent slice
       - GUI owns queue lifetime
       - Cmd never executes a leaf
 

@@ -1,12 +1,13 @@
 //! GUI surface owns the SDL consumer lifecycle from creation to cleanup.
 //!
 //! It edits one query, consumes command candidates, renders rows, and queues
-//! one resolved command for the surface-owned shutdown handoff.
+//! one resolved intent for the surface-owned shutdown handoff.
 
 const std = @import("std");
 const app_icons = @import("../picker/icons.zig");
 const candidate_owner = @import("picker_candidate");
 const command_owner = @import("../picker/cmd.zig");
+const process_owner = @import("../process/launch.zig");
 const config_defaults = @import("../config/defaults.zig");
 const cursor_blink = @import("../picker/cursor_blink.zig");
 const rank = @import("../picker/rank.zig");
@@ -46,29 +47,30 @@ const TextDrag = struct {
     anchor: u32,
 };
 
-const LaunchRunner = *const fn ([*:0]const u8) command_owner.LaunchRunError!void;
+/// LaunchRunner is the process-boundary function consumed by GUI queue drain.
+const LaunchRunner = *const fn ([]const u8) process_owner.LaunchError!void;
 
 /// LaunchQueue owns one bounded GUI leaf intent until the interface drains it.
 const LaunchQueue = struct {
-    command_buf: [command_owner.max_cmd_bytes + 1]u8 = undefined,
-    command_len: u32 = 0,
+    intent_buf: [process_owner.max_intent_bytes]u8 = undefined,
+    intent_len: usize = 0,
     state: enum { idle, queued } = .idle,
 
-    /// queue stores one non-empty, NUL-terminated command without allocation.
-    fn queue(self: *LaunchQueue, command_bytes: []const u8) !void {
-        if (command_bytes.len == 0) return error.EmptyCommand;
-        if (command_bytes.len > command_owner.max_cmd_bytes) return error.CommandTooLong;
+    /// queue stores one non-empty bounded intent without allocation. Process
+    /// owns sentinel construction when this intent crosses the launch boundary.
+    fn queue(self: *LaunchQueue, intent_bytes: []const u8) !void {
+        if (intent_bytes.len == 0) return error.EmptyIntent;
+        if (intent_bytes.len > process_owner.max_intent_bytes) return error.IntentTooLong;
         std.debug.assert(self.state == .idle);
-        @memcpy(self.command_buf[0..command_bytes.len], command_bytes);
-        self.command_buf[command_bytes.len] = 0;
-        self.command_len = @intCast(command_bytes.len);
+        @memcpy(self.intent_buf[0..intent_bytes.len], intent_bytes);
+        self.intent_len = intent_bytes.len;
         self.state = .queued;
     }
 
     fn clear(self: *LaunchQueue) void {
         std.debug.assert(self.state == .queued);
-        self.command_buf[0] = 0;
-        self.command_len = 0;
+        @memset(self.intent_buf[0..self.intent_len], 0);
+        self.intent_len = 0;
         self.state = .idle;
     }
 
@@ -76,12 +78,11 @@ const LaunchQueue = struct {
         return self.state == .queued;
     }
 
-    fn commandZ(self: *LaunchQueue) [*:0]const u8 {
+    fn intent(self: *const LaunchQueue) []const u8 {
         std.debug.assert(self.state == .queued);
-        std.debug.assert(self.command_len > 0);
-        std.debug.assert(self.command_len <= command_owner.max_cmd_bytes);
-        std.debug.assert(self.command_buf[self.command_len] == 0);
-        return self.command_buf[0..self.command_len :0].ptr;
+        std.debug.assert(self.intent_len > 0);
+        std.debug.assert(self.intent_len <= process_owner.max_intent_bytes);
+        return self.intent_buf[0..self.intent_len];
     }
 };
 
@@ -332,7 +333,7 @@ const Surface = struct {
     }
 
     fn drainPendingLaunch(self: *Surface) !void {
-        try drainLaunchQueue(&self.launch_queue, command_owner.runDetachedShellCommand);
+        try drainLaunchQueue(&self.launch_queue, process_owner.runDetached);
     }
 
     fn render(self: *Surface) !void {
@@ -798,18 +799,20 @@ fn routeQueryForSelection(value: candidate_owner.Candidate) ![]const u8 {
     return value.routeQuery() orelse error.RouteMissing;
 }
 
-fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) command_owner.LaunchRunError!void {
+/// drainLaunchQueue hands one resolved intent to process and clears the queue
+/// on both success and failure before returning.
+fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) process_owner.LaunchError!void {
     if (!queue.hasQueued()) return;
     defer queue.clear();
-    try runner(queue.commandZ());
+    try runner(queue.intent());
 }
 
-fn launchQueueRunnerOkForTest(command: [*:0]const u8) command_owner.LaunchRunError!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+fn launchQueueRunnerOkForTest(intent: []const u8) process_owner.LaunchError!void {
+    if (!std.mem.eql(u8, "run-me", intent)) return error.CommandFailed;
 }
 
-fn launchQueueRunnerFailForTest(command: [*:0]const u8) command_owner.LaunchRunError!void {
-    if (!std.mem.eql(u8, "run-me", std.mem.span(command))) return error.CommandFailed;
+fn launchQueueRunnerFailForTest(intent: []const u8) process_owner.LaunchError!void {
+    if (!std.mem.eql(u8, "run-me", intent)) return error.CommandFailed;
     return error.CommandFailed;
 }
 
@@ -827,11 +830,18 @@ test "surface launch queue clears after failed drain" {
     try std.testing.expect(!queue.hasQueued());
 }
 
-test "surface launch queue rejects empty and oversized commands" {
+test "surface launch queue rejects empty and oversized intents" {
     var queue = LaunchQueue{};
-    try std.testing.expectError(error.EmptyCommand, queue.queue(""));
-    const oversized = [_]u8{'x'} ** (command_owner.max_cmd_bytes + 1);
-    try std.testing.expectError(error.CommandTooLong, queue.queue(&oversized));
+    try std.testing.expectError(error.EmptyIntent, queue.queue(""));
+    const oversized = [_]u8{'x'} ** (process_owner.max_intent_bytes + 1);
+    try std.testing.expectError(error.IntentTooLong, queue.queue(&oversized));
+    try std.testing.expect(!queue.hasQueued());
+}
+
+test "surface launch queue clears after process rejects an embedded NUL" {
+    var queue = LaunchQueue{};
+    try queue.queue("run\x00me");
+    try std.testing.expectError(error.IntentContainsNul, drainLaunchQueue(&queue, process_owner.runDetached));
     try std.testing.expect(!queue.hasQueued());
 }
 

@@ -14,6 +14,7 @@ scope:
     - sunglasses mode
     - Bash completion
     - installable Bash completion entrypoint
+    - resolved Concrete leaf launch boundary
   excluded:
     - other compositors
     - generic UI toolkit abstractions
@@ -50,6 +51,8 @@ bounds:
   bash_completion_words: 16
   bash_completion_line_chars: 4096
   bash_completion_word_chars: 256
+  process_intent_bytes: 4096
+  launch_wait_interrupts: 16
   notification_history_open_bytes: 64
   wallpaper_images: 4096
   wallpaper_path_bytes: 4096
@@ -85,6 +88,12 @@ proof:
     - nested COMPREPLY contains no full wayspot command prefix or notification-history leaf
     - Bash rejects invalid COMP_POINT and excessive COMP_CWORD or COMP_WORDS state
     - Bash rejects a middle-of-word COMP_POINT without invoking Wayspot
+    - process launch rejects empty and overlong intents before fork
+    - process launch rejects embedded NUL before sentinel construction
+    - process launch accepts the exact process intent bound and rejects one byte beyond it
+    - process launch maps child success, child failure, fork failure, and wait interruption bounds exactly
+    - process launch imports no Cmd, GUI, or CLI code
+    - GUI LaunchQueue clears after process success and failure
     - Input exposes exactly none, scalar, toggle, and path arms
     - every typed Concrete leaf declares its accepted Input arms
     - scalar, toggle, path, and monitor bounds are equal in GUI and CLI
