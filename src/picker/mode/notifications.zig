@@ -1,8 +1,8 @@
-//! Notifications owns route behavior for NotificationsSubCmd.
+//! Notifications mode owns semantic route behavior for NotificationsSubCmd.
 //!
 //! The child union is declared in picker/sub_cmd.zig. This file constructs
 //! picker candidates and bounded lifecycle meaning; DBus runtime ownership
-//! remains in src/notification/.
+//! remains in src/notification/. No resident implementation is imported here.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");

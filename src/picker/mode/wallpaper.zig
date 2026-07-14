@@ -1,8 +1,8 @@
-//! Wallpaper owns route behavior for WallpaperSubCmd.
+//! Wallpaper mode owns semantic route behavior for WallpaperSubCmd.
 //!
 //! The child union is declared in picker/sub_cmd.zig. This file constructs
 //! picker candidates and bounded lifecycle meaning; image and Wayland runtime
-//! remain in src/wallpaper/.
+//! remain in src/wallpaper/. No resident implementation is imported here.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");

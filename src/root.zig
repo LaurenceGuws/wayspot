@@ -1,4 +1,5 @@
-//! Wayspot root exports accepted interfaces, env, identity, picker, and resident owners.
+//! Wayspot root exports accepted interfaces, environment facts, picker values,
+//! and resident runtime owners.
 const std = @import("std");
 pub const cli = @import("cli/entry.zig");
 pub const config = @import("config/mod.zig");
@@ -54,6 +55,9 @@ test "root references config and appearance declarations" {
     std.testing.refAllDecls(config.defaults);
     std.testing.refAllDecls(env);
     std.testing.refAllDecls(process);
+    std.testing.refAllDecls(notification);
+    std.testing.refAllDecls(wallpaper);
+    std.testing.refAllDecls(sunglasses);
     std.testing.refAllDecls(cli);
     std.testing.refAllDecls(cli.bash_completion);
     std.testing.refAllDecls(gui);

@@ -591,8 +591,9 @@ test "wallpaper slots are bounded by env monitor facts" {
 test "wallpaper owner rejects a second live pid file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const runtime_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(runtime_dir);
+    const runtime_dir_z = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(runtime_dir_z);
+    const runtime_dir = std.mem.sliceTo(runtime_dir_z, 0);
 
     var owner = try PidFile.create(std.testing.allocator, runtime_dir);
     defer owner.deinit(std.testing.allocator);

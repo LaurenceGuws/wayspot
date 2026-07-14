@@ -105,7 +105,7 @@ test "library scan indexes PNG and BMP records from one directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "wall.png",
         .data = "\x89PNG\r\n\x1a\n" ++
             "\x00\x00\x00\x0d" ++
@@ -114,7 +114,7 @@ test "library scan indexes PNG and BMP records from one directory" {
             "\x00\x00\x00\x20" ++
             "\x08\x02\x00\x00\x00",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "wall.bmp",
         .data = "BM" ++
             "\x36\x00\x00\x00" ++
@@ -131,10 +131,11 @@ test "library scan indexes PNG and BMP records from one directory" {
             "\x00\x00\x00\x00" ++
             "\x00\x00\x00\x00",
     });
-    try tmp.dir.writeFile(.{ .sub_path = "notes.txt", .data = "ignored" });
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "notes.txt", .data = "ignored" });
 
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
+    const base_z = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(base_z);
+    const base = std.mem.sliceTo(base_z, 0);
 
     var library = try scan(std.testing.allocator, base);
     defer library.deinit(std.testing.allocator);

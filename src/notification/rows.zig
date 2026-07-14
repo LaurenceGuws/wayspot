@@ -74,6 +74,12 @@ pub fn resetForTest(allocator: std.mem.Allocator) void {
     row_store.close_fn = null;
 }
 
+fn deinitForTest(allocator: std.mem.Allocator) void {
+    resetForTest(allocator);
+    row_store.entries.deinit(allocator);
+    row_store.entries = .empty;
+}
+
 pub fn recordNotify(
     allocator: std.mem.Allocator,
     id: u32,
@@ -233,7 +239,7 @@ fn freeSnapshotRow(allocator: std.mem.Allocator, row: Snapshot) void {
 test "recordNotify and snapshot preserve latest state" {
     const allocator = std.testing.allocator;
     resetForTest(allocator);
-    defer resetForTest(allocator);
+    defer deinitForTest(allocator);
 
     try recordNotify(allocator, 7, "app", "app-icon", "hello", "body", 2, true);
     recordClosed(7, 3);
@@ -241,7 +247,7 @@ test "recordNotify and snapshot preserve latest state" {
 
     const rows = try snapshot(allocator);
     defer freeSnapshot(allocator, rows);
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(row_store.len)));
+    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(row_store.entries.items.len)));
     try std.testing.expectEqual(@as(u32, 7), rows[0].id);
     try std.testing.expectEqualStrings("app2", rows[0].app_name);
     try std.testing.expectEqualStrings("app2-icon", rows[0].app_icon);
@@ -251,7 +257,7 @@ test "recordNotify and snapshot preserve latest state" {
 test "recordNotify bounds retained body bytes" {
     const allocator = std.testing.allocator;
     resetForTest(allocator);
-    defer resetForTest(allocator);
+    defer deinitForTest(allocator);
 
     const body = [_]u8{'x'} ** (max_body_bytes + 1);
     try recordNotify(allocator, 9, "app", "icon", "summary", &body, 1, false);

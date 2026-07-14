@@ -1,19 +1,40 @@
-//! Sunglasses owns bounded per-monitor overlay state and resident lifecycle calls.
+//! Sunglasses is the resident per-monitor overlay owner.
+//!
+//! `run` owns identity setup, SDL lifecycle, overlay cleanup, and startup
+//! recovery. `applyNow`, `reconcileSavedState`, and `applyLeaf` own the direct
+//! lifecycle transitions; picker mode code carries only typed leaf meaning.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");
+const env = @import("../env/mod.zig");
+const identity = @import("../identity.zig");
 
 pub const Overlay = @import("overlay.zig").Overlay;
 pub const state = @import("state.zig");
 
 /// run owns one sunglasses resident overlay lifecycle.
-pub const run = Overlay.runOverlay;
+pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
+    try identity.set(identity.sunglasses);
+    Overlay.runOverlay(allocator, monitor_source) catch |err| {
+        recordStartupFailure(allocator, monitor_source.runtimeDir(), err);
+        std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
+        std.process.exit(2);
+    };
+}
 /// applyNow wakes the resident overlay after persisted state changes.
-pub const applyNow = Overlay.applyNow;
+pub fn applyNow(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
+    try identity.set(identity.sunglasses);
+    try Overlay.applyNow(allocator, runtime_dir);
+}
 /// reconcileSavedState starts, wakes, or stops the resident overlay for saved state.
-pub const reconcileSavedState = Overlay.reconcileSavedState;
+pub fn reconcileSavedState(allocator: std.mem.Allocator, runtime_dir: []const u8) !void {
+    try identity.set(identity.sunglasses);
+    try Overlay.reconcileSavedState(allocator, runtime_dir);
+}
 /// recordStartupFailure writes the bounded resident startup failure status.
-pub const recordStartupFailure = Overlay.recordStartupFailure;
+pub fn recordStartupFailure(allocator: std.mem.Allocator, runtime_dir: []const u8, err: anyerror) void {
+    Overlay.recordStartupFailure(allocator, runtime_dir, err);
+}
 
 /// applyLeaf owns typed sunglasses state mutation and resident reconciliation.
 /// The picker supplies a copied Lifecycle value; this owner persists only its
@@ -23,6 +44,7 @@ pub fn applyLeaf(
     runtime_dir: []const u8,
     value: candidate.Lifecycle,
 ) !void {
+    try identity.set(identity.sunglasses);
     var saved = try state.State.load(allocator);
     switch (value) {
         .sunglasses_dim => |leaf| {
@@ -63,4 +85,9 @@ pub fn applyLeaf(
     }
     try saved.save(allocator);
     try Overlay.reconcileSavedState(allocator, runtime_dir);
+}
+
+test "sunglasses module reaches resident overlay and state owners" {
+    std.testing.refAllDecls(Overlay);
+    std.testing.refAllDecls(state);
 }

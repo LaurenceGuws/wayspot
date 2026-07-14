@@ -224,7 +224,7 @@ fn placeOnFocusedMonitor() void {
 
 fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: env.MonitorSource, title: []const u8) !void {
     const monitors = try monitor_source.queryMonitors(allocator);
-    const monitor_name = focusedMonitorName(monitors) orelse return error.NoFocusedEnvMonitor;
+    const monitor_name = focusedMonitorName(&monitors) orelse return error.NoFocusedEnvMonitor;
     const command = try placementActionCommand(allocator, monitor_name, title);
     defer allocator.free(command);
     const pid = try forkChild();
@@ -232,7 +232,7 @@ fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: env.MonitorS
     try waitChild(pid);
 }
 
-fn focusedMonitorName(monitors: env.monitor.MonitorList) ?[]const u8 {
+fn focusedMonitorName(monitors: *const env.monitor.MonitorList) ?[]const u8 {
     var index: u32 = 0;
     while (index < monitors.count) : (index += 1) {
         if (monitors.items[index].focused) return monitors.items[index].nameText();
@@ -314,7 +314,7 @@ test "notification placement action uses monitor fact only" {
     second.focused = true;
     try monitors.append(second);
 
-    const monitor_name = focusedMonitorName(monitors) orelse return error.NoFocusedEnvMonitor;
+    const monitor_name = focusedMonitorName(&monitors) orelse return error.NoFocusedEnvMonitor;
     const command = try placementActionCommand(std.testing.allocator, monitor_name, window_title);
     defer std.testing.allocator.free(command);
 

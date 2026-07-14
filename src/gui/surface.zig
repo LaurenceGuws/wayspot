@@ -1,7 +1,8 @@
 //! GUI surface owns the SDL consumer lifecycle from creation to cleanup.
 //!
 //! It edits one query, consumes command candidates, renders rows, and queues
-//! one resolved intent for the surface-owned shutdown handoff.
+//! one resolved intent for the surface-owned shutdown handoff. It imports no
+//! notification, wallpaper, or sunglasses implementation files.
 
 const std = @import("std");
 const app_icons = @import("../picker/icons.zig");

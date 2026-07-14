@@ -65,6 +65,7 @@ invariants:
   - main selects exact positional canonical mode argv into the existing SubCmd or typed Concrete value and does not scan for resident flags
   - --ui is accepted only as the exact GUI entry; resident mode roots and operations remain positional argv
   - notification, wallpaper, and sunglasses resident modules own their public runtime entry calls and lifecycle cleanup
+  - each resident module sets its owner identity inside its explicit entrypoint before resident work
   - legacy resident flags are rejected to root help and never enter a resident runtime branch
   - until the structured process argv boundary exists, every dynamic monitor and path word in a resolved shell bridge is single-quoted; invalid control bytes are rejected before resolution
   - Bash serialization is CLI-owned and completion policy is Cmd-owned

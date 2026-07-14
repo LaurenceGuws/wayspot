@@ -1,8 +1,8 @@
-//! Sunglasses owns route behavior for SunglassesSubCmd.
+//! Sunglasses mode owns semantic route behavior for SunglassesSubCmd.
 //!
 //! The child union is declared in picker/sub_cmd.zig. This file constructs
 //! picker candidates and bounded lifecycle meaning; monitor overlay state and
-//! runtime remain in src/sunglasses/.
+//! runtime remain in src/sunglasses/. No resident implementation is imported here.
 
 const std = @import("std");
 const candidate = @import("picker_candidate");

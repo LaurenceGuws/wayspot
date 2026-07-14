@@ -1,4 +1,4 @@
-//! Entrypoint owns exact argv selection, resident call wiring, shared picker composition, and cleanup order.
+//! Entrypoint owns exact argv selection, shared picker composition, and cleanup order.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -159,7 +159,6 @@ fn runResident(allocator: std.mem.Allocator, init: *const std.process.Init, valu
 }
 
 fn runSubCmd(allocator: std.mem.Allocator, init: *const std.process.Init, route: sub_cmd.SubCmd) !void {
-    try wayspot.identity.set(subCmdIdentity(route));
     switch (route) {
         .notifications => |value| switch (value) {
             .restart => try wayspot.notification.run(allocator),
@@ -179,7 +178,6 @@ fn runConcrete(allocator: std.mem.Allocator, init: *const std.process.Init, valu
 }
 
 fn runLifecycle(allocator: std.mem.Allocator, init: *const std.process.Init, value: candidate.Lifecycle) !void {
-    try wayspot.identity.set(lifecycleIdentity(value));
     switch (value) {
         .notifications_restart => try wayspot.notification.run(allocator),
         .wallpaper_restart => try runWallpaper(allocator, init, .restart),
@@ -199,7 +197,7 @@ fn runWallpaper(allocator: std.mem.Allocator, init: *const std.process.Init, val
     switch (value) {
         .restart => {
             const signature = try instanceSignature(init);
-            try runWallpaperLoop(allocator, wayspot.env.MonitorSource.init(.{
+            try wayspot.wallpaper.run(allocator, wayspot.env.MonitorSource.init(.{
                 .runtime_dir = runtime_dir,
                 .signature = signature,
             }));
@@ -213,7 +211,7 @@ fn runSunglasses(allocator: std.mem.Allocator, init: *const std.process.Init, va
         .restart => {
             const runtime_dir = try runtimeDir(init);
             const signature = try instanceSignature(init);
-            try runSunglassesOverlay(allocator, runtime_dir, wayspot.env.MonitorSource.init(.{
+            try wayspot.sunglasses.run(allocator, wayspot.env.MonitorSource.init(.{
                 .runtime_dir = runtime_dir,
                 .signature = signature,
             }));
@@ -224,63 +222,12 @@ fn runSunglasses(allocator: std.mem.Allocator, init: *const std.process.Init, va
     }
 }
 
-fn runWallpaperLoop(allocator: std.mem.Allocator, monitor_source: wayspot.env.MonitorSource) !void {
-    if (!build_options.enable_sdl) {
-        std.log.err("wallpaper loop requires SDL build", .{});
-        std.process.exit(2);
-    }
-
-    wayspot.wallpaper.run(allocator, monitor_source) catch |err| {
-        std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});
-        std.process.exit(2);
-    };
-}
-
-fn runSunglassesOverlay(
-    allocator: std.mem.Allocator,
-    runtime_dir: []const u8,
-    monitor_source: wayspot.env.MonitorSource,
-) !void {
-    if (!build_options.enable_sdl) {
-        std.log.err("sunglasses overlay requires SDL build", .{});
-        std.process.exit(2);
-    }
-
-    wayspot.sunglasses.run(allocator, monitor_source) catch |err| {
-        wayspot.sunglasses.recordStartupFailure(allocator, runtime_dir, err);
-        std.log.err("sunglasses overlay failed: {s}", .{@errorName(err)});
-        std.process.exit(2);
-    };
-}
-
 fn runtimeDir(init: *const std.process.Init) ![]const u8 {
     return init.minimal.environ.getPosix("XDG_RUNTIME_DIR") orelse error.HyprlandRuntimeDirMissing;
 }
 
 fn instanceSignature(init: *const std.process.Init) ![]const u8 {
     return init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE") orelse error.HyprlandInstanceSignatureMissing;
-}
-
-fn subCmdIdentity(route: sub_cmd.SubCmd) []const u8 {
-    return switch (route) {
-        .notifications => wayspot.identity.notifications,
-        .wallpaper => wayspot.identity.wallpaper,
-        .sunglasses => wayspot.identity.sunglasses,
-    };
-}
-
-fn lifecycleIdentity(value: candidate.Lifecycle) []const u8 {
-    return switch (value) {
-        .notifications_restart => wayspot.identity.notifications,
-        .wallpaper_restart, .wallpaper_rotate => wayspot.identity.wallpaper,
-        .sunglasses_restart,
-        .sunglasses_apply,
-        .sunglasses_reconcile,
-        .sunglasses_dim,
-        .sunglasses_filter,
-        .sunglasses_image,
-        => wayspot.identity.sunglasses,
-    };
 }
 
 const PickerBundle = struct {
@@ -403,11 +350,8 @@ test "selectEntry rejects every legacy resident flag" {
     try expectHelp(&.{ "wayspot", "--sunglasses-clear-image", "DP-1" });
 }
 
-test "canonical resident identities remain explicit" {
-    try std.testing.expectEqualStrings(wayspot.identity.notifications, subCmdIdentity(notifications_mode.restartSubCmd()));
-    try std.testing.expectEqualStrings(wayspot.identity.wallpaper, subCmdIdentity(wallpaper_mode.restartSubCmd()));
-    try std.testing.expectEqualStrings(wayspot.identity.sunglasses, subCmdIdentity(sunglasses_mode.restartSubCmd()));
-    try std.testing.expectEqualStrings(wayspot.identity.notifications, lifecycleIdentity(candidate.notificationsRestart()));
-    try std.testing.expectEqualStrings(wayspot.identity.wallpaper, lifecycleIdentity(candidate.wallpaperRotate()));
-    try std.testing.expectEqualStrings(wayspot.identity.sunglasses, lifecycleIdentity(candidate.sunglassesApply()));
+test "resident identity names remain explicit" {
+    try std.testing.expectEqualStrings("wayspot-notify", wayspot.identity.notifications);
+    try std.testing.expectEqualStrings("wayspot-wall", wayspot.identity.wallpaper);
+    try std.testing.expectEqualStrings("wayspot-sunglas", wayspot.identity.sunglasses);
 }

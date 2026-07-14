@@ -103,10 +103,11 @@ test "config loader rejects oversized file" {
 
     var data: [max_file_bytes + 1]u8 = undefined;
     @memset(&data, 'x');
-    try tmp.dir.writeFile(.{ .sub_path = "wallpaper.conf", .data = &data });
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "wallpaper.conf", .data = &data });
 
-    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(base);
+    const base_z = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(base_z);
+    const base = std.mem.sliceTo(base_z, 0);
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/wallpaper.conf", .{base});
     defer std.testing.allocator.free(path);
 

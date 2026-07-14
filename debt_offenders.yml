@@ -1,14 +1,13 @@
 # WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
 # This is a design index, not an implementation authorization.
 project: wayspot
-checkpoint: fbf89c8
+checkpoint: 2b11c99
 status: implementation_in_progress
-implementation_status: canonical_mode_entrypoints_uncommitted
+implementation_status: runtime_entrypoint_separation_uncommitted
 review_gate:
-  current_slice: canonical_mode_entrypoints
+  current_slice: runtime_entrypoint_separation
   implementation_authorized: true
   forbidden_before_approval:
-    - runtime_entrypoint_separation
     - build_packaging_and_rerun_wiring
     - stale_shape_cleanup
 
@@ -1520,7 +1519,7 @@ offenders:
       - Cmd never executes a leaf
 
   - id: canonical_mode_entrypoints
-    status: ready_for_review
+    status: closed
     owner: process
     evidence:
       - src/main.zig
@@ -1579,24 +1578,43 @@ offenders:
       - legacy main-branch removal is intentional; runtime compatibility is bounded transition state
 
   - id: runtime_entrypoint_separation
-    status: open
+    status: ready_for_review
     owner: process
     evidence:
       - src/notification/mod.zig
       - src/wallpaper/mod.zig
       - src/sunglasses/mod.zig
-      - src/picker/surface.zig
+      - src/main.zig
+      - src/gui/surface.zig
+      - src/notification/banner.zig
+      - src/notification/rows.zig
+      - src/wallpaper/config.zig
+      - src/wallpaper/library.zig
+      - src/wallpaper/loop.zig
     target_files:
       - src/notification/mod.zig
       - src/wallpaper/mod.zig
       - src/sunglasses/mod.zig
+      - src/main.zig
       - src/gui/surface.zig
       - src/root.zig
+      - src/picker/mode/notifications.zig
+      - src/picker/mode/wallpaper.zig
+      - src/picker/mode/sunglasses.zig
+      - src/notification/banner.zig
+      - src/notification/rows.zig
+      - src/wallpaper/config.zig
+      - src/wallpaper/library.zig
+      - src/wallpaper/loop.zig
     changes:
-      - make each resident mod expose one explicit run entrypoint
+      - replace resident mod aliases with explicit owner functions for run and direct lifecycle operations
+      - move resident identity setup into notification, wallpaper, and sunglasses owner entrypoints
+      - move wallpaper failure logging and sunglasses startup recovery into their resident owners
       - keep DBus, Wayland, SDL, state, cleanup, and recovery in resident folders
       - remove picker surface imports of resident implementation files
       - keep mode files limited to SubCmd and leaf intent
+      - retain resident cleanup and recovery coverage as reachable module tests
+      - fix notification monitor-slice lifetime and global row test cleanup exposed by resident reachability
     required_symbols:
       - notification.run
       - wallpaper.run
