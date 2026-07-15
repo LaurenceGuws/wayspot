@@ -44,4 +44,5 @@ are in [`AGENTS.md`](AGENTS.md). The project design, rules, active scope, and
 reviewed debt register are [`project_design.yml`](project_design.yml),
 [`project_rules.yml`](project_rules.yml),
 [`project_version_scope.yml`](project_version_scope.yml), and
-[`debt_offenders.yml`](debt_offenders.yml).
+[`debt_offenders.yml`](debt_offenders.yml). External IO maturity is tracked
+separately in [`maturity_offenders.yml`](maturity_offenders.yml).

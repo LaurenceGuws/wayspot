@@ -7,6 +7,7 @@
 - Project rules: [`project_rules.yml`](project_rules.yml)
 - Active scope and bounds: [`project_version_scope.yml`](project_version_scope.yml)
 - Reviewed design debt: [`debt_offenders.yml`](debt_offenders.yml)
+- External IO maturity: [`maturity_offenders.yml`](maturity_offenders.yml)
 - Domain implementation: [`src/`](src/)
 - Build graph: [`build.zig`](build.zig)
 - QAgent domain shape: `/home/home/personal/projects/qagent/qagent/schema.yml`
@@ -28,7 +29,9 @@
 `DOMAIN.yml` is the exhaustive Wayspot product shape. `project_design.yml`
 defines the dependency graph, `project_rules.yml` defines cross-cutting
 engineering rules, and `project_version_scope.yml` defines the active scope
-and named bounds. `src/` is the answer for behavior, ownership, cleanup, and
+and named bounds. `debt_offenders.yml` records product-shape debt;
+`maturity_offenders.yml` records the reviewed external-IO mock-and-test
+maturity work. `src/` is the answer for behavior, ownership, cleanup, and
 failure meaning. A new root, noun, verb, field, relationship, or product
 surface is an operator decision.
 
@@ -94,6 +97,9 @@ unfinished implementation.
 
 - Read the active scope, project rules, domain, design, source, callers, and
   runtime path before changing shape.
+- Read `maturity_offenders.yml` before changing any covered external-IO
+  boundary; its unit/fuzz/simulation gates do not accept fixtures or live
+  external receipts.
 - Write or update the design and invariant before implementation.
 - Pass the design and debt register through reviewer approval before expanding
   a boundary slice.
@@ -131,6 +137,8 @@ unfinished implementation.
   and named capacity.
 - `debt_offenders.yml` is the reviewed current debt register, not a second
   product contract.
+- `maturity_offenders.yml` is the reviewed external-IO mock and test register,
+  not product vocabulary or a replacement for `debt_offenders.yml`.
 - `README.md` is the operator-facing overview and must not override the above.
 
 Before reporting completion:

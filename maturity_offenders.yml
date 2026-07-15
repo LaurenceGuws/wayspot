@@ -1,0 +1,1680 @@
+# Wayspot external IO maturity register.
+# This index is exhaustive for current external calls. It does not replace
+# DOMAIN.yml or the cache/config/history register.
+
+register:
+  name: external_io_maturity
+  status: open
+  implementation_status: design_only
+  source_changes: false
+  implementation_order:
+    - sdl_wayland_window_display_events
+    - hyprland_ipc_wire
+    - dbus_notifications
+    - std_io_fs_file_and_terminal
+    - process_launch
+    - linux_lifecycle
+    - clock_and_random
+    - process_input_environment
+    - lua_defaults_runtime
+    - text_rasterization
+
+scope:
+  included_surfaces:
+    - SDL and Wayland C window, display, buffer, and event calls
+    - Hyprland request and socket2 event sockets with their JSON wire parsing
+    - D-Bus notification connection, messages, variants, main loop, and timers
+    - std.Io/std.fs file calls, terminal output, and standard diagnostic logs
+      used by Wayspot owners
+    - fork, exec, wait, child-process, and converter launch calls
+    - Linux signal, eventfd, poll, kill, sleep, and /proc lifecycle reads
+    - clock and random sources used by resident and notification owners
+    - process environment inputs used to choose XDG, HOME, PATH, and Hyprland paths
+    - Lua 5.4/Howl calls used by the defaults loader
+    - FreeType and HarfBuzz font loading, scaling, shaping, glyph, and bitmap calls
+  not_boundaries:
+    - SQLite
+    - INI
+    - JSONL
+  exclusion_rule: >-
+    SQLite, INI, and JSONL remain absent dependencies. This register separates
+    runtime product IO from build/re-run tooling and from test-only filesystem
+    fixtures. std.Io and std.fs are runtime substrate calls only when a listed
+    product owner invokes them; build.zig and re-run.sh are tooling inventory,
+    and std.testing.tmpDir/std.testing.io/TmpDir calls are forbidden evidence.
+
+  inventory_claim: >-
+    The current_direct_calls entries cover every current runtime native C,
+    socket, std.Io/std.fs, process, Linux lifecycle, clock/random, environment,
+    and terminal/logging, Lua, FreeType, and HarfBuzz call in the listed product owners. Tooling-only build.zig and
+    re-run.sh calls are listed only under tooling_only. Test-only
+    std.testing.tmpDir/std.testing.io/TmpDir file calls are listed only under
+    forbidden_current_test_io and never satisfy a maturity gate. Pure
+    formatting through an abstract std.Io.Writer is unit/fuzz work. Orders 1-3
+    are the largest first wave; the remaining orders preserve the complete
+    current runtime-call inventory.
+
+tooling_only:
+  meaning: >-
+    build.zig and re-run.sh are build/re-run tools, not runtime product IO
+    owners. Their filesystem, process, environment, /proc, and shell calls are
+    inventoried for completeness only. They have no product mock seam and are
+    never driven by a simulation gate; shell receipts and build-graph receipts
+    are not maturity evidence.
+  paths:
+    - path: build.zig
+      symbols:
+        - build
+      direct_calls:
+        - std.Io.Dir.cwd().readFileAlloc
+        - b.dependency
+        - linkSystemLibrary
+        - "linkSystemLibrary(freetype2)"
+        - "linkSystemLibrary(harfbuzz)"
+        - "include_path(/usr/include/freetype2)"
+        - "include_path(/usr/include/harfbuzz)"
+        - addModule
+        - addTest
+        - addRunArtifact
+      bounds:
+        - "The embedded defaults.lua read is limited to 32768 bytes by build.zig."
+        - "Build graph module, test, link, and run-artifact counts are bounded by the declared build graph; no product input is created by this path."
+      errors: "Build configuration, dependency, read, link, and graph-construction errors stop the build; no runtime fallback is claimed."
+      cleanup: "Build-owned module and artifact objects are released by the build runner; this path has no resident handle or product state."
+    - path: re-run.sh
+      symbols:
+        - sync_binary
+        - read_proc_argv
+        - read_pid_file
+        - pid_has_canonical_mode
+        - pid_has_legacy_mode
+        - collect_mode_pids
+        - collect_wallpaper_pids
+        - stop_pid_list
+        - wait_for_pid_list
+        - wait_for_canonical_mode
+        - wait_for_canonical_wallpaper
+        - restart_notifications
+        - restart_wallpaper
+      direct_calls:
+        - mkdir -p
+        - cp
+        - chmod +x
+        - mv -f
+        - rm -f
+        - head -n 2
+        - pgrep -x
+        - kill -TERM
+        - sleep 0.05
+        - setsid
+        - systemctl --user start/stop
+        - zigup run 0.16.0 build
+        - canonical binary launch
+        - /proc/<pid>/cmdline read
+        - /proc/<pid>/comm read
+        - stdout/stderr redirection
+      bounds:
+        - "At most 8 external pid candidates, 4 argv elements, pid values <=4194304, and 40 wait cycles are accepted."
+        - "The shell script accepts only exact canonical or exact legacy argv identities; fuzzy substring matches are not accepted."
+      errors: "Every shell command status is checked at its current boundary; malformed, stale, duplicate, and overbound pid data is rejected."
+      cleanup: "Temporary binary paths, pid candidates, and receipt processes are removed or reaped by the bounded script path; no product owner receives shell ownership."
+  evidence: "inventory_only"
+  simulation: false
+
+forbidden_current_test_io:
+  status: open_migration_offenders
+  meaning: >-
+    These are current test-only filesystem fixtures, not runtime product IO.
+    Their std.testing.tmpDir, std.testing.io, and std.testing.TmpDir operations
+    are open migration work and cannot count as unit, fuzz, or simulation
+    maturity evidence. A future mock seam must replace the fixture operation
+    before its boundary can claim simulation coverage.
+  entries:
+    - path: src/config/defaults.zig
+      symbols:
+        - "test missing user config keeps embedded defaults"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.io
+        - std.testing.TmpDir
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace the temporary HOME/config directory with the planned typed file mock; keep Lua mapping unit/fuzz tests separate."
+    - path: src/notification/dbus.zig
+      symbols:
+        - dbusTestPath
+        - readTestHistory
+        - "timer expiry rejects stale source and accepts current source"
+        - "notify History failure rolls back Store timer file hooks and rows"
+        - "post-replace History failure commits Store timer and effects"
+        - "notify history preserves replacement created time and dates new rows"
+        - "close persists every durable field before live removal"
+        - "close missing durable row leaves live state and timer unchanged"
+        - "close pre-replace failure preserves live state timer file and effects"
+        - "close parent sync failure commits live close and effects"
+        - "expiry retries pre-replace failure and closes on success"
+        - "DBus deinit creates no durable history row"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - std.Io.Dir.cwd().readFileAlloc
+      migration_task: "Move durable-history test paths and readback behind the D-Bus/file mock transcripts; native GLib simulation must not use a temporary fixture directory."
+    - path: src/notification/history.zig
+      symbols:
+        - writeTestFile
+        - testPath
+        - "missing history file loads empty"
+        - "directory read error propagates"
+        - "permission read error propagates"
+        - "read allocation error propagates"
+        - "read byte bound propagates StreamTooLong"
+        - "invalid JSON propagates"
+        - "unsupported version propagates"
+        - "wrong or missing rows propagate invalid JSON"
+        - "malformed row rejects the complete history"
+        - "parse returns HistoryFieldTooLong and frees prior rows"
+        - "save writes and replaces one JSON object atomically"
+        - "save reports parent sync failure after publishing new bytes"
+        - "save creates nested absolute parent directories"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.io
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - tmp.dir.openFile
+        - tmp.dir.setPermissions
+        - tmp.dir.close
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace temporary history files and injected parent paths with the typed HistoryFileIo transcript, retaining pure JSON and row unit/fuzz tests."
+    - path: src/notification/history_list.zig
+      symbols:
+        - "notification History list projects newest rows and loads once"
+        - "notification history candidate cleanup is repeatable"
+        - "notification History list retries after a failed read"
+        - "notification History list enforces the selection bound"
+        - "notification History list allocation failure cleans every owner"
+        - "notification History list stages output before publishing"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.io
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+      migration_task: "Drive history-list load failure and retry through a typed history mock; do not treat a temporary JSON file as simulation."
+    - path: src/picker/cmd.zig
+      symbols:
+        - pickerHistoryTestPath
+        - expectHistoryWriteFailure
+        - "Cmd picker collects candidates once per picker lifecycle"
+        - "candidate loading rolls back overflow and retries without stale candidates"
+        - "desktop scan overflow reaches transaction and retries cleanly"
+        - "Cmd Apps route reaches installed and fixed-local leaves"
+        - "picker history save creates nested parent directories"
+        - "picker history rejects persisted unreachable selection without mutation"
+        - "picker history load remembers missing file and retries every other failure"
+        - "picker history load failure publishes no partial list and retries"
+        - "picker history load rejects oversized files and permission failures"
+        - "picker history serialization accepts exact file bound and rejects one byte over"
+        - "picker history save preflights file overflow before replacement"
+        - "picker history atomic write preserves phases and cleans temporary files"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - std.Io.Dir.cwd().readFileAlloc
+        - std.Io.Dir.cwd().access
+        - std.Io.Dir.cwd().deleteFile
+        - std.Io.Dir.cwd().createFile
+        - std.Io.Dir.cwd().createDirPath
+        - std.Io.Dir.cwd().openDir
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace picker history/cache temporary directories with PickerHistoryFileIo and AppsCacheFileIo transcripts; keep candidate rollback unit/fuzz assertions independent."
+    - path: src/picker/icons.zig
+      symbols:
+        - testAbsolutePath
+        - "icon resolver accepts bounded absolute png path"
+        - "icon resolver searches bounded hicolor and pixmaps roots"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.io
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - tmp.dir.createDirPath
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace icon root/path fixtures with IconFileIo transcripts; image decoding remains its separate unit/fuzz boundary."
+    - path: src/picker/mode/apps.zig
+      symbols:
+        - "Apps.defaultCachePath uses XDG cache parent and HOME fallback"
+        - "apps owns fixed local candidates and executable resolution"
+        - "unexpected app cache read errors propagate"
+        - "apps collects candidates from cache file"
+        - "apps accepts candidates without icon metadata"
+        - "apps cache owns bounded fields and skips bad duplicate records"
+        - "apps allocation failure preserves output and retries"
+        - "apps scans desktop files when cache is missing"
+        - "apps returns no candidates when cache has no valid candidates"
+        - "apps replaces owned candidate fields across collects"
+        - "apps trims crlf and trailing whitespace from candidate fields"
+        - "apps scans desktop root and rebuilds candidate cache"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - tmp.dir.createDirPath
+        - tmp.dir.readFileAlloc
+      migration_task: "Replace app-cache and desktop-root fixtures with AppsCacheFileIo and directory transcript operations; fixed local Spec records remain pure data."
+    - path: src/picker/scale.zig
+      symbols:
+        - testAbsolutePath
+        - "default zoom state loads when file is missing"
+        - "valid persisted zoom loads"
+        - "oversized state file falls back to default"
+        - "malformed state falls back to default"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.io
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace scale state temporary files with a typed state/file transcript; scale math remains unit/fuzz only."
+    - path: src/sunglasses/overlay.zig
+      symbols:
+        - testRuntimeDir
+        - "sunglasses owner rejects a second live pid file"
+        - "sunglasses startup status path stays beside pid file"
+        - "sunglasses startup poll reports status before timeout"
+        - "sunglasses startup poll keeps ready wait and stale outcomes without status"
+        - "sunglasses startup status round trips missing image failure"
+        - "sunglasses startup status rejects oversized file"
+        - "sunglasses startup status cleanup removes stale status on new start"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - tmp.dir.createDirPath
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace pid/status temporary paths with PidStatusFileIo and ProcessControlIo transcripts; overlay lifecycle simulation must not use fixture files."
+    - path: src/sunglasses/state.zig
+      symbols:
+        - "effective image overlay requires enabled opacity and absolute path"
+        - "parse valid state with image fields"
+        - "malformed state load falls back to default"
+        - "missing state load falls back to default"
+        - "oversized state load falls back to default"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace sunglasses state fixture files with a typed state transcript; parser and scalar validation remain unit/fuzz tests."
+    - path: src/sunglasses/surface.zig
+      symbols:
+        - "surface buffer decision uses image only for effective image overlay"
+        - "image path formatting accepts maximum state path plus nul terminator"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace image path fixture roots with a typed image/file transcript; C surface calls remain order-1 simulation."
+    - path: src/wallpaper/config.zig
+      symbols:
+        - "config loader rejects oversized file"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace wallpaper config fixture files with a typed ConfigFileIo transcript; parse remains unit/fuzz."
+    - path: src/wallpaper/library.zig
+      symbols:
+        - "library scan indexes PNG and BMP records from one directory"
+        - "library scan requires an absolute directory path"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - tmp.dir.writeFile
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace wallpaper directory fixture trees with WallpaperLibraryIo open/next/stat/close transcripts."
+    - path: src/wallpaper/loop.zig
+      symbols:
+        - "wallpaper owner rejects a second live pid file"
+      direct_calls:
+        - std.testing.tmpDir
+        - std.testing.TmpDir
+        - std.Io.Dir.cwd().realPathFileAlloc
+      migration_task: "Replace wallpaper pid fixture paths with PidStatusFileIo and ProcessControlIo transcripts."
+  required_scan: >-
+    Run rg for std.testing.tmpDir, std.testing.io, std.testing.TmpDir, tmp.dir,
+    and test-only realPathFileAlloc calls. The result must equal these fourteen
+    source paths; every match remains an open migration offender and is
+    forbidden as maturity simulation evidence.
+
+absent_dependencies:
+  - name: sqlite
+    present: false
+    evidence: "No SQLite import, link, schema, query, or database path exists in src, build.zig, or assets."
+  - name: ini
+    present: false
+    evidence: "No INI parser, INI reader, or INI file path exists in src, build.zig, or assets."
+  - name: jsonl
+    present: false
+    evidence: "No JSONL reader or writer exists; in-scope JSON parsing belongs to the Hyprland wire adapter."
+
+test_classes:
+  unit:
+    meaning: >-
+      Run a pure Wayspot function with bounded values and assert exact returned
+      values, errors, and owned-memory state.
+  fuzz:
+    meaning: >-
+      Generate bounded bytes or typed wire values for a pure parser and assert
+      termination, exact rejection, and cleanup without an external process.
+  simulation:
+    meaning: >-
+      Run production code against an exact mock IO interface. The mock is
+      generated from bounded operations and reproduces every input byte, output
+      byte, error, partial transfer, callback, and cleanup event exactly; it is
+      not a fixture, screenshot, live GUI or compositor call, shell call, or
+      canned external object.
+
+rules:
+  pure_internal_modules: >-
+    Pure parsers, event classifiers, result mappers, geometry, and state
+    transitions use unit and fuzz only. They do not receive a mock IO object.
+  external_adapters: >-
+    Every direct C, socket, D-Bus, main-loop, file, terminal, or diagnostic-log
+    owner uses a named mock seam and simulation. Passing unit or fuzz evidence
+    alone does not close that owner.
+  mock_cleanup: >-
+    Every simulated handle, buffer, variant, source, callback context, and
+    connection has one explicit deinit or close assertion on success and every
+    error path.
+  source_path_rule: >-
+    current_owner_paths name current files and symbols. current_direct_calls list
+    exact calls; grouped keys name adapter call groups owned by the paths above.
+    planned_mock_interface paths are targets and are not current source claims.
+  test_class_rule: "Only unit, fuzz, and simulation occur in this register."
+
+boundaries:
+  - order: 1
+    name: sdl_wayland_window_display_events
+    status: open
+    current_owner_paths:
+      - "src/env/monitor.zig:queryMonitors/monitorName/monitorSize/monitorScale/waylandOutput/windowWaylandHandles"
+      - "src/gui/surface.zig:run; Surface.init/deinit/handleEvent/render"
+      - "src/notification/banner.zig:show/render/eventLoop/applySurfaceScale/setDrawColor"
+      - "src/picker/icon_diag.zig:writeReport"
+      - "src/picker/icons.zig:AppIconStore.deinit/loadTexturePath/loadSurface/boundedSurfaceForTexture"
+      - "src/picker/scale.zig:zoomAction"
+      - "src/picker/signal.zig:Signal.pushWake"
+      - "src/picker/text.zig:TextEngine.draw/renderTexture/renderCursor"
+      - "src/wallpaper/loop.zig:Loop.run/waitForWake/pushVendorUserEvent"
+      - "src/wallpaper/surface.zig:WallpaperSurface.init/drawImage/deinit; LayerShellRole.init/drawImage/attachCreatedBuffer/deinit"
+      - "src/sunglasses/overlay.zig:Overlay.startVendor/runApplyLoop/waitForWake/OverlaySignals"
+      - "src/sunglasses/surface.zig:SunglassesSurface.init/redraw/deinit; LayerShellRole.init/drawStateSurface/drawStateImage/drawStateTint/attachCreatedBuffer/deinit"
+      - "src/c/sdl.h:WAYSPOT_LAYER_MAX_OUTPUTS/WAYSPOT_LAYER_MAX_OUTPUT_NAME/wayspot_layer_globals/wayspot_layer_configure_state/wayspot_shm_buffer/wayspot_layer_result/wayspot_layer_globals_init/wayspot_layer_globals_deinit/wayspot_layer_find_output/wayspot_layer_get_surface/wayspot_layer_surface_add_listener/wayspot_layer_surface_set_size/wayspot_layer_surface_set_anchor/wayspot_layer_surface_set_exclusive_zone/wayspot_layer_surface_set_keyboard_interactivity/wayspot_layer_surface_ack_configure/wayspot_layer_surface_destroy/wayspot_wl_surface_commit/wayspot_wl_display_roundtrip/wayspot_wl_display_roundtrip_cleanup/wayspot_shm_buffer_create/wayspot_shm_buffer_destroy/wayspot_wl_surface_attach_buffer/wayspot_wl_surface_detach_buffer/wayspot_wl_surface_set_empty_input_region"
+      - "src/c/wayland.h:WAYSPOT_LAYER_MAX_OUTPUTS/WAYSPOT_LAYER_MAX_OUTPUT_NAME/wayspot_layer_output/wayspot_layer_globals/wayspot_layer_configure_state/wayspot_shm_buffer/wayspot_layer_result/wayspot_wayland_connect/wayspot_wayland_disconnect/wayspot_layer_create_surface/wayspot_wl_surface_destroy/wayspot_layer_globals_init/wayspot_layer_globals_deinit/wayspot_layer_find_output/wayspot_layer_get_surface/wayspot_layer_surface_add_listener/wayspot_layer_surface_set_size/wayspot_layer_surface_set_anchor/wayspot_layer_surface_set_exclusive_zone/wayspot_layer_surface_set_keyboard_interactivity/wayspot_layer_surface_ack_configure/wayspot_layer_surface_destroy/wayspot_wl_surface_commit/wayspot_wl_display_roundtrip/wayspot_wl_display_roundtrip_cleanup/wayspot_shm_buffer_create/wayspot_shm_buffer_destroy/wayspot_wl_surface_attach_buffer/wayspot_wl_surface_detach_buffer"
+      - "src/c/wayspot_layer_shell.c:wayspot_wayland_connect/wayspot_shm_buffer_create/wayspot_layer_globals_init"
+    current_direct_calls:
+      src/env/monitor.zig:
+        - SDL_GetDisplays
+        - SDL_free
+        - SDL_GetDisplayName
+        - SDL_GetDisplayBounds
+        - SDL_GetDisplayContentScale
+        - SDL_GetDisplayProperties
+        - SDL_GetPointerProperty
+        - SDL_GetWindowProperties
+      src/gui/surface.zig:
+        - SDL_Init
+        - SDL_Quit
+        - SDL_CreateWindow
+        - SDL_DestroyWindow
+        - SDL_CreateRenderer
+        - SDL_DestroyRenderer
+        - SDL_StartTextInput
+        - SDL_StopTextInput
+        - SDL_ShowWindow
+        - SDL_RaiseWindow
+        - SDL_WaitEventTimeout
+        - SDL_PollEvent
+        - SDL_GetTicks
+        - SDL_GetWindowSize
+        - SDL_SetRenderScale
+        - SDL_SetRenderDrawColor
+        - SDL_RenderClear
+        - SDL_RenderPresent
+        - SDL_RenderFillRect
+        - SDL_RenderRect
+        - SDL_RenderTexture
+        - SDL_GetClipboardText
+        - SDL_SetClipboardText
+        - SDL_free
+      src/notification/banner.zig:
+        - SDL_SetHint
+        - SDL_Init
+        - SDL_Quit
+        - SDL_CreateWindow
+        - SDL_DestroyWindow
+        - SDL_CreateRenderer
+        - SDL_DestroyRenderer
+        - SDL_ShowWindow
+        - SDL_RaiseWindow
+        - SDL_SetRenderScale
+        - SDL_RenderClear
+        - SDL_RenderFillRect
+        - SDL_RenderPresent
+        - SDL_SetRenderDrawColor
+        - SDL_WaitEventTimeout
+        - SDL_SetWindowSize
+        - SDL_SyncWindow
+      src/picker/icon_diag.zig:
+        - SDL_Init
+        - SDL_Quit
+        - SDL_CreateWindow
+        - SDL_DestroyWindow
+        - SDL_CreateRenderer
+        - SDL_DestroyRenderer
+        - SDL_DestroyTexture
+      src/picker/icons.zig:
+        - SDL_LoadPNG
+        - SDL_LoadBMP
+        - SDL_DestroySurface
+        - SDL_CreateTextureFromSurface
+        - SDL_ScaleSurface
+        - SDL_DestroyTexture
+      src/picker/scale.zig: []
+      src/picker/signal.zig:
+        - SDL_PushEvent
+      src/picker/text.zig:
+        - SDL_CreateTexture
+        - SDL_DestroyTexture
+        - SDL_SetTextureBlendMode
+        - SDL_UpdateTexture
+        - SDL_RenderTexture
+        - SDL_SetRenderDrawColor
+        - SDL_RenderFillRect
+      src/sunglasses/overlay.zig:
+        - SDL_SetHint
+        - SDL_Init
+        - SDL_Quit
+        - SDL_WaitEvent
+        - SDL_PollEvent
+        - SDL_PushEvent
+      src/sunglasses/surface.zig:
+        - SDL_CreateWindowWithProperties
+        - SDL_DestroyWindow
+        - SDL_CreateProperties
+        - SDL_DestroyProperties
+        - SDL_SetStringProperty
+        - SDL_SetNumberProperty
+        - SDL_SetBooleanProperty
+        - SDL_GetWindowProperties
+        - SDL_GetPointerProperty
+        - SDL_LoadPNG
+        - SDL_LoadBMP
+        - SDL_ConvertSurface
+        - SDL_SetSurfaceBlendMode
+        - SDL_CreateSurfaceFrom
+        - SDL_BlitSurfaceScaled
+        - SDL_DestroySurface
+        - SDL_SetWindowSize
+      src/wallpaper/loop.zig:
+        - SDL_SetHint
+        - SDL_Init
+        - SDL_Quit
+        - SDL_WaitEventTimeout
+        - SDL_PollEvent
+        - SDL_PushEvent
+        - SDL_GetTicks
+      src/wallpaper/surface.zig:
+        - SDL_LoadPNG
+        - SDL_LoadBMP
+        - SDL_ConvertSurface
+        - SDL_CreateSurfaceFrom
+        - SDL_BlitSurfaceScaled
+        - SDL_DestroySurface
+      "src/c/wayland.h": []
+      "src/c/wayspot_layer_shell.c":
+        - wayspot_wayland_connect
+        - wayspot_wayland_disconnect
+        - wayspot_layer_globals_init
+        - wayspot_layer_globals_deinit
+        - wayspot_layer_find_output
+        - wayspot_layer_create_surface
+        - wayspot_layer_get_surface
+        - wayspot_layer_get_surface_on_layer
+        - wayspot_layer_surface_add_listener
+        - wayspot_layer_surface_set_size
+        - wayspot_layer_surface_set_anchor
+        - wayspot_layer_surface_set_exclusive_zone
+        - wayspot_layer_surface_set_keyboard_interactivity
+        - wayspot_layer_surface_ack_configure
+        - wayspot_layer_surface_destroy
+        - wayspot_wl_surface_commit
+        - wayspot_wl_surface_attach_buffer
+        - wayspot_wl_surface_detach_buffer
+        - wayspot_wl_surface_set_empty_input_region
+        - wayspot_wl_display_roundtrip
+        - wayspot_wl_display_roundtrip_cleanup
+        - wayspot_shm_buffer_create
+        - wayspot_shm_buffer_destroy
+        - wl_display_connect
+        - wl_display_disconnect
+        - wl_display_get_registry
+        - wl_display_roundtrip
+        - wl_registry_add_listener
+        - wl_registry_bind
+        - wl_registry_destroy
+        - wl_output_add_listener
+        - wl_output_destroy
+        - wl_compositor_create_surface
+        - wl_compositor_create_region
+        - wl_compositor_destroy
+        - wl_region_destroy
+        - wl_proxy_add_listener
+        - wl_proxy_get_version
+        - wl_proxy_marshal_flags
+        - wl_surface_attach
+        - wl_surface_damage_buffer
+        - wl_surface_commit
+        - wl_surface_destroy
+        - wl_surface_set_input_region
+        - wl_shm_create_pool
+        - wl_shm_pool_create_buffer
+        - wl_shm_pool_destroy
+        - wl_shm_destroy
+        - wl_buffer_destroy
+        - memfd_create
+        - ftruncate
+        - mmap
+        - munmap
+        - close
+    current_type_and_constant_uses:
+      - "src/picker/scale.zig:SDL_Keycode/SDL_Keymod/SDL_KMOD_CTRL"
+      - "src/picker/signal.zig:SDL_Event/SDL_EVENT_QUIT"
+    planned_mock_interfaces:
+      - path: src/c/sdl_io.zig
+        module: sdl_io
+        planned_design: true
+        operator_decision_required: true
+      - path: src/c/wayland_io.zig
+        module: wayland_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/c/sdl_io.zig
+          mock_call_transcript:
+            - operation: SdlRuntimeIo.init/quit/setHint/startTextInput/stopTextInput
+              input_type: SdlRuntimeRequest
+              result_type: SdlRuntimeResult
+              error_set: [SdlInitFailed, SdlHintFailed, SdlTextInputFailed]
+            - operation: SdlDisplayIo.queryDisplays/queryBounds/queryScale/queryProperties
+              input_type: DisplayId or void
+              result_type: DisplayList<=8 or DisplayProperties
+              error_set: [SdlMonitorQueryFailed, SdlMonitorNameMissing, SdlMonitorSizeMissing, SdlMonitorScaleMissing, SdlMonitorPropertyMissing]
+            - operation: SdlWindowIo.create/destroy/show/raise/size/sync
+              input_type: WindowSpec or WindowHandle
+              result_type: WindowHandle or bool or void
+              error_set: [SdlWindowFailed, SdlShowFailed, SdlResizeFailed]
+            - operation: SdlWindowPropertyIo.create/destroy/set/get
+              input_type: WindowPropertyRequest or WindowHandle
+              result_type: PropertySetResult or WaylandHandles
+              error_set: [SdlWindowFailed, SdlWindowPropertyMissing, WaylandSurfaceUnavailable]
+            - operation: SdlEventIo.wait/poll/push/ticks
+              input_type: SdlEvent or EventTimeoutMs or void
+              result_type: SdlEvent or bool or u64
+              error_set: [SdlWaitFailed]
+            - operation: SdlRenderIo.create/destroy/clear/draw/present/scale
+              input_type: WindowHandle or RendererHandle or RenderCommand
+              result_type: RendererHandle or bool or void
+              error_set: [SdlRendererFailed, SdlRenderFailed, SdlScaleFailed]
+            - operation: SdlTextureIo.create/update/destroy/render
+              input_type: RendererHandle or TextureSpec or TextureHandle
+              result_type: TextureHandle or bool or void
+              error_set: [SdlTextTextureFailed, SdlTextRenderFailed]
+            - operation: SdlImageIo.load/convert/scale/blit/destroy
+              input_type: BoundedImagePath or SurfaceHandle or ImageRect
+              result_type: SurfaceHandle or bool or void
+              error_set: [WallpaperImageLoadFailed, WallpaperImageConvertFailed, WallpaperImageTargetFailed, WallpaperImageScaleFailed, SunglassesImageLoadFailed, SunglassesImageConvertFailed, SunglassesImageTargetFailed, SunglassesImageScaleFailed]
+            - operation: SdlClipboardIo.get/set/free
+              input_type: ClipboardBytes or void
+              result_type: ClipboardBytes or bool or void
+              error_set: [SdlClipboardFailed]
+          cleanup_record: >-
+            Every typed handle returned by create/load/convert is destroyed by
+            its matching destroy operation exactly once; init failure quits
+            SDL, and clipboard/display allocations receive one free record.
+        - path: src/c/wayland_io.zig
+          mock_call_transcript:
+            - operation: WaylandDisplayIo.connect/disconnect/roundtrip
+              input_type: WaylandDisplayHandle or void
+              result_type: WaylandDisplayHandle or i32 or void
+              error_set: [WaylandDisplayUnavailable, LayerShellRoundtripFailed]
+            - operation: WaylandRegistryIo.bind/listen/destroy
+              input_type: RegistryHandle or RegistryBindRequest
+              result_type: RegistryBinding or void
+              error_set: [LayerShellRegistryFailed, LayerShellRegistryListenerFailed]
+            - operation: LayerShellIo.create/configure/destroy
+              input_type: LayerGlobals or LayerSurfaceRequest
+              result_type: LayerSurfaceHandle or ConfigureState or void
+              error_set: [LayerShellMissing, LayerShellSurfaceCreateFailed, LayerShellConfigureFailed]
+            - operation: WaylandBufferIo.create/attach/detach/destroy
+              input_type: LayerGlobals or BufferHandle or BufferAttach
+              result_type: BufferHandle or void
+              error_set: [WallpaperInvalidBufferSize, WallpaperMemfdFailed, WallpaperTruncateFailed, WallpaperMmapFailed, WallpaperShmPoolFailed, WallpaperWlBufferFailed, SunglassesInvalidBufferSize, SunglassesMemfdFailed, SunglassesTruncateFailed, SunglassesMmapFailed, SunglassesShmPoolFailed, SunglassesWlBufferFailed]
+            - operation: WaylandMemoryIo.createMap/unmap/close
+              input_type: BufferByteLength or FileDescriptor
+              result_type: MappedBytes or void
+              error_set: [WallpaperMemfdFailed, WallpaperTruncateFailed, WallpaperMmapFailed, SunglassesMemfdFailed, SunglassesTruncateFailed, SunglassesMmapFailed]
+          cleanup_record: >-
+            A failed layer or buffer operation destroys only handles created by
+            that transcript; successful deinit destroys layer, pool, buffer,
+            mapping, output, and display handles once in reverse ownership order.
+    exact_bounds:
+      - "WAYSPOT_LAYER_MAX_OUTPUTS is 8; output_count never exceeds 8."
+      - "WAYSPOT_LAYER_MAX_OUTPUT_NAME is 96; one terminating byte is retained by the C slot."
+      - "The env monitor bound is src/env/monitor.zig:max_monitors = 8."
+      - "The C buffer accepts width and height greater than zero, rejects multiplication overflow, and stores stride * height bytes."
+      - "One SDL_Event is the input/output unit for wait, poll, and push; shutdown uses the exact SDL quit, terminating, and window-close event types."
+      - "Layer names and monitor names enter C as bounded sentinel strings owned by the caller."
+    exact_errors:
+      - >-
+        The SDL owner mapping is exhaustive: SdlHintFailed, SdlInitFailed,
+        SdlTextInputFailed, SdlShowFailed, SdlRendererFailed, SdlWindowFailed,
+        SdlWindowSizeFailed, SdlWindowPropertyMissing, SdlMonitorQueryFailed,
+        SdlMonitorNameMissing, SdlMonitorSizeMissing, SdlMonitorScaleMissing,
+        SdlMonitorPropertyMissing, SdlWaitFailed, SdlRenderFailed,
+        SdlResizeFailed, SdlScaleFailed, SdlClipboardFailed,
+        SdlTextTextureFailed, and SdlTextRenderFailed.
+      - >-
+        The Wayland owner mapping is exhaustive: WaylandDisplayUnavailable,
+        WaylandSurfaceUnavailable, LayerShellOutputMissing,
+        LayerShellSurfaceCreateFailed, LayerShellRegistryFailed,
+        LayerShellRegistryListenerFailed, LayerShellRoundtripFailed,
+        LayerShellMissing, LayerShellCompositorMissing, LayerShellShmMissing,
+        LayerShellInputRegionFailed, LayerShellConfigureFailed,
+        LayerShellClosed, LayerShellUnexpectedResult,
+        WallpaperImageUnexpectedResult, and SunglassesBufferUnexpectedResult.
+      - >-
+        The wallpaper and sunglasses image mapping is exhaustive:
+        WallpaperUnsupportedImageExtension, WallpaperImageLoadFailed,
+        WallpaperImageConvertFailed, WallpaperImageTargetFailed,
+        WallpaperImageScaleFailed, SunglassesUnsupportedImageExtension,
+        SunglassesImageLoadFailed, SunglassesImageConvertFailed,
+        SunglassesImageTargetFailed, SunglassesImageScaleFailed, and
+        SunglassesImageOpacityInvalid.
+      - >-
+        The wallpaper and sunglasses buffer mapping is exhaustive:
+        WallpaperInvalidBufferSize, WallpaperMemfdFailed,
+        WallpaperTruncateFailed, WallpaperMmapFailed, WallpaperShmPoolFailed,
+        WallpaperWlBufferFailed, SunglassesInvalidBufferSize,
+        SunglassesMemfdFailed, SunglassesTruncateFailed,
+        SunglassesMmapFailed, SunglassesShmPoolFailed, and
+        SunglassesWlBufferFailed.
+    exact_cleanup:
+      - "Surface init destroys a created renderer/window and calls SDL_Quit on later failure."
+      - "Surface deinit stops text input, destroys renderer/window, and calls SDL_Quit once."
+      - "Every created Wayland layer, SHM pool, buffer, mmap region, display, and output is destroyed or disconnected exactly once on success and failure."
+      - "A failed buffer attach destroys only the newly created buffer; the previously attached buffer remains owned until replacement or deinit."
+    pure_internal_paths:
+      - "src/gui/surface.zig:handleEvent/routeQueryForSelection/queryMouseByteOffset"
+      - "src/wallpaper/surface.zig:imageKind/coverSourceRect/positiveRect/mapWallpaperImageResult"
+      - "src/sunglasses/surface.zig:imageKind/coverSourceRect/positiveRect/mapSunglassesBufferResult"
+    unit_gates:
+      - "Test event shutdown classification, geometry, image-kind selection, and every C result mapping with exact values."
+    fuzz_gates:
+      - "Fuzz bounded SDL event values, image path suffix bytes, geometry dimensions, and C result values; assert termination and no owned-handle mutation."
+    simulation_gates:
+      - "Drive Surface, wallpaper LayerShellRole, and sunglasses LayerShellRole through SdlRuntimeIo, SdlDisplayIo, SdlWindowIo, SdlWindowPropertyIo, SdlEventIo, SdlRenderIo, SdlTextureIo, SdlImageIo, SdlClipboardIo, WaylandDisplayIo, WaylandRegistryIo, LayerShellIo, WaylandBufferIo, and WaylandMemoryIo mocks for create, configure, draw, replace, close, and every listed failure."
+      - "Assert exact operation order, returned errors, new-buffer rollback, old-buffer retention, and one cleanup for every created handle."
+  - order: 2
+    name: hyprland_ipc_wire
+    status: open
+    current_owner_paths:
+      - "src/env/hyprland.zig:request/connectRequestSocket/writeAll/readBounded"
+      - "src/env/hyprland.zig:EventStream/init/wait/readAvailable/readAvailableFromBytes/deinit"
+      - "src/env/hyprland.zig:parseMonitors/parseWorkspaces/parseWindows/classifyEventLine"
+      - "src/env/mod.zig:MonitorFactStream/init/wait/waitForEventStreamReconnect"
+    current_direct_calls:
+      socket:
+        - std.os.linux.socket
+        - std.os.linux.connect
+        - std.os.linux.write
+        - std.os.linux.read
+        - std.os.linux.close
+        - std.os.linux.poll
+        - std.os.linux.errno
+      wire_parse:
+        - std.json.parseFromSlice
+        - parseMonitors
+        - parseWorkspaces
+        - parseWindows
+        - classifyEventLine
+    planned_mock_interfaces:
+      - path: src/env/hyprland_io.zig
+        module: hyprland_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/env/hyprland_io.zig
+          mock_call_transcript:
+            - operation: HyprlandRequestIo.request
+              input_type: RequestName
+              result_type: ResponseBytes<=max_hypr_response_bytes
+              error_set: [HyprlandSocketPathTooLong, HyprlandSocketOpenFailed, HyprlandSocketConnectFailed, HyprlandSocketWriteFailed, HyprlandSocketReadFailed, HyprlandResponseTooLarge]
+            - operation: HyprlandEventIo.readEvent
+              input_type: EventSocketHandle
+              result_type: EventBytes<=event_read_bytes or EndOfStream
+              error_set: [SignalInterrupted, HyprlandSocketReadFailed, HyprlandEventSocketClosed, HyprlandEventLineTooLong]
+            - operation: HyprlandPollIo.poll
+              input_type: "PollSet{event_fd: fd_t, stop_fd: fd_t}"
+              result_type: "PollResult{event_ready: bool, stop_ready: bool}"
+              error_set: [SignalInterrupted, SystemCallFailed]
+            - operation: HyprlandSocketIo.close
+              input_type: SocketHandle
+              result_type: void
+              error_set: []
+          cleanup_record: >-
+            Each request socket and retained event socket receives one close
+            record; response bytes and parsed JSON ownership are released after
+            publication or error, and reconnect closes the old event socket
+            before installing the new one.
+    exact_bounds:
+      - "socket_path_bytes is 160; request and event socket paths reject longer paths."
+      - "max_hypr_response_bytes is 1048576; request responses and JSON input reject one byte beyond it."
+      - "event_read_bytes is 1024; one socket read contributes at most 1024 bytes to the pending line parser."
+      - "max_event_line_bytes is 512; one socket2 event line rejects overflow and pending storage is bounded."
+      - "The request set is exactly j/monitors, j/workspaces, and j/clients."
+      - "Parsed output bounds are 8 monitors, 64 workspaces, 256 windows, 96 monitor/workspace names, 128 window classes, and 512 window titles."
+      - "A poll operation has exactly the event fd and stop fd; a pending event is one FactEvent."
+    exact_errors:
+      - "Socket path, socket creation, connect, write, read, event EOF, event line, poll, and signal-interruption errors retain the current Hyprland* error names."
+      - "JSON type, field, number, address, response-size, list-capacity, and allocator errors remain distinct at parse and fact-owner boundaries."
+    exact_cleanup:
+      - "A failed socket connect closes the fd; request closes its fd after read; EventStream.deinit closes its retained fd once."
+      - "A reconnect deinitializes the old EventStream before replacing it; every response allocation and parsed JSON tree is freed after fact publication or error."
+    pure_internal_paths:
+      - "src/env/hyprland.zig:classifyEventLine/eventNameIn/jsonString/jsonBool/jsonI32/jsonF64/parseAddress"
+      - "src/env/monitor.zig:MonitorList"
+      - "src/env/workspace.zig:WorkspaceList"
+      - "src/env/window.zig:WindowList"
+    unit_gates:
+      - "Test request-name selection, event classification, partial-line merging, fact conversion, exact bounds, and every error mapping without a socket."
+    fuzz_gates:
+      - "Fuzz bounded monitor, workspace, and window JSON bytes plus bounded socket2 chunks; assert termination, exact rejection, and freed parse state."
+    simulation_gates:
+      - "Drive request and EventStream production code with HyprlandRequestIo, HyprlandEventIo, HyprlandPollIo, and HyprlandSocketIo mocks that return partial writes, partial reads, EINTR, EOF, malformed JSON, oversized response, and oversized event line."
+      - "Assert exact request bytes, response bytes, FactEvent output, reconnect order, returned errors, and close count without a compositor socket."
+  - order: 3
+    name: dbus_notifications
+    status: open
+    current_owner_paths:
+      - "src/notification/dbus.zig:run/DBus.init/start/deinit"
+      - "src/notification/dbus.zig:onBusAcquired/onNameAcquired/onNameLost/onMethodCall"
+      - "src/notification/dbus.zig:handleNotify/handleCloseNotification/parseActions/parseHints"
+      - "src/notification/dbus.zig:prepareTimer/TimerChange/onNotificationExpired/clearTimers"
+      - "src/notification/dbus.zig:emitActionInvoked/emitNotificationClosed"
+    current_direct_calls:
+      connection:
+        - g_bus_own_name
+        - g_bus_unown_name
+        - g_dbus_node_info_new_for_xml
+        - g_dbus_node_info_unref
+        - g_dbus_node_info_lookup_interface
+        - g_dbus_connection_register_object
+        - g_dbus_connection_unregister_object
+        - g_dbus_connection_emit_signal
+        - g_dbus_method_invocation_return_value
+        - g_dbus_method_invocation_return_dbus_error
+        - g_object_ref
+        - g_object_unref
+        - g_error_free
+      variants:
+        - g_variant_new
+        - g_variant_new_strv
+        - g_variant_new_tuple
+        - g_variant_unref
+        - g_variant_n_children
+        - g_variant_get_child_value
+        - g_variant_get_string
+        - g_variant_get_uint32
+        - g_variant_get_int32
+        - g_variant_is_of_type
+        - g_variant_lookup
+      loop_and_timer:
+        - g_main_loop_new
+        - g_main_loop_run
+        - g_main_loop_unref
+        - g_timeout_add_full
+        - g_source_remove
+    planned_mock_interfaces:
+      - path: src/notification/dbus_io.zig
+        module: dbus_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/notification/dbus_io.zig
+          mock_call_transcript:
+            - operation: DBusNameIo.busOwnName/unownName
+              input_type: BusNameRequest or BusOwnerId
+              result_type: BusOwnerId or void
+              error_set: [NotificationsBusOwnFailed]
+            - operation: DBusObjectIo.registerObject/unregisterObject
+              input_type: IntrospectionXml and ObjectPath or RegistrationId
+              result_type: "RegistrationResult{registration_id: guint, error: GErrorRecord?} | void"
+              error_set: []
+            - operation: DBusReplyIo.returnValue/returnError
+              input_type: InvocationId and TypedReply or DbusErrorReply
+              result_type: "ReplyResult{sent: bool}"
+              error_set: []
+            - operation: DBusSignalIo.emitActionInvoked/emitNotificationClosed
+              input_type: ActionSignal or ClosedSignal
+              result_type: "SignalResult{emitted: bool}"
+              error_set: []
+            - operation: DBusPayloadIo.decodeNotify
+              input_type: NotifyPayload
+              result_type: TypedNotify
+              error_set: [InvalidArgs]
+            - operation: DBusPayloadIo.decodeClose
+              input_type: ClosePayload
+              result_type: NotificationId
+              error_set: [InvalidArgs]
+            - operation: DBusPayloadIo.decodeHints
+              input_type: HintsPayload
+              result_type: TypedHints
+              error_set: []
+            - operation: DBusPayloadIo.decodeActions
+              input_type: ActionPairs
+              result_type: BoundedActionPairs<=8
+              error_set: [OutOfMemory]
+            - operation: DBusLoopIo.run
+              input_type: void
+              result_type: LoopExit
+              error_set: [NotificationsMainLoopFailed]
+            - operation: DBusTimerIo.add/remove
+              input_type: TimerRequest or TimerSourceId
+              result_type: TimerSourceId or void
+              error_set: [NotificationTimerFailed]
+          cleanup_record: >-
+            Every owner id, registration id, typed payload allocation, timer
+            source, and callback context receives one release record. The
+            simulation may attach native GLib connection, variant, error, and
+            callback handles to these typed records; fuzz input never carries
+            those native handles.
+    exact_bounds:
+      - "Notify accepts exactly 8 child values; CloseNotification accepts exactly 1 child value."
+      - "parseActions admits at most 8 key/label pairs; each returned action borrows the decoded variant strings until the callback ends."
+      - "Notification Store bounds app_name and app_icon at 256 bytes, summary at 512 bytes, body at 4096 bytes, and live rows at 256."
+      - "Timer inputs use expire_timeout 0, negative default, or positive values clamped at 60000 ms; urgency 2 disables the timer."
+      - "Each timeout context has one id and one exact guint source_id; a stale source cannot touch the current timer or live notification."
+      - "D-Bus error messages use bounded 96-byte or 128-byte stack buffers at the current return boundaries."
+    exact_errors:
+      - "Node XML, bus ownership, object registration, main-loop creation, variant type, argument count, notification allocation, timer creation, and source removal failures retain the current error names and D-Bus error mapping."
+      - "Notify and CloseNotification preserve the current UnknownNotificationId, HistoryRowNotFound, committed-unsynced, InvalidArgs, and Failed meanings."
+      - "A g_timeout_add_full result of zero is NotificationTimerFailed; a source callback returning zero removes only its exact source."
+    exact_cleanup:
+      - "Every child GVariant is unrefed after one callback; action arrays are freed after handleNotify; GError values are freed by logGError."
+      - "DBus.deinit unregisters the object, releases the bus name, unreferences the connection and node info, removes timers, deinitializes the timer map, and deinitializes Store."
+      - "TimerChange rollback removes only the new source; commit swaps the prepared source and removes the old source; TimeoutContext is destroyed by the GLib notify callback exactly once."
+    pure_internal_paths:
+      - "src/notification/dbus.zig:dbusExpireTimeoutMs/timeoutSourceIsCurrent/variantType"
+      - "src/notification/dbus.zig:returnInvalidArgs/returnNotifyFailure/returnCloseFailure"
+    unit_gates:
+      - "Test timeout mapping, stale-source identity, action-pair admission, argument-count mapping, and bounded error text without a GLib or D-Bus object."
+    fuzz_gates:
+      - "Fuzz bounded typed NotifyPayload and ClosePayload values, ActionPair arrays, HintsPayload values, and bounded D-Bus error text through a pure typed variant-wire parser; assert exact rejection and typed cleanup without GVariant pointers."
+    simulation_gates:
+      - "Drive DBus production handlers with DBusNameIo, DBusObjectIo, DBusReplyIo, DBusSignalIo, DBusPayloadIo, DBusLoopIo, and DBusTimerIo mocks for name ownership, XML/object registration, Notify, replacement, CloseNotification, signals, main-loop return, timer add, stale callback, current callback, and every failure. Native GDBusConnection, GVariant, GError, source, and callback handles remain simulation-only."
+      - "Assert exact message children, variant unrefs, source identity, Store/timer transaction order, returned D-Bus error, and one cleanup per connection, variant, source, and context."
+  - order: 4
+    name: std_io_fs_file_and_terminal
+    status: open
+    current_owner_paths:
+      - "src/config/defaults.zig:load/loadFromEnvironment"
+      - "src/notification/history.zig:History.loadAtPath/History.saveAtPathResult/path"
+      - "src/picker/cmd.zig:Picker.loadHistory/Picker.saveHistory/writeHistoryAtomic"
+      - "src/picker/mode/apps.zig:Apps.defaultCachePath/Apps.collectCandidates/collectFromDesktopFiles/collectFromDesktopRoot/writeAppCacheFromCandidates"
+      - "src/picker/icon_cache.zig:refresh/printRefreshSummary/ensureCacheDir"
+      - "src/picker/icon_diag.zig:writeReport/ensureReportParent"
+      - "src/picker/icons.zig:findCachedIconPath/fileStatAccepted"
+      - "src/picker/scale.zig:readStateAnyPath/writeStateAnyPath/statePath"
+      - "src/wallpaper/config.zig:Config.loadAtPath/defaultPath"
+      - "src/wallpaper/image_info.zig:readInfo"
+      - "src/wallpaper/library.zig:scanDirectory/Library.deinit"
+      - "src/wallpaper/loop.zig:PidFile.create/readWallpaperPid/removePidFile"
+      - "src/sunglasses/state.zig:State.loadAtPath/State.saveAtPath/readStateAnyPath/writeStateAnyPath"
+      - "src/sunglasses/overlay.zig:PidFile.create/readSunglassesPid/readStartupStatus/writeStartupStatus/removePidFile/removeStartupStatus/selfExePathZ"
+      - "src/root.zig:bufferedPrint"
+      - "src/cli/entry.zig:runQuery/runApps/runBashCompletion"
+    current_direct_calls:
+      defaults:
+        - "src/config/defaults.zig:std.Io.Dir.cwd().readFileAlloc"
+      notification_history:
+        - "std.Io.Dir.cwd().readFileAlloc"
+        - "std.Io.Dir.openDirAbsolute"
+        - "std.Io.Dir.cwd().openDir"
+        - "std.Io.Dir.createDirPath"
+        - "std.Io.Dir.createFileAtomic"
+        - "std.Io.File.writeStreamingAll"
+        - "std.Io.File.sync"
+        - "std.Io.AtomicFile.replace"
+        - "std.Io.AtomicFile.deinit"
+        - "std.Io.Dir.close"
+        - "std.posix.errno"
+      picker_history:
+        - "std.Io.Dir.cwd().readFileAlloc"
+        - "std.Io.Dir.createFileAbsolute"
+        - "std.Io.Dir.cwd().createFile"
+        - "std.Io.File.writeStreamingAll"
+        - "std.Io.File.sync"
+        - "std.Io.File.close"
+        - "std.Io.Dir.renameAbsolute"
+        - "std.Io.Dir.cwd().rename"
+        - "std.Io.Dir.deleteFileAbsolute"
+        - "std.Io.Dir.cwd().deleteFile"
+        - "std.Io.Dir.cwd().access"
+        - "std.Io.Dir.openDirAbsolute"
+        - "std.Io.Dir.cwd().openDir"
+        - "std.posix.system.fsync"
+        - "std.posix.errno"
+      apps:
+        - "std.Io.Dir.cwd().readFileAlloc"
+        - "std.Io.Dir.openDirAbsolute"
+        - "std.Io.Dir.cwd().openDir"
+        - "std.Io.Dir.iterate"
+        - "std.Io.Dir.Iterator.next"
+        - "std.Io.Dir.readFileAlloc"
+        - "std.Io.Dir.accessAbsolute"
+        - "std.Io.Dir.deleteFileAbsolute"
+        - "std.Io.Dir.createDirAbsolute"
+        - "std.Io.Dir.cwd().createDirPath"
+        - "std.Io.Dir.createFileAbsolute"
+        - "std.Io.Dir.cwd().createFile"
+        - "std.Io.File.writeStreamingAll"
+        - "std.Io.File.close"
+      icons_and_reports:
+        - "std.Io.Dir.cwd().createFile"
+        - "std.Io.Dir.cwd().createDirPath"
+        - "std.Io.Dir.cwd().statFile"
+        - "std.Io.Dir.cwd().readFile"
+        - "std.Io.Dir.cwd().realPathFileAlloc"
+        - "std.c.access"
+      resident_files:
+        - "std.Io.Dir.cwd().readFile"
+        - "std.Io.Dir.cwd().readFileAlloc"
+        - "std.Io.Dir.accessAbsolute"
+        - "std.Io.Dir.cwd().createDirPath"
+        - "std.Io.Dir.createFileAbsolute"
+        - "std.Io.Dir.cwd().createFile"
+        - "std.Io.Dir.deleteFileAbsolute"
+        - "std.Io.Dir.cwd().deleteFile"
+        - "std.Io.Dir.readLinkAbsolute"
+        - "std.Io.File.writeStreamingAll"
+        - "std.Io.File.sync"
+        - "std.Io.File.close"
+      terminal_output:
+        - "std.Io.File.stdout"
+        - "std.Io.File.writer"
+        - "std.Io.Writer.writeAll"
+        - "std.Io.Writer.print"
+        - "std.Io.Writer.flush"
+        - "std.log.scoped"
+        - "std.log.err"
+        - "std.log.warn"
+        - "std.log.info"
+        - "std.log.debug"
+    current_diagnostic_callers:
+      - src/env/hyprland.zig
+      - src/gui/surface.zig
+      - src/main.zig
+      - src/notification/banner.zig
+      - src/notification/dbus.zig
+      - src/picker/icon_cache.zig
+      - src/picker/mode/apps.zig
+      - src/picker/signal.zig
+      - src/picker/text.zig
+      - src/sunglasses/mod.zig
+      - src/sunglasses/overlay.zig
+      - src/sunglasses/state.zig
+      - src/wallpaper/loop.zig
+      - src/wallpaper/mod.zig
+    planned_mock_interfaces:
+      - path: src/io/file_io.zig
+        module: file_io
+        planned_design: true
+        operator_decision_required: true
+      - path: src/io/terminal_io.zig
+        module: terminal_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/io/file_io.zig
+          mock_call_transcript:
+            - operation: ConfigFileIo.readDefaults
+              input_type: "DefaultsPath"
+              result_type: "DefaultsBytes<=32768"
+              error_set: [FileNotFound, AccessDenied, PermissionDenied, StreamTooLong, OutOfMemory]
+            - operation: HistoryFileIo.read/writeAtomic/sync
+              input_type: "HistoryPath and HistoryBytes<=2097152"
+              result_type: "HistoryBytes or Published or ParentSyncError"
+              error_set: [FileNotFound, StreamTooLong, InvalidHistoryJson, OutOfMemory, InputOutput, NoSpaceLeft, DiskQuota]
+            - operation: AppsCacheFileIo.read/write
+              input_type: "AppsCachePath and TsvBytes<=2097152"
+              result_type: "TsvBytes or void"
+              error_set: [FileNotFound, NotDir, AccessDenied, PermissionDenied, StreamTooLong, OutOfMemory, InputOutput]
+            - operation: WallpaperLibraryIo.open/next/stat/close
+              input_type: "AbsoluteDirectoryPath and EntryIndex<=16384"
+              result_type: "DirectoryEntry or EndOfDirectory or FileStat"
+              error_set: [FileNotFound, NotDir, AccessDenied, PermissionDenied, TooManyWallpaperDirectoryEntries, OutOfMemory]
+            - operation: IconFileIo.readIndex/writeReport/stat
+              input_type: "IconPath and IndexBytes<=262144"
+              result_type: "IndexBytes or FileStat or void"
+              error_set: [FileNotFound, AccessDenied, PermissionDenied, IconCachePathTooLong, InputOutput]
+            - operation: PidStatusFileIo.read/write/remove/readProc
+              input_type: "PidPath or ProcPath and Bytes<=4096"
+              result_type: "PidBytes<=32 or StatusBytes<=96 or CmdlineBytes<=4096 or void"
+              error_set: [FileNotFound, AccessDenied, PermissionDenied, PathAlreadyExists, StreamTooLong, InputOutput]
+            - operation: PickerHistoryFileIo.read/writeTemp/rename/remove/sync
+              input_type: "HistoryPath and SerializedBytes<=16384"
+              result_type: "HistoryBytes or Published or ParentSyncError or void"
+              error_set: [FileNotFound, AccessDenied, PermissionDenied, StreamTooLong, HistoryFileTooLong, InputOutput, NoSpaceLeft, DiskQuota]
+          cleanup_record: >-
+            The mock transcript records one close for every opened file or
+            directory, one free for every raw read buffer, and one removal for
+            every temporary path. Pre-replacement failure removes the temporary
+            file; post-replacement parent sync failure records the published
+            destination and exact durability error. Owned parsed strings are
+            freed once after publication or rollback.
+        - path: src/io/terminal_io.zig
+          mock_call_transcript:
+            - operation: CliTerminalIo.write/flush
+              input_type: "HelpOrCandidateBytes<=4096"
+              result_type: void
+              error_set: [InputOutput, NoSpaceLeft]
+            - operation: IconSummaryIo.write/flush
+              input_type: "SummaryBytes<=512"
+              result_type: void
+              error_set: [InputOutput, NoSpaceLeft]
+            - operation: LogIo.emit
+              input_type: "LogRecord{level,scope,message<=1024}"
+              result_type: void
+              error_set: [InputOutput, NoSpaceLeft]
+          cleanup_record: >-
+            Terminal output and diagnostic logging own no retained bytes or
+            external handle in the mock. Each write transcript ends with
+            exactly one flush or the exact write error; each LogIo transcript
+            emits one bounded record or the exact log error; abstract
+            std.Io.Writer formatting remains a pure unit/fuzz target.
+    exact_bounds:
+      - "std.Io.Dir.max_path_bytes bounds every constructed path; values above it return the owner path error before opening anything."
+      - "Embedded and user defaults are each 32768 bytes; notification history is 2097152 bytes and 512 rows."
+      - "Apps cache input is 2097152 bytes, each desktop/cache field is 256 bytes, and candidate publication is bounded by candidate.max_candidates."
+      - "Wallpaper config is 4096 bytes, image header reads are 65536 bytes, wallpaper library paths are 4096 bytes, entries are 16384, and records are 4096."
+      - "Icon index input is 262144 bytes, icon names are 192 bytes, icon paths are 768 bytes, icon files are 2097152 bytes, roots are 8, and probes are 96."
+      - "Wallpaper and sunglasses pid files are 32 bytes, sunglasses startup status is 96 bytes, and /proc cmdline reads are 4096 bytes."
+      - "Picker selection history is 64 entries, 256 bytes per selection, and 16384 serialized bytes."
+      - "CLI help and query output uses the fixed 1024-byte or 4096-byte local output buffers; icon summaries use 512 bytes."
+      - "Each diagnostic log record is bounded at 1024 bytes before the LogIo transcript; logging does not retain caller bytes."
+    exact_errors:
+      - "FileNotFound is tolerated only at the owner-documented optional cache/history/status fallback; NotDir, AccessDenied, PermissionDenied, allocation, StreamTooLong, parse, sync, and unexpected errors propagate at their owner boundary."
+      - "Atomic writers distinguish pre-replacement write/file-sync/rename errors from post-replacement parent-sync errors; the latter return the exact ParentSyncError with new bytes published."
+      - "Desktop and wallpaper directory scans retain only their explicit missing-root tolerance; malformed or oversized records are rejected or skipped only where the current owner says so."
+      - "Terminal writers return the exact std.Io.Writer write or flush error; no terminal error is converted into a successful receipt."
+    exact_cleanup:
+      - "Every file and directory handle closes once on success and each error path; raw cache/read buffers are freed before candidate publication."
+      - "History, picker-history, and state atomic temporary files are removed on every pre-replacement failure; destination bytes remain unchanged in that phase."
+      - "App producer strings are freed after candidate rollback or Apps deinit; icon, wallpaper, and sunglasses owned paths are freed once by their owner."
+      - "Terminal output retains no external handle after flush or returned error."
+    pure_internal_paths:
+      - "src/cli/bash_completion.zig:write/writeWord"
+      - "src/picker/cmd.zig:printCandidate/serializeHistory"
+      - "src/wallpaper/image_info.zig:parseHeader/parsePng/parseBmp"
+      - "src/picker/icons.zig:resolveIconPathInternal/copyPathZ"
+    unit_gates:
+      - "Test exact path bounds, missing-file fallback, field and row bounds, parser errors, serialization bounds, writer phase mapping, cleanup order, and terminal byte formatting with no real file or terminal."
+    fuzz_gates:
+      - "Fuzz bounded file bytes, TSV/JSON/config headers, path bytes, pid/status text, serialized selections, and pure Writer output; assert termination, exact errors, and no published ownership on failure."
+    simulation_gates:
+      - "Drive every listed runtime product file owner through ConfigFileIo, HistoryFileIo, AppsCacheFileIo, WallpaperLibraryIo, IconFileIo, PidStatusFileIo, PickerHistoryFileIo, CliTerminalIo, and LogIo mocks with partial writes, short reads, each listed error, pre/post replacement, and cleanup transcripts."
+      - "Assert exact path bytes, operation order, raw-buffer lifetime, destination preservation before replacement, published-unsynced meaning after replacement, and one close/free/remove record per operation."
+      - "Do not drive build.zig, re-run.sh, shell commands, build graph calls, or std.testing.tmpDir/std.testing.io/TmpDir fixtures in this simulation; those paths are tooling_only or forbidden_current_test_io."
+  - order: 5
+    name: process_launch
+    status: open
+    current_owner_paths:
+      - "src/process/launch.zig:runDetached/runDetachedWithFork/copyIntent/launchChild/launchExecShell/launchRedirectStdio/launchFork/launchWaitWith/waitPid"
+      - "src/notification/banner.zig:spawn/wrapperChild/bannerChild/runPlacementAction/placementActionChild/forkChild/waitChild"
+      - "src/picker/icon_cache.zig:runConverter/commandPath"
+      - "src/sunglasses/overlay.zig:startOverlayDetached/overlayWrapperChild/execSunglassesOverlay/redirectStdioToNull/forkChild/waitChild"
+      - "src/cli/entry.zig:runIntentBytes"
+      - "src/picker/cmd.zig:resolveCandidate"
+    current_direct_calls:
+      src/process/launch.zig:
+        - std.c.open
+        - std.c.dup2
+        - std.c.close
+        - std.c.setsid
+        - std.c.fork
+        - std.c.execve
+        - std.c.environ
+        - std.c._errno
+        - std.c._exit
+        - std.c.waitpid
+      src/notification/banner.zig:
+        - std.c.fork
+        - std.c.execve
+        - std.c.environ
+        - std.c._errno
+        - std.c._exit
+        - std.c.waitpid
+      src/picker/icon_cache.zig:
+        - std.c.fork
+        - std.c.execve
+        - std.c.environ
+        - std.c._errno
+        - std.c._exit
+        - std.c.waitpid
+      src/sunglasses/overlay.zig:
+        - std.c.open
+        - std.c.dup2
+        - std.c.close
+        - std.c.setsid
+        - std.c.fork
+        - std.c.execve
+        - std.c.environ
+        - std.c._errno
+        - std.c._exit
+        - std.c.waitpid
+    planned_mock_interfaces:
+      - path: src/process/process_io.zig
+        module: process_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/process/process_io.zig
+          mock_call_transcript:
+            - operation: ProcessForkIo.fork
+              input_type: void
+              result_type: "ChildPid or ForkFailure"
+              error_set: [ForkFailed]
+            - operation: ProcessExecIo.execShell/execConverter/execOverlay
+              input_type: "SentinelPath and IntentBytes<=4096"
+              result_type: ChildExit
+              error_set: [IntentFailed, ChildFailed]
+            - operation: ProcessStdioIo.redirect/close
+              input_type: "DevNullFd and ThreeStreams"
+              result_type: void
+              error_set: [IntentFailed, ChildFailed]
+            - operation: ProcessWaitIo.wait
+              input_type: "ChildPid and InterruptCount<=16"
+              result_type: ExitStatus
+              error_set: [WaitFailed, WaitInterruptedTooOften, ChildFailed, IntentFailed]
+          cleanup_record: >-
+            The wrapper owns the fork result until wait; the child owns only its
+            sentinel argv and exits after exec failure. Every duplicated stdio
+            descriptor closes once, every waited child is reaped once, and a
+            converter or banner child never remains owned by the parent after
+            the wait transcript.
+    exact_bounds:
+      - "Process intent is non-empty, NUL-free, and at most process.max_intent_bytes = 4096 before the one sentinel byte is appended."
+      - "Process wait retries at most process.max_wait_interrupts = 16 EINTR results; banner and overlay child waits use their owner bound of 8."
+      - "Child failure exits use the current bounded code 127; shell argv is exactly sh, -lc, intent, null and converter argv is exactly the current converter form."
+      - "Banner placement scripts are bounded by the fixed script buffer and title selector by 160 bytes; icon converter paths are 768 bytes, PATH entries 512 bytes, and command names 128 bytes."
+    exact_errors:
+      - "runDetached preserves EmptyIntent, IntentTooLong, IntentContainsNul, IntentFailed, ForkFailed, WaitFailed, and WaitInterruptedTooOften."
+      - "Banner and sunglasses child boundaries preserve ChildFailed, ForkFailed, WaitFailed, and their current resident startup errors; converter failure remains RsvgConvertMissing or a failed conversion count."
+      - "A failed exec, stdio redirect, fork, or wait is returned to the owning caller and is never reported as a successful launch."
+    exact_cleanup:
+      - "The parent waits for and reaps the wrapper; the wrapper creates the detached session and does not leak its child descriptor state."
+      - "The child closes redirected stdio after duplication and exits exactly once on failed exec; no parent-side ownership is transferred for a detached application."
+      - "Converter, banner, and overlay waits reap every child; test transcripts assert no un-waited pid and no double close."
+    pure_internal_paths:
+      - "src/process/launch.zig:copyIntent/launchWaitWith"
+      - "src/picker/cmd.zig:resolveCandidate/resolveLifecycle"
+      - "src/picker/icon_cache.zig:pathEntryContainsCmd"
+    unit_gates:
+      - "Test empty, exact, NUL, and overlong intent values; argv construction; fork, exec, exit, wait, and converter error mapping with typed results and no child process."
+    fuzz_gates:
+      - "Fuzz bounded intent, shell-quoted path, converter path, title selector, and wait status values; assert no sentinel truncation, no shell-string reconstruction, and bounded termination."
+    simulation_gates:
+      - "Drive runDetached, banner placement, sunglasses start, and icon converter launch through ProcessForkIo, ProcessExecIo, ProcessStdioIo, and ProcessWaitIo transcripts for success, partial setup, child failure, fork failure, and interrupt bounds."
+      - "Assert exact argv bytes, fork/exec/wait order, descriptor cleanup, child reaping, returned errors, and no process remains in the mock transcript."
+      - "Do not drive re-run.sh, systemctl, zigup, shell commands, or build graph calls in this simulation; those are tooling_only inventory and have no product mock gate."
+  - order: 6
+    name: linux_lifecycle
+    status: open
+    current_owner_paths:
+      - "src/picker/signal.zig:Signal.init/start/stop/pushWake/signalHandler/osEventFd/signalEventFd/osClose/osPoll/osRead/osWrite"
+      - "src/wallpaper/loop.zig:MonitorWatcher/LoopSignals/signalHandler/signalsMain/PidFile/readWallpaperPid/pidMatchesWallpaper/sendSignal/drainEventFd/osEventFd/signalEventFd/osClose/osPoll/osRead/osWrite"
+      - "src/sunglasses/overlay.zig:MonitorWatcher/OverlaySignals/signalHandler/signalsMain/readSunglassesPid/childState/pidMatchesSunglassesOverlay/sendSignal/stopOverlay/overlayStartPoll/sleepNs/drainEventFd/osEventFd/signalEventFd/osClose/osPoll/osRead/osWrite"
+      - "src/env/mod.zig:waitForEventStreamReconnect"
+      - "src/identity.zig:set"
+      - "src/main.zig:runPicker"
+      - "src/sunglasses/mod.zig:run"
+      - "src/wallpaper/mod.zig:run"
+      - "src/notification/dbus.zig:onNameLost"
+    current_direct_calls:
+      signal_and_fd:
+        - std.posix.sigaction
+        - std.posix.sigemptyset
+        - std.os.linux.eventfd
+        - std.os.linux.poll
+        - std.os.linux.read
+        - std.os.linux.write
+        - std.os.linux.close
+        - std.os.linux.errno
+        - std.Thread.spawn
+        - std.Thread.join
+      process_control:
+        - std.os.linux.kill
+        - std.os.linux.getpid
+        - std.os.linux.errno
+        - std.c._errno
+        - std.c.nanosleep
+        - "src/identity.zig:std.posix.prctl"
+        - "src/main.zig:std.process.exit (runPicker)"
+        - "src/sunglasses/mod.zig:std.process.exit (run)"
+        - "src/wallpaper/mod.zig:std.process.exit (run)"
+        - "src/notification/dbus.zig:std.process.exit (onNameLost)"
+      proc_reads:
+        - "std.Io.Dir.cwd().readFile(/proc/<pid>/cmdline)"
+    planned_mock_interfaces:
+      - path: src/os/lifecycle_io.zig
+        module: lifecycle_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/os/lifecycle_io.zig
+          mock_call_transcript:
+            - operation: SignalIo.install/restore
+              input_type: "SignalSet{INT,TERM,USR1} and Handler"
+              result_type: void
+              error_set: [SystemCallFailed]
+            - operation: EventFdIo.create/read/write/close
+              input_type: "EventFdValue=u64 and EventFdHandle"
+              result_type: "BytesRead<=8 or void"
+              error_set: [WouldBlock, SystemCallFailed]
+            - operation: PollIo.wait
+              input_type: "PollSet<=3 and TimeoutMs"
+              result_type: "ReadySet"
+              error_set: [SignalInterrupted, SystemCallFailed]
+            - operation: ProcessControlIo.kill/readPid
+              input_type: "Pid and Signal"
+              result_type: "PidStatus or void"
+              error_set: [WallpaperLoopNotRunning, SunglassesOverlayNotRunning, SystemCallFailed]
+            - operation: ProcIo.readCmdline/readComm
+              input_type: "Pid and Bytes<=4096"
+              result_type: "NulSeparatedArgv<=4"
+              error_set: [FileNotFound, AccessDenied, PermissionDenied, InvalidCharacter, Overflow]
+            - operation: SleepIo.until
+              input_type: "Deadline and SleepNanoseconds"
+              result_type: void
+              error_set: []
+          cleanup_record: >-
+            Signal handlers restore the previous actions before owner deinit;
+            every eventfd closes once, every spawned watcher joins once, every
+            poll buffer is local, and proc reads retain no bytes after identity
+            validation. Kill and sleep transcripts end on stop, deadline, or
+            the exact owner error.
+    exact_bounds:
+      - "Picker owns one eventfd and one poll fd; wallpaper and sunglasses each own two signal eventfds plus one monitor stop eventfd."
+      - "Every eventfd read/write is exactly one u64 value of 8 bytes; poll sets contain only the owner fds and use -1 or the named reconnect timeout."
+      - "Wallpaper and sunglasses stop/start polls are bounded at 100 iterations with 10 ms sleeps; child waits use 8 interrupts and proc cmdline reads use 4096 bytes."
+      - "Pid text is 32 bytes, a pid must parse as a positive pid_t, and command identity admits exactly two argv elements with at most four parsed argv slots."
+    exact_errors:
+      - "Signal and fd owners preserve SignalInterrupted, WouldBlock, and SystemCallFailed; kill maps ESRCH to the exact wallpaper or sunglasses not-running error."
+      - "Proc identity rejects missing, unreadable, malformed, extra-argument, and wrong-position command lines without touching the current process."
+      - "A stop failure never becomes a successful clean shutdown; timeout and stale-child meanings remain the current resident errors."
+    exact_cleanup:
+      - "Signal handlers restore prior actions before fds are closed; watcher threads join before their stop fds close; each owner deinit closes all remaining eventfds once."
+      - "Pid files and startup status files are removed only by their owning resident deinit/transition; stale pid data cannot signal an unrelated process."
+    pure_internal_paths:
+      - "src/wallpaper/loop.zig:cmdlineMatchesWallpaper"
+      - "src/sunglasses/overlay.zig:cmdlineMatchesSunglassesOverlay/overlayStartPoll"
+    unit_gates:
+      - "Test signal classification, eventfd byte counts, poll readiness, proc argv identity, stale-source rejection, pid parsing, and bounded stop decisions without Linux calls."
+    fuzz_gates:
+      - "Fuzz bounded NUL-separated proc argv, pid text, poll readiness, signal values, and sleep deadlines; assert exact rejection and no signal to an unverified pid."
+    simulation_gates:
+      - "Drive Signal, LoopSignals, OverlaySignals, resident pid identity, and Linux lifecycle through SignalIo, EventFdIo, PollIo, ProcessControlIo, ProcIo, and SleepIo mocks for startup, wake, rotate/apply, stale pid, stop, timeout, and cleanup."
+      - "Assert last-byte operation order, handler restore, fd close/join order, exact kill target, bounded sleeps, and no cleanup of an unverified process."
+      - "Do not drive re-run.sh, pgrep, shell kill/sleep, or build graph calls in this simulation; those calls are tooling_only inventory and have no product mock gate."
+  - order: 7
+    name: clock_and_random
+    status: open
+    current_owner_paths:
+      - "src/wallpaper/loop.zig:randomSeed/runRandomLoop/waitForWake"
+      - "src/notification/dbus.zig:realtimeNs"
+      - "src/notification/history_list.zig:realtimeNs"
+      - "src/notification/banner.zig:monotonicMs/elapsedMs"
+    current_direct_calls:
+      clock:
+        - std.os.linux.clock_gettime
+        - std.os.linux.errno
+      random:
+        - std.os.linux.getrandom
+      conversion_constants:
+        - std.time.ns_per_s
+        - std.time.ns_per_ms
+      covered_by_order_1:
+        - SDL_GetTicks
+    planned_mock_interfaces:
+      - path: src/time/random_io.zig
+        module: random_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/time/random_io.zig
+          mock_call_transcript:
+            - operation: ClockIo.realtime/monotonic
+              input_type: "ClockKind"
+              result_type: "Timespec{sec:i64,nsec:i64}"
+              error_set: [SystemCallFailed]
+            - operation: RandomIo.readSeed
+              input_type: "ByteCount=8"
+              result_type: "SeedBytes[8]"
+              error_set: [WallpaperRandomSeedFailed, SystemCallFailed]
+          cleanup_record: >-
+            Clock reads borrow no external handle. RandomIo owns only the exact
+            eight-byte read buffer for one call and releases it at return; a
+            short or failed read publishes no partial seed.
+    exact_bounds:
+      - "Realtime and monotonic conversion rejects or maps only the current clock result; nanoseconds use the exact std.time.ns_per_s or ns_per_ms constants."
+      - "Wallpaper randomSeed requests exactly @sizeOf(u64)=8 bytes and accepts only a full read."
+      - "SDL_GetTicks is already an order-1 SDL event/tick call and is not duplicated as an order-7 native call."
+    exact_errors:
+      - "clock_gettime failure keeps the current realtimeNs fallback/error meaning at each owner; random short read returns WallpaperRandomSeedFailed."
+      - "No deterministic seed or clock value is silently substituted in the mock contract; every value and error is transcript data."
+    exact_cleanup:
+      - "The clock transcript has no handle; the random seed buffer is local and is not retained after conversion to u64."
+    pure_internal_paths:
+      - "src/wallpaper/loop.zig:waitForWake"
+      - "src/notification/banner.zig:elapsedMs"
+    unit_gates:
+      - "Test seconds/nanoseconds conversion, deadline comparison, exact eight-byte seed conversion, and short-read error mapping with typed values."
+    fuzz_gates:
+      - "Fuzz bounded timespec fields, deadline arithmetic, and eight-byte seed contents; assert no overflow, nontermination, or retained buffer."
+    simulation_gates:
+      - "Drive realtimeNs, monotonicMs, and randomSeed through ClockIo and RandomIo transcripts with exact values, short reads, and errors; assert operation order and result meaning."
+  - order: 8
+    name: process_input_environment
+    status: open
+    current_owner_paths:
+      - "src/main.zig:main/init.minimal.args.toSlice/runPicker/runtimeDir/instanceSignature"
+      - "src/env/mod.zig:MonitorSource.fromProcessEnv"
+      - "src/notification/history.zig:path"
+      - "src/picker/mode/apps.zig:Apps.defaultCachePath/desktopFileRoots/cmdExists"
+      - "src/picker/icons.zig:ResolveRoots.fromEnv/envBytes"
+      - "src/picker/icon_cache.zig:commandPath"
+      - "src/picker/scale.zig:statePath"
+      - "src/sunglasses/state.zig:statePath"
+      - "src/wallpaper/config.zig:defaultPath"
+      - "src/sunglasses/overlay.zig:startOverlay"
+    current_direct_calls:
+      zig_environment:
+        - "src/main.zig:init.minimal.args.toSlice"
+        - 'src/main.zig:init.minimal.environ.getPosix("HOME")'
+        - 'src/main.zig:init.minimal.environ.getPosix("XDG_CACHE_HOME")'
+        - 'src/main.zig:init.minimal.environ.getPosix("XDG_RUNTIME_DIR")'
+        - 'src/main.zig:init.minimal.environ.getPosix("HYPRLAND_INSTANCE_SIGNATURE")'
+        - "std.c.getenv"
+      names_read:
+        - HOME
+        - XDG_CACHE_HOME
+        - XDG_STATE_HOME
+        - XDG_RUNTIME_DIR
+        - XDG_DATA_HOME
+        - XDG_DATA_DIRS
+        - PATH
+        - HYPRLAND_INSTANCE_SIGNATURE
+    planned_mock_interfaces:
+      - path: src/env/environment_io.zig
+        module: environment_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/env/environment_io.zig
+          mock_call_transcript:
+            - operation: EnvironmentInputIo.readHome
+              input_type: "HOME"
+              result_type: "BoundedPath<=4096 or Unset"
+              error_set: [HomeNotSet]
+            - operation: EnvironmentInputIo.readXdg
+              input_type: "XdgName{CACHE,STATE,RUNTIME,DATA_HOME,DATA_DIRS}"
+              result_type: "BoundedPathList<=8 or Unset"
+              error_set: [HyprlandRuntimeDirMissing, HyprlandInstanceSignatureMissing, HistoryPathTooLong, IconCachePathTooLong]
+            - operation: EnvironmentInputIo.readPath
+              input_type: "PATH"
+              result_type: "BoundedPathList<=64 and Entry<=512 or Unset"
+              error_set: []
+            - operation: EnvironmentInputIo.readHyprland
+              input_type: "HYPRLAND_INSTANCE_SIGNATURE and XDG_RUNTIME_DIR"
+              result_type: "HyprlandAddressParts"
+              error_set: [HyprlandRuntimeDirMissing, HyprlandInstanceSignatureMissing]
+          cleanup_record: >-
+            Environment values are borrowed only for the call or duplicated by
+            the named owner; no mock value outlives its read transcript. Every
+            duplicated HOME, XDG, PATH, or Hyprland value is freed by the owner
+            that requested it on success and error.
+    exact_bounds:
+      - "Every environment-derived path is bounded by std.Io.Dir.max_path_bytes; HOME, XDG, and Hyprland address parts cannot create an overlong path."
+      - "XDG_DATA_DIRS and PATH are split into the current owner bounds: at most 8 desktop/icon roots, at most 64 PATH entries, and 512 bytes per PATH entry."
+      - "HYPRLAND_INSTANCE_SIGNATURE and XDG_RUNTIME_DIR feed the existing 160-byte socket-path bound; unset values use the current owner-specific missing-value meaning."
+    exact_errors:
+      - "Unset HOME, XDG_RUNTIME_DIR, or HYPRLAND_INSTANCE_SIGNATURE preserves the current owner error or optional fallback; malformed and overlong values return the current path/environment error before external use."
+      - "PATH lookup returns command-not-found without launching a converter; process argv is passed through the existing bounded command selection path."
+    exact_cleanup:
+      - "Borrowed environment bytes are not freed; every duplicated root list and constructed path is freed on every failed or successful owner path."
+      - "No environment read starts a process or mutates resident state before the owner has validated all required values."
+    pure_internal_paths:
+      - "src/picker/mode/apps.zig:desktopFileRoots"
+      - "src/picker/icons.zig:ResolveRoots.fromEnv"
+      - "src/main.zig:selectEntry"
+    unit_gates:
+      - "Test unset, empty, exact-bound, overbound, split-list, fallback, and invalid-byte environment values through typed inputs without reading the process environment."
+    fuzz_gates:
+      - "Fuzz bounded HOME/XDG/PATH/Hyprland values and list separators; assert path bounds, no embedded NUL use, deterministic fallback, and no retained mock bytes."
+    simulation_gates:
+      - "Drive main argv/environment, env, apps, icons, history, scale, wallpaper, and sunglasses consumers through EnvironmentInputIo with exact borrowed/owned lifetime transcripts."
+      - "Assert each consumer requests only its named variables, validates before path/socket/process use, and frees every duplicated value once."
+      - "Do not drive re-run.sh, shell variables, build.zig, or build graph calls in this simulation; those paths are tooling_only inventory and have no product mock gate."
+  - order: 9
+    name: lua_defaults_runtime
+    status: open
+    current_owner_paths:
+      - "src/config/defaults.zig:load/loadFromEnvironment/loadEmbedded/applyBuffer/LuaState.init/LuaState.deinit/LuaState.loadAndRun/instructionHook/applyRoot/applyFonts/applyPicker/applyBanner/applyText/applyFontCandidates/applyColorField/applyFontPxField/applyChromeField/applyLayoutField/applyOpacityField/readColor/validateFontCandidateArray/validateNamedFields"
+    current_data_paths:
+      - assets/lua/defaults.lua
+    current_direct_calls:
+      lua_state:
+        - c.luaL_newstate
+        - c.lua_close
+        - c.luaL_loadbufferx
+        - c.lua_pcallk
+        - c.lua_sethook
+        - c.lua_error
+      lua_stack_and_types:
+        - c.lua_gettop
+        - c.lua_settop
+        - c.lua_istable
+        - c.lua_absindex
+        - c.lua_getfield
+        - c.lua_rawgeti
+        - c.lua_pushnil
+        - c.lua_next
+        - c.lua_pop
+        - c.lua_type
+        - c.lua_isinteger
+        - c.lua_tointegerx
+        - c.lua_tonumberx
+        - c.lua_tolstring
+        - c.lua_pushlstring
+    planned_mock_interfaces:
+      - path: src/config/lua_io.zig
+        module: lua_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/config/lua_io.zig
+          mock_call_transcript:
+            - operation: LuaStateIo.open/close
+              input_type: "LuaChunkBytes<=32768"
+              result_type: "LuaStateHandle or void"
+              error_set: [LuaOutOfMemory]
+            - operation: LuaChunkIo.load/execute
+              input_type: "TextChunk<=32768 and InstructionBudget=100000"
+              result_type: "LuaReturnValue"
+              error_set: [LuaLoadFailed, LuaExecutionFailed, LuaInstructionBudgetExceeded]
+            - operation: LuaTableIo.readField/readArray/iterate
+              input_type: "TypedStackIndex and TableDepth<=4"
+              result_type: "TypedLuaValue or EndOfTable"
+              error_set: [InvalidDefaultsField, MissingDefaultsField, UnknownDefaultsField, DefaultsTableTooDeep, TooManyDefaultsKeys]
+            - operation: LuaValueIo.readText/readInteger/readNumber/readColor
+              input_type: "TypedLuaValue"
+              result_type: "AppearanceValue"
+              error_set: [InvalidDefaultsField, StringTooLong, FontSizeOutOfRange, ChromeOutOfRange, ColorComponentOutOfRange]
+          cleanup_record: >-
+            LuaStateIo closes one state exactly once, removes the instruction
+            hook before close, and restores the stack at each table field
+            boundary. A failed load or apply closes the state and publishes no
+            partial Appearance value; typed mock handles never enter fuzz input.
+    exact_bounds:
+      - "Embedded and user Lua chunks are each limited to 32768 bytes before Howl execution."
+      - "The instruction hook stops execution at 100000 instructions; nested tables are at most depth 4, total keys 128, colors 32, and font candidates use values.max_font_candidates."
+      - "Appearance strings use values.max_string_bytes and numeric fields use the existing font, chrome, layout, opacity, and color bounds; no Lua value is silently widened."
+      - "defaults.lua is the embedded value source; assets/lua/defaults.lua is data, not a second runtime owner."
+    exact_errors:
+      - "Lua state allocation, load, execution, instruction-budget, table-shape, missing/unknown-field, depth, key-count, string, font, chrome, layout, opacity, and color errors retain the exact current names from src/config/defaults.zig."
+      - "A malformed or non-table return is DefaultsMustReturnTable; no Lua error is converted into default success after a required field has failed."
+    exact_cleanup:
+      - "The state hook is removed before lua_close; stack values are popped at each defer; a failed field application leaves the caller's transactional Appearance unchanged."
+      - "The build asset bytes remain owned by build options and the user file buffer is freed by load after applyBuffer returns."
+    pure_internal_paths:
+      - "src/config/defaults.zig:fieldAllowed/ensureDepth/stackString"
+      - "src/config/defaults.zig:applyRoot/applyFonts/applyPicker/applyBanner/applyText"
+      - "assets/lua/defaults.lua:return"
+    unit_gates:
+      - "Test required/optional appearance mapping, exact numeric/string bounds, missing/unknown fields, table depth, key count, and stack cleanup through typed values without Lua C handles."
+    fuzz_gates:
+      - "Fuzz bounded typed Lua text/value transcripts and pure appearance mapping; assert instruction termination, exact rejection, stack balance, and no partial publication."
+    simulation_gates:
+      - "Drive loadEmbedded/load/applyBuffer through LuaStateIo, LuaChunkIo, LuaTableIo, and LuaValueIo mocks for valid defaults, malformed chunks, execution errors, budget exhaustion, missing fields, unknown fields, and cleanup."
+      - "Assert exact chunk bytes, operation order, instruction hook removal, stack pops, state close, error return, and transactional Appearance ownership."
+  - order: 10
+    name: text_rasterization
+    status: open
+    current_owner_paths:
+      - "src/picker/text.zig:TextEngine.init/deinit/draw/measureRangeXOffsets/loadPrimaryFace/setFontSize/shape/measure/rasterize/glyphBounds"
+      - "src/c/text.h:FT_Library/FT_Face/FT_GlyphSlot/FT_Bitmap/hb_font_t/hb_buffer_t"
+    current_direct_calls:
+      freetype:
+        - FT_Init_FreeType
+        - FT_Done_FreeType
+        - FT_New_Face
+        - FT_Select_Charmap
+        - FT_Done_Face
+        - FT_Set_Pixel_Sizes
+        - FT_Load_Glyph
+      harfbuzz:
+        - hb_buffer_create
+        - hb_buffer_destroy
+        - hb_font_destroy
+        - hb_ft_font_create_referenced
+        - hb_ft_font_changed
+        - hb_buffer_reset
+        - hb_buffer_set_cluster_level
+        - hb_buffer_add_utf32
+        - hb_buffer_guess_segment_properties
+        - hb_shape
+        - hb_buffer_get_glyph_infos
+        - hb_buffer_get_glyph_positions
+      c_headers:
+        - "src/c/text.h:#include <freetype/freetype.h>"
+        - "src/c/text.h:#include <harfbuzz/hb.h>"
+        - "src/c/text.h:#include <harfbuzz/hb-ft.h>"
+    planned_mock_interfaces:
+      - path: src/c/text_io.zig
+        module: text_io
+        planned_design: true
+        operator_decision_required: true
+    mock_contract:
+      native_calls: current_direct_calls
+      targets:
+        - path: src/c/text_io.zig
+          mock_call_transcript:
+            - operation: FontLibraryIo.init/done
+              input_type: void
+              result_type: "FontLibraryHandle or FreeTypeResult"
+              error_set: [FreeTypeInitFailed]
+            - operation: FontFaceIo.load/select/scale/loadGlyph/done
+              input_type: "FontPath<=4096, FaceIndex=0, PixelSize>=1, GlyphId, LoadFlags=FT_LOAD_RENDER"
+              result_type: "FaceHandle, ScaleResult, GlyphBitmap, or FreeTypeResult"
+              error_set: [FontFaceUnavailable, FontSizeUnavailable]
+            - operation: ShapeBufferIo.create/reset/add/guess/shape/read/destroy
+              input_type: "Codepoints<=256, Glyphs<=384, TextBytes<=512"
+              result_type: "GlyphInfosAndPositions<=384 or ShapeResult"
+              error_set: [ShapeBufferUnavailable, ShapeOutputUnavailable, TextGlyphLimitExceeded]
+          cleanup_record: >-
+            The mock transcript closes one font buffer, one HarfBuzz font, one
+            face, and one FreeType library exactly once in reverse ownership
+            order. Failed face selection closes the rejected face; failed
+            buffer or shaping setup closes every handle created before the
+            failure; bitmap bytes are local and are not retained after draw.
+    exact_bounds:
+      - "Text input is at most 512 bytes, decoded codepoints are at most 256, glyph output is at most 384, and each font candidate path uses the existing 4096-byte path bound."
+      - "Pixel size is at least 1 after the current owner mapping; raster bounds are at most 1200 by 180 and pixel storage is at most 864000 bytes."
+      - "Only the current FT_LOAD_RENDER glyph path is simulated; a nonzero FT_Load_Glyph result produces the current missing-glyph skip, not a new fallback error."
+    exact_errors:
+      - "FreeTypeInitFailed, FontFaceUnavailable, FontSizeUnavailable, ShapeBufferUnavailable, ShapeOutputUnavailable, TextGlyphLimitExceeded, EmptyTextBounds, and TextTextureTooLarge retain their current mappings."
+      - "Nonzero FT_Done_Face and FT_Done_FreeType results remain cleanup diagnostics; they do not become successful resource ownership."
+    exact_cleanup:
+      - "TextEngine.deinit destroys the HarfBuzz buffer and font, then the FreeType face and library, then the owned pixel list; each failure path releases only handles it created."
+      - "A rejected face is closed before the next bounded candidate; shape output pointers are borrowed until the copy into GlyphPlacement ends."
+    pure_internal_paths:
+      - "src/picker/text.zig:boundedCodepoints/boundedCodepointsWithByteEnds/codepointBoundaryForByteOffset/advanceForCodepointBoundary/placedBitmapBounds/px26Dot6/pxAdvance/bitmapAlpha/copyBitmap"
+    unit_gates:
+      - "Test bounded UTF-8 decoding, control replacement, byte-to-codepoint boundaries, 26.6 conversion, glyph advance mapping, bitmap bounds, and texture bounds with typed values and no vendor handles."
+    fuzz_gates:
+      - "Fuzz bounded text bytes, UTF-8 fragments, codepoint boundaries, glyph positions, bitmap dimensions, and scale values; assert termination, no overflow, exact bounds, and no retained vendor pointer."
+    simulation_gates:
+      - "Drive TextEngine font-library init/done, face load/select/scale, glyph load, and HarfBuzz buffer create/reset/add/shape/read/destroy through FontLibraryIo, FontFaceIo, and ShapeBufferIo transcripts for every current return failure and cleanup path."
+      - "Assert last-byte operation order, rejected-face cleanup, buffer/font/face/library cleanup, bounded glyph output, missing-glyph skip meaning, and pixel ownership without a real font library, GUI, fixture, or live process; bitmapAlpha and copyBitmap remain unit/fuzz work."
+final_gate:
+  required_classes:
+    - unit
+    - fuzz
+    - simulation
+  required_scans:
+    - "ruby -e 'require \"yaml\"; YAML.load_stream(File.read(\"maturity_offenders.yml\"))'"
+    - "Run rg -l '\\bSDL_[A-Za-z0-9_]+' src --glob '*.zig' and require exactly the twelve listed Zig owner paths; compare every c.SDL_* call to the file-keyed SDL current_direct_calls; parse every current_owner_paths entry and verify each slash- or semicolon-delimited symbol exists in its exact file, then validate every file path."
+    - "Require planned_mock_interfaces and mock_contract targets to be exactly src/c/sdl_io.zig, src/c/wayland_io.zig, src/env/hyprland_io.zig, src/notification/dbus_io.zig, src/io/file_io.zig, src/io/terminal_io.zig, src/process/process_io.zig, src/os/lifecycle_io.zig, src/time/random_io.zig, src/env/environment_io.zig, src/config/lua_io.zig, and src/c/text_io.zig; every target is marked planned_design and operator_decision_required, has a typed mock_call_transcript and cleanup_record, and is absent until an operator creates the planned module."
+    - "Run bounded owner scans for std.Io/std.fs file, terminal, and std.log calls, std.c fork/exec/wait, std.os.linux signal/eventfd/poll/kill/getrandom/clock calls, std.c.getenv and Init.environ.getPosix, c.lua*/luaL_*, FT_*, and hb_*; compare every direct call to exactly one current_direct_calls entry or the explicitly recorded order-1 SDL/order-2 Hyprland/order-3 D-Bus entry. Validate every current_diagnostic_callers path. std.fs.path and abstract std.Io.Writer formatting are pure-only exceptions and must appear in pure_internal_paths or a unit/fuzz gate."
+    - "Require std.Io.Dir.iterate and std.Io.Dir.Iterator.next for the current directory owners, std.Io.AtomicFile.deinit for notification history, std.posix.errno for current fsync owners, src/main.zig:init.minimal.args.toSlice for process input, src/identity.zig:std.posix.prctl, and every current std.process.exit call site in the Linux/process-control inventory."
+    - "Run rg for build.zig freetype2/harfbuzz link/include calls and re-run.sh mkdir/cp/chmod/mv/rm/head/setsid/systemctl/pgrep/kill/sleep and /proc reads; compare every match to tooling_only and require none in runtime current_owner_paths, runtime current_direct_calls, or simulation gates."
+    - "Parse every current_owner_paths path:symbol and verify the current file and every slash-delimited symbol exists; include src/env/mod.zig, src/c/text.h, and src/picker/text.zig in the current owner scan, validate every current file path, and keep tooling-only, forbidden fixture, and planned module paths out of the runtime current path set."
+    - "Run the forbidden_current_test_io scan and require exactly its fourteen source paths for std.testing.tmpDir/std.testing.io/std.testing.TmpDir file operations; reject every fixture path as maturity evidence and keep those paths out of runtime simulation gates."
+    - "Scan this file for duplicate boundary names, duplicate exact current owner entries, stale current source paths, forbidden generic buckets, and any test class outside unit, fuzz, simulation."
+    - "Verify absent_dependencies names SQLite, INI, and JSONL only; no boundary, mock target, owner path, direct call, or implementation order may invent any of those surfaces."
+    - "git diff --check"
+  prohibited_evidence:
+    - fixture
+    - screenshot
+    - live_gui
+    - live_compositor
+    - shell_receipt
+    - external_process

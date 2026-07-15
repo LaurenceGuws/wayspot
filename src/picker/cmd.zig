@@ -279,7 +279,6 @@ pub const Picker = struct {
         for (self.cmds) |cmd| {
             switch (cmd) {
                 .apps => |owner| if (owner) |apps| {
-                    apps.freeCacheData(allocator);
                     apps.freeOwnedStrings(allocator);
                 },
                 .notifications, .wallpaper, .sunglasses => {},
@@ -815,7 +814,6 @@ test "Cmd picker collects candidates once per picker lifecycle" {
     });
 
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
-    defer std.testing.allocator.free(cache_path);
 
     var apps = apps_mode.Apps.init(cache_path);
     defer apps.deinit(std.testing.allocator);
@@ -824,13 +822,11 @@ test "Cmd picker collects candidates once per picker lifecycle" {
 
     const first = try model.rankQuery(std.testing.allocator, "kit");
     defer std.testing.allocator.free(first);
-    try std.testing.expect(apps.cache_data != null);
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.owned_strings.items.len > 0);
 
     const second = try model.rankQuery(std.testing.allocator, "fire");
     defer std.testing.allocator.free(second);
-    try std.testing.expect(apps.cache_data != null);
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
+    try std.testing.expect(apps.owned_strings.items.len > 0);
 }
 
 test "candidate loading rolls back overflow and retries without stale candidates" {
@@ -855,7 +851,6 @@ test "candidate loading rolls back overflow and retries without stale candidates
     });
 
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
-    defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
         fn cmdExists(_: []const u8) bool {
@@ -863,10 +858,8 @@ test "candidate loading rolls back overflow and retries without stale candidates
         }
     };
 
-    var apps = apps_mode.Apps{
-        .cache_path = cache_path,
-        .cmd_exists_fn = Fake.cmdExists,
-    };
+    var apps = apps_mode.Apps.init(cache_path);
+    apps.cmd_exists_fn = Fake.cmdExists;
     defer apps.deinit(std.testing.allocator);
 
     var model = Picker.init(&apps);
@@ -875,7 +868,6 @@ test "candidate loading rolls back overflow and retries without stale candidates
     try std.testing.expectError(error.TooManyCandidates, model.rankQuery(std.testing.allocator, ""));
     try std.testing.expectEqual(@as(usize, 0), model.candidates.count);
     try std.testing.expect(!model.candidates_loaded);
-    try std.testing.expect(apps.cache_data == null);
     try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
 
     try tmp.dir.writeFile(std.Options.debug_io, .{
@@ -935,7 +927,6 @@ test "desktop scan overflow reaches transaction and retries cleanly" {
     });
 
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps-cache.tsv", .{tmp.sub_path});
-    defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
         fn cmdExists(_: []const u8) bool {
@@ -943,11 +934,9 @@ test "desktop scan overflow reaches transaction and retries cleanly" {
         }
     };
 
-    var apps = apps_mode.Apps{
-        .cache_path = cache_path,
-        .cmd_exists_fn = Fake.cmdExists,
-        .desktop_root = overflow_root,
-    };
+    var apps = apps_mode.Apps.init(cache_path);
+    apps.cmd_exists_fn = Fake.cmdExists;
+    apps.desktop_root = overflow_root;
     defer apps.deinit(std.testing.allocator);
 
     var model = Picker.init(&apps);
@@ -956,7 +945,6 @@ test "desktop scan overflow reaches transaction and retries cleanly" {
     try std.testing.expectError(error.TooManyCandidates, model.rankQuery(std.testing.allocator, ""));
     try std.testing.expectEqual(@as(usize, 0), model.candidates.count);
     try std.testing.expect(!model.candidates_loaded);
-    try std.testing.expect(apps.cache_data == null);
     try std.testing.expectEqual(@as(usize, 0), apps.owned_strings.items.len);
 
     apps.desktop_root = recovered_root;
@@ -1041,7 +1029,6 @@ test "Cmd Apps route reaches installed and fixed-local leaves" {
         ,
     });
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/apps.tsv", .{tmp.sub_path});
-    defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
         fn cmdExists(name: []const u8) bool {
@@ -1049,10 +1036,8 @@ test "Cmd Apps route reaches installed and fixed-local leaves" {
         }
     };
 
-    var apps = apps_mode.Apps{
-        .cache_path = cache_path,
-        .cmd_exists_fn = Fake.cmdExists,
-    };
+    var apps = apps_mode.Apps.init(cache_path);
+    apps.cmd_exists_fn = Fake.cmdExists;
     defer apps.deinit(std.testing.allocator);
 
     var model = Picker.init(&apps);
@@ -1536,10 +1521,9 @@ test "Cmd picker keeps app selection behavior" {
         }
     };
 
-    var apps = apps_mode.Apps{
-        .cache_path = "unused",
-        .cmd_exists_fn = Fake.cmdExists,
-    };
+    const cache_path = try std.testing.allocator.dupe(u8, "unused");
+    var apps = apps_mode.Apps.init(cache_path);
+    apps.cmd_exists_fn = Fake.cmdExists;
     defer apps.deinit(std.testing.allocator);
 
     var list = candidate.Candidate.List.empty;

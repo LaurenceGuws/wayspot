@@ -131,7 +131,8 @@ fn runPicker(
     ui: bool,
 ) !void {
     const home = init.minimal.environ.getPosix("HOME") orelse ".";
-    var picker_bundle = try setupPickerBundle(allocator, home);
+    const xdg_cache_home = init.minimal.environ.getPosix("XDG_CACHE_HOME");
+    var picker_bundle = try setupPickerBundle(allocator, home, xdg_cache_home);
     picker_bundle.wirePicker();
     defer picker_bundle.deinit(allocator);
 
@@ -231,7 +232,6 @@ fn instanceSignature(init: *const std.process.Init) ![]const u8 {
 }
 
 const PickerBundle = struct {
-    app_cache_path: []u8,
     history_path: []u8,
     notification_history: wayspot.notification.history_list.NotificationHistoryList = .{},
     apps: wayspot.picker.mode.apps.Apps,
@@ -241,7 +241,6 @@ const PickerBundle = struct {
         self.picker.deinit(allocator);
         self.notification_history.deinit(allocator);
         self.apps.deinit(allocator);
-        allocator.free(self.app_cache_path);
         allocator.free(self.history_path);
     }
 
@@ -251,14 +250,21 @@ const PickerBundle = struct {
     }
 };
 
-fn setupPickerBundle(allocator: std.mem.Allocator, home: []const u8) !PickerBundle {
-    const app_cache = try std.fmt.allocPrint(allocator, "{s}/.cache/waybar/wofi-app-launcher.tsv", .{home});
+fn setupPickerBundle(
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    xdg_cache_home: ?[]const u8,
+) !PickerBundle {
+    const app_cache = try wayspot.picker.mode.apps.Apps.defaultCachePath(
+        allocator,
+        xdg_cache_home,
+        home,
+    );
     errdefer allocator.free(app_cache);
     const history_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/wayspot/history.log", .{home});
     errdefer allocator.free(history_path);
 
     return .{
-        .app_cache_path = app_cache,
         .history_path = history_path,
         .apps = wayspot.picker.mode.apps.Apps.init(app_cache),
         .picker = undefined,
@@ -353,4 +359,19 @@ test "resident identity names remain explicit" {
     try std.testing.expectEqualStrings("wayspot-notify", wayspot.identity.notifications);
     try std.testing.expectEqualStrings("wayspot-wall", wayspot.identity.wallpaper);
     try std.testing.expectEqualStrings("wayspot-sunglas", wayspot.identity.sunglasses);
+}
+
+test "setupPickerBundle transfers the XDG cache path to Apps" {
+    var bundle = try setupPickerBundle(
+        std.testing.allocator,
+        "/tmp/wayspot-home",
+        "/tmp/wayspot-cache",
+    );
+    bundle.wirePicker();
+    defer bundle.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "/tmp/wayspot-cache/wayspot/apps.tsv",
+        bundle.apps.cache_path,
+    );
 }

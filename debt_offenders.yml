@@ -3,10 +3,12 @@
 
 register:
   checkpoint: 6ff94bc
-  status: open
-  implementation_status: not_started
+  status: paused
+  implementation_status: paused_for_external_io_maturity
+  pause_register: maturity_offenders.yml
+  pause_scope: cache_config_history_orders
   review_gate:
-    state: operator_review_required
+    state: maturity_review_required
     source_changes: false
     uncommitted_register: true
 
@@ -48,9 +50,9 @@ path_table:
     target_path: "$XDG_CONFIG_HOME/wayspot/wallpaper.conf"
     target_fallback: "$HOME/.config/wayspot/wallpaper.conf"
   - surface: app_cache
-    current_source: "src/main.zig:setupPickerBundle and src/picker/mode/apps.zig:invalidateDefaultCache"
-    current_path: "$HOME/.cache/waybar/wofi-app-launcher.tsv"
-    current_rule: setupPickerBundle formats the path from HOME and Apps receives it as cache_path
+    current_source: "src/picker/mode/apps.zig:Apps.defaultCachePath"
+    current_path: "$XDG_CACHE_HOME/wayspot/apps.tsv or $HOME/.cache/wayspot/apps.tsv"
+    current_rule: Apps.defaultCachePath uses XDG_CACHE_HOME directly and falls back to HOME/.cache
     target_path: "$XDG_CACHE_HOME/wayspot/apps.tsv"
     target_fallback: "$HOME/.cache/wayspot/apps.tsv"
   - surface: icon_cache
@@ -149,7 +151,7 @@ current_failure_behavior:
   - path_symbol: "src/wallpaper/config.zig:Config.parse"
     behavior: "Unknown keys and missing and relative library paths return errors; interval values clamp; duplicate keys use the last value."
   - path_symbol: "src/picker/mode/apps.zig:Apps.collectCandidates"
-    behavior: "Missing, NotDir, and AccessDenied trigger desktop scan; malformed cache lines skip; cache rebuild write errors are logged and ignored."
+    behavior: "Missing, NotDir, and AccessDenied cache reads trigger a desktop scan. Malformed, overlong, extra-field, and duplicate-executable records are skipped. Desktop-root FileNotFound and NotDir are tolerated; allocation and unexpected scan errors propagate. Cache rebuild write errors are logged and ignored. Cache fields are copied into Apps.owned_strings and the raw read buffer is freed before publication."
   - path_symbol: "src/picker/icon_cache.zig:refresh"
     behavior: "Missing converter returns an error; converter and wait failures leave direct index and PNG writes in place."
   - path_symbol: "src/picker/icons.zig:AppIconStore.textureForWithRoots"
@@ -408,42 +410,45 @@ implementation_order:
     status: closed
 
   - order: 8
-    path_symbol: "src/picker/mode/apps.zig:Apps.cache_path/cache_data/owned_strings/collectCandidates/collectFromDesktopFiles"
+    path_symbol: "src/picker/mode/apps.zig:Apps.cache_path/owned_strings/collectCandidates/collectFromDesktopFiles"
     depends_on: [7]
     target_symbols:
       - "src/picker/mode/apps.zig:Apps.defaultCachePath"
     callers:
+      - "src/main.zig:setupPickerBundle"
       - "src/picker/cmd.zig:buildCandidatesTransactional"
       - "src/cli/entry.zig:runIconDiag"
       - "src/cli/entry.zig:runIconCacheRefresh"
     delete_symbols:
       - "src/picker/mode/apps.zig:Apps.cache_data"
+      - "src/picker/mode/apps.zig:Apps.freeCacheData"
     task: >-
-      Make Apps.cache_path an owned []u8 freed by Apps.deinit. Keep owned_strings only for Candidate fields. Delete Apps.cache_data. Read cache bytes into a local buffer, parse each TSV field into an owned copy, free the raw buffer before Candidate publication, and free every owned string in Apps.deinit and picker rollback. Make Apps.defaultCachePath build XDG_CACHE_HOME/wayspot/apps.tsv with HOME/.cache/wayspot/apps.tsv fallback. Remove app_cache_path from PickerBundle. Bound category, name, executable selection, and icon fields at 256 bytes. When no valid cache record remains, call collectFromDesktopFiles and then write valid records through writeAppCacheFromCandidates. Keep fixed local Spec values separate from desktop records.
+      Make Apps.cache_path an owned []u8 transferred by Apps.init and freed by Apps.deinit. Keep owned_strings only for duplicated Candidate fields and delete Apps.cache_data and Apps.freeCacheData. Read at most 2097152 bytes into a local buffer, parse the current unversioned three-or-four-field TSV shape into staged Candidates and owned copies, free the raw buffer before publication, and reject malformed, overlong, and extra-field records without truncation. Deduplicate executable fields. Bound category, name, executable selection, and icon fields at 256 bytes. When no valid cache record remains, call collectFromDesktopFiles and then write valid records through the existing writeAppCacheFromCandidates. Propagate allocation and unexpected desktop errors, tolerate only missing desktop roots, and keep the cache rebuild write best-effort. Preserve out.count and published Apps ownership on every collection failure; publish staged records first and then replace old Apps strings so Picker rollback can forget records before freeing producer strings. Keep fixed local Spec values static and outside owned_strings. Make Apps.defaultCachePath build XDG_CACHE_HOME/wayspot/apps.tsv with HOME/.cache/wayspot/apps.tsv fallback, remove app_cache_path from PickerBundle, and route setupPickerBundle and CLI icon consumers through the Apps owner.
     acceptance_proof:
-      - Test cache parse, desktop fallback, no-valid-record fallback, fixed-local availability, duplicate executable, malformed field, 256-byte field, 257-byte field, 1024-candidate bound, allocation failure, and retry.
-      - Test no Candidate points into the raw cache read buffer after collectCandidates returns.
-      - Test failed collection publishes no partial Candidate and frees Apps.owned_strings exactly once.
-      - Run wayspot apps and GUI /apps output receipts with byte equality.
+      - Test Apps.defaultCachePath for XDG_CACHE_HOME and HOME fallback, three and four field cache records, malformed, overlong, extra-field, duplicate executable, and exact 256-byte fields.
+      - Test no Candidate points into the raw cache read buffer after collectCandidates returns, fixed Spec availability/resolution, desktop fallback, no-valid-record fallback, and best-effort cache rebuild.
+      - Test allocation failure, 1024-candidate overflow, retry, preserved out.count, no partial publication, and exact Apps-owned string cleanup.
+      - Run CLI app collection, CLI icon diagnostic/cache consumers, and wayspot apps receipts with byte equality through the shared Apps owner. The GUI /apps runtime receipt is blocked by operator assistance and is not claimed here.
+      - Run zig build test --summary all (414/414: 202 aggregate-root and 212 direct-root tests), zig build, zig fmt --check, YAML stream validation, source-reference scans, the deleted cache_data/freeCacheData scan, the 120-column scan, and git diff --check.
+    size_observation: "Current order-8 worktree proof measures 808633 src/*.zig bytes excluding CR/LF against the 718917-byte 6ff94bc checkpoint; the final source-size gate remains failing."
     status: open
 
   - order: 9
     path_symbol: "src/picker/mode/apps.zig:writeAppCacheFromCandidates/invalidateDefaultCache"
     depends_on: [8]
     target_symbols:
-      - "src/picker/mode/apps.zig:Apps.defaultCachePath"
+      - "src/picker/mode/apps.zig:writeAppCacheFromCandidates"
     delete_symbols:
       - "src/picker/mode/apps.zig:invalidateDefaultCache"
     callers:
-      - "src/main.zig:setupPickerBundle"
-      - "src/picker/mode/apps.zig:writeAppCacheFromCandidates"
+      - "src/picker/mode/apps.zig:Apps.collectFromDesktopFiles"
     task: >-
-      Make Apps.defaultCachePath the only path construction function. It returns XDG_CACHE_HOME/wayspot/apps.tsv and HOME/.cache/wayspot/apps.tsv fallback. Make the exact first line # wayspot-apps-v1. Make every following record exactly category<TAB>name<TAB>executable<TAB>icon with no fifth field. Make the parser reject a missing, duplicate, or wrong first version line. Move app path construction out of src/main.zig:setupPickerBundle and call Apps.defaultCachePath from that function. Make writeAppCacheFromCandidates write a bounded TSV through a same-directory temporary file, sync it, rename it, and sync the parent. Keep the previous valid file after write, sync, and rename failure. Delete invalidateDefaultCache, its tests, its docs, and its callers.
+      Make writeAppCacheFromCandidates emit the exact first line # wayspot-apps-v1. Make every following record exactly category<TAB>name<TAB>executable<TAB>icon with no fifth field. Make the Apps parser reject a missing, duplicate, or wrong first version line. Use the already-owned Apps.defaultCachePath result without changing its path construction. Make writeAppCacheFromCandidates write bounded bytes through a same-directory temporary file, sync it, rename it, and sync the parent. Keep the previous valid file after pre-replacement write, file-sync, and rename failure; after parent-sync failure, leave the new file published and return the exact durability error. Delete invalidateDefaultCache, its tests, its docs, and its callers.
     acceptance_proof:
-      - Test XDG_CACHE_HOME path, HOME fallback, parent creation, version line, four 256-byte fields, malformed cache, and cache overflow.
-      - Inject write, sync, rename, and parent-sync failures and prove the previous file remains valid and the temporary file is removed.
+      - Test the exact version line, four 256-byte fields, missing, duplicate, and wrong version lines, malformed cache, parent creation, and cache overflow.
+      - Inject pre-replacement write, file-sync, and rename failures and prove the previous file remains valid and the temporary file is removed; inject parent-sync failure and prove the new file remains published, the temporary file is gone, and the exact durability error returns.
       - Run rg for invalidateDefaultCache and accept only this deletion record.
-      - Run CLI app collection, GUI /apps, and isolated cache rebuild receipts.
+      - Run CLI app collection, GUI /apps, and isolated cache rebuild receipts through the order-8-owned Apps.defaultCachePath.
     status: open
 
   - order: 10

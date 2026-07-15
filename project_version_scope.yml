@@ -52,6 +52,8 @@ bounds:
   bash_completion_words: 16
   bash_completion_line_chars: 4096
   bash_completion_word_chars: 256
+  app_cache_read_bytes: 2097152
+  app_tsv_field_bytes: 256
   process_intent_bytes: 4096
   launch_wait_interrupts: 16
   rerun_pid_records: 8
@@ -87,9 +89,9 @@ bounds:
 test_coverage:
   aggregate_root: src/aggregate_test.zig
   accepted_minimum: 320
-  current_verified: 410
-  aggregate_root_tests: 199
-  direct_root_tests: 211
+  current_verified: 414
+  aggregate_root_tests: 202
+  direct_root_tests: 212
   proof_command: "zig build test --summary all"
 proof:
   required_before_acceptance:
