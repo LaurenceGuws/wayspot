@@ -1512,7 +1512,7 @@ test "Cmd picker explicitly rejects every route and display-only notification" {
         try std.testing.expectError(error.CandidateNotLaunchable, model.resolveCandidate(std.testing.allocator, route));
     }
 
-    const notification = candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1");
+    const notification = candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:1");
     try std.testing.expectError(error.NotificationDisplayOnly, model.resolveCandidate(std.testing.allocator, notification));
 }
 
@@ -1565,7 +1565,7 @@ test "Cmd picker keeps app selection behavior" {
 test "Cmd picker writes notification candidates" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
-    try list.append(candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1"));
+    try list.append(candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:1"));
 
     var model = Picker{
         .candidates = list,
@@ -1578,7 +1578,7 @@ test "Cmd picker writes notification candidates" {
     defer output.deinit();
     try model.query(std.testing.allocator, "/notifications history", &output.writer);
 
-    try std.testing.expectEqualStrings("concrete\tnotification-history:0:1\tSummary\tApp\n", output.written());
+    try std.testing.expectEqualStrings("concrete\tnotification-history:1\tSummary\tApp\n", output.written());
 }
 
 test "Cmd picker returns next app arguments" {
@@ -1603,7 +1603,7 @@ test "Cmd completion returns route words and excludes notification records" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.subCmd(.{ .notifications = .{ .history = {} } }));
-    try list.append(candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1"));
+    try list.append(candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:1"));
 
     var model = Picker{
         .candidates = list,

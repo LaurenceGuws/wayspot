@@ -7,36 +7,20 @@ const candidate_mod = @import("picker_candidate");
 pub const RankedCandidate = struct {
     candidate: candidate_mod.Candidate,
     score: i32,
+    /// source_index is the original candidate position used as the final tie-break.
+    source_index: usize,
 };
 
+/// rankCandidates ranks one candidate slice without picker history recency.
 pub fn rankCandidates(
     allocator: std.mem.Allocator,
     query: query_mod.Query,
     candidates: []const candidate_mod.Candidate,
 ) ![]RankedCandidate {
-    return rankCandidatesWithHistory(allocator, query, candidates, &.{});
+    return rankCandidatesWithOldestFirstHistory(allocator, query, candidates, &.{});
 }
 
-pub fn rankCandidatesWithHistory(
-    allocator: std.mem.Allocator,
-    query: query_mod.Query,
-    candidates: []const candidate_mod.Candidate,
-    recent_selections: []const []const u8,
-) ![]RankedCandidate {
-    var scored = std.ArrayList(RankedCandidate).empty;
-    defer scored.deinit(allocator);
-
-    for (candidates) |candidate| {
-        if (!matchesRoute(query, candidate)) continue;
-        const score = candidateScoreNewestFirst(query.route, query.term, candidate, recent_selections);
-        if (score <= 0) continue;
-        try scored.append(allocator, .{ .candidate = candidate, .score = score });
-    }
-
-    std.mem.sort(RankedCandidate, scored.items, {}, lessThan);
-    return scored.toOwnedSlice(allocator);
-}
-
+/// rankCandidatesWithOldestFirstHistory ranks Apps with Picker.history order.
 pub fn rankCandidatesWithOldestFirstHistory(
     allocator: std.mem.Allocator,
     query: query_mod.Query,
@@ -46,11 +30,15 @@ pub fn rankCandidatesWithOldestFirstHistory(
     var scored = std.ArrayList(RankedCandidate).empty;
     defer scored.deinit(allocator);
 
-    for (candidates) |candidate| {
+    for (candidates, 0..) |candidate, source_index| {
         if (!matchesRoute(query, candidate)) continue;
         const score = candidateScoreOldestFirst(query.route, query.term, candidate, history_selections);
         if (score <= 0) continue;
-        try scored.append(allocator, .{ .candidate = candidate, .score = score });
+        try scored.append(allocator, .{
+            .candidate = candidate,
+            .score = score,
+            .source_index = source_index,
+        });
     }
 
     std.mem.sort(RankedCandidate, scored.items, {}, lessThan);
@@ -74,7 +62,8 @@ fn lessThan(_: void, a: RankedCandidate, b: RankedCandidate) bool {
     }
 
     const icon_order = std.mem.order(u8, a.candidate.iconName(), b.candidate.iconName());
-    return icon_order == .lt;
+    if (icon_order != .eq) return icon_order == .lt;
+    return a.source_index < b.source_index;
 }
 
 fn matchesRoute(query: query_mod.Query, candidate: candidate_mod.Candidate) bool {
@@ -114,16 +103,6 @@ fn matchesModeRoute(value: candidate_mod.Candidate) bool {
     };
 }
 
-fn candidateScoreNewestFirst(
-    route: query_mod.Route,
-    needle: []const u8,
-    candidate: candidate_mod.Candidate,
-    recent_selections: []const []const u8,
-) i32 {
-    const score = candidateScoreWithoutRecency(route, needle, candidate) orelse return 0;
-    return score + recencyBoostNewestFirst(candidate.selection(), recent_selections);
-}
-
 fn candidateScoreOldestFirst(
     route: query_mod.Route,
     needle: []const u8,
@@ -131,6 +110,7 @@ fn candidateScoreOldestFirst(
     history_selections: []const []u8,
 ) i32 {
     const score = candidateScoreWithoutRecency(route, needle, candidate) orelse return 0;
+    if (isNotification(candidate)) return score;
     return score + recencyBoostOldestFirst(candidate.selection(), history_selections);
 }
 
@@ -138,13 +118,13 @@ fn candidateScoreWithoutRecency(route: query_mod.Route, needle: []const u8, cand
     var score: i32 = baseWeight(route, candidate.typeOf());
     if (route == .notifications and isNotification(candidate)) {
         const history_filter = notificationHistoryFilter(needle) orelse return null;
-        if (history_filter.len == 0) return score + notificationHistoryOrderBoost(candidate.selection());
+        if (history_filter.len == 0) return score;
         if (indexOfAsciiFold(candidate.title(), history_filter) == null and
             (candidate.subtitle().len == 0 or indexOfAsciiFold(candidate.subtitle(), history_filter) == null))
         {
             return null;
         }
-        return score + 30 + notificationHistoryOrderBoost(candidate.selection());
+        return score + 30;
     }
     if (needle.len == 0) return score;
 
@@ -220,16 +200,6 @@ fn notificationHistoryFilter(term: []const u8) ?[]const u8 {
     return std.mem.trim(u8, trimmed["history".len..], " \t");
 }
 
-fn notificationHistoryOrderBoost(open: []const u8) i32 {
-    const prefix = "notification-history:";
-    if (!std.mem.startsWith(u8, open, prefix)) return 0;
-    const rest = open[prefix.len..];
-    const end = std.mem.indexOfScalar(u8, rest, ':') orelse return 0;
-    const rank = std.fmt.parseInt(u32, rest[0..end], 10) catch return 0;
-    const bounded_rank = @min(rank, 900);
-    return 1000 - @as(i32, @intCast(bounded_rank));
-}
-
 fn eqlAsciiFold(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len != needle.len) return false;
     var index: u32 = 0;
@@ -274,18 +244,6 @@ fn shortQueryBias(needle_len: u64, kind: std.meta.Tag(candidate_mod.Candidate)) 
         .sub_cmd => 0,
         .concrete => 50,
     };
-}
-
-fn recencyBoostNewestFirst(selection: []const u8, history_selections: []const []const u8) i32 {
-    var index: u32 = 0;
-    for (history_selections) |recent| {
-        if (!std.mem.eql(u8, recent, selection)) {
-            index += 1;
-            continue;
-        }
-        return recencyBonus(index);
-    }
-    return 0;
 }
 
 fn recencyBoostOldestFirst(selection: []const u8, history_selections: []const []u8) i32 {
@@ -363,8 +321,8 @@ test "slash routes expose typed resident routes and notification history" {
         candidate_mod.Candidate.subCmd(.{ .notifications = .{ .history = {} } }),
         candidate_mod.Candidate.subCmd(.{ .wallpaper = .{ .rotate = {} } }),
         candidate_mod.Candidate.subCmd(.{ .sunglasses = .{ .apply = {} } }),
-        candidate_mod.Candidate.notificationLeaf("New message", "Mail: body", "notification-history:0:2"),
-        candidate_mod.Candidate.notificationLeaf("Older message", "Mail: body", "notification-history:1:1"),
+        candidate_mod.Candidate.notificationLeaf("New message", "Mail: body", "notification-history:2"),
+        candidate_mod.Candidate.notificationLeaf("Older message", "Mail: body", "notification-history:1"),
         candidate_mod.Candidate.lifecycleLeaf(candidate_mod.wallpaperRestart()),
         candidate_mod.Candidate.appLeaf("Kitty", "Terminal", "kitty", ""),
     };
@@ -383,7 +341,7 @@ test "slash routes expose typed resident routes and notification history" {
     defer std.testing.allocator.free(history);
     try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(history.len)));
     try std.testing.expectEqual(std.meta.Tag(candidate_mod.Candidate).concrete, history[0].candidate.typeOf());
-    try std.testing.expectEqualStrings("notification-history:0:2", history[0].candidate.selection());
+    try std.testing.expectEqualStrings("notification-history:2", history[0].candidate.selection());
 }
 
 test "default route is Apps mode" {
@@ -427,39 +385,136 @@ test "recency history boosts repeated selections" {
         candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
         candidate_mod.Candidate.openLeaf("Power menu", "Session", "power", ""),
     };
-    const history = [_][]const u8{"power"};
+    var power = [_]u8{ 'p', 'o', 'w', 'e', 'r' };
+    const history = [_][]u8{power[0..]};
     const query = try query_mod.parse("> p");
-    const ranked = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &history);
+    const ranked = try rankCandidatesWithOldestFirstHistory(std.testing.allocator, query, &candidates, &history);
     defer std.testing.allocator.free(ranked);
 
     try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(ranked.len)));
     try std.testing.expectEqualStrings("Power menu", ranked[0].candidate.title());
 }
 
-test "newest-first and oldest-first histories produce equivalent recency ranking" {
+test "empty and oldest-first history leave notification scores unchanged" {
     const candidates = [_]candidate_mod.Candidate{
-        candidate_mod.Candidate.openLeaf("Settings", "System", "settings", ""),
-        candidate_mod.Candidate.openLeaf("Power menu", "Session", "power", ""),
-        candidate_mod.Candidate.openLeaf("Terminal", "System", "terminal", ""),
+        candidate_mod.Candidate.notificationLeaf("Newest", "Mail", "notification-history:2"),
+        candidate_mod.Candidate.notificationLeaf("Older", "Mail", "notification-history:1"),
     };
-    const newest_first = [_][]const u8{ "power", "settings" };
-    var settings = [_]u8{ 's', 'e', 't', 't', 'i', 'n', 'g', 's' };
-    var power = [_]u8{ 'p', 'o', 'w', 'e', 'r' };
-    const oldest_first = [_][]u8{ settings[0..], power[0..] };
-    const query = try query_mod.parse("> e");
+    var first: [22]u8 = undefined;
+    @memcpy(first[0..], "notification-history:1");
+    var second: [22]u8 = undefined;
+    @memcpy(second[0..], "notification-history:2");
+    const history = [_][]u8{ first[0..], second[0..] };
+    const query = try query_mod.parse("/notifications history");
 
-    const ranked_newest = try rankCandidatesWithHistory(std.testing.allocator, query, &candidates, &newest_first);
-    defer std.testing.allocator.free(ranked_newest);
-    const ranked_oldest = try rankCandidatesWithOldestFirstHistory(std.testing.allocator, query, &candidates, &oldest_first);
-    defer std.testing.allocator.free(ranked_oldest);
+    const without_history = try rankCandidatesWithOldestFirstHistory(
+        std.testing.allocator,
+        query,
+        &candidates,
+        &.{},
+    );
+    defer std.testing.allocator.free(without_history);
+    const with_history = try rankCandidatesWithOldestFirstHistory(
+        std.testing.allocator,
+        query,
+        &candidates,
+        &history,
+    );
+    defer std.testing.allocator.free(with_history);
 
-    try std.testing.expectEqual(@as(u32, @intCast(ranked_newest.len)), @as(u32, @intCast(ranked_oldest.len)));
-    var index: u32 = 0;
-    while (index < ranked_newest.len) : (index += 1) {
-        try std.testing.expectEqualStrings(ranked_newest[index].candidate.selection(), ranked_oldest[index].candidate.selection());
-        try std.testing.expectEqual(ranked_newest[index].score, ranked_oldest[index].score);
-    }
-    try std.testing.expectEqualStrings("power", ranked_oldest[0].candidate.selection());
+    try std.testing.expectEqual(@as(usize, 2), without_history.len);
+    try std.testing.expectEqual(without_history[0].score, with_history[0].score);
+    try std.testing.expectEqual(without_history[1].score, with_history[1].score);
+    try std.testing.expectEqualStrings(
+        without_history[0].candidate.selection(),
+        with_history[0].candidate.selection(),
+    );
+    try std.testing.expectEqualStrings(
+        without_history[1].candidate.selection(),
+        with_history[1].candidate.selection(),
+    );
+}
+
+test "equal notification fields use lower source index" {
+    const candidates = [_]candidate_mod.Candidate{
+        candidate_mod.Candidate.appLeaf("Ignored", "", "ignored", ""),
+        candidate_mod.Candidate.notificationLeaf("Same", "Mail", "notification-history:1"),
+        candidate_mod.Candidate.notificationLeaf("Same", "Mail", "notification-history:1"),
+    };
+    const query = try query_mod.parse("/notifications history");
+    const ranked = try rankCandidatesWithOldestFirstHistory(
+        std.testing.allocator,
+        query,
+        &candidates,
+        &.{},
+    );
+    defer std.testing.allocator.free(ranked);
+
+    try std.testing.expectEqual(@as(usize, 2), ranked.len);
+    try std.testing.expectEqual(@as(usize, 1), ranked[0].source_index);
+    try std.testing.expectEqual(@as(usize, 2), ranked[1].source_index);
+}
+
+test "rank tie fields precede source index" {
+    const title_first = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("Alpha", "same", "same", "same"),
+        .score = 10,
+        .source_index = 1,
+    };
+    const title_second = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("Beta", "same", "same", "same"),
+        .score = 10,
+        .source_index = 0,
+    };
+    try std.testing.expect(lessThan({}, title_first, title_second));
+
+    const subtitle_first = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "Alpha", "same", "same"),
+        .score = 10,
+        .source_index = 1,
+    };
+    const subtitle_second = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "Beta", "same", "same"),
+        .score = 10,
+        .source_index = 0,
+    };
+    try std.testing.expect(lessThan({}, subtitle_first, subtitle_second));
+
+    const selection_first = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "same", "a", "same"),
+        .score = 10,
+        .source_index = 1,
+    };
+    const selection_second = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "same", "b", "same"),
+        .score = 10,
+        .source_index = 0,
+    };
+    try std.testing.expect(lessThan({}, selection_first, selection_second));
+
+    const sub_cmd = RankedCandidate{
+        .candidate = candidate_mod.Candidate.subCmd(.{ .wallpaper = .{ .restart = {} } }),
+        .score = 10,
+        .source_index = 1,
+    };
+    const concrete = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("Wallpaper", "Resident", "wayspot wallpaper", ""),
+        .score = 10,
+        .source_index = 0,
+    };
+    try std.testing.expect(lessThan({}, sub_cmd, concrete));
+
+    const icon_first = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "same", "same", "a"),
+        .score = 10,
+        .source_index = 1,
+    };
+    const icon_second = RankedCandidate{
+        .candidate = candidate_mod.Candidate.appLeaf("same", "same", "same", "b"),
+        .score = 10,
+        .source_index = 0,
+    };
+    try std.testing.expect(lessThan({}, icon_first, icon_second));
 }
 
 test "Apps route filters fixed-local leaves by title" {

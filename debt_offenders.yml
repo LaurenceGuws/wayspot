@@ -156,7 +156,6 @@ current_failure_behavior:
     behavior: "Missing and failed icons retain a missing entry until AppIconStore.deinit."
 
 duplicate_representations:
-  - "src/picker/cmd.zig:Picker.history retains selection strings in memory and history.log; src/picker/rank.zig:notificationHistoryOrderBoost reads notification order from those strings."
   - "src/picker/mode/apps.zig reads desktop-file values, raw TSV bytes, Candidate fields, and fixed local Spec values."
   - "src/picker/icons.zig:Candidate.iconName and AppIconStore repeat icon identity held by src/picker/icon_cache.zig:index.tsv and icon-CRC32.png."
   - "assets/lua/defaults.lua and src/picker/appearance.zig:currentHardcodedDefaults both hold appearance values."
@@ -392,7 +391,7 @@ implementation_order:
     status: closed
 
   - order: 7
-    path_symbol: "src/picker/rank.zig:rankCandidatesWithHistory/rankCandidatesWithOldestFirstHistory"
+    path_symbol: "src/picker/rank.zig:rankCandidatesWithOldestFirstHistory"
     depends_on: [6]
     delete_symbols:
       - "src/picker/rank.zig:rankCandidatesWithHistory"
@@ -400,11 +399,13 @@ implementation_order:
       Keep rankCandidatesWithOldestFirstHistory as the sole picker history rank function. Delete rankCandidatesWithHistory, its wrapper call, its newest-first tests, and notificationHistoryOrderBoost. Make NotificationHistoryList emit notification candidates newest-first. Store each source index in RankedCandidate. After score, title, subtitle, selection, type, and icon comparisons are equal, sort the lower source index first. Rank only the unique oldest-first Picker.history list and preserve notification row order independently of picker ranking.
     acceptance_proof:
       - Run rg for rankCandidatesWithHistory and notificationHistoryOrderBoost and accept only the deleted-symbol record in this register.
-      - Test empty history, one selection, 64 selections, duplicate selection, oldest-first order, and deterministic title, selection, type, and icon tie breaks.
-      - Test notification timestamps do not change picker scores and picker history does not change notification row order.
-      - Test two equal-score notification rows prove the newest source index remains first after ranking.
-      - Run zig build test --summary all and zig build.
-    status: open
+      - Existing Picker tests cover empty and missing history, one selection, 64 entries, duplicate replacement, and unique oldest-first order; rank tests cover the sole oldest-first rank function and its recency behavior.
+      - Test deterministic score, title, subtitle, selection, type, icon, and lower-source-index tie order.
+      - Test notification candidates keep equal scores with empty and populated Picker.history; the HistoryList timestamp/id test remains the producer newest-first proof.
+      - Test two equal-field notification candidates preserve lower original source_index after ranking.
+      - Run zig build test --summary all (410/410: 199 aggregate-root and 211 direct-root tests), zig build, zig fmt --check, YAML stream validation, the exact deleted-symbol scan, and git diff --check.
+    size_observation: "Current order-7 worktree proof measures 801106 src/*.zig bytes excluding CR/LF against the 718917-byte 6ff94bc checkpoint; the final source-size gate remains failing."
+    status: closed
 
   - order: 8
     path_symbol: "src/picker/mode/apps.zig:Apps.cache_path/cache_data/owned_strings/collectCandidates/collectFromDesktopFiles"

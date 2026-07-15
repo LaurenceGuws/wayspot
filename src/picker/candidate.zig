@@ -909,7 +909,7 @@ test "Concrete notification is display-only and lifecycle carries Input" {
     try std.testing.expect(leaf.concreteValue().?.isLaunchable());
     try std.testing.expectEqual(std.meta.Tag(Input).toggle, std.meta.activeTag(leaf.input()));
 
-    const notification = Candidate.notificationLeaf("Summary", "App", "notification-history:0:1");
+    const notification = Candidate.notificationLeaf("Summary", "App", "notification-history:1");
     try std.testing.expect(!notification.concreteValue().?.isLaunchable());
     try std.testing.expect(!Candidate.accepts(.selection, notification));
 }
@@ -919,7 +919,7 @@ test "Candidate boundary policy covers every Concrete arm" {
     const app = Candidate.appLeaf("Kitty", "Terminal", "kitty", "");
     const open = Candidate.openLeaf("Settings", "System", "settings", "");
     const lifecycle = Candidate.lifecycleLeaf(sunglassesRestart());
-    const notification = Candidate.notificationLeaf("Summary", "App", "notification-history:0:1");
+    const notification = Candidate.notificationLeaf("Summary", "App", "notification-history:1");
 
     try std.testing.expect(Candidate.accepts(.query, route));
     try std.testing.expect(Candidate.accepts(.query, app));

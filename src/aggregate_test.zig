@@ -104,7 +104,6 @@ pub const parse = query_source.parse;
 pub const rank = rank_source;
 pub const RankedCandidate = rank_source.RankedCandidate;
 pub const rankCandidates = rank_source.rankCandidates;
-pub const rankCandidatesWithHistory = rank_source.rankCandidatesWithHistory;
 pub const rankCandidatesWithOldestFirstHistory = rank_source.rankCandidatesWithOldestFirstHistory;
 
 // wayspot_history, wayspot_notification_preview, and wayspot_history_list

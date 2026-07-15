@@ -654,8 +654,8 @@ build_graph:
   test_coverage:
     command: "zig build test --summary all"
     accepted_minimum: 320
-    current_verified: 408
-    aggregate_root_tests: 197
+    current_verified: 410
+    aggregate_root_tests: 199
     direct_root_tests: 211
     note: aggregate source imports run together; direct module roots remain additional checks; the accepted 320 count is a total baseline, not an aggregate-only count
   packaging:
