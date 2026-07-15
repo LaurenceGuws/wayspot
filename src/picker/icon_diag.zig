@@ -1,4 +1,4 @@
-//! App icon diagnostics report resolver and vendor texture upload results for local app rows.
+//! App icon diagnostics report resolver and vendor texture upload results for local app candidates.
 
 const std = @import("std");
 const candidate_mod = @import("picker_candidate");
@@ -7,10 +7,10 @@ const app_icons = @import("icons.zig");
 const c = @import("sdl_c");
 
 pub const report_path = ".zig-cache/wayspot/icon-diagnostic.tsv";
-const max_report_rows: u32 = 768;
+const max_report_candidates: u32 = 768;
 
 const Counts = struct {
-    app_rows: u32 = 0,
+    app_candidates: u32 = 0,
     resolved: u32 = 0,
     iconless: u32 = 0,
     unsupported: u32 = 0,
@@ -49,8 +49,8 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
     const roots = app_icons.ResolveRoots.fromEnv();
     for (candidates) |candidate| {
         if (!candidate.isApp()) continue;
-        counts.app_rows += 1;
-        if (counts.app_rows > max_report_rows) {
+        counts.app_candidates += 1;
+        if (counts.app_candidates > max_report_candidates) {
             counts.skipped += 1;
             continue;
         }
@@ -98,9 +98,9 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
     }
 
     try out.print(
-        "summary\tapp_rows={d}\tresolved={d}\ticonless={d}\tunsupported={d}\tsurface_ok={d}\tsurface_failed={d}\tskipped={d}\n",
+        "summary\tapp_candidates={d}\tresolved={d}\ticonless={d}\tunsupported={d}\tsurface_ok={d}\tsurface_failed={d}\tskipped={d}\n",
         .{
-            counts.app_rows,
+            counts.app_candidates,
             counts.resolved,
             counts.iconless,
             counts.unsupported,
@@ -115,10 +115,10 @@ pub fn writeReport(candidates: []const candidate_mod.Candidate) !void {
     var stdout_buffer: [512]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "icon diagnostic report: {s}\napp_rows={d} resolved={d} surface_ok={d} surface_failed={d} iconless={d} unsupported={d} skipped={d}\n",
+        "icon diagnostic report: {s}\napp_candidates={d} resolved={d} surface_ok={d} surface_failed={d} iconless={d} unsupported={d} skipped={d}\n",
         .{
             report_path,
-            counts.app_rows,
+            counts.app_candidates,
             counts.resolved,
             counts.surface_ok,
             counts.surface_failed,

@@ -153,12 +153,12 @@ pub const EventStream = struct {
 };
 
 /// request opens, writes, reads, and closes one synchronous Hyprland request.
-pub fn request(allocator: std.mem.Allocator, hypr: Connection, command: []const u8) ![]u8 {
+pub fn request(allocator: std.mem.Allocator, hypr: Connection, request_text: []const u8) ![]u8 {
     const socket_path = try std.fmt.allocPrint(allocator, "{s}/hypr/{s}/.socket.sock", .{ hypr.runtime_dir, hypr.signature });
     defer allocator.free(socket_path);
     const fd = try connectRequestSocket(socket_path);
     defer closeFd(fd);
-    try writeAll(fd, command);
+    try writeAll(fd, request_text);
     return readBounded(allocator, fd);
 }
 

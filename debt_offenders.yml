@@ -1,14 +1,13 @@
 # WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
 # This is a design index, not an implementation authorization.
 project: wayspot
-checkpoint: 250ad5b
+checkpoint: c221b80
 status: ready_for_review
-implementation_status: build_packaging_and_rerun_wiring_uncommitted
+implementation_status: stale_shape_cleanup_uncommitted
 review_gate:
-  current_slice: build_packaging_and_rerun_wiring
+  current_slice: stale_shape_cleanup
   implementation_authorized: true
-  forbidden_before_approval:
-    - stale_shape_cleanup
+  forbidden_before_approval: []
 
 shape_bars:
   required_vocabulary:
@@ -734,7 +733,7 @@ target_files:
     tests:
       - successful launch returns after the wrapper wait
       - successful child wait returns normally
-      - child failure maps to CommandFailed
+      - child failure maps to IntentFailed
       - fork failure maps before child creation
       - wait interruption reaches max_wait_interrupts exactly
       - wait failure maps to WaitFailed
@@ -1504,7 +1503,7 @@ offenders:
     required_tests:
       - successful launch
       - successful child wait
-      - child failure maps to CommandFailed
+      - child failure maps to IntentFailed
       - fork failure
       - wait interruption bound
       - wait failure maps to WaitFailed
@@ -1555,7 +1554,7 @@ offenders:
     required_symbols:
       - main
       - selectEntry
-      - resolveLifecycleCommand
+      - resolveLifecycle
       - notification.run
       - wallpaper.run
       - wallpaper.rotateNow
@@ -1626,6 +1625,8 @@ offenders:
     required_tests:
       - resident module reachability
       - no GUI-to-resident import path
+      - notification banner child failure maps to ChildFailed
+      - sunglasses overlay child failure maps to ChildFailed
       - duplicate owner, cleanup, and recovery tests remain green
     required_comments:
       - resident mod //! entrypoint ownership
@@ -1698,7 +1699,7 @@ offenders:
       - rerun ownership, exact canonical identity, and one-way legacy transition rationale
 
   - id: stale_shape_cleanup
-    status: open
+    status: ready_for_review
     owner: project
     evidence:
       - src/picker/appearance.zig
@@ -1734,7 +1735,7 @@ offenders:
       - re-run.sh
       - packaging/systemd/wayspot.service
     changes:
-      - delete deprecated Command, Mode, Open, and flat row vocabulary
+      - delete deprecated Command, Mode, Open, and picker flat row vocabulary while retaining notification Row API and viewport geometry
       - rename stale command and form symbols/comments where they describe Cmd-tree meaning
       - remove stale module exports and imports
       - update inline test names to the accepted vocabulary
@@ -1745,8 +1746,10 @@ offenders:
       - no Open candidate owner
       - no commands method
       - no stale form comment for picker input
+      - notification RowInput, Row, and Cache.rows remain canonical
     required_tests:
       - source scan finds no deleted owner symbols
+      - source scan finds no picker Row or payload bridge while retaining notification Row symbols
       - all remaining public symbols have current comments
       - full unit and build proof
     required_comments:

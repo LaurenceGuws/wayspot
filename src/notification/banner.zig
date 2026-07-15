@@ -225,10 +225,10 @@ fn placeOnFocusedMonitor() void {
 fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: env.MonitorSource, title: []const u8) !void {
     const monitors = try monitor_source.queryMonitors(allocator);
     const monitor_name = focusedMonitorName(&monitors) orelse return error.NoFocusedEnvMonitor;
-    const command = try placementActionCommand(allocator, monitor_name, title);
-    defer allocator.free(command);
+    const script = try placementActionScript(allocator, monitor_name, title);
+    defer allocator.free(script);
     const pid = try forkChild();
-    if (pid == 0) placementActionChild(command);
+    if (pid == 0) placementActionChild(script);
     try waitChild(pid);
 }
 
@@ -240,7 +240,7 @@ fn focusedMonitorName(monitors: *const env.monitor.MonitorList) ?[]const u8 {
     return null;
 }
 
-fn placementActionCommand(allocator: std.mem.Allocator, monitor_name: []const u8, title: []const u8) ![]u8 {
+fn placementActionScript(allocator: std.mem.Allocator, monitor_name: []const u8, title: []const u8) ![]u8 {
     if (title.len == 0 or title.len > max_window_title_selector_bytes) return error.InvalidWindowTitle;
     return std.fmt.allocPrint(
         allocator,
@@ -249,18 +249,18 @@ fn placementActionCommand(allocator: std.mem.Allocator, monitor_name: []const u8
     );
 }
 
-fn placementActionChild(command: []const u8) noreturn {
-    var command_buf: [512:0]u8 = undefined;
-    if (command.len >= command_buf.len) std.c._exit(placement_child_fail_code);
-    @memcpy(command_buf[0..command.len], command);
-    command_buf[command.len] = 0;
+fn placementActionChild(script: []const u8) noreturn {
+    var script_buf: [512:0]u8 = undefined;
+    if (script.len >= script_buf.len) std.c._exit(placement_child_fail_code);
+    @memcpy(script_buf[0..script.len], script);
+    script_buf[script.len] = 0;
     const shell_path = "/bin/sh";
     const shell_name = "sh";
     const shell_arg = "-lc";
     const argv: [4:null]?[*:0]const u8 = .{
         shell_name,
         shell_arg,
-        command_buf[0..command.len :0].ptr,
+        script_buf[0..script.len :0].ptr,
         null,
     };
     const exec_rc = std.c.execve(shell_path, &argv, std.c.environ);
@@ -293,8 +293,8 @@ fn waitChild(pid: std.c.pid_t) !void {
         return error.WaitInterruptedTooOften;
     }
     const status_bits: u32 = @bitCast(status);
-    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
-    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
+    if (!std.c.W.IFEXITED(status_bits)) return error.ChildFailed;
+    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.ChildFailed;
 }
 
 test "boundedTimeout clamps notification expiry" {
@@ -315,10 +315,10 @@ test "notification placement action uses monitor fact only" {
     try monitors.append(second);
 
     const monitor_name = focusedMonitorName(&monitors) orelse return error.NoFocusedEnvMonitor;
-    const command = try placementActionCommand(std.testing.allocator, monitor_name, window_title);
-    defer std.testing.allocator.free(command);
+    const script = try placementActionScript(std.testing.allocator, monitor_name, window_title);
+    defer std.testing.allocator.free(script);
 
-    try std.testing.expect(std.mem.indexOf(u8, command, "monitor = \"HDMI-A-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command, "title:^Wayspot Notification$") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command, "workspace") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "monitor = \"HDMI-A-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "title:^Wayspot Notification$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "workspace") == null);
 }

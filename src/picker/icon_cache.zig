@@ -13,7 +13,7 @@ const max_svg_file_bytes: u64 = 2 * 1024 * 1024;
 const max_converter_path_bytes = app_icons.max_icon_path_bytes;
 const max_path_entries: u32 = 64;
 const max_path_entry_bytes = 512;
-const max_command_name_bytes = 128;
+const max_cmd_name_bytes = 128;
 const converter_fail_code: i32 = 127;
 const max_wait_interrupts: u32 = 8;
 
@@ -221,7 +221,7 @@ fn runConverter(converter_path: [:0]const u8, svg_path: [:0]const u8, png_path: 
 }
 
 fn commandPath(name: []const u8, out: []u8) ?[:0]const u8 {
-    if (name.len == 0 or name.len > max_command_name_bytes) return null;
+    if (name.len == 0 or name.len > max_cmd_name_bytes) return null;
     if (std.mem.indexOfScalar(u8, name, '/') != null) return null;
     const path_value = if (std.c.getenv("PATH")) |value| std.mem.span(value) else return null;
     var entries = std.mem.splitScalar(u8, path_value, ':');
@@ -231,12 +231,12 @@ fn commandPath(name: []const u8, out: []u8) ?[:0]const u8 {
         if (entry.len > max_path_entry_bytes) return null;
         if (entry_count >= max_path_entries) return null;
         entry_count += 1;
-        if (pathEntryContainsCommand(entry, name, out)) |path| return path;
+        if (pathEntryContainsCmd(entry, name, out)) |path| return path;
     }
     return null;
 }
 
-fn pathEntryContainsCommand(entry: []const u8, name: []const u8, out: []u8) ?[:0]const u8 {
+fn pathEntryContainsCmd(entry: []const u8, name: []const u8, out: []u8) ?[:0]const u8 {
     if (entry.len + 1 + name.len > max_converter_path_bytes or out.len <= entry.len + 1 + name.len) return null;
     @memcpy(out[0..entry.len], entry);
     out[entry.len] = '/';
@@ -248,7 +248,7 @@ fn pathEntryContainsCommand(entry: []const u8, name: []const u8, out: []u8) ?[:0
     return if (rc == 0) path else null;
 }
 
-test "command path rejects invalid command names" {
+test "cmd path rejects invalid cmd names" {
     var path_buffer: [max_converter_path_bytes + 1]u8 = undefined;
     try std.testing.expect(commandPath("", &path_buffer) == null);
     try std.testing.expect(commandPath("bin/rsvg-convert", &path_buffer) == null);

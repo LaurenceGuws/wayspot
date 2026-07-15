@@ -1,4 +1,4 @@
-//! AppIconStore owns bounded app-row icon resolution and vendor textures for one picker lifecycle.
+//! AppIconStore owns bounded app-candidate icon resolution and vendor textures for one picker lifecycle.
 
 const std = @import("std");
 

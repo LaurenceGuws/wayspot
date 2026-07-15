@@ -1,6 +1,6 @@
 //! GUI surface owns the SDL consumer lifecycle from creation to cleanup.
 //!
-//! It edits one query, consumes command candidates, renders rows, and queues
+//! It edits one query, consumes Candidates, renders rows, and queues
 //! one resolved intent for the surface-owned shutdown handoff. It imports no
 //! notification, wallpaper, or sunglasses implementation files.
 
@@ -8,7 +8,7 @@ const std = @import("std");
 const picker_owner = @import("wayspot_picker");
 const app_icons = picker_owner.icons;
 const candidate_owner = picker_owner.candidate;
-const command_owner = picker_owner.cmd;
+const cmd_owner = picker_owner.cmd;
 const process_owner = @import("wayspot_process");
 const config_defaults = @import("wayspot_config_defaults");
 const cursor_blink = picker_owner.cursor_blink;
@@ -25,7 +25,7 @@ const c = @import("sdl_c");
 /// run owns one GUI picker lifecycle from window creation through cleanup.
 pub fn run(
     allocator: std.mem.Allocator,
-    picker: *command_owner.Picker,
+    picker: *cmd_owner.Picker,
     home: []const u8,
 ) !void {
     try picker.loadHistory(allocator);
@@ -90,7 +90,7 @@ const LaunchQueue = struct {
 
 const Surface = struct {
     allocator: std.mem.Allocator,
-    picker: *command_owner.Picker,
+    picker: *cmd_owner.Picker,
     window: *c.SDL_Window,
     renderer: *c.SDL_Renderer,
     text: text_owner.TextEngine,
@@ -110,7 +110,7 @@ const Surface = struct {
     shutdown_after_launch: bool = false,
     text_drag: ?TextDrag = null,
 
-    fn init(allocator: std.mem.Allocator, picker: *command_owner.Picker, home: []const u8) !Surface {
+    fn init(allocator: std.mem.Allocator, picker: *cmd_owner.Picker, home: []const u8) !Surface {
         const config = try scale_owner.SurfaceConfig.load(allocator);
         const appearance_state = try config_defaults.load(allocator, home);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) return error.SdlInitFailed;
@@ -319,12 +319,12 @@ const Surface = struct {
             return;
         }
         if (!candidate.isLaunchable()) return;
-        const command = try self.picker.resolveCandidateCommand(self.allocator, candidate);
-        defer self.allocator.free(command);
+        const intent = try self.picker.resolveCandidate(self.allocator, candidate);
+        defer self.allocator.free(intent);
         if (candidate.isApp() or candidate.isOpen()) {
-            try self.picker.recordSelection(self.allocator, candidate.openPayload());
+            try self.picker.recordSelection(self.allocator, candidate.selection());
         }
-        try self.launch_queue.queue(command);
+        try self.launch_queue.queue(intent);
         self.shutdown_after_launch = true;
     }
 
@@ -810,12 +810,12 @@ fn drainLaunchQueue(queue: *LaunchQueue, runner: LaunchRunner) process_owner.Lau
 }
 
 fn launchQueueRunnerOkForTest(intent: []const u8) process_owner.LaunchError!void {
-    if (!std.mem.eql(u8, "run-me", intent)) return error.CommandFailed;
+    if (!std.mem.eql(u8, "run-me", intent)) return error.IntentFailed;
 }
 
 fn launchQueueRunnerFailForTest(intent: []const u8) process_owner.LaunchError!void {
-    if (!std.mem.eql(u8, "run-me", intent)) return error.CommandFailed;
-    return error.CommandFailed;
+    if (!std.mem.eql(u8, "run-me", intent)) return error.IntentFailed;
+    return error.IntentFailed;
 }
 
 test "surface launch queue clears after successful drain" {
@@ -828,7 +828,7 @@ test "surface launch queue clears after successful drain" {
 test "surface launch queue clears after failed drain" {
     var queue = LaunchQueue{};
     try queue.queue("run-me");
-    try std.testing.expectError(error.CommandFailed, drainLaunchQueue(&queue, launchQueueRunnerFailForTest));
+    try std.testing.expectError(error.IntentFailed, drainLaunchQueue(&queue, launchQueueRunnerFailForTest));
     try std.testing.expect(!queue.hasQueued());
 }
 
@@ -848,7 +848,7 @@ test "surface launch queue clears after process rejects an embedded NUL" {
 }
 
 test "GUI route selection consumes shared Candidate without changing Cmd order" {
-    const picker = command_owner.Picker{};
+    const picker = cmd_owner.Picker{};
     const before = picker.cmds;
     const route = candidate_owner.Candidate.subCmd(.{ .sunglasses = .{ .image = .{ .opacity = {} } } });
 

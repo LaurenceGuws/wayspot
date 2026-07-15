@@ -8,10 +8,10 @@ const std = @import("std");
 const candidate = @import("picker_candidate");
 const sub_cmd = @import("picker_sub_cmd");
 
-/// restart_open is the stable display input for the notification restart route.
-pub const restart_open = "lifecycle:notifications:restart";
-/// history_open is the stable display input for the notification history route.
-pub const history_open = "/notifications history";
+/// restart_selection is the stable display input for the notification restart route.
+pub const restart_selection = "lifecycle:notifications:restart";
+/// history_selection is the stable display input for the notification history route.
+pub const history_selection = "/notifications history";
 
 /// collectCandidates constructs the notification restart leaf and history route.
 pub fn collectCandidates(out: *candidate.Candidate.List) !void {
@@ -34,7 +34,7 @@ pub fn historySubCmd() sub_cmd.SubCmd {
     return .{ .notifications = .{ .history = {} } };
 }
 
-/// resolve returns the canonical command meaning for a notification route.
+/// resolve returns the canonical resident intent for a notification route.
 /// History is display-only and therefore has no executable intent here.
 pub fn resolve(value: sub_cmd.NotificationsSubCmd) ?[]const u8 {
     return switch (value) {
@@ -56,9 +56,9 @@ test "notification mode constructs both typed child routes" {
 
     try std.testing.expectEqual(@as(usize, 2), list.count);
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).concrete, list.items[0].typeOf());
-    try std.testing.expectEqualStrings(restart_open, list.items[0].openPayload());
+    try std.testing.expectEqualStrings(restart_selection, list.items[0].selection());
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).sub_cmd, list.items[1].typeOf());
-    try std.testing.expectEqualStrings(history_open, list.items[1].openPayload());
+    try std.testing.expectEqualStrings(history_selection, list.items[1].selection());
     try std.testing.expectEqual(sub_cmd.NotificationsSubCmd.restart, std.meta.activeTag(restartSubCmd().notifications));
     try std.testing.expectEqual(sub_cmd.NotificationsSubCmd.history, std.meta.activeTag(historySubCmd().notifications));
 }

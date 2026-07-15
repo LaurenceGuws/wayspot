@@ -8,8 +8,8 @@ const std = @import("std");
 const candidate = @import("picker_candidate");
 const sub_cmd = @import("picker_sub_cmd");
 
-/// restart_open is the stable display input for the wallpaper restart route.
-pub const restart_open = "lifecycle:wallpapers:restart";
+/// restart_selection is the stable display input for the wallpaper restart route.
+pub const restart_selection = "lifecycle:wallpapers:restart";
 
 /// collectCandidates constructs the wallpaper lifecycle leaves.
 pub fn collectCandidates(out: *candidate.Candidate.List) !void {
@@ -32,7 +32,7 @@ pub fn rotateSubCmd() sub_cmd.SubCmd {
     return .{ .wallpaper = .{ .rotate = {} } };
 }
 
-/// resolve returns canonical wallpaper command meaning without running it.
+/// resolve returns canonical wallpaper resident intent without running it.
 pub fn resolve(value: sub_cmd.WallpaperSubCmd) []const u8 {
     return switch (value) {
         .restart => restartIntent(),
@@ -53,9 +53,9 @@ test "wallpaper mode constructs both typed child routes" {
 
     try std.testing.expectEqual(@as(usize, 2), list.count);
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).concrete, list.items[0].typeOf());
-    try std.testing.expectEqualStrings(restart_open, list.items[0].openPayload());
+    try std.testing.expectEqualStrings(restart_selection, list.items[0].selection());
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).concrete, list.items[1].typeOf());
-    try std.testing.expectEqualStrings("wayspot wallpaper rotate", list.items[1].openPayload());
+    try std.testing.expectEqualStrings("wayspot wallpaper rotate", list.items[1].selection());
 }
 
 test "wallpaper routes resolve without importing the resident runtime" {

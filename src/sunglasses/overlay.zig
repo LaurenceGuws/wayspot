@@ -549,8 +549,8 @@ fn pidMatchesSunglassesOverlay(pid: std.os.linux.pid_t) bool {
     return cmdlineMatchesSunglassesOverlay(cmdline);
 }
 
-/// Returns true only for one exact sunglasses resident argv. The old flag
-/// form remains accepted as an exact transitional identity until packaging cleanup.
+/// Returns true only for one exact sunglasses resident argv or the exact
+/// legacy identity retained by the bounded rerun transition.
 fn cmdlineMatchesSunglassesOverlay(cmdline: []const u8) bool {
     var has_binary = false;
     var resident_arg: []const u8 = "";
@@ -860,8 +860,8 @@ fn waitChild(pid: std.c.pid_t) !void {
         return error.WaitInterruptedTooOften;
     }
     const status_bits: u32 = @bitCast(status);
-    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
-    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
+    if (!std.c.W.IFEXITED(status_bits)) return error.ChildFailed;
+    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.ChildFailed;
 }
 
 fn sleepNs(ns: u64) void {

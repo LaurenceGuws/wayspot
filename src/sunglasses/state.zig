@@ -115,7 +115,7 @@ pub const MonitorState = struct {
     }
 };
 
-/// State owns bounded per-monitor sunglasses values and their serialized form.
+/// State owns bounded per-monitor sunglasses values and their serialized state.
 pub const State = struct {
     monitors: [max_monitors]MonitorState = undefined,
     count: u32 = 0,

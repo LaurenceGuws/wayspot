@@ -11,7 +11,7 @@ const wallpaper_mode = wayspot.picker.mode.wallpaper;
 
 /// CanonicalEntry is the exact top-level process selection result.
 /// Resident values are already typed Cmd-tree values; no flag scan or second
-/// command representation exists after selection.
+/// Candidate representation exists after selection.
 const CanonicalEntry = union(enum) {
     help,
     ui,

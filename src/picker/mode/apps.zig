@@ -4,11 +4,11 @@ const std = @import("std");
 const candidate_mod = @import("picker_candidate");
 
 const Dependency = union(enum) {
-    command: []const u8,
+    cmd: []const u8,
 };
 
 const Execution = union(enum) {
-    shell_command: []const u8,
+    shell_cmd: []const u8,
 };
 
 const Spec = struct {
@@ -26,16 +26,16 @@ const local_specs = [_]Spec{
         .subtitle = "System",
         .open = "settings",
         .icon = "preferences-system-symbolic",
-        .execution = .{ .shell_command = "wlrlui" },
-        .dependency = .{ .command = "wlrlui" },
+        .execution = .{ .shell_cmd = "wlrlui" },
+        .dependency = .{ .cmd = "wlrlui" },
     },
     .{
         .title = "Power menu",
         .subtitle = "Session",
         .open = "power",
         .icon = "system-shutdown-symbolic",
-        .execution = .{ .shell_command = "wlogout" },
-        .dependency = .{ .command = "wlogout" },
+        .execution = .{ .shell_cmd = "wlogout" },
+        .dependency = .{ .cmd = "wlogout" },
     },
 };
 
@@ -44,7 +44,7 @@ pub const Apps = struct {
     cache_path: []const u8,
     cache_data: ?[]u8 = null,
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
-    command_exists_fn: *const fn (name: []const u8) bool = commandExists,
+    cmd_exists_fn: *const fn (name: []const u8) bool = cmdExists,
     /// desktop_root narrows discovery to one borrowed root when configured; null uses standard roots.
     desktop_root: ?[]const u8 = null,
 
@@ -109,20 +109,20 @@ pub const Apps = struct {
 
         if (count == 0) {
             self.freeCacheData(allocator);
-            std.log.warn("app rows cache contained no parsable rows path={s}", .{self.cache_path});
+            std.log.warn("app candidate cache contained no parsable candidates path={s}", .{self.cache_path});
         }
         try self.collectOpenCandidates(out);
     }
 
     /// resolve maps one available fixed-local leaf to an executable intent without executing it.
-    /// Unknown names return UnknownOpen; known names with missing dependencies return OpenUnavailable.
+    /// Unknown names return UnknownSelection; known names with missing dependencies return SelectionUnavailable.
     pub fn resolve(self: *const Apps, allocator: std.mem.Allocator, open: []const u8) ![]u8 {
         for (local_specs) |spec| {
             if (!std.mem.eql(u8, spec.open, open)) continue;
-            if (!self.openAvailable(spec)) return error.OpenUnavailable;
-            return resolveExecutionCommand(allocator, spec.execution);
+            if (!self.openAvailable(spec)) return error.SelectionUnavailable;
+            return resolveExecution(allocator, spec.execution);
         }
-        return error.UnknownOpen;
+        return error.UnknownSelection;
     }
 
     fn collectOpenCandidates(self: *Apps, out: *candidate_mod.Candidate.List) !void {
@@ -134,7 +134,7 @@ pub const Apps = struct {
 
     fn openAvailable(self: *const Apps, spec: Spec) bool {
         return switch (spec.dependency) {
-            .command => |name| self.command_exists_fn(name),
+            .cmd => |name| self.cmd_exists_fn(name),
         };
     }
 
@@ -150,7 +150,7 @@ pub const Apps = struct {
         self.owned_strings.clearRetainingCapacity();
     }
 
-    /// freeCacheData releases cache bytes borrowed by published Candidate rows.
+    /// freeCacheData releases cache bytes borrowed by published Candidates.
     pub fn freeCacheData(self: *Apps, allocator: std.mem.Allocator) void {
         if (self.cache_data) |data| {
             allocator.free(data);
@@ -184,7 +184,7 @@ pub const Apps = struct {
         const added = out.count - start_len;
         if (added > 0) {
             writeAppCacheFromCandidates(self.cache_path, out.slice()[start_len..]) catch |err| {
-                std.log.warn("app rows failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
+                std.log.warn("app candidates failed to rebuild cache '{s}': {s}", .{ self.cache_path, @errorName(err) });
             };
         }
     }
@@ -231,13 +231,13 @@ pub const Apps = struct {
     }
 };
 
-fn resolveExecutionCommand(allocator: std.mem.Allocator, execution: Execution) ![]u8 {
+fn resolveExecution(allocator: std.mem.Allocator, execution: Execution) ![]u8 {
     return switch (execution) {
-        .shell_command => |command| allocator.dupe(u8, command),
+        .shell_cmd => |intent| allocator.dupe(u8, intent),
     };
 }
 
-fn commandExists(name: []const u8) bool {
+fn cmdExists(name: []const u8) bool {
     if (name.len == 0 or name.len > 255) return false;
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const path_env = if (std.c.getenv("PATH")) |value| std.mem.span(value) else return false;
@@ -264,18 +264,18 @@ pub fn invalidateDefaultCache() void {
     defer allocator.free(cache_path);
     std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, cache_path) catch |err| switch (err) {
         error.FileNotFound => {},
-        else => std.log.warn("app rows cache invalidate failed path={s} err={s}", .{ cache_path, @errorName(err) }),
+        else => std.log.warn("app candidate cache invalidate failed path={s} err={s}", .{ cache_path, @errorName(err) }),
     };
 }
 
 fn testApps(cache_path: []const u8) Apps {
     return .{
         .cache_path = cache_path,
-        .command_exists_fn = testCommandExists,
+        .cmd_exists_fn = testCmdExists,
     };
 }
 
-fn testCommandExists(_: []const u8) bool {
+fn testCmdExists(_: []const u8) bool {
     return false;
 }
 
@@ -434,8 +434,8 @@ fn appendDesktopRootUnique(roots: *std.ArrayList([]u8), allocator: std.mem.Alloc
     try roots.append(allocator, candidate_owned);
 }
 
-fn writeAppCacheFromCandidates(cache_path: []const u8, rows: []const candidate_mod.Candidate) !void {
-    if (rows.len == 0) return;
+fn writeAppCacheFromCandidates(cache_path: []const u8, candidates: []const candidate_mod.Candidate) !void {
+    if (candidates.len == 0) return;
     const parent = std.fs.path.dirname(cache_path) orelse return;
     if (std.fs.path.isAbsolute(parent)) {
         std.Io.Dir.createDirAbsolute(std.Options.debug_io, parent, .default_dir) catch |err| switch (err) {
@@ -454,9 +454,9 @@ fn writeAppCacheFromCandidates(cache_path: []const u8, rows: []const candidate_m
 
     var file_buffer: [4096]u8 = undefined;
     var writer = file.writer(std.Options.debug_io, &file_buffer);
-    for (rows) |row| {
-        if (!row.isApp()) continue;
-        try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ row.subtitle(), row.title(), row.openPayload(), row.iconName() });
+    for (candidates) |candidate| {
+        if (!candidate.isApp()) continue;
+        try writer.interface.print("{s}\t{s}\t{s}\t{s}\n", .{ candidate.subtitle(), candidate.title(), candidate.selection(), candidate.iconName() });
     }
     try writer.interface.flush();
     try file.sync(std.Options.debug_io);
@@ -476,14 +476,14 @@ test "apps owns fixed local candidates and executable resolution" {
     defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
-        fn commandExists(name: []const u8) bool {
+        fn cmdExists(name: []const u8) bool {
             return std.mem.eql(u8, name, "wlrlui");
         }
     };
 
     var apps = Apps{
         .cache_path = cache_path,
-        .command_exists_fn = Fake.commandExists,
+        .cmd_exists_fn = Fake.cmdExists,
     };
     defer apps.deinit(std.testing.allocator);
 
@@ -494,13 +494,13 @@ test "apps owns fixed local candidates and executable resolution" {
     try std.testing.expect(list.items[0].isApp());
     try std.testing.expect(list.items[1].isOpen());
     try std.testing.expectEqualStrings("Kitty", list.items[0].title());
-    try std.testing.expectEqualStrings("settings", list.items[1].openPayload());
+    try std.testing.expectEqualStrings("settings", list.items[1].selection());
 
-    const command = try apps.resolve(std.testing.allocator, "settings");
-    defer std.testing.allocator.free(command);
-    try std.testing.expectEqualStrings("wlrlui", command);
-    try std.testing.expectError(error.OpenUnavailable, apps.resolve(std.testing.allocator, "power"));
-    try std.testing.expectError(error.UnknownOpen, apps.resolve(std.testing.allocator, "missing"));
+    const intent = try apps.resolve(std.testing.allocator, "settings");
+    defer std.testing.allocator.free(intent);
+    try std.testing.expectEqualStrings("wlrlui", intent);
+    try std.testing.expectError(error.SelectionUnavailable, apps.resolve(std.testing.allocator, "power"));
+    try std.testing.expectError(error.UnknownSelection, apps.resolve(std.testing.allocator, "missing"));
 }
 
 test "unexpected app cache read errors propagate" {
@@ -520,7 +520,7 @@ test "unexpected app cache read errors propagate" {
     try std.testing.expect(apps.cache_data == null);
 }
 
-test "app rows collects rows from cache file" {
+test "apps collects candidates from cache file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -548,11 +548,11 @@ test "app rows collects rows from cache file" {
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Kitty", list.items[0].title());
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
-    try std.testing.expectEqualStrings("kitty", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("kitty", list.items[0].selection());
     try std.testing.expectEqualStrings("kitty", list.items[0].iconName());
 }
 
-test "app rows accepts cache rows without icon metadata" {
+test "apps accepts candidates without icon metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -583,7 +583,7 @@ test "app rows accepts cache rows without icon metadata" {
     try std.testing.expectEqualStrings("firefox", list.items[1].iconName());
 }
 
-test "app rows scans desktop files when cache is missing" {
+test "apps scans desktop files when cache is missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const cache_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/missing.tsv", .{tmp.sub_path});
@@ -599,14 +599,14 @@ test "app rows scans desktop files when cache is missing" {
     try std.testing.expect(apps.cache_data == null);
 }
 
-test "app rows returns no rows when cache has no valid rows" {
+test "apps returns no candidates when cache has no valid candidates" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     try tmp.dir.writeFile(std.Options.debug_io, .{
         .sub_path = "apps.tsv",
         .data =
-        \\bad row
+        \\bad candidate
         \\still bad
         \\
         ,
@@ -626,7 +626,7 @@ test "app rows returns no rows when cache has no valid rows" {
     try std.testing.expect(apps.cache_data == null);
 }
 
-test "app rows replaces cache data across cache collects" {
+test "apps replaces cache data across candidate collects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -673,7 +673,7 @@ test "app rows replaces cache data across cache collects" {
     try std.testing.expectEqualStrings("Gimp", list.items[0].title());
 }
 
-test "app rows trims crlf and trailing whitespace from stored fields" {
+test "apps trims crlf and trailing whitespace from candidate fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -698,9 +698,9 @@ test "app rows trims crlf and trailing whitespace from stored fields" {
 
     try std.testing.expectEqual(@as(u32, 2), list.count);
     try std.testing.expectEqualStrings("Utilities", list.items[0].subtitle());
-    try std.testing.expectEqualStrings("kitty", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("kitty", list.items[0].selection());
     try std.testing.expectEqualStrings("kitty", list.items[0].iconName());
-    try std.testing.expectEqualStrings("firefox", list.items[1].openPayload());
+    try std.testing.expectEqualStrings("firefox", list.items[1].selection());
 }
 
 test "desktop entry parser extracts app metadata and strips exec field codes" {
@@ -724,7 +724,7 @@ test "desktop entry parser extracts app metadata and strips exec field codes" {
     try std.testing.expectEqualStrings("/usr/bin/zen-browser --new-window", normalized);
 }
 
-test "app rows can scan desktop root and rebuild cache rows" {
+test "apps scans desktop root and rebuilds candidate cache" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -762,7 +762,7 @@ test "app rows can scan desktop root and rebuild cache rows" {
     try std.testing.expectEqual(@as(u32, 4), @as(u32, @intCast(apps.owned_strings.items.len)));
     try std.testing.expectEqualStrings("Test App", list.items[0].title());
     try std.testing.expectEqualStrings("Utility", list.items[0].subtitle());
-    try std.testing.expectEqualStrings("test-app", list.items[0].openPayload());
+    try std.testing.expectEqualStrings("test-app", list.items[0].selection());
 
     try writeAppCacheFromCandidates(cache_file, list.slice());
     const written = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, cache_file, std.testing.allocator, .limited(4096));

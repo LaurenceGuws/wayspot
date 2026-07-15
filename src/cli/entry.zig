@@ -1,9 +1,9 @@
 //! CLI owns terminal consumption of the shared Cmd tree.
 //!
-//! It accepts the current terminal routes, writes the existing terminal records,
+//! It accepts the current terminal routes and writes the shared candidate records,
 //! and invokes one already-wired Picker. Candidate meaning and construction
 //! remain in picker.cmd; Bash position mapping and serialization are delegated
-//! to the command completion boundary and bash_completion.
+//! to the Cmd completion boundary and bash_completion.
 
 const std = @import("std");
 const picker_owner = @import("wayspot_picker");
@@ -20,7 +20,6 @@ pub const bash_completion = @import("bash_completion.zig");
 pub fn accepts(args: []const []const u8) bool {
     if (args.len < 2) return false;
     if (std.mem.eql(u8, args[1], "apps")) return true;
-    if (std.mem.eql(u8, args[1], "commands")) return true;
     if (std.mem.eql(u8, args[1], "query")) return true;
     if (std.mem.eql(u8, args[1], "open")) return true;
     if (std.mem.eql(u8, args[1], "--icon-diag")) return true;
@@ -54,32 +53,19 @@ pub fn run(
         return;
     }
 
-    if (std.mem.eql(u8, args[1], "commands")) {
-        try runRows(allocator, picker);
-        return;
-    }
-
     if (std.mem.eql(u8, args[1], "query")) {
         try runQuery(allocator, picker, args[2..]);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "open")) {
-        if (args.len != 3) return error.OpenPayloadRequired;
+        if (args.len != 3) return error.SelectionRequired;
         try runOpen(allocator, picker, args[2]);
         return;
     }
 
     std.debug.assert(args.len >= 3);
     try runBashCompletion(allocator, picker, args[3..]);
-}
-
-fn runRows(allocator: std.mem.Allocator, picker: *cmd_owner.Picker) !void {
-    try picker.loadHistory(allocator);
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(std.Options.debug_io, &stdout_buffer);
-    try picker.commands(allocator, &stdout_writer.interface);
-    try stdout_writer.interface.flush();
 }
 
 fn runIconDiag(allocator: std.mem.Allocator, picker: *cmd_owner.Picker) !void {
@@ -115,7 +101,7 @@ fn runQuery(
     picker: *cmd_owner.Picker,
     query_parts: []const []const u8,
 ) !void {
-    const raw_query = try joinCommandText(allocator, query_parts);
+    const raw_query = try joinQueryText(allocator, query_parts);
     defer allocator.free(raw_query);
     try picker.loadHistory(allocator);
 
@@ -143,10 +129,10 @@ fn runApps(
 fn appsQuery(allocator: std.mem.Allocator, query_parts: []const []const u8) ![]u8 {
     if (query_parts.len == 0) return allocator.dupe(u8, "/apps");
 
-    const terms = try joinCommandText(allocator, query_parts);
+    const terms = try joinQueryText(allocator, query_parts);
     defer allocator.free(terms);
     const prefix = "/apps ";
-    if (terms.len > cmd_owner.max_cmd_bytes -| prefix.len) return error.CommandTooLong;
+    if (terms.len > cmd_owner.max_cmd_bytes -| prefix.len) return error.QueryTooLong;
     return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, terms });
 }
 
@@ -167,7 +153,7 @@ fn runBashCompletion(
     if (query_parts.len != 2) return error.CompletionArgumentsInvalid;
     const position = try parseCompletionPosition(query_parts[0]);
     const raw_query = query_parts[1];
-    if (raw_query.len > cmd_owner.max_cmd_bytes) return error.CommandTooLong;
+    if (raw_query.len > cmd_owner.max_cmd_bytes) return error.QueryTooLong;
     try picker.loadHistory(allocator);
 
     const completed = try picker.complete(allocator, position, raw_query);
@@ -192,15 +178,15 @@ fn runIntentBytes(intent: []const u8) !void {
     try process_owner.runDetached(intent);
 }
 
-fn joinCommandText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
+fn joinQueryText(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     if (parts.len == 0) return allocator.dupe(u8, "");
     var total_len: u32 = 0;
     for (parts) |part| {
         total_len += @intCast(part.len);
-        if (total_len > cmd_owner.max_cmd_bytes) return error.CommandTooLong;
+        if (total_len > cmd_owner.max_cmd_bytes) return error.QueryTooLong;
     }
     total_len += @intCast(parts.len - 1);
-    if (total_len > cmd_owner.max_cmd_bytes) return error.CommandTooLong;
+    if (total_len > cmd_owner.max_cmd_bytes) return error.QueryTooLong;
 
     var out = try std.ArrayList(u8).initCapacity(allocator, total_len);
     errdefer out.deinit(allocator);

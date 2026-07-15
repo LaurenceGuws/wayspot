@@ -215,7 +215,7 @@ test "named product defaults preserve current picker appearance" {
     try std.testing.expectEqual(@as(u16, 14), defaults.picker.subtitle_normal.font_px);
 }
 
-test "named product defaults preserve banner and form appearance" {
+test "named product defaults preserve banner and picker appearance" {
     const defaults = try currentHardcodedDefaults();
     try std.testing.expectEqual(Rgba8{ .r = 70, .g = 22, .b = 26, .a = 242 }, defaults.banner.critical_background);
     try std.testing.expectEqual(@as(f32, 2), defaults.banner.accent_w);

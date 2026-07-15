@@ -175,21 +175,6 @@ pub const MonitorName = struct {
     }
 };
 
-/// Row stores one bounded display record and its terminal Input contract.
-/// Display slices are borrowed from the producer; Input values are copied.
-pub const Row = struct {
-    /// title is a borrowed display string.
-    title: []const u8,
-    /// subtitle is a borrowed explanatory string.
-    subtitle: []const u8,
-    /// open is a borrowed stable route or executable payload.
-    open: []const u8,
-    /// icon is a borrowed optional application icon name.
-    icon: []const u8 = "",
-    /// input is the copied terminal value contract.
-    input: Input = .none,
-};
-
 /// ActionLeaf carries Input.none for a resident action leaf.
 pub const ActionLeaf = struct {
     /// input is Input.none for an action-only lifecycle leaf.
@@ -268,23 +253,58 @@ pub const Lifecycle = union(enum) {
 };
 
 /// Concrete is the exact terminal union consumed after route selection.
-/// Apps own app and open rows, resident modes own lifecycle leaves, and
-/// notification history owns display-only rows. Every arm validates its Input
-/// policy before resolution; notification has no launch failure path.
+/// Apps own app and open leaves, resident modes own lifecycle leaves, and
+/// notification history owns display-only leaves. Display strings are borrowed
+/// from their producer; typed Input values are copied into each terminal leaf.
 pub const Concrete = union(enum) {
     /// app is one launchable installed application leaf.
-    app: Row,
+    app: struct {
+        /// title is the bounded display title.
+        title: []const u8,
+        /// subtitle is the bounded display subtitle.
+        subtitle: []const u8,
+        /// selection is the stable application lookup value.
+        selection: []const u8,
+        /// icon is the optional application icon name.
+        icon: []const u8 = "",
+        /// input is the typed leaf contract and is none for app leaves.
+        input: Input = .none,
+    },
     /// open is one launchable file, URL, or direct open leaf.
-    open: Row,
+    open: struct {
+        /// title is the bounded display title.
+        title: []const u8,
+        /// subtitle is the bounded display subtitle.
+        subtitle: []const u8,
+        /// selection is the stable direct-open lookup value.
+        selection: []const u8,
+        /// icon is the optional application icon name.
+        icon: []const u8 = "",
+        /// input is the typed leaf contract and is none for open leaves.
+        input: Input = .none,
+    },
     /// lifecycle is one typed resident leaf intent.
     lifecycle: Lifecycle,
     /// notification is display-only and rejected at selection and launch.
-    notification: Row,
+    notification: struct {
+        /// title is the bounded display title.
+        title: []const u8,
+        /// subtitle is the bounded display subtitle.
+        subtitle: []const u8,
+        /// selection is the stable notification-history lookup value.
+        selection: []const u8,
+        /// icon is the optional application icon name.
+        icon: []const u8 = "",
+        /// input is the typed leaf contract and is none for notifications.
+        input: Input = .none,
+    },
 
     /// input returns the typed value contract of the active leaf.
     pub fn input(self: Concrete) Input {
         return switch (self) {
-            .app, .open, .notification => |value| value.input,
+            .app => |value| value.input,
+            .open => |value| value.input,
+            .notification => |value| value.input,
             .lifecycle => |value| value.input(),
         };
     }
@@ -373,18 +393,18 @@ pub const Candidate = union(enum) {
     }
 
     /// appLeaf creates one launchable application leaf with Input.none.
-    pub fn appLeaf(title_text: []const u8, subtitle_text: []const u8, open_payload: []const u8, icon: []const u8) Candidate {
-        return .{ .concrete = .{ .app = .{ .title = title_text, .subtitle = subtitle_text, .open = open_payload, .icon = icon } } };
+    pub fn appLeaf(title_text: []const u8, subtitle_text: []const u8, selection_text: []const u8, icon: []const u8) Candidate {
+        return .{ .concrete = .{ .app = .{ .title = title_text, .subtitle = subtitle_text, .selection = selection_text, .icon = icon } } };
     }
 
     /// openLeaf creates one launchable direct-open leaf with Input.none.
-    pub fn openLeaf(title_text: []const u8, subtitle_text: []const u8, open_payload: []const u8, icon: []const u8) Candidate {
-        return .{ .concrete = .{ .open = .{ .title = title_text, .subtitle = subtitle_text, .open = open_payload, .icon = icon } } };
+    pub fn openLeaf(title_text: []const u8, subtitle_text: []const u8, selection_text: []const u8, icon: []const u8) Candidate {
+        return .{ .concrete = .{ .open = .{ .title = title_text, .subtitle = subtitle_text, .selection = selection_text, .icon = icon } } };
     }
 
     /// notificationLeaf creates one display-only history leaf.
-    pub fn notificationLeaf(title_text: []const u8, subtitle_text: []const u8, open_payload: []const u8) Candidate {
-        return .{ .concrete = .{ .notification = .{ .title = title_text, .subtitle = subtitle_text, .open = open_payload } } };
+    pub fn notificationLeaf(title_text: []const u8, subtitle_text: []const u8, selection_text: []const u8) Candidate {
+        return .{ .concrete = .{ .notification = .{ .title = title_text, .subtitle = subtitle_text, .selection = selection_text } } };
     }
 
     /// lifecycleLeaf creates one typed resident leaf.
@@ -451,27 +471,28 @@ pub const Candidate = union(enum) {
         }
     }
 
-    /// row returns the display record for either route or terminal value.
-    pub fn row(self: Candidate) Row {
-        return switch (self) {
-            .sub_cmd => |value| subCmdRow(value),
-            .concrete => |value| concreteRow(value),
-        };
-    }
-
     /// title returns the bounded display title.
     pub fn title(self: Candidate) []const u8 {
-        return self.row().title;
+        return switch (self) {
+            .sub_cmd => |value| subCmdTitle(value),
+            .concrete => |value| concreteTitle(value),
+        };
     }
 
     /// subtitle returns the bounded display subtitle.
     pub fn subtitle(self: Candidate) []const u8 {
-        return self.row().subtitle;
+        return switch (self) {
+            .sub_cmd => |value| subCmdSubtitle(value),
+            .concrete => |value| concreteSubtitle(value),
+        };
     }
 
-    /// openPayload returns the stable terminal lookup bytes or route label.
-    pub fn openPayload(self: Candidate) []const u8 {
-        return self.row().open;
+    /// selection returns the stable terminal lookup bytes or route label.
+    pub fn selection(self: Candidate) []const u8 {
+        return switch (self) {
+            .sub_cmd => |value| subCmdSelection(value),
+            .concrete => |value| concreteSelection(value),
+        };
     }
 
     /// routeQuery returns the GUI query that reaches this SubCmd node.
@@ -485,7 +506,10 @@ pub const Candidate = union(enum) {
 
     /// iconName returns the optional application icon name.
     pub fn iconName(self: Candidate) []const u8 {
-        return self.row().icon;
+        return switch (self) {
+            .sub_cmd => "",
+            .concrete => |value| concreteIcon(value),
+        };
     }
 
     /// input returns the selected terminal Input or none for a route node.
@@ -578,58 +602,161 @@ fn requireNone(value: Input) InputError!void {
     };
 }
 
-fn concreteRow(value: Concrete) Row {
+fn concreteTitle(value: Concrete) []const u8 {
     return switch (value) {
-        .app, .open, .notification => |row| row,
-        .lifecycle => |leaf| lifecycleRow(leaf),
+        .app => |leaf| leaf.title,
+        .open => |leaf| leaf.title,
+        .notification => |leaf| leaf.title,
+        .lifecycle => |leaf| lifecycleTitle(leaf),
     };
 }
 
-fn lifecycleRow(value: Lifecycle) Row {
+fn concreteSubtitle(value: Concrete) []const u8 {
     return switch (value) {
-        .notifications_restart => .{ .title = "Restart notifications", .subtitle = "Lifecycle", .open = "lifecycle:notifications:restart" },
-        .wallpaper_restart => .{ .title = "Restart wallpaper", .subtitle = "Lifecycle", .open = "lifecycle:wallpapers:restart" },
-        .wallpaper_rotate => .{ .title = "Rotate wallpaper", .subtitle = "Lifecycle", .open = "wayspot wallpaper rotate" },
-        .sunglasses_restart => .{ .title = "Restart sunglasses", .subtitle = "Lifecycle", .open = "lifecycle:sunglasses:restart" },
-        .sunglasses_apply => .{ .title = "Apply sunglasses", .subtitle = "Lifecycle", .open = "wayspot sunglasses apply" },
-        .sunglasses_reconcile => .{ .title = "Reconcile sunglasses", .subtitle = "Lifecycle", .open = "wayspot sunglasses reconcile" },
-        .sunglasses_dim => |leaf| .{ .title = "Dim sunglasses", .subtitle = "Scalar or toggle", .open = "wayspot sunglasses dim", .input = leaf.input },
-        .sunglasses_filter => |leaf| .{ .title = "Filter sunglasses", .subtitle = "Scalar or toggle", .open = "wayspot sunglasses filter", .input = leaf.input },
-        .sunglasses_image => |leaf| .{ .title = "Image sunglasses", .subtitle = "Path, scalar, toggle, or none", .open = "wayspot sunglasses image", .input = leaf.input },
+        .app => |leaf| leaf.subtitle,
+        .open => |leaf| leaf.subtitle,
+        .notification => |leaf| leaf.subtitle,
+        .lifecycle => |leaf| lifecycleSubtitle(leaf),
     };
 }
 
-fn subCmdRow(value: sub_cmd.SubCmd) Row {
+fn concreteSelection(value: Concrete) []const u8 {
+    return switch (value) {
+        .app => |leaf| leaf.selection,
+        .open => |leaf| leaf.selection,
+        .notification => |leaf| leaf.selection,
+        .lifecycle => |leaf| lifecycleSelection(leaf),
+    };
+}
+
+fn concreteIcon(value: Concrete) []const u8 {
+    return switch (value) {
+        .app => |leaf| leaf.icon,
+        .open => |leaf| leaf.icon,
+        .notification => |leaf| leaf.icon,
+        .lifecycle => "",
+    };
+}
+
+fn lifecycleTitle(value: Lifecycle) []const u8 {
+    return switch (value) {
+        .notifications_restart => "Restart notifications",
+        .wallpaper_restart => "Restart wallpaper",
+        .wallpaper_rotate => "Rotate wallpaper",
+        .sunglasses_restart => "Restart sunglasses",
+        .sunglasses_apply => "Apply sunglasses",
+        .sunglasses_reconcile => "Reconcile sunglasses",
+        .sunglasses_dim => "Dim sunglasses",
+        .sunglasses_filter => "Filter sunglasses",
+        .sunglasses_image => "Image sunglasses",
+    };
+}
+
+fn lifecycleSubtitle(value: Lifecycle) []const u8 {
+    return switch (value) {
+        .notifications_restart, .wallpaper_restart, .wallpaper_rotate, .sunglasses_restart, .sunglasses_apply, .sunglasses_reconcile => "Lifecycle",
+        .sunglasses_dim, .sunglasses_filter => "Scalar or toggle",
+        .sunglasses_image => "Path, scalar, toggle, or none",
+    };
+}
+
+fn lifecycleSelection(value: Lifecycle) []const u8 {
+    return switch (value) {
+        .notifications_restart => "lifecycle:notifications:restart",
+        .wallpaper_restart => "lifecycle:wallpapers:restart",
+        .wallpaper_rotate => "wayspot wallpaper rotate",
+        .sunglasses_restart => "lifecycle:sunglasses:restart",
+        .sunglasses_apply => "wayspot sunglasses apply",
+        .sunglasses_reconcile => "wayspot sunglasses reconcile",
+        .sunglasses_dim => "wayspot sunglasses dim",
+        .sunglasses_filter => "wayspot sunglasses filter",
+        .sunglasses_image => "wayspot sunglasses image",
+    };
+}
+
+fn subCmdTitle(value: sub_cmd.SubCmd) []const u8 {
     return switch (value) {
         .notifications => |child| switch (child) {
-            .history => .{ .title = "Notification history", .subtitle = "Route", .open = "/notifications history" },
-            .restart => .{ .title = "Notifications", .subtitle = "Mode", .open = "wayspot notifications" },
+            .history => "Notification history",
+            .restart => "Notifications",
         },
         .wallpaper => |child| switch (child) {
-            .restart => .{ .title = "Wallpaper", .subtitle = "Mode", .open = "wayspot wallpaper" },
-            .rotate => .{ .title = "Rotate wallpaper", .subtitle = "Lifecycle", .open = "wayspot wallpaper rotate" },
+            .restart => "Wallpaper",
+            .rotate => "Rotate wallpaper",
         },
         .sunglasses => |child| switch (child) {
-            .restart => .{ .title = "Sunglasses", .subtitle = "Mode", .open = "wayspot sunglasses" },
-            .apply => .{ .title = "Apply sunglasses", .subtitle = "Lifecycle", .open = "wayspot sunglasses apply" },
-            .reconcile => .{ .title = "Reconcile sunglasses", .subtitle = "Lifecycle", .open = "wayspot sunglasses reconcile" },
+            .restart => "Sunglasses",
+            .apply => "Apply sunglasses",
+            .reconcile => "Reconcile sunglasses",
             .dim => |operation| switch (operation) {
-                .set => .{ .title = "Set sunglasses dim", .subtitle = "Slider", .open = "wayspot sunglasses dim" },
-                .on => .{ .title = "Enable sunglasses dim", .subtitle = "Toggle", .open = "wayspot sunglasses dim" },
-                .off => .{ .title = "Disable sunglasses dim", .subtitle = "Toggle", .open = "wayspot sunglasses dim" },
+                .set => "Set sunglasses dim",
+                .on => "Enable sunglasses dim",
+                .off => "Disable sunglasses dim",
             },
             .filter => |operation| switch (operation) {
-                .set => .{ .title = "Set sunglasses filter", .subtitle = "Slider", .open = "wayspot sunglasses filter" },
-                .on => .{ .title = "Enable sunglasses filter", .subtitle = "Toggle", .open = "wayspot sunglasses filter" },
-                .off => .{ .title = "Disable sunglasses filter", .subtitle = "Toggle", .open = "wayspot sunglasses filter" },
+                .set => "Set sunglasses filter",
+                .on => "Enable sunglasses filter",
+                .off => "Disable sunglasses filter",
             },
             .image => |operation| switch (operation) {
-                .set => .{ .title = "Set sunglasses image", .subtitle = "Path", .open = "wayspot sunglasses image" },
-                .opacity => .{ .title = "Set sunglasses image opacity", .subtitle = "Slider", .open = "wayspot sunglasses image" },
-                .on => .{ .title = "Enable sunglasses image", .subtitle = "Toggle", .open = "wayspot sunglasses image" },
-                .off => .{ .title = "Disable sunglasses image", .subtitle = "Toggle", .open = "wayspot sunglasses image" },
-                .clear => .{ .title = "Clear sunglasses image", .subtitle = "Action", .open = "wayspot sunglasses image" },
+                .set => "Set sunglasses image",
+                .opacity => "Set sunglasses image opacity",
+                .on => "Enable sunglasses image",
+                .off => "Disable sunglasses image",
+                .clear => "Clear sunglasses image",
             },
+        },
+    };
+}
+
+fn subCmdSubtitle(value: sub_cmd.SubCmd) []const u8 {
+    return switch (value) {
+        .notifications => |child| switch (child) {
+            .history => "Route",
+            .restart => "Resident",
+        },
+        .wallpaper => |child| switch (child) {
+            .restart => "Resident",
+            .rotate => "Lifecycle",
+        },
+        .sunglasses => |child| switch (child) {
+            .restart => "Resident",
+            .apply, .reconcile => "Lifecycle",
+            .dim => |operation| switch (operation) {
+                .set => "Slider",
+                .on, .off => "Toggle",
+            },
+            .filter => |operation| switch (operation) {
+                .set => "Slider",
+                .on, .off => "Toggle",
+            },
+            .image => |operation| switch (operation) {
+                .set => "Path",
+                .opacity => "Slider",
+                .on, .off => "Toggle",
+                .clear => "Action",
+            },
+        },
+    };
+}
+
+fn subCmdSelection(value: sub_cmd.SubCmd) []const u8 {
+    return switch (value) {
+        .notifications => |child| switch (child) {
+            .history => "/notifications history",
+            .restart => "wayspot notifications",
+        },
+        .wallpaper => |child| switch (child) {
+            .restart => "wayspot wallpaper",
+            .rotate => "wayspot wallpaper rotate",
+        },
+        .sunglasses => |child| switch (child) {
+            .restart => "wayspot sunglasses",
+            .apply => "wayspot sunglasses apply",
+            .reconcile => "wayspot sunglasses reconcile",
+            .dim => "wayspot sunglasses dim",
+            .filter => "wayspot sunglasses filter",
+            .image => "wayspot sunglasses image",
         },
     };
 }
@@ -819,7 +946,7 @@ test "Candidate boundary policy covers every Concrete arm" {
 test "candidate route preserves nested SubCmd without embedding Input" {
     const route = Candidate.subCmd(.{ .sunglasses = .{ .dim = .{ .set = {} } } });
     try std.testing.expectEqual(std.meta.Tag(Candidate).sub_cmd, route.typeOf());
-    try std.testing.expectEqualStrings("wayspot sunglasses dim", route.openPayload());
+    try std.testing.expectEqualStrings("wayspot sunglasses dim", route.selection());
     try std.testing.expectEqualStrings("/sunglasses dim", route.routeQuery().?);
     const selected = switch (route) {
         .sub_cmd => |value| value.sunglasses,

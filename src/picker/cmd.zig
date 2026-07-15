@@ -29,27 +29,35 @@ comptime {
 
 /// Cmd is the closed top-level mode vocabulary in fixed apps-first order.
 pub const Cmd = union(enum) {
+    /// apps is the default mode and the first ordered Cmd arm.
     apps: ?*apps_mode.Apps,
+    /// notifications selects the notification resident mode.
     notifications: struct {},
+    /// wallpaper selects the wallpaper resident mode.
     wallpaper: struct {},
+    /// sunglasses selects the sunglasses resident mode.
     sunglasses: struct {},
 };
 
 /// CompletionPosition identifies the Cmd-tree level receiving one shell prefix.
 pub const CompletionPosition = enum {
+    /// mode receives one top-level Cmd name.
     mode,
+    /// sub_cmd receives one resident SubCmd name.
     sub_cmd,
+    /// operation receives one nested route operation.
     operation,
+    /// app receives one application selection.
     app,
 };
 
 /// Completion is one borrowed shell argument selected by Cmd semantics.
 ///
 /// The argument is a static Cmd/SubCmd name or a producer-owned application
-/// payload. The returned slice owns only the Completion records; the Picker
+/// selection. The returned slice owns only the Completion records; the Picker
 /// and its producers outlive every argument until the caller frees the slice.
 pub const Completion = struct {
-    /// argument is exactly one next shell argument, without a command prefix.
+    /// argument is exactly one next shell argument, without a Wayspot prefix.
     argument: []const u8,
 };
 
@@ -88,7 +96,7 @@ pub const Picker = struct {
         deinitHistory(&self.history, allocator);
     }
 
-    /// rankQuery returns ranked rows for the current query string.
+    /// rankQuery returns ranked candidates for the current query string.
     pub fn rankQuery(self: *Picker, allocator: std.mem.Allocator, raw_query: []const u8) ![]rank.RankedCandidate {
         const parsed = try query_mod.parse(raw_query);
         if (parsed.route != .modes) try self.loadCandidatesOnce(allocator);
@@ -113,37 +121,37 @@ pub const Picker = struct {
         );
     }
 
-    /// recordSelection keeps the selected open payload in bounded oldest-first order.
-    pub fn recordSelection(self: *Picker, allocator: std.mem.Allocator, selected_open: []const u8) !void {
+    /// recordSelection keeps the selected candidate value in bounded oldest-first order.
+    pub fn recordSelection(self: *Picker, allocator: std.mem.Allocator, selected_selection: []const u8) !void {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
-        try recordHistory(&self.history, self.max_history, allocator, selected_open);
+        try recordHistory(&self.history, self.max_history, allocator, selected_selection);
     }
 
     /// loadHistory reads persisted selection history when a path was configured.
     pub fn loadHistory(self: *Picker, allocator: std.mem.Allocator) !void {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
-        try loadHistoryRows(&self.history, self.max_history, self.history_path, allocator);
+        try loadHistorySelections(&self.history, self.max_history, self.history_path, allocator);
     }
 
     /// saveHistory writes persisted selection history when a path was configured.
     pub fn saveHistory(self: *Picker, allocator: std.mem.Allocator) !void {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
-        try saveHistoryRows(self.history.items, self.history_path, allocator);
+        try saveHistorySelections(self.history.items, self.history_path, allocator);
     }
 
-    /// resolveCandidateCommand resolves one terminal leaf and rejects route or
+    /// resolveCandidate resolves one terminal leaf and rejects route or
     /// display-only candidates before any process launch is possible.
-    pub fn resolveCandidateCommand(
+    pub fn resolveCandidate(
         self: *Picker,
         allocator: std.mem.Allocator,
-        row: candidate.Candidate,
+        value: candidate.Candidate,
     ) ![]u8 {
         std.debug.assert(self.max_history > 0);
-        return switch (row) {
-            .sub_cmd => |value| resolveSubCmd(value),
+        return switch (value) {
+            .sub_cmd => |sub_cmd_value| resolveSubCmd(sub_cmd_value),
             .concrete => |leaf| self.resolveConcrete(allocator, leaf),
         };
     }
@@ -160,35 +168,27 @@ pub const Picker = struct {
     fn resolveConcrete(self: *const Picker, allocator: std.mem.Allocator, leaf: candidate.Concrete) ![]u8 {
         try leaf.validate();
         return switch (leaf) {
-            .app => |value| allocator.dupe(u8, value.open),
+            .app => |value| allocator.dupe(u8, value.selection),
             .open => |value| blk: {
                 const apps = self.appsOwner() orelse return error.AppsOwnerMissing;
-                break :blk try apps.resolve(allocator, value.open);
+                break :blk try apps.resolve(allocator, value.selection);
             },
-            .lifecycle => |value| resolveLifecycleCommand(allocator, value),
+            .lifecycle => |value| resolveLifecycle(allocator, value),
             .notification => error.NotificationDisplayOnly,
         };
     }
 
-    /// open resolves one terminal lookup string for the current CLI bridge.
-    pub fn open(self: *Picker, allocator: std.mem.Allocator, lookup: []const u8) ![]u8 {
+    /// open resolves one terminal selection value for the current CLI bridge.
+    pub fn open(self: *Picker, allocator: std.mem.Allocator, selection: []const u8) ![]u8 {
         try self.loadCandidatesOnce(allocator);
-        for (self.candidates.slice()) |row| {
-            if (!std.mem.eql(u8, row.openPayload(), lookup)) continue;
-            return self.resolveCandidateCommand(allocator, row);
+        for (self.candidates.slice()) |value| {
+            if (!std.mem.eql(u8, value.selection(), selection)) continue;
+            return self.resolveCandidate(allocator, value);
         }
-        return error.UnknownOpen;
+        return error.UnknownSelection;
     }
 
-    /// commands writes the current command rows as tab-separated terminal records.
-    pub fn commands(self: *Picker, allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
-        try self.loadCandidatesOnce(allocator);
-        for (self.candidates.slice()) |row| {
-            try printTerminalRow(out, row);
-        }
-    }
-
-    /// query writes ranked command rows for a terminal query.
+    /// query writes ranked candidates for a terminal query.
     pub fn query(
         self: *Picker,
         allocator: std.mem.Allocator,
@@ -198,7 +198,7 @@ pub const Picker = struct {
         const ranked = try self.rankQuery(allocator, raw_query);
         defer allocator.free(ranked);
         for (ranked) |item| {
-            try printTerminalRow(out, item.candidate);
+            try printCandidate(out, item.candidate);
         }
     }
 
@@ -361,7 +361,7 @@ pub const Picker = struct {
         if (ranked.len > max_completion_candidates) return error.TooManyCompletionCandidates;
         for (ranked) |item| {
             if (!candidate.Candidate.accepts(.bash_completion, item.candidate)) continue;
-            try appendCompletion(out, count, item.candidate.openPayload(), "");
+            try appendCompletion(out, count, item.candidate.selection(), "");
         }
     }
 };
@@ -417,8 +417,8 @@ fn makeCmds(apps: ?*apps_mode.Apps) [4]Cmd {
     };
 }
 
-/// resolveLifecycleCommand exhaustively dispatches each resident leaf arm.
-fn resolveLifecycleCommand(allocator: std.mem.Allocator, value: candidate.Lifecycle) ![]u8 {
+/// resolveLifecycle exhaustively resolves each resident leaf arm.
+fn resolveLifecycle(allocator: std.mem.Allocator, value: candidate.Lifecycle) ![]u8 {
     return switch (value) {
         .notifications_restart => allocator.dupe(u8, notifications_mode.restartIntent()),
         .wallpaper_restart => allocator.dupe(u8, wallpaper_mode.restartIntent()),
@@ -508,12 +508,12 @@ fn appendShellQuoted(out: *std.ArrayList(u8), allocator: std.mem.Allocator, valu
     try out.append(allocator, '\'');
 }
 
-fn printTerminalRow(out: *std.Io.Writer, row: candidate.Candidate) !void {
+fn printCandidate(out: *std.Io.Writer, value: candidate.Candidate) !void {
     try out.print("{s}\t{s}\t{s}\t{s}\n", .{
-        @tagName(row.typeOf()),
-        row.openPayload(),
-        row.title(),
-        row.subtitle(),
+        @tagName(value.typeOf()),
+        value.selection(),
+        value.title(),
+        value.subtitle(),
     });
 }
 
@@ -521,10 +521,10 @@ fn recordHistory(
     history: *std.ArrayListUnmanaged([]u8),
     max_history: u32,
     allocator: std.mem.Allocator,
-    selected_open: []const u8,
+    selected_selection: []const u8,
 ) !void {
-    if (selected_open.len == 0) return;
-    const copy = try allocator.dupe(u8, selected_open);
+    if (selected_selection.len == 0) return;
+    const copy = try allocator.dupe(u8, selected_selection);
     try history.append(allocator, copy);
 
     if (history.items.len > max_history) {
@@ -533,7 +533,7 @@ fn recordHistory(
     }
 }
 
-fn loadHistoryRows(
+fn loadHistorySelections(
     history: *std.ArrayListUnmanaged([]u8),
     max_history: u32,
     history_path: ?[]const u8,
@@ -554,7 +554,7 @@ fn loadHistoryRows(
     }
 }
 
-fn saveHistoryRows(history: []const []const u8, history_path: ?[]const u8, allocator: std.mem.Allocator) !void {
+fn saveHistorySelections(history: []const []const u8, history_path: ?[]const u8, allocator: std.mem.Allocator) !void {
     const path = history_path orelse return;
 
     var out = std.ArrayList(u8).empty;
@@ -619,7 +619,7 @@ fn deinitHistory(history: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allo
     history.deinit(allocator);
 }
 
-test "command model collects candidates once per picker lifecycle" {
+test "Cmd picker collects candidates once per picker lifecycle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -651,7 +651,7 @@ test "command model collects candidates once per picker lifecycle" {
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(apps.owned_strings.items.len)));
 }
 
-test "candidate loading rolls back overflow and retries without stale rows" {
+test "candidate loading rolls back overflow and retries without stale candidates" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -676,14 +676,14 @@ test "candidate loading rolls back overflow and retries without stale rows" {
     defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
-        fn commandExists(_: []const u8) bool {
+        fn cmdExists(_: []const u8) bool {
             return false;
         }
     };
 
     var apps = apps_mode.Apps{
         .cache_path = cache_path,
-        .command_exists_fn = Fake.commandExists,
+        .cmd_exists_fn = Fake.cmdExists,
     };
     defer apps.deinit(std.testing.allocator);
 
@@ -705,10 +705,10 @@ test "candidate loading rolls back overflow and retries without stale rows" {
     defer std.testing.allocator.free(recovered);
     try std.testing.expectEqual(@as(usize, 1), recovered.len);
     try std.testing.expectEqualStrings("Recovered", recovered[0].candidate.title());
-    try std.testing.expectEqualStrings("recovered", recovered[0].candidate.openPayload());
+    try std.testing.expectEqualStrings("recovered", recovered[0].candidate.selection());
     var apps_count: usize = 0;
-    for (model.candidates.slice()) |row| {
-        if (row.isApp() or row.isOpen()) apps_count += 1;
+    for (model.candidates.slice()) |candidate_value| {
+        if (candidate_value.isApp() or candidate_value.isOpen()) apps_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), apps_count);
 }
@@ -756,14 +756,14 @@ test "desktop scan overflow reaches transaction and retries cleanly" {
     defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
-        fn commandExists(_: []const u8) bool {
+        fn cmdExists(_: []const u8) bool {
             return false;
         }
     };
 
     var apps = apps_mode.Apps{
         .cache_path = cache_path,
-        .command_exists_fn = Fake.commandExists,
+        .cmd_exists_fn = Fake.cmdExists,
         .desktop_root = overflow_root,
     };
     defer apps.deinit(std.testing.allocator);
@@ -782,7 +782,7 @@ test "desktop scan overflow reaches transaction and retries cleanly" {
     defer std.testing.allocator.free(recovered);
     try std.testing.expectEqual(@as(usize, 1), recovered.len);
     try std.testing.expectEqualStrings("Recovered Desktop App", recovered[0].candidate.title());
-    try std.testing.expectEqualStrings("recovered-desktop", recovered[0].candidate.openPayload());
+    try std.testing.expectEqualStrings("recovered-desktop", recovered[0].candidate.selection());
 }
 
 test "Cmd array is exhaustive, bounded, and apps-first" {
@@ -805,7 +805,7 @@ test "Picker initializers share the one Cmd composition" {
     try std.testing.expectEqual(@TypeOf(first), @TypeOf(second));
 }
 
-test "command model exposes typed sunglasses leaves" {
+test "Cmd picker exposes typed sunglasses leaves" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -815,7 +815,7 @@ test "command model exposes typed sunglasses leaves" {
     try std.testing.expect(results[0].candidate.isLaunchable() or results[0].candidate.isSubCmd());
 }
 
-test "command model exposes every resident mode at the modes route" {
+test "Cmd picker exposes every resident mode at the modes route" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -838,7 +838,7 @@ test "command model exposes every resident mode at the modes route" {
     try std.testing.expect(saw_sunglasses);
 }
 
-test "command query enforces the bounded query input" {
+test "Cmd query enforces the bounded query input" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -848,7 +848,7 @@ test "command query enforces the bounded query input" {
     try std.testing.expect(!model.candidates_loaded);
 }
 
-test "command Apps route reaches installed and fixed-local leaves" {
+test "Cmd Apps route reaches installed and fixed-local leaves" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.Options.debug_io, .{
@@ -862,14 +862,14 @@ test "command Apps route reaches installed and fixed-local leaves" {
     defer std.testing.allocator.free(cache_path);
 
     const Fake = struct {
-        fn commandExists(name: []const u8) bool {
+        fn cmdExists(name: []const u8) bool {
             return std.mem.eql(u8, name, "wlrlui");
         }
     };
 
     var apps = apps_mode.Apps{
         .cache_path = cache_path,
-        .command_exists_fn = Fake.commandExists,
+        .cmd_exists_fn = Fake.cmdExists,
     };
     defer apps.deinit(std.testing.allocator);
 
@@ -886,10 +886,10 @@ test "command Apps route reaches installed and fixed-local leaves" {
     defer std.testing.allocator.free(filtered);
     try std.testing.expectEqual(@as(usize, 1), filtered.len);
     try std.testing.expect(filtered[0].candidate.isOpen());
-    try std.testing.expectEqualStrings("settings", filtered[0].candidate.openPayload());
+    try std.testing.expectEqualStrings("settings", filtered[0].candidate.selection());
 }
 
-test "command model ranks retained history without query history allocation" {
+test "Cmd picker ranks retained history without query history allocation" {
     var model = Picker.init(null);
     defer model.deinit(std.testing.allocator);
     model.candidates_loaded = true;
@@ -903,7 +903,7 @@ test "command model ranks retained history without query history allocation" {
     try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(ranked.len)));
 }
 
-test "command history save creates nested parent directories" {
+test "picker history save creates nested parent directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -913,132 +913,132 @@ test "command history save creates nested parent directories" {
     defer std.testing.allocator.free(path);
 
     const entries = [_][]const u8{ "settings", "power" };
-    try saveHistoryRows(entries[0..], path, std.testing.allocator);
+    try saveHistorySelections(entries[0..], path, std.testing.allocator);
 
     const saved = try tmp.dir.readFileAlloc(std.Options.debug_io, "nested/history/history.log", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(saved);
     try std.testing.expectEqualStrings("settings\npower\n", saved);
 }
 
-test "command model resolves app and lifecycle commands" {
+test "Cmd picker resolves app and lifecycle intents" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
-    const lifecycle = try model.open(std.testing.allocator, notifications_mode.restart_open);
+    const lifecycle = try model.open(std.testing.allocator, notifications_mode.restart_selection);
     defer std.testing.allocator.free(lifecycle);
     try std.testing.expectEqualStrings("wayspot notifications", lifecycle);
 
-    try std.testing.expectError(error.UnknownOpen, model.open(std.testing.allocator, "missing-open"));
+    try std.testing.expectError(error.UnknownSelection, model.open(std.testing.allocator, "missing-selection"));
 }
 
-test "command model resolves resident lifecycle owners" {
+test "Cmd picker resolves resident lifecycle owners" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
-    const wallpaper = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRestart()));
+    const wallpaper = try model.resolveCandidate(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRestart()));
     defer std.testing.allocator.free(wallpaper);
     try std.testing.expectEqualStrings("wayspot wallpaper", wallpaper);
 
-    const rotate = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRotate()));
+    const rotate = try model.resolveCandidate(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.wallpaperRotate()));
     defer std.testing.allocator.free(rotate);
     try std.testing.expectEqualStrings("wayspot wallpaper rotate", rotate);
 
-    const sunglasses = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesRestart()));
+    const sunglasses = try model.resolveCandidate(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesRestart()));
     defer std.testing.allocator.free(sunglasses);
     try std.testing.expectEqualStrings("wayspot sunglasses", sunglasses);
 
-    const apply = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesApply()));
+    const apply = try model.resolveCandidate(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesApply()));
     defer std.testing.allocator.free(apply);
     try std.testing.expectEqualStrings("wayspot sunglasses apply", apply);
 
-    const reconcile = try model.resolveCandidateCommand(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesReconcile()));
+    const reconcile = try model.resolveCandidate(std.testing.allocator, candidate.Candidate.lifecycleLeaf(candidate.sunglassesReconcile()));
     defer std.testing.allocator.free(reconcile);
     try std.testing.expectEqualStrings("wayspot sunglasses reconcile", reconcile);
 }
 
-test "command model resolves typed sunglasses leaves" {
+test "Cmd picker resolves typed sunglasses leaves" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
     const dim_input = try candidate.Input.scalarInput(35, 0, 100, 1);
     const dim = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesDim("DP-1", dim_input));
-    const dim_command = try model.resolveCandidateCommand(std.testing.allocator, dim);
-    defer std.testing.allocator.free(dim_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP-1' set 35", dim_command);
+    const dim_intent = try model.resolveCandidate(std.testing.allocator, dim);
+    defer std.testing.allocator.free(dim_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP-1' set 35", dim_intent);
 
     const filter_input = try candidate.Input.scalarInput(-35, -100, 100, 1);
     const filter = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesFilter("DP-1", filter_input));
-    const filter_command = try model.resolveCandidateCommand(std.testing.allocator, filter);
-    defer std.testing.allocator.free(filter_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP-1' set -35", filter_command);
+    const filter_intent = try model.resolveCandidate(std.testing.allocator, filter);
+    defer std.testing.allocator.free(filter_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP-1' set -35", filter_intent);
 
     const image_input = try candidate.Input.pathInput("/tmp/sunglasses.png");
     const image = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesImage("DP-1", image_input));
-    const image_command = try model.resolveCandidateCommand(std.testing.allocator, image);
-    defer std.testing.allocator.free(image_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' set '/tmp/sunglasses.png'", image_command);
+    const image_intent = try model.resolveCandidate(std.testing.allocator, image);
+    defer std.testing.allocator.free(image_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' set '/tmp/sunglasses.png'", image_intent);
 }
 
-test "command model resolves every typed sunglasses Input arm" {
+test "Cmd picker resolves every typed sunglasses Input arm" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
     const dim_toggle = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesDim("DP-1", candidate.Input.toggleInput(false)));
-    const dim_toggle_command = try model.resolveCandidateCommand(std.testing.allocator, dim_toggle);
-    defer std.testing.allocator.free(dim_toggle_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP-1' off", dim_toggle_command);
+    const dim_toggle_intent = try model.resolveCandidate(std.testing.allocator, dim_toggle);
+    defer std.testing.allocator.free(dim_toggle_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP-1' off", dim_toggle_intent);
 
     const filter_toggle = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesFilter("DP-1", candidate.Input.toggleInput(true)));
-    const filter_toggle_command = try model.resolveCandidateCommand(std.testing.allocator, filter_toggle);
-    defer std.testing.allocator.free(filter_toggle_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP-1' on", filter_toggle_command);
+    const filter_toggle_intent = try model.resolveCandidate(std.testing.allocator, filter_toggle);
+    defer std.testing.allocator.free(filter_toggle_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP-1' on", filter_toggle_intent);
 
     const image_opacity = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesImage("DP-1", try candidate.Input.scalarInput(55, 0, 100, 1)));
-    const image_opacity_command = try model.resolveCandidateCommand(std.testing.allocator, image_opacity);
-    defer std.testing.allocator.free(image_opacity_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' opacity 55", image_opacity_command);
+    const image_opacity_intent = try model.resolveCandidate(std.testing.allocator, image_opacity);
+    defer std.testing.allocator.free(image_opacity_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' opacity 55", image_opacity_intent);
 
     const image_clear = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesImage("DP-1", .none));
-    const image_clear_command = try model.resolveCandidateCommand(std.testing.allocator, image_clear);
-    defer std.testing.allocator.free(image_clear_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' clear", image_clear_command);
+    const image_clear_intent = try model.resolveCandidate(std.testing.allocator, image_clear);
+    defer std.testing.allocator.free(image_clear_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' clear", image_clear_intent);
 }
 
-test "command model shell-quotes dynamic sunglasses words" {
+test "Cmd picker shell-quotes dynamic sunglasses words" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
     const dim = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesDim("DP 1;$(touch x)", try candidate.Input.scalarInput(35, 0, 100, 1)));
-    const dim_command = try model.resolveCandidateCommand(std.testing.allocator, dim);
-    defer std.testing.allocator.free(dim_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP 1;$(touch x)' set 35", dim_command);
+    const dim_intent = try model.resolveCandidate(std.testing.allocator, dim);
+    defer std.testing.allocator.free(dim_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses dim 'DP 1;$(touch x)' set 35", dim_intent);
 
     const filter = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesFilter("DP`1 $HOME", candidate.Input.toggleInput(true)));
-    const filter_command = try model.resolveCandidateCommand(std.testing.allocator, filter);
-    defer std.testing.allocator.free(filter_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP`1 $HOME' on", filter_command);
+    const filter_intent = try model.resolveCandidate(std.testing.allocator, filter);
+    defer std.testing.allocator.free(filter_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses filter 'DP`1 $HOME' on", filter_intent);
 
     const path = try candidate.Input.pathInput("/tmp/a; touch /tmp/b $ `");
     const image = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesImage("DP-1", path));
-    const image_command = try model.resolveCandidateCommand(std.testing.allocator, image);
-    defer std.testing.allocator.free(image_command);
-    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' set '/tmp/a; touch /tmp/b $ `'", image_command);
+    const image_intent = try model.resolveCandidate(std.testing.allocator, image);
+    defer std.testing.allocator.free(image_intent);
+    try std.testing.expectEqualStrings("wayspot sunglasses image 'DP-1' set '/tmp/a; touch /tmp/b $ `'", image_intent);
 
     const quoted_path = try candidate.Input.pathInput("/tmp/a'b");
     const quoted_image = candidate.Candidate.lifecycleLeaf(try candidate.sunglassesImage("DP-1", quoted_path));
-    const quoted_command = try model.resolveCandidateCommand(std.testing.allocator, quoted_image);
-    defer std.testing.allocator.free(quoted_command);
-    try std.testing.expect(std.mem.indexOf(u8, quoted_command, "'\\''") != null);
+    const quoted_intent = try model.resolveCandidate(std.testing.allocator, quoted_image);
+    defer std.testing.allocator.free(quoted_intent);
+    try std.testing.expect(std.mem.indexOf(u8, quoted_intent, "'\\''") != null);
 }
 
-test "command model rejects newline dynamic words before resolution" {
+test "Cmd picker rejects newline dynamic words before resolution" {
     const scalar = try candidate.Input.scalarInput(35, 0, 100, 1);
 
     try std.testing.expectError(error.MonitorByteInvalid, candidate.sunglassesDim("DP-1\n", scalar));
     try std.testing.expectError(error.PathByteInvalid, candidate.Input.pathInput("/tmp/a\nb"));
 }
 
-test "command model explicitly rejects every route and display-only notification" {
+test "Cmd picker explicitly rejects every route and display-only notification" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -1048,14 +1048,14 @@ test "command model explicitly rejects every route and display-only notification
         candidate.Candidate.subCmd(.{ .sunglasses = .{ .dim = .{ .set = {} } } }),
     };
     for (routes) |route| {
-        try std.testing.expectError(error.CandidateNotLaunchable, model.resolveCandidateCommand(std.testing.allocator, route));
+        try std.testing.expectError(error.CandidateNotLaunchable, model.resolveCandidate(std.testing.allocator, route));
     }
 
     const notification = candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1");
-    try std.testing.expectError(error.NotificationDisplayOnly, model.resolveCandidateCommand(std.testing.allocator, notification));
+    try std.testing.expectError(error.NotificationDisplayOnly, model.resolveCandidate(std.testing.allocator, notification));
 }
 
-test "command model rejects invalid typed leaf at resolution" {
+test "Cmd picker rejects invalid typed leaf at resolution" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -1065,19 +1065,19 @@ test "command model rejects invalid typed leaf at resolution" {
             .input = .none,
         },
     });
-    try std.testing.expectError(error.MonitorEmpty, model.resolveCandidateCommand(std.testing.allocator, invalid));
+    try std.testing.expectError(error.MonitorEmpty, model.resolveCandidate(std.testing.allocator, invalid));
 }
 
-test "command model keeps app open payload behavior" {
+test "Cmd picker keeps app selection behavior" {
     const Fake = struct {
-        fn commandExists(name: []const u8) bool {
+        fn cmdExists(name: []const u8) bool {
             return std.mem.eql(u8, name, "wlrlui");
         }
     };
 
     var apps = apps_mode.Apps{
         .cache_path = "unused",
-        .command_exists_fn = Fake.commandExists,
+        .cmd_exists_fn = Fake.cmdExists,
     };
     defer apps.deinit(std.testing.allocator);
 
@@ -1091,17 +1091,17 @@ test "command model keeps app open payload behavior" {
     list = .empty;
     defer model.deinit(std.testing.allocator);
 
-    const command = try model.open(std.testing.allocator, "foot");
-    defer std.testing.allocator.free(command);
-    try std.testing.expectEqualStrings("foot", command);
+    const intent = try model.open(std.testing.allocator, "foot");
+    defer std.testing.allocator.free(intent);
+    try std.testing.expectEqualStrings("foot", intent);
 
     const open_leaf = candidate.Candidate.openLeaf("Settings", "System", "settings", "");
-    const open_command = try model.resolveCandidateCommand(std.testing.allocator, open_leaf);
-    defer std.testing.allocator.free(open_command);
-    try std.testing.expectEqualStrings("wlrlui", open_command);
+    const open_intent = try model.resolveCandidate(std.testing.allocator, open_leaf);
+    defer std.testing.allocator.free(open_intent);
+    try std.testing.expectEqualStrings("wlrlui", open_intent);
 }
 
-test "command model collects notification history list rows" {
+test "Cmd picker writes notification candidates" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.notificationLeaf("Summary", "App", "notification-history:0:1"));
@@ -1115,12 +1115,12 @@ test "command model collects notification history list rows" {
 
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    try model.commands(std.testing.allocator, &output.writer);
+    try model.query(std.testing.allocator, "/notifications history", &output.writer);
 
     try std.testing.expectEqualStrings("concrete\tnotification-history:0:1\tSummary\tApp\n", output.written());
 }
 
-test "command model returns next app arguments" {
+test "Cmd picker returns next app arguments" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.appLeaf("Quote App", "Utilities", "quote'app", ""));
@@ -1138,7 +1138,7 @@ test "command model returns next app arguments" {
     try std.testing.expectEqualStrings("quote'app", completed[0].argument);
 }
 
-test "command completion returns route words and excludes notification records" {
+test "Cmd completion returns route words and excludes notification records" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     try list.append(candidate.Candidate.subCmd(.{ .notifications = .{ .history = {} } }));
@@ -1161,7 +1161,7 @@ test "command completion returns route words and excludes notification records" 
     }
 }
 
-test "command completion enforces its bounded app result" {
+test "Cmd completion enforces its bounded app result" {
     var list = candidate.Candidate.List.empty;
     defer list.deinit();
     var index: usize = 0;
@@ -1179,7 +1179,7 @@ test "command completion enforces its bounded app result" {
     try std.testing.expectError(error.TooManyCompletionCandidates, model.complete(std.testing.allocator, .app, "/apps"));
 }
 
-test "command completion returns one next word at every routed position" {
+test "Cmd completion returns one next word at every routed position" {
     var model = Picker{};
     defer model.deinit(std.testing.allocator);
 
@@ -1191,15 +1191,15 @@ test "command completion returns one next word at every routed position" {
     try std.testing.expectEqualStrings("wallpaper", modes[2].argument);
     try std.testing.expectEqualStrings("sunglasses", modes[3].argument);
 
-    const sub_commands = try model.complete(std.testing.allocator, .sub_cmd, "/sunglasses ");
-    defer std.testing.allocator.free(sub_commands);
-    try std.testing.expectEqual(@as(usize, 6), sub_commands.len);
-    try std.testing.expectEqualStrings("restart", sub_commands[0].argument);
-    try std.testing.expectEqualStrings("apply", sub_commands[1].argument);
-    try std.testing.expectEqualStrings("reconcile", sub_commands[2].argument);
-    try std.testing.expectEqualStrings("dim", sub_commands[3].argument);
-    try std.testing.expectEqualStrings("filter", sub_commands[4].argument);
-    try std.testing.expectEqualStrings("image", sub_commands[5].argument);
+    const sub_cmds = try model.complete(std.testing.allocator, .sub_cmd, "/sunglasses ");
+    defer std.testing.allocator.free(sub_cmds);
+    try std.testing.expectEqual(@as(usize, 6), sub_cmds.len);
+    try std.testing.expectEqualStrings("restart", sub_cmds[0].argument);
+    try std.testing.expectEqualStrings("apply", sub_cmds[1].argument);
+    try std.testing.expectEqualStrings("reconcile", sub_cmds[2].argument);
+    try std.testing.expectEqualStrings("dim", sub_cmds[3].argument);
+    try std.testing.expectEqualStrings("filter", sub_cmds[4].argument);
+    try std.testing.expectEqualStrings("image", sub_cmds[5].argument);
 
     const operations = try model.complete(std.testing.allocator, .operation, "/sunglasses dim ");
     defer std.testing.allocator.free(operations);

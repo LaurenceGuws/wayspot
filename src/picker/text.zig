@@ -564,7 +564,7 @@ fn pxAdvance(value: c_int) f32 {
     return px26Dot6(value);
 }
 
-test "boundedCodepoints sanitizes form fields and truncates" {
+test "boundedCodepoints sanitizes picker input and truncates" {
     var out: [max_codepoints]u32 = undefined;
     const count = boundedCodepoints(&out, "ab\ncd", 4);
     try std.testing.expectEqual(@as(u32, 4), count);

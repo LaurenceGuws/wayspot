@@ -8,8 +8,8 @@ const std = @import("std");
 const candidate = @import("picker_candidate");
 const sub_cmd = @import("picker_sub_cmd");
 
-/// restart_open is the stable display input for the sunglasses restart route.
-pub const restart_open = "lifecycle:sunglasses:restart";
+/// restart_selection is the stable display input for the sunglasses restart route.
+pub const restart_selection = "lifecycle:sunglasses:restart";
 
 /// collectCandidates constructs direct lifecycle leaves and nested input routes.
 pub fn collectCandidates(out: *candidate.Candidate.List) !void {
@@ -51,7 +51,7 @@ pub fn imageSubCmd() sub_cmd.SubCmd {
     return .{ .sunglasses = .{ .image = .{ .set = {} } } };
 }
 
-/// resolve returns canonical sunglasses command meaning without changing state.
+/// resolve returns canonical sunglasses resident intent without changing state.
 pub fn resolve(value: sub_cmd.SunglassesSubCmd) []const u8 {
     return switch (value) {
         .restart => restartIntent(),
@@ -153,13 +153,13 @@ test "sunglasses mode constructs every declared child route" {
 
     try std.testing.expectEqual(@as(usize, 6), list.count);
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).concrete, list.items[0].typeOf());
-    try std.testing.expectEqualStrings(restart_open, list.items[0].openPayload());
-    try std.testing.expectEqualStrings("wayspot sunglasses apply", list.items[1].openPayload());
-    try std.testing.expectEqualStrings("wayspot sunglasses reconcile", list.items[2].openPayload());
+    try std.testing.expectEqualStrings(restart_selection, list.items[0].selection());
+    try std.testing.expectEqualStrings("wayspot sunglasses apply", list.items[1].selection());
+    try std.testing.expectEqualStrings("wayspot sunglasses reconcile", list.items[2].selection());
     try std.testing.expectEqual(std.meta.Tag(candidate.Candidate).sub_cmd, list.items[3].typeOf());
-    try std.testing.expectEqualStrings("wayspot sunglasses dim", list.items[3].openPayload());
-    try std.testing.expectEqualStrings("wayspot sunglasses filter", list.items[4].openPayload());
-    try std.testing.expectEqualStrings("wayspot sunglasses image", list.items[5].openPayload());
+    try std.testing.expectEqualStrings("wayspot sunglasses dim", list.items[3].selection());
+    try std.testing.expectEqualStrings("wayspot sunglasses filter", list.items[4].selection());
+    try std.testing.expectEqualStrings("wayspot sunglasses image", list.items[5].selection());
 }
 
 test "sunglasses routes resolve without importing overlay runtime" {

@@ -17,7 +17,7 @@ pub const LaunchError = error{
     EmptyIntent,
     IntentTooLong,
     IntentContainsNul,
-    CommandFailed,
+    IntentFailed,
     ForkFailed,
     WaitFailed,
     WaitInterruptedTooOften,
@@ -142,8 +142,8 @@ fn launchWaitWith(pid: std.c.pid_t, wait_pid: WaitPid) LaunchError!void {
     }
 
     const status_bits: u32 = @bitCast(status);
-    if (!std.c.W.IFEXITED(status_bits)) return error.CommandFailed;
-    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.CommandFailed;
+    if (!std.c.W.IFEXITED(status_bits)) return error.IntentFailed;
+    if (std.c.W.EXITSTATUS(status_bits) != 0) return error.IntentFailed;
 }
 
 /// waitPid maps one waitpid result to the bounded wait state machine.
@@ -202,7 +202,7 @@ test "wait reports successful child exit" {
 test "wait reports child failure" {
     const pid = try launchFork();
     if (pid == 0) std.c._exit(1);
-    try std.testing.expectError(error.CommandFailed, launchWait(pid));
+    try std.testing.expectError(error.IntentFailed, launchWait(pid));
 }
 
 test "wait interruption reaches its explicit bound" {

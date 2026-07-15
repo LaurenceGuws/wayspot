@@ -470,8 +470,8 @@ fn pidMatchesWallpaper(pid: std.os.linux.pid_t) bool {
     return cmdlineMatchesWallpaper(cmdline);
 }
 
-/// Returns true only for one exact wallpaper resident argv. The old flag form
-/// remains accepted as an exact transitional identity until packaging cleanup.
+/// Returns true only for one exact wallpaper resident argv or the exact legacy
+/// identity retained by the bounded rerun transition.
 fn cmdlineMatchesWallpaper(cmdline: []const u8) bool {
     var has_binary = false;
     var resident_arg: []const u8 = "";

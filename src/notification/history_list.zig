@@ -85,17 +85,17 @@ pub const NotificationHistoryList = struct {
     ) !void {
         const title = preview.historyTitle(row.app_name, row.summary);
         const subtitle = preview.historySubtitle(row.app_name, row.body);
-        const open_payload = try std.fmt.allocPrint(allocator, "{s}{d}:{d}", .{ open_prefix, newest_rank, row.id });
-        errdefer allocator.free(open_payload);
-        if (open_payload.len > max_open_bytes) return error.NotificationHistoryOpenTooLong;
+        const selection = try std.fmt.allocPrint(allocator, "{s}{d}:{d}", .{ open_prefix, newest_rank, row.id });
+        errdefer allocator.free(selection);
+        if (selection.len > max_open_bytes) return error.NotificationHistoryOpenTooLong;
         const owned_title = try allocator.dupe(u8, title.slice());
         errdefer allocator.free(owned_title);
         const owned_subtitle = try allocator.dupe(u8, subtitle.slice());
         errdefer allocator.free(owned_subtitle);
 
         try self.owned_strings.ensureUnusedCapacity(allocator, 3);
-        try out.append(candidate_mod.Candidate.notificationLeaf(owned_title, owned_subtitle, open_payload));
-        self.owned_strings.appendAssumeCapacity(open_payload);
+        try out.append(candidate_mod.Candidate.notificationLeaf(owned_title, owned_subtitle, selection));
+        self.owned_strings.appendAssumeCapacity(selection);
         self.owned_strings.appendAssumeCapacity(owned_title);
         self.owned_strings.appendAssumeCapacity(owned_subtitle);
     }
@@ -137,7 +137,7 @@ test "notification history list exposes newest cached rows first" {
     try std.testing.expectEqual(@as(usize, 2), list.count);
     try std.testing.expectEqual(std.meta.Tag(candidate_mod.Candidate).concrete, list.items[0].typeOf());
     try std.testing.expectEqualStrings("new", list.items[0].title());
-    try std.testing.expect(std.mem.startsWith(u8, list.items[0].openPayload(), open_prefix));
+    try std.testing.expect(std.mem.startsWith(u8, list.items[0].selection(), open_prefix));
 }
 
 test "notification history candidate cleanup is repeatable" {
