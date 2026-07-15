@@ -156,9 +156,6 @@ current_failure_behavior:
     behavior: "Missing and failed icons retain a missing entry until AppIconStore.deinit."
 
 duplicate_representations:
-  - "src/notification/state.zig:Store and src/notification/rows.zig:row_store retain live notification text; src/notification/history.zig:History retains a durable copy."
-  - "src/notification/history.zig:History.rows and src/notification/history_list.zig:NotificationHistoryList.cache retain the same full notification rows before Candidate.notification construction."
-  - "src/notification/history_list.zig:appendRow embeds notification rank in selection text; src/notification/history.zig:rowNewer already orders rows by timestamp and identity."
   - "src/picker/cmd.zig:Picker.history retains selection strings in memory and history.log; src/picker/rank.zig:notificationHistoryOrderBoost reads notification order from those strings."
   - "src/picker/mode/apps.zig reads desktop-file values, raw TSV bytes, Candidate fields, and fixed local Spec values."
   - "src/picker/icons.zig:Candidate.iconName and AppIconStore repeat icon identity held by src/picker/icon_cache.zig:index.tsv and icon-CRC32.png."
@@ -178,7 +175,6 @@ source_files:
   - src/notification/history.zig
   - src/notification/history_list.zig
   - src/notification/mod.zig
-  - src/notification/rows.zig
   - src/notification/state.zig
   - src/picker/appearance.zig
   - src/picker/cmd.zig
@@ -348,21 +344,34 @@ implementation_order:
     status: closed
 
   - order: 5
-    path_symbol: "src/notification/history_list.zig:NotificationHistoryList.cache/collectAtPathAtTime"
+    path_symbol: "src/notification/history_list.zig:NotificationHistoryList.loaded/collectAtPathAtTime"
     depends_on: [4]
     target_symbols:
       - "src/notification/history_list.zig:NotificationHistoryList.loaded"
       - "src/notification/history_list.zig:collectAtPathAtTime"
       - "src/notification/history_list.zig:appendRow"
+      - "src/notification/history_list.zig:appendSelection"
+      - "src/notification/history_list.zig:clearCandidateProduction"
     task: >-
-      Delete NotificationHistoryList.cache. Add one loaded bool. Make collectAtPathAtTime load one local History, sort its rows, append bounded Candidate.notification strings, deinit the local History, and set loaded true. Make clearCandidateProduction free owned_strings and set loaded false. Make appendRow write stable selection text notification-history:<id> with no rank and retain max_open_bytes 32.
+      Delete NotificationHistoryList.cache and retain one loaded bool. Make
+      collectAtPathAtTime load one local History, sort rows by updated_ns
+      descending then id descending, stage bounded Candidate.notification
+      strings, publish the staged list only after capacity succeeds, deinit the
+      local History, and set loaded true. Make clearCandidateProduction free
+      owned_strings and set loaded false. Make appendRow and appendSelection
+      write stable selection text notification-history:<id> with no rank and
+      enforce max_open_bytes 32. A failed collection publishes no candidates,
+      frees every producer string, leaves loaded false, and permits every
+      later call to retry; no retry counter or cutoff exists.
     acceptance_proof:
       - Test source has no NotificationHistoryList.cache field and no retained History after collectAtPathAtTime returns.
       - Test loaded false, one successful load, repeated collect without a second read, clear reset, and retry after failure.
       - Test newest timestamp order, identity tie order, the largest u32 id selection, the 32-byte bound, and formatter rejection of a constructed overlong selection.
-      - Test allocation failure frees title, subtitle, selection, local History rows, and Candidate list state.
-      - Run notification picker output and GUI/CLI byte-equivalence receipts.
-    status: open
+      - Test allocation failure frees title, subtitle, selection, local History rows, and Candidate list state; test output-capacity failure leaves the published list unchanged.
+      - Run notification picker output and GUI/CLI byte-equivalence receipts using the canonical /notifications history paths; ranked notification order remains deferred to order 7.
+      - Run zig build test --summary all (397/397), zig build, zig fmt --check, YAML validation, the exact source-order proof, and git diff --check.
+    size_observation: "Current worktree measures 780067 src/*.zig bytes excluding CR/LF against the 718917-byte 6ff94bc checkpoint; the final source-size gate remains failing."
+    status: closed
 
   - order: 6
     path_symbol: "src/picker/cmd.zig:Picker.history/recordHistory/loadHistorySelections/writeHistoryAtomic"
