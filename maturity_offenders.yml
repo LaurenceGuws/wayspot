@@ -403,6 +403,114 @@ boundaries:
         sunglasses consumer. The implemented display-facts slice remains
         unchanged. Wallpaper and the image, SHM, render, texture, clipboard,
         event, and standalone Wayland connection slices remain deferred.
+      no_c_mock_build:
+        status: required
+        rule: >-
+          Transcript, unit, fuzz, and simulation code is plain typed Zig. It
+          does not import sdl_c or wayland_c, link libc or SDL3, link a
+          Wayland library, start a DE, or invoke native adapter code.
+        plain_modules:
+          - path: src/c/sdl_io.zig
+            role: >-
+              Own SdlDisplayIo, SdlWindowIo, SdlWindowPropertyIo, their plain
+              result types, and fixed typed transcripts. This module is the
+              mock source used by unit, fuzz, and simulation targets.
+            imports: []
+            links: []
+          - path: src/c/wayland_io.zig
+            role: >-
+              Own WaylandIo, its plain layer/display/surface result types, and
+              fixed typed transcripts. This module is the mock source used by
+              unit, fuzz, and simulation targets.
+            imports: []
+            links: []
+          - path: src/c/io_simulation_test.zig
+            role: >-
+              Test the paired sunglasses transcript against exact typed mock
+              operation records; it imports only sdl_io and wayland_io.
+            imports:
+              - sdl_io
+              - wayland_io
+            links: []
+            display: absent
+        native_modules:
+          - path: src/c/sdl_native.zig
+            status: planned
+            role: >-
+              Implement the native SdlDisplayIo, SdlWindowIo, and
+              SdlWindowPropertyIo sources. It is the only Zig module in this
+              slice that imports sdl_c or calls SDL_*.
+            imports:
+              - sdl_c
+              - sdl_io
+            links:
+              - libc
+              - SDL3
+          - path: src/c/wayland_native.zig
+            status: planned
+            role: >-
+              Implement the native WaylandIo source by invoking the listed
+              wayspot_* wrappers. Raw wl_* calls remain in
+              src/c/wayspot_layer_shell.c. It consumes the native-only SDL
+              handle handoff and never changes the plain transcript types.
+            imports:
+              - wayland_c
+              - wayland_io
+              - sdl_native
+            links:
+              - libc
+              - wayland-client
+          - path: src/c/native_io_check.zig
+            status: planned
+            role: >-
+              Compile and link the native adapter modules without starting a
+              window, compositor, or DE. This is a compile/link check, not a
+              simulation source.
+            imports:
+              - sdl_native
+              - wayland_native
+            links:
+              - libc
+              - SDL3
+              - wayland-client
+        targets:
+          - name: sdl_io_unit_fuzz
+            root: src/c/sdl_io.zig
+            imports: []
+            links: []
+            runs_without: [SDL3, wayland-client, libc, DE]
+          - name: wayland_io_unit_fuzz
+            root: src/c/wayland_io.zig
+            imports: []
+            links: []
+            runs_without: [SDL3, wayland-client, libc, DE]
+          - name: sdl_wayland_simulation
+            root: src/c/io_simulation_test.zig
+            imports: [sdl_io, wayland_io]
+            links: []
+            runs_without: [SDL3, wayland-client, libc, DE]
+            forbidden_imports: [sdl_c, wayland_c, sdl_native, wayland_native]
+          - name: wayspot_native_io_check
+            root: src/c/native_io_check.zig
+            imports: [sdl_native, wayland_native]
+            links: [libc, SDL3, wayland-client]
+            invokes_simulation: false
+            starts_de: false
+          - name: wayspot
+            role: production/native
+            imports: [sdl_native, wayland_native]
+            links: [libc, SDL3, wayland-client]
+            invokes_simulation: false
+        separation_gate:
+          - >-
+            The simulation target must compile and run when SDL3, Wayland,
+            libc, sdl_c, wayland_c, and DE environment inputs are absent.
+          - >-
+            The native check and production targets compile/link native
+            adapters separately; neither target is used as simulation proof.
+          - >-
+            No simulation transcript may contain a native pointer or invoke a
+            function from sdl_native, wayland_native, sdl_c, or wayland_c.
       ownership:
         - path: src/c/sdl_io.zig
           symbols:
