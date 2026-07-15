@@ -2,9 +2,10 @@
 
 const std = @import("std");
 const c = @import("sdl_c");
+const sdl_io = @import("sdl_io");
 
-pub const max_monitors: u32 = 8;
-pub const max_monitor_name_bytes: u32 = 96;
+pub const max_monitors: u32 = sdl_io.max_displays;
+pub const max_monitor_name_bytes: u32 = sdl_io.max_display_name_bytes;
 pub const max_current_active_workspaces_per_monitor: u32 = 8;
 
 /// MonitorId is an opaque source-provided monitor identity.
@@ -33,9 +34,9 @@ pub const MonitorSize = struct {
 pub const MonitorScale = struct {
     value: f64,
 
-    /// init rejects non-positive scale values from external sources.
+    /// init rejects non-finite and non-positive scale values from external sources.
     pub fn init(value: f64) !MonitorScale {
-        if (value <= 0) return error.InvalidMonitorScale;
+        if (!std.math.isFinite(value) or value <= 0) return error.InvalidMonitorScale;
         return .{ .value = value };
     }
 };
@@ -52,9 +53,10 @@ pub const MonitorName = struct {
         return name;
     }
 
-    /// set rejects empty and overlong source names.
+    /// set rejects empty, overlong, and embedded-NUL source names.
     pub fn set(self: *MonitorName, text: []const u8) !void {
         if (text.len == 0 or text.len > max_monitor_name_bytes) return error.InvalidMonitorName;
+        for (text) |byte| if (byte == 0) return error.InvalidMonitorName;
         @memcpy(self.bytes[0..text.len], text);
         self.len = @intCast(text.len);
     }
@@ -139,51 +141,43 @@ pub const WaylandHandles = struct {
     wl_surface: *c.struct_wl_surface,
 };
 
-/// queryMonitors loads monitor facts from SDL display APIs on the main thread.
+/// queryMonitors loads monitor facts through the production SDL display source.
 pub fn queryMonitors() !MonitorList {
-    var raw_count: c_int = 0;
-    const ids = c.SDL_GetDisplays(&raw_count) orelse return error.SdlMonitorQueryFailed;
-    defer c.SDL_free(ids);
-    if (raw_count < 0) return error.SdlMonitorQueryFailed;
-    const count: u32 = @intCast(raw_count);
+    var io = sdl_io.SdlDisplayIo.native();
+    return queryMonitorsWith(&io);
+}
+
+/// queryMonitorsWith consumes one bounded display source and publishes no partial list.
+pub fn queryMonitorsWith(io: *sdl_io.SdlDisplayIo) !MonitorList {
+    const ids = try io.queryDisplays();
     var list = MonitorList{};
     var index: u32 = 0;
-    while (index < count) : (index += 1) {
-        const source_id = ids[index];
-        const name = try monitorName(source_id);
-        const size = try monitorSize(source_id);
-        var monitor = try Monitor.init(.{ .value = @intCast(source_id) }, name.slice(), size);
-        monitor.scale = monitorScale(source_id) catch null;
+    while (index < ids.count) : (index += 1) {
+        const monitor_id = try monitorId(ids.items[index]);
+        const facts = try io.queryFacts(ids.items[index]);
+        const size = try MonitorSize.init(facts.bounds.width, facts.bounds.height);
+        var monitor = try Monitor.init(monitor_id, facts.name.slice(), size);
+        if (facts.scale) |scale| monitor.scale = try MonitorScale.init(scale);
         try list.append(monitor);
     }
     return list;
 }
 
-/// monitorName converts one SDL display name into the monitor domain noun.
-pub fn monitorName(source_id: c.SDL_DisplayID) !MonitorName {
-    const name_ptr = c.SDL_GetDisplayName(source_id) orelse return error.SdlMonitorNameMissing;
-    return MonitorName.init(std.mem.span(name_ptr));
+/// monitorId rejects an SDL identity that cannot fit the monitor domain type.
+fn monitorId(id: sdl_io.DisplayId) !MonitorId {
+    const value = std.math.cast(i32, id) orelse return error.MonitorIdOutOfRange;
+    return .{ .value = value };
 }
 
-/// monitorSize converts one SDL display bounds record into a monitor size fact.
-pub fn monitorSize(source_id: c.SDL_DisplayID) !MonitorSize {
-    var rect: c.SDL_Rect = undefined;
-    if (!c.SDL_GetDisplayBounds(source_id, &rect)) return error.SdlMonitorSizeMissing;
-    return MonitorSize.init(rect.w, rect.h);
-}
-
-/// monitorScale returns the optional SDL scale fact for one monitor source.
-pub fn monitorScale(source_id: c.SDL_DisplayID) !MonitorScale {
-    const scale = c.SDL_GetDisplayContentScale(source_id);
-    if (scale <= 0) return error.SdlMonitorScaleMissing;
-    return MonitorScale.init(scale);
-}
-
-/// waylandOutput returns SDL's wl_output implementation source for a monitor.
+/// waylandOutput remains a native handle lookup for the later Wayland seam.
 pub fn waylandOutput(source_id: c.SDL_DisplayID) !*c.struct_wl_output {
     const props = c.SDL_GetDisplayProperties(source_id);
     if (props == 0) return error.SdlMonitorPropertyMissing;
-    const raw = c.SDL_GetPointerProperty(props, c.SDL_PROP_DISPLAY_WAYLAND_WL_OUTPUT_POINTER, null) orelse return error.SdlMonitorPropertyMissing;
+    const raw = c.SDL_GetPointerProperty(
+        props,
+        c.SDL_PROP_DISPLAY_WAYLAND_WL_OUTPUT_POINTER,
+        null,
+    ) orelse return error.SdlMonitorPropertyMissing;
     return @ptrCast(@alignCast(raw));
 }
 
@@ -191,8 +185,16 @@ pub fn waylandOutput(source_id: c.SDL_DisplayID) !*c.struct_wl_output {
 pub fn windowWaylandHandles(window: *c.SDL_Window) !WaylandHandles {
     const props = c.SDL_GetWindowProperties(window);
     if (props == 0) return error.SdlWindowPropertyMissing;
-    const raw_display = c.SDL_GetPointerProperty(props, c.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, null) orelse return error.SdlWindowPropertyMissing;
-    const raw_surface = c.SDL_GetPointerProperty(props, c.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, null) orelse return error.SdlWindowPropertyMissing;
+    const raw_display = c.SDL_GetPointerProperty(
+        props,
+        c.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
+        null,
+    ) orelse return error.SdlWindowPropertyMissing;
+    const raw_surface = c.SDL_GetPointerProperty(
+        props,
+        c.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
+        null,
+    ) orelse return error.SdlWindowPropertyMissing;
     return .{
         .wl_display = @ptrCast(@alignCast(raw_display)),
         .wl_surface = @ptrCast(@alignCast(raw_surface)),
@@ -222,10 +224,84 @@ test "monitor name and geometry reject invalid source facts" {
     try std.testing.expectError(error.InvalidMonitorName, MonitorName.init(""));
     const overlong = [_]u8{'x'} ** (max_monitor_name_bytes + 1);
     try std.testing.expectError(error.InvalidMonitorName, MonitorName.init(&overlong));
+    const embedded_nul = [_]u8{ 'D', 'P', 0, '-', '1' };
+    try std.testing.expectError(error.InvalidMonitorName, MonitorName.init(&embedded_nul));
     try std.testing.expectError(error.InvalidMonitorSize, MonitorSize.init(0, 1080));
     try std.testing.expectError(error.InvalidMonitorScale, MonitorScale.init(0));
+    try std.testing.expectError(error.InvalidMonitorScale, MonitorScale.init(std.math.nan(f64)));
+    try std.testing.expectError(error.InvalidMonitorScale, MonitorScale.init(std.math.inf(f64)));
 }
 
-test "missing SDL properties fail cleanly" {
-    try std.testing.expectError(error.SdlMonitorPropertyMissing, waylandOutput(0));
+test "monitor adapter publishes complete transcript facts" {
+    const expected = [_]sdl_io.DisplayCall{
+        .{ .operation = .query_displays },
+        .{ .operation = .release_displays },
+        .{ .operation = .query_name, .display_id = 7 },
+        .{ .operation = .query_bounds, .display_id = 7 },
+        .{ .operation = .query_scale, .display_id = 7 },
+        .{ .operation = .query_name, .display_id = 11 },
+        .{ .operation = .query_bounds, .display_id = 11 },
+        .{ .operation = .query_scale, .display_id = 11 },
+    };
+    var transcript = try sdl_io.DisplayTranscript.init(expected[0..]);
+    var displays = sdl_io.DisplayList{};
+    displays.count = 2;
+    displays.items[0] = 7;
+    displays.items[1] = 11;
+    transcript.display_result = .{ .values = displays };
+    transcript.names[0] = try sdl_io.DisplayName.init("DP-1");
+    transcript.names[1] = try sdl_io.DisplayName.init("HDMI-A-1");
+    transcript.bounds[0] = try sdl_io.DisplayBounds.init(1920, 1080);
+    transcript.bounds[1] = try sdl_io.DisplayBounds.init(2560, 1440);
+    transcript.scales[0] = 1.0;
+    transcript.scales[1] = 1.25;
+
+    var io = sdl_io.SdlDisplayIo.fromTranscript(&transcript);
+    const monitors = try queryMonitorsWith(&io);
+    try transcript.assertComplete();
+    try std.testing.expectEqual(@as(u32, 2), monitors.count);
+    try std.testing.expectEqualStrings("DP-1", monitors.items[0].nameText());
+    try std.testing.expectEqual(@as(i32, 2560), monitors.items[1].size.width);
+    try std.testing.expectEqual(@as(f64, 1.25), monitors.items[1].scale.?.value);
+}
+
+test "monitor adapter publishes no partial list on fact failure" {
+    const expected = [_]sdl_io.DisplayCall{
+        .{ .operation = .query_displays },
+        .{ .operation = .release_displays },
+        .{ .operation = .query_name, .display_id = 7 },
+        .{ .operation = .query_bounds, .display_id = 7 },
+        .{ .operation = .query_scale, .display_id = 7 },
+        .{ .operation = .query_name, .display_id = 11 },
+    };
+    var transcript = try sdl_io.DisplayTranscript.init(expected[0..]);
+    var displays = sdl_io.DisplayList{};
+    displays.count = 2;
+    displays.items[0] = 7;
+    displays.items[1] = 11;
+    transcript.display_result = .{ .values = displays };
+    transcript.names[0] = try sdl_io.DisplayName.init("DP-1");
+    transcript.bounds[0] = try sdl_io.DisplayBounds.init(1920, 1080);
+    transcript.scales[0] = 1.0;
+    transcript.names[1] = null;
+
+    var io = sdl_io.SdlDisplayIo.fromTranscript(&transcript);
+    try std.testing.expectError(error.SdlMonitorNameMissing, queryMonitorsWith(&io));
+    try transcript.assertComplete();
+}
+
+test "monitor adapter rejects an SDL id outside the domain range" {
+    const expected = [_]sdl_io.DisplayCall{
+        .{ .operation = .query_displays },
+        .{ .operation = .release_displays },
+    };
+    var transcript = try sdl_io.DisplayTranscript.init(expected[0..]);
+    var displays = sdl_io.DisplayList{};
+    displays.count = 1;
+    displays.items[0] = @as(u32, @intCast(std.math.maxInt(i32))) + 1;
+    transcript.display_result = .{ .values = displays };
+
+    var io = sdl_io.SdlDisplayIo.fromTranscript(&transcript);
+    try std.testing.expectError(error.MonitorIdOutOfRange, queryMonitorsWith(&io));
+    try transcript.assertComplete();
 }

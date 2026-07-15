@@ -22,6 +22,13 @@ pub fn build(b: *std.Build) void {
     const lua_mod = lua_dep.module("howl_lua");
     const sdl_include = sdl_dep.path("include");
     const sdl_c_mod = translateCModule(b, b.path("src/c/sdl.h"), target, optimize, &.{sdl_include});
+    const sdl_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/sdl_io.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    sdl_io_mod.addImport("sdl_c", sdl_c_mod);
     const wayland_c_mod = translateCModule(b, b.path("src/c/wayland.h"), target, optimize, &.{});
     const text_c_mod = translateCModule(b, b.path("src/c/text.h"), target, optimize, &.{
         .{ .cwd_relative = "/usr/include/freetype2" },
@@ -106,6 +113,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     env_mod.addImport("sdl_c", sdl_c_mod);
+    env_mod.addImport("sdl_io", sdl_io_mod);
 
     const scale_mod = b.createModule(.{
         .root_source_file = b.path("src/picker/scale.zig"),
@@ -333,6 +341,7 @@ pub fn build(b: *std.Build) void {
     aggregate_test_mod.addImport("picker_candidate", picker_candidate_mod);
     aggregate_test_mod.addImport("picker_sub_cmd", picker_sub_cmd_mod);
     aggregate_test_mod.addImport("sdl_c", sdl_c_mod);
+    aggregate_test_mod.addImport("sdl_io", sdl_io_mod);
     aggregate_test_mod.addImport("text_c", text_c_mod);
     aggregate_test_mod.addImport("wayland_c", wayland_c_mod);
     aggregate_test_mod.addIncludePath(sdl_include);
@@ -436,6 +445,13 @@ pub fn build(b: *std.Build) void {
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    const sdl_io_tests = b.addTest(.{ .root_module = sdl_io_mod });
+    sdl_io_tests.use_llvm = true;
+    sdl_io_tests.use_lld = true;
+    sdl_io_tests.root_module.addIncludePath(sdl_include);
+    sdl_io_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    const run_sdl_io_tests = b.addRunArtifact(sdl_io_tests);
+
     const aggregate_tests = b.addTest(.{ .root_module = aggregate_test_mod });
     aggregate_tests.use_llvm = true;
     aggregate_tests.use_lld = true;
@@ -520,6 +536,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_sdl_io_tests.step);
     test_step.dependOn(&run_aggregate_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);

@@ -5,8 +5,8 @@
 register:
   name: external_io_maturity
   status: open
-  implementation_status: design_only
-  source_changes: false
+  implementation_status: partial_sdl_display_facts
+  source_changes: true
   implementation_order:
     - sdl_wayland_window_display_events
     - hyprland_ipc_wire
@@ -388,15 +388,17 @@ rules:
   source_path_rule: >-
     current_owner_paths name current files and symbols. current_direct_calls list
     exact calls; grouped keys name adapter call groups owned by the paths above.
-    planned_mock_interface paths are targets and are not current source claims.
+    planned_mock_interface paths are targets until their boundary marks an
+    implemented slice; an implemented target is also a current source claim.
   test_class_rule: "Only unit, fuzz, and simulation occur in this register."
 
 boundaries:
   - order: 1
     name: sdl_wayland_window_display_events
-    status: open
+    status: partial_sdl_display_facts
     current_owner_paths:
-      - "src/env/monitor.zig:queryMonitors/monitorName/monitorSize/monitorScale/waylandOutput/windowWaylandHandles"
+      - "src/env/monitor.zig:queryMonitors/queryMonitorsWith/monitorId/waylandOutput/windowWaylandHandles"
+      - "src/c/sdl_io.zig:DisplayName/DisplayBounds/DisplayFacts/DisplayList/DisplayTranscript/SdlDisplayIo/queryDisplaysNative/queryNameNative/queryBoundsNative/queryScaleNative"
       - "src/gui/surface.zig:run; Surface.init/deinit/handleEvent/render"
       - "src/notification/banner.zig:show/render/eventLoop/applySurfaceScale/setDrawColor"
       - "src/picker/icon_diag.zig:writeReport"
@@ -413,14 +415,15 @@ boundaries:
       - "src/c/wayspot_layer_shell.c:wayspot_wayland_connect/wayspot_shm_buffer_create/wayspot_layer_globals_init"
     current_direct_calls:
       src/env/monitor.zig:
+        - SDL_GetDisplayProperties
+        - SDL_GetPointerProperty
+        - SDL_GetWindowProperties
+      src/c/sdl_io.zig:
         - SDL_GetDisplays
         - SDL_free
         - SDL_GetDisplayName
         - SDL_GetDisplayBounds
         - SDL_GetDisplayContentScale
-        - SDL_GetDisplayProperties
-        - SDL_GetPointerProperty
-        - SDL_GetWindowProperties
       src/gui/surface.zig:
         - SDL_Init
         - SDL_Quit
@@ -592,8 +595,16 @@ boundaries:
     planned_mock_interfaces:
       - path: src/c/sdl_io.zig
         module: sdl_io
-        planned_design: true
-        operator_decision_required: true
+        planned_design: false
+        implemented: true
+        operator_decision_required: false
+        implemented_operations:
+          - SdlDisplayIo.queryDisplays
+          - SdlDisplayIo.queryName
+          - SdlDisplayIo.queryBounds
+          - SdlDisplayIo.queryScale
+        deferred_operations:
+          - SdlDisplayIo.queryProperties
       - path: src/c/wayland_io.zig
         module: wayland_io
         planned_design: true
@@ -603,14 +614,32 @@ boundaries:
       targets:
         - path: src/c/sdl_io.zig
           mock_call_transcript:
+            - operation: SdlDisplayIo.queryDisplays
+              input_type: void
+              result_type: DisplayList<=8
+              error_set: [SdlMonitorQueryFailed, TooManyMonitors]
+            - operation: SdlDisplayIo.queryName
+              input_type: DisplayId
+              result_type: DisplayName<=96
+              error_set: [SdlMonitorNameMissing, InvalidMonitorName]
+            - operation: SdlDisplayIo.queryBounds
+              input_type: DisplayId
+              result_type: DisplayBounds
+              error_set: [SdlMonitorSizeMissing, InvalidMonitorSize]
+            - operation: SdlDisplayIo.queryScale
+              input_type: DisplayId
+              result_type: f64
+              error_set: [SdlMonitorScaleMissing]
+            - operation: SdlDisplayIo.queryProperties
+              status: deferred
+              input_type: DisplayId
+              result_type: DisplayProperties
+              error_set: [SdlMonitorPropertyMissing]
             - operation: SdlRuntimeIo.init/quit/setHint/startTextInput/stopTextInput
+              status: deferred
               input_type: SdlRuntimeRequest
               result_type: SdlRuntimeResult
               error_set: [SdlInitFailed, SdlHintFailed, SdlTextInputFailed]
-            - operation: SdlDisplayIo.queryDisplays/queryBounds/queryScale/queryProperties
-              input_type: DisplayId or void
-              result_type: DisplayList<=8 or DisplayProperties
-              error_set: [SdlMonitorQueryFailed, SdlMonitorNameMissing, SdlMonitorSizeMissing, SdlMonitorScaleMissing, SdlMonitorPropertyMissing]
             - operation: SdlWindowIo.create/destroy/show/raise/size/sync
               input_type: WindowSpec or WindowHandle
               result_type: WindowHandle or bool or void
@@ -673,6 +702,8 @@ boundaries:
       - "WAYSPOT_LAYER_MAX_OUTPUTS is 8; output_count never exceeds 8."
       - "WAYSPOT_LAYER_MAX_OUTPUT_NAME is 96; one terminating byte is retained by the C slot."
       - "The env monitor bound is src/env/monitor.zig:max_monitors = 8."
+      - "The SDL display adapter copies at most 8 display ids and 96 name bytes; one display transcript has at most 26 operations."
+      - "Display names are non-empty, contain no embedded NUL, and have at most 96 bytes; display scales are finite and strictly positive or absent only for the explicit SDL scale-missing error."
       - "The C buffer accepts width and height greater than zero, rejects multiplication overflow, and stores stride * height bytes."
       - "One SDL_Event is the input/output unit for wait, poll, and push; shutdown uses the exact SDL quit, terminating, and window-close event types."
       - "Layer names and monitor names enter C as bounded sentinel strings owned by the caller."
@@ -685,6 +716,10 @@ boundaries:
         SdlMonitorPropertyMissing, SdlWaitFailed, SdlRenderFailed,
         SdlResizeFailed, SdlScaleFailed, SdlClipboardFailed,
         SdlTextTextureFailed, and SdlTextRenderFailed.
+      - >-
+        The implemented display adapter also maps InvalidMonitorName,
+        InvalidMonitorSize, InvalidMonitorScale, MonitorIdOutOfRange, and
+        TooManyMonitors without exposing SDL result types.
       - >-
         The Wayland owner mapping is exhaustive: WaylandDisplayUnavailable,
         WaylandSurfaceUnavailable, LayerShellOutputMissing,
@@ -720,10 +755,11 @@ boundaries:
       - "src/wallpaper/surface.zig:imageKind/coverSourceRect/positiveRect/mapWallpaperImageResult"
       - "src/sunglasses/surface.zig:imageKind/coverSourceRect/positiveRect/mapSunglassesBufferResult"
     unit_gates:
-      - "Test event shutdown classification, geometry, image-kind selection, and every C result mapping with exact values."
+      - "Test bounded display count, name, size, scale, and monitor-id mapping with exact values; test event shutdown classification, geometry, image-kind selection, and every remaining C result mapping with exact values."
     fuzz_gates:
-      - "Fuzz bounded SDL event values, image path suffix bytes, geometry dimensions, and C result values; assert termination and no owned-handle mutation."
+      - "Fuzz bounded display counts, names, scales, event values, image path suffix bytes, geometry dimensions, and remaining C result values; assert termination and no owned-handle mutation."
     simulation_gates:
+      - "Drive queryMonitorsWith through a DisplayTranscript for valid ids, null and invalid SDL lists, name/size/scale failures, out-of-range ids, exact SDL_free order, and no partial published list."
       - "Drive Surface, wallpaper LayerShellRole, and sunglasses LayerShellRole through SdlRuntimeIo, SdlDisplayIo, SdlWindowIo, SdlWindowPropertyIo, SdlEventIo, SdlRenderIo, SdlTextureIo, SdlImageIo, SdlClipboardIo, WaylandDisplayIo, WaylandRegistryIo, LayerShellIo, WaylandBufferIo, and WaylandMemoryIo mocks for create, configure, draw, replace, close, and every listed failure."
       - "Assert exact operation order, returned errors, new-buffer rollback, old-buffer retention, and one cleanup for every created handle."
   - order: 2
@@ -1662,7 +1698,7 @@ final_gate:
   required_scans:
     - "ruby -e 'require \"yaml\"; YAML.load_stream(File.read(\"maturity_offenders.yml\"))'"
     - "Run rg -l '\\bSDL_[A-Za-z0-9_]+' src --glob '*.zig' and require exactly the twelve listed Zig owner paths; compare every c.SDL_* call to the file-keyed SDL current_direct_calls; parse every current_owner_paths entry and verify each slash- or semicolon-delimited symbol exists in its exact file, then validate every file path."
-    - "Require planned_mock_interfaces and mock_contract targets to be exactly src/c/sdl_io.zig, src/c/wayland_io.zig, src/env/hyprland_io.zig, src/notification/dbus_io.zig, src/io/file_io.zig, src/io/terminal_io.zig, src/process/process_io.zig, src/os/lifecycle_io.zig, src/time/random_io.zig, src/env/environment_io.zig, src/config/lua_io.zig, and src/c/text_io.zig; every target is marked planned_design and operator_decision_required, has a typed mock_call_transcript and cleanup_record, and is absent until an operator creates the planned module."
+    - "Require planned_mock_interfaces and mock_contract targets to be exactly src/c/sdl_io.zig, src/c/wayland_io.zig, src/env/hyprland_io.zig, src/notification/dbus_io.zig, src/io/file_io.zig, src/io/terminal_io.zig, src/process/process_io.zig, src/os/lifecycle_io.zig, src/time/random_io.zig, src/env/environment_io.zig, src/config/lua_io.zig, and src/c/text_io.zig; every target has a typed mock_call_transcript and cleanup_record, implemented targets declare implemented_operations, and every target still marked planned_design is absent until an operator creates its planned module."
     - "Run bounded owner scans for std.Io/std.fs file, terminal, and std.log calls, std.c fork/exec/wait, std.os.linux signal/eventfd/poll/kill/getrandom/clock calls, std.c.getenv and Init.environ.getPosix, c.lua*/luaL_*, FT_*, and hb_*; compare every direct call to exactly one current_direct_calls entry or the explicitly recorded order-1 SDL/order-2 Hyprland/order-3 D-Bus entry. Validate every current_diagnostic_callers path. std.fs.path and abstract std.Io.Writer formatting are pure-only exceptions and must appear in pure_internal_paths or a unit/fuzz gate."
     - "Require std.Io.Dir.iterate and std.Io.Dir.Iterator.next for the current directory owners, std.Io.AtomicFile.deinit for notification history, std.posix.errno for current fsync owners, src/main.zig:init.minimal.args.toSlice for process input, src/identity.zig:std.posix.prctl, and every current std.process.exit call site in the Linux/process-control inventory."
     - "Run rg for build.zig freetype2/harfbuzz link/include calls and re-run.sh mkdir/cp/chmod/mv/rm/head/setsid/systemctl/pgrep/kill/sleep and /proc reads; compare every match to tooling_only and require none in runtime current_owner_paths, runtime current_direct_calls, or simulation gates."
