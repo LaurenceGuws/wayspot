@@ -1,8 +1,8 @@
-//! NotificationHistoryList owns picker rows loaded from the persisted notification cache.
+//! NotificationHistoryList owns picker candidates loaded from notification History.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const history_cache = @import("wayspot_history_cache");
+const history = @import("wayspot_history");
 const preview = @import("wayspot_notification_preview");
 const candidate_mod = @import("picker_candidate");
 
@@ -14,7 +14,7 @@ comptime {
 }
 
 pub const NotificationHistoryList = struct {
-    cache: ?history_cache.Cache = null,
+    cache: ?history.History = null,
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn deinit(self: *NotificationHistoryList, allocator: std.mem.Allocator) void {
@@ -22,11 +22,11 @@ pub const NotificationHistoryList = struct {
         self.owned_strings.deinit(allocator);
     }
 
-    /// clearCandidateProduction releases rows and cache state after a staged build fails.
+    /// clearCandidateProduction releases candidates and loaded History state after a staged build fails.
     pub fn clearCandidateProduction(self: *NotificationHistoryList, allocator: std.mem.Allocator) void {
         for (self.owned_strings.items) |text| allocator.free(text);
         self.owned_strings.clearRetainingCapacity();
-        if (self.cache) |*cache| cache.deinit();
+        if (self.cache) |*loaded_history| loaded_history.deinit();
         self.cache = null;
     }
 
@@ -35,7 +35,7 @@ pub const NotificationHistoryList = struct {
         allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
     ) !void {
-        const path = try history_cache.cachePath(allocator);
+        const path = try history.path(allocator);
         defer allocator.free(path);
         try self.collectAtPath(allocator, out, path);
     }
@@ -69,8 +69,8 @@ pub const NotificationHistoryList = struct {
         now_ns: u64,
     ) !void {
         if (self.cache != null) return;
-        self.cache = try history_cache.Cache.loadAtPath(allocator, path, now_ns);
-        std.mem.sort(history_cache.Row, self.cache.?.rows.items, {}, rowNewer);
+        self.cache = try history.History.loadAtPath(allocator, path, now_ns);
+        std.mem.sort(history.Row, self.cache.?.rows.items, {}, rowNewer);
         for (self.cache.?.rows.items, 0..) |row, idx| {
             try self.appendRow(allocator, out, row, @intCast(idx));
         }
@@ -80,7 +80,7 @@ pub const NotificationHistoryList = struct {
         self: *NotificationHistoryList,
         allocator: std.mem.Allocator,
         out: *candidate_mod.Candidate.List,
-        row: history_cache.Row,
+        row: history.Row,
         newest_rank: u32,
     ) !void {
         const title = preview.historyTitle(row.app_name, row.summary);
@@ -101,7 +101,7 @@ pub const NotificationHistoryList = struct {
     }
 };
 
-fn rowNewer(_: void, a: history_cache.Row, b: history_cache.Row) bool {
+fn rowNewer(_: void, a: history.Row, b: history.Row) bool {
     if (a.updated_ns != b.updated_ns) return a.updated_ns > b.updated_ns;
     return a.id > b.id;
 }
@@ -115,18 +115,30 @@ fn realtimeNs() u64 {
     return seconds_ns + nanos;
 }
 
-test "notification history list exposes newest cached rows first" {
+test "notification History list exposes newest rows first" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/history.json", .{tmp.sub_path});
     defer std.testing.allocator.free(path);
 
-    const now = history_cache.retention_ns + 100;
-    var cache = history_cache.Cache.init(std.testing.allocator);
-    defer cache.deinit();
-    try cache.upsert(.{ .id = 1, .created_ns = 1, .updated_ns = now - 5, .app_name = "Old App", .summary = "old" });
-    try cache.upsert(.{ .id = 2, .created_ns = 2, .updated_ns = now, .app_name = "New App", .summary = "new" });
-    try cache.saveAtPath(path);
+    const now = history.retention_ns + 100;
+    var source_history = history.History.init(std.testing.allocator);
+    defer source_history.deinit();
+    try source_history.upsert(.{
+        .id = 1,
+        .created_ns = 1,
+        .updated_ns = now - 5,
+        .app_name = "Old App",
+        .summary = "old",
+    });
+    try source_history.upsert(.{
+        .id = 2,
+        .created_ns = 2,
+        .updated_ns = now,
+        .app_name = "New App",
+        .summary = "new",
+    });
+    try source_history.saveAtPath(path);
 
     var list_owner = NotificationHistoryList{};
     defer list_owner.deinit(std.testing.allocator);
@@ -146,11 +158,17 @@ test "notification history candidate cleanup is repeatable" {
     const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/history.json", .{tmp.sub_path});
     defer std.testing.allocator.free(path);
 
-    const now = history_cache.retention_ns + 100;
-    var cache = history_cache.Cache.init(std.testing.allocator);
-    defer cache.deinit();
-    try cache.upsert(.{ .id = 1, .created_ns = 1, .updated_ns = now, .app_name = "Mail", .summary = "message" });
-    try cache.saveAtPath(path);
+    const now = history.retention_ns + 100;
+    var source_history = history.History.init(std.testing.allocator);
+    defer source_history.deinit();
+    try source_history.upsert(.{
+        .id = 1,
+        .created_ns = 1,
+        .updated_ns = now,
+        .app_name = "Mail",
+        .summary = "message",
+    });
+    try source_history.saveAtPath(path);
 
     var list_owner = NotificationHistoryList{};
     defer list_owner.deinit(std.testing.allocator);

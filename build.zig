@@ -80,8 +80,8 @@ pub fn build(b: *std.Build) void {
     });
     rank_mod.addImport("picker_candidate", picker_candidate_mod);
     rank_mod.addImport("wayspot_query", query_mod);
-    const history_cache_mod = b.createModule(.{
-        .root_source_file = b.path("src/notification/history_cache.zig"),
+    const history_mod = b.createModule(.{
+        .root_source_file = b.path("src/notification/history.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    history_list_mod.addImport("wayspot_history_cache", history_cache_mod);
+    history_list_mod.addImport("wayspot_history", history_mod);
     history_list_mod.addImport("wayspot_notification_preview", notification_preview_mod);
     history_list_mod.addImport("picker_candidate", picker_candidate_mod);
 
@@ -264,7 +264,7 @@ pub fn build(b: *std.Build) void {
     notification_mod.addImport("wayspot_appearance", appearance_mod);
     notification_mod.addImport("wayspot_scale", scale_mod);
     notification_mod.addImport("wayspot_text", text_mod);
-    notification_mod.addImport("wayspot_history_cache", history_cache_mod);
+    notification_mod.addImport("wayspot_history", history_mod);
     notification_mod.addImport("wayspot_notification_preview", notification_preview_mod);
     notification_mod.addImport("wayspot_history_list", history_list_mod);
     notification_mod.addImport("sdl_c", sdl_c_mod);
@@ -327,7 +327,7 @@ pub fn build(b: *std.Build) void {
     aggregate_test_mod.addImport("wayspot_rank", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_scale", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_text", aggregate_test_mod);
-    aggregate_test_mod.addImport("wayspot_history_cache", aggregate_test_mod);
+    aggregate_test_mod.addImport("wayspot_history", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_notification_preview", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_history_list", aggregate_test_mod);
     aggregate_test_mod.addImport("picker_candidate", picker_candidate_mod);
@@ -509,8 +509,8 @@ pub fn build(b: *std.Build) void {
     const notification_preview_tests = b.addTest(.{ .root_module = notification_preview_mod });
     const run_notification_preview_tests = b.addRunArtifact(notification_preview_tests);
 
-    const notification_history_cache_tests = b.addTest(.{ .root_module = history_cache_mod });
-    const run_notification_history_cache_tests = b.addRunArtifact(notification_history_cache_tests);
+    const notification_history_tests = b.addTest(.{ .root_module = history_mod });
+    const run_notification_history_tests = b.addRunArtifact(notification_history_tests);
 
     const notification_history_list_tests = b.addTest(.{ .root_module = history_list_mod });
     const run_notification_history_list_tests = b.addRunArtifact(notification_history_list_tests);
@@ -523,7 +523,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_aggregate_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);
-    test_step.dependOn(&run_notification_history_cache_tests.step);
+    test_step.dependOn(&run_notification_history_tests.step);
     test_step.dependOn(&run_notification_history_list_tests.step);
     test_step.dependOn(&run_picker_appearance_tests.step);
     test_step.dependOn(&run_picker_sub_cmd_tests.step);

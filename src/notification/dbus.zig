@@ -1,7 +1,7 @@
 //! Notification DBus owns the Freedesktop interface and banner dispatch.
 
 const std = @import("std");
-const history_cache = @import("wayspot_history_cache");
+const history = @import("wayspot_history");
 const notifications_state = @import("state.zig");
 const notification_rows = @import("rows.zig");
 const banner = @import("banner.zig");
@@ -631,18 +631,18 @@ fn handleNotify(self: *DBus, parameters: ?*GVariant, invocation: *GDBusMethodInv
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
 }
 
-fn persistHistory(allocator: std.mem.Allocator, input: history_cache.RowInput) !void {
+fn persistHistory(allocator: std.mem.Allocator, input: history.RowInput) !void {
     const now_ns = realtimeNs();
-    var cache = try history_cache.Cache.load(allocator, now_ns);
-    defer cache.deinit();
+    var saved_history = try history.History.load(allocator, now_ns);
+    defer saved_history.deinit();
     var row = input;
     row.created_ns = now_ns;
     row.updated_ns = now_ns;
-    try cache.upsert(row);
-    cache.pruneOld(now_ns);
-    const path = try history_cache.cachePath(allocator);
+    try saved_history.upsert(row);
+    saved_history.pruneOld(now_ns);
+    const path = try history.path(allocator);
     defer allocator.free(path);
-    try cache.saveAtPath(path);
+    try saved_history.saveAtPath(path);
 }
 
 fn realtimeNs() u64 {

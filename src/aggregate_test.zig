@@ -10,8 +10,8 @@ pub const identity_source = @import("identity.zig");
 pub const env_source = @import("env/mod.zig");
 pub const config_source = @import("config/defaults.zig");
 pub const notification_source = @import("notification/dbus.zig");
-pub const notification_history_source = @import("notification/history_list.zig");
-pub const notification_cache_source = @import("notification/history_cache.zig");
+pub const notification_history_list_source = @import("notification/history_list.zig");
+pub const notification_history_source = @import("notification/history.zig");
 pub const notification_preview_source = @import("notification/preview.zig");
 
 pub const appearance_source = @import("picker/appearance.zig");
@@ -107,20 +107,20 @@ pub const rankCandidates = rank_source.rankCandidates;
 pub const rankCandidatesWithHistory = rank_source.rankCandidatesWithHistory;
 pub const rankCandidatesWithOldestFirstHistory = rank_source.rankCandidatesWithOldestFirstHistory;
 
-// wayspot_history_cache, wayspot_notification_preview, and wayspot_history_list
-pub const history_cache = notification_cache_source;
-pub const version = notification_cache_source.version;
-pub const max_file_bytes = notification_cache_source.max_file_bytes;
-pub const max_rows = notification_cache_source.max_rows;
-pub const max_app_name_bytes = notification_cache_source.max_app_name_bytes;
-pub const max_app_icon_bytes = notification_cache_source.max_app_icon_bytes;
-pub const max_summary_bytes = notification_cache_source.max_summary_bytes;
-pub const max_body_bytes = notification_cache_source.max_body_bytes;
-pub const retention_ns = notification_cache_source.retention_ns;
-pub const RowInput = notification_cache_source.RowInput;
-pub const Row = notification_cache_source.Row;
-pub const Cache = notification_cache_source.Cache;
-pub const cachePath = notification_cache_source.cachePath;
+// wayspot_history, wayspot_notification_preview, and wayspot_history_list
+pub const history = notification_history_source;
+pub const version = notification_history_source.version;
+pub const max_file_bytes = notification_history_source.max_file_bytes;
+pub const max_rows = notification_history_source.max_rows;
+pub const max_app_name_bytes = notification_history_source.max_app_name_bytes;
+pub const max_app_icon_bytes = notification_history_source.max_app_icon_bytes;
+pub const max_summary_bytes = notification_history_source.max_summary_bytes;
+pub const max_body_bytes = notification_history_source.max_body_bytes;
+pub const retention_ns = notification_history_source.retention_ns;
+pub const RowInput = notification_history_source.RowInput;
+pub const Row = notification_history_source.Row;
+pub const History = notification_history_source.History;
+pub const path = notification_history_source.path;
 
 pub const preview = notification_preview_source;
 pub const banner_app_max = notification_preview_source.banner_app_max;
@@ -137,8 +137,8 @@ pub const historyTitle = notification_preview_source.historyTitle;
 pub const historySubtitle = notification_preview_source.historySubtitle;
 pub const collapse = notification_preview_source.collapse;
 
-pub const history_list = notification_history_source;
-pub const NotificationHistoryList = notification_history_source.NotificationHistoryList;
+pub const history_list = notification_history_list_source;
+pub const NotificationHistoryList = notification_history_list_source.NotificationHistoryList;
 
 test "aggregate root reaches the source-tree test modules" {
     std.testing.refAllDecls(identity_source);
@@ -146,6 +146,7 @@ test "aggregate root reaches the source-tree test modules" {
     std.testing.refAllDecls(config_source);
     std.testing.refAllDecls(notification_source);
     std.testing.refAllDecls(notification_history_source);
+    std.testing.refAllDecls(notification_history_list_source);
     std.testing.refAllDecls(appearance_source);
     std.testing.refAllDecls(query_source);
     std.testing.refAllDecls(rank_source);
