@@ -1,12 +1,12 @@
 # WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
 # This is a design index, not an implementation authorization.
 project: wayspot
-checkpoint: c221b80
-status: ready_for_review
-implementation_status: stale_shape_cleanup_uncommitted
+checkpoint: 6ff94bc
+status: closed
+implementation_status: null
 review_gate:
-  current_slice: stale_shape_cleanup
-  implementation_authorized: true
+  current_slice: null
+  implementation_authorized: false
   forbidden_before_approval: []
 
 shape_bars:
@@ -214,6 +214,7 @@ target_tree:
       - src/picker/icons.zig
       - src/picker/mod.zig
       - src/picker/mode/apps.zig
+      - src/picker/mode/mod.zig
       - src/picker/mode/notifications.zig
       - src/picker/mode/sunglasses.zig
       - src/picker/mode/wallpaper.zig
@@ -237,7 +238,6 @@ target_tree:
       - src/wallpaper/surface.zig
   removed_files:
     - src/picker/command.zig
-    - src/picker/mode/mod.zig
     - src/picker/open.zig
     - src/picker/surface.zig
   moved_files:
@@ -273,7 +273,6 @@ target_files:
         - ToggleInput
         - PathInput
         - MonitorName
-        - Row
         - ActionLeaf
         - MonitorLeaf
         - Input.none
@@ -392,6 +391,21 @@ target_files:
       - hint and mode are absent from Concrete
       - candidate policy rejects non-applicable leaves explicitly
 
+  - path: src/picker/mode/mod.zig
+    status: preserved
+    owner: picker.mode
+    role: mode-folder export index for concrete mode owners consumed by Cmd
+    symbols:
+      public:
+        - apps
+        - notifications
+        - sunglasses
+        - wallpaper
+    comments:
+      file: "//! Picker mode exports the concrete mode owners consumed by Cmd."
+    tests:
+      - mode-folder exports apps, notifications, sunglasses, and wallpaper
+
   - path: src/picker/sub_cmd.zig
     status: new
     owner: picker.sub_cmd
@@ -453,7 +467,6 @@ target_files:
         - deinit
         - rankQuery
         - resolveCandidate
-        - selectCandidate
         - loadHistory
         - saveHistory
         - recordSelection
@@ -461,9 +474,8 @@ target_files:
         - buildCandidatesTransactional
         - resolveSubCmd
         - resolveConcrete
-        - assertModeOrder
     comments:
-      file: "//! Cmd owns the bounded command tree and never imports SDL, Bash formatting, or resident runtime code."
+      file: "//! Cmd owns the bounded Cmd tree and never imports SDL, Bash formatting, or resident runtime code."
       symbols:
         - "/// Cmd is the four-arm tagged union in fixed apps-first order."
         - "/// cmds is the bounded ordered array consumed identically by GUI and CLI."
@@ -513,8 +525,8 @@ target_files:
     tests:
       - apps mode is first in the Cmd array and selected by default
       - /apps reaches the same candidates as wayspot apps
-      - cache rows collect bounded application leaves
-      - desktop-file fallback collects bounded application leaves
+      - cache candidates collect bounded application Candidates
+      - desktop-file fallback collects bounded application Candidates
       - fixed local candidates are included only when dependencies exist
       - producer cleanup after candidate overflow leaves no borrowed strings
       - app leaf resolves to an executable intent without executing it
@@ -525,8 +537,8 @@ target_files:
     role: notifications Cmd arm, NotificationsSubCmd route behavior, and lifecycle intent
     symbols:
       public:
-        - history_open
-        - restart_open
+        - history_selection
+        - restart_selection
         - collectCandidates
         - resolve
         - restartIntent
@@ -548,7 +560,7 @@ target_files:
     role: wallpaper Cmd arm, WallpaperSubCmd route behavior, and lifecycle intent
     symbols:
       public:
-        - restart_open
+        - restart_selection
         - collectCandidates
         - resolve
         - restartIntent
@@ -917,9 +929,9 @@ target_files:
     comments:
       file: current //! contract retained
       symbols:
-        - rename any stale form wording to picker input wording
+        - picker input wording remains current
     tests:
-      - rename the form-appearance test without changing its proof
+      - named product defaults preserve current picker appearance
 
   - path: src/picker/text.zig
     status: comment_and_test_cleanup
@@ -933,9 +945,9 @@ target_files:
     comments:
       file: current //! or add one describing SDL text ownership and bounds
       symbols:
-        - rename form-field wording to picker-input wording
+        - picker-input wording remains current
     tests:
-      - rename bounded input sanitization test without changing its proof
+      - boundedCodepoints sanitizes picker input and truncates
 
   - path: src/picker/icon_cache.zig
     status: symbol_cleanup
@@ -1042,7 +1054,7 @@ target_files:
 
 offenders:
   - id: cmd_union_and_order
-    status: open
+    status: closed
     owner: picker.cmd
     evidence:
       - src/picker/command.zig
@@ -1079,7 +1091,7 @@ offenders:
       - Picker ownership and cleanup
 
   - id: candidate_input_contract_and_typed_leaves
-    status: open
+    status: closed
     owner: picker.candidate
     evidence:
       - src/picker/candidate.zig
@@ -1150,7 +1162,7 @@ offenders:
       - CLI/GUI equivalence proof boundary
 
   - id: sub_cmd_and_candidate_reachability
-    status: open
+    status: closed
     owner: picker.mode
     evidence:
       - src/picker/mode/apps.zig
@@ -1205,7 +1217,7 @@ offenders:
       - sunglasses.select owns route-to-Concrete Input-arm selection without resident state
 
   - id: concrete_leaf_union_and_resolution
-    status: open
+    status: closed
     owner: picker.candidate
     evidence:
       - src/picker/candidate.zig
@@ -1269,7 +1281,7 @@ offenders:
       - interim shell-string resolution quotes every dynamic monitor and path word until structured argv owns process launch
 
   - id: apps_default_mode_and_single_source
-    status: open
+    status: closed
     owner: picker.mode.apps
     evidence:
       - src/picker/mode/apps.zig
@@ -1304,7 +1316,7 @@ offenders:
       - one producer owns all app candidate strings
 
   - id: candidate_failure_atomicity_and_lifetime
-    status: open
+    status: closed
     owner: picker.cmd
     evidence:
       - src/picker/cmd.zig
@@ -1344,7 +1356,7 @@ offenders:
       - cache read classification propagates allocation and unexpected errors
 
   - id: query_rank_and_leaf_resolution
-    status: open
+    status: closed
     owner: picker.cmd
     evidence:
       - src/picker/query.zig
@@ -1383,7 +1395,7 @@ offenders:
       - resolution ownership and rejection meaning
 
   - id: shared_cli_gui_consumption
-    status: open
+    status: closed
     owner: project
     evidence:
       - src/main.zig
@@ -1421,7 +1433,7 @@ offenders:
       - shared composition ownership
 
   - id: bash_serialization_boundary
-    status: open
+    status: closed
     owner: cli
     evidence:
       - src/picker/cmd.zig
@@ -1471,7 +1483,7 @@ offenders:
       - complete record bound
 
   - id: process_leaf_launch_boundary
-    status: open
+    status: closed
     owner: process
     evidence:
       - src/picker/cmd.zig
@@ -1633,7 +1645,7 @@ offenders:
       - mode //! semantic-only ownership
 
   - id: build_packaging_and_rerun_wiring
-    status: ready_for_review
+    status: closed
     owner: build
     evidence:
       - build.zig
@@ -1699,7 +1711,7 @@ offenders:
       - rerun ownership, exact canonical identity, and one-way legacy transition rationale
 
   - id: stale_shape_cleanup
-    status: ready_for_review
+    status: closed
     owner: project
     evidence:
       - src/picker/appearance.zig
@@ -1736,7 +1748,7 @@ offenders:
       - packaging/systemd/wayspot.service
     changes:
       - delete deprecated Command, Mode, Open, and picker flat row vocabulary while retaining notification Row API and viewport geometry
-      - rename stale command and form symbols/comments where they describe Cmd-tree meaning
+      - keep picker-input comments and test names aligned with their current meaning
       - remove stale module exports and imports
       - update inline test names to the accepted vocabulary
       - prove negative space with bounded grep
