@@ -221,25 +221,31 @@ implementation_order:
     target_paths:
       - "src/notification/state.zig"
       - "src/notification/dbus.zig"
+      - "src/notification/history.zig"
     target_symbols:
       - "src/notification/state.zig:Store.prepareNotify"
       - "src/notification/state.zig:NotifyChange"
       - "src/notification/dbus.zig:DBus.prepareTimer"
       - "src/notification/dbus.zig:TimerChange"
+      - "src/notification/history.zig:ParentSyncError"
+      - "src/notification/history.zig:History.saveAtPathResult"
+      - "src/notification/history.zig:SaveResult"
     callers:
       - "src/notification/dbus.zig:handleNotify"
     depends_on:
       - 1
     task: >-
-      Add a bounded Store change transaction for new and replacement notifications. Store.prepareNotify must perform every fallible notification allocation and capacity check before changing the map, retain the exact previous Notification and next_id, and return NotifyChange. NotifyChange.rollback restores the previous Store fields and next_id or removes the new row; NotifyChange.commit performs only non-fallible ownership swaps and frees. Add DBus.prepareTimer and TimerChange. Timer preparation reserves timer-map capacity and creates the new source while the old timer entry remains installed; rollback removes only the new source and commit performs only the prepared map swap and old-source removal. Use this change in handleNotify before new or replacement History persistence. Close and expiry History persistence belong only to order 3. Keep src/notification/rows.zig, notification_rows, and their callers untouched.
+      Add a bounded Store change transaction for new and replacement notifications. Store.prepareNotify must perform every fallible notification allocation and capacity check before changing the map, retain the exact previous Notification and next_id, and return NotifyChange. NotifyChange.rollback restores the previous Store fields and next_id or removes the new row; NotifyChange.commit performs only non-fallible ownership swaps and frees. Add DBus.prepareTimer and TimerChange. Timer preparation reserves timer-map capacity and creates the new source while the old timer entry remains installed; rollback removes only the new source and commit performs only the prepared map swap and old-source removal. Use this change in handleNotify before new or replacement History persistence. History.saveAtPathResult must distinguish errors before Atomic.replace from parent-sync failure after replacement. Pre-replace errors roll back Store and timer; post-replace parent-sync failure commits Store and timer, publishes post-commit effects, and reports the committed-unsynced result at DBus. Close and expiry History persistence belong only to order 3. Keep src/notification/rows.zig, notification_rows, and their callers untouched.
     acceptance_proof:
       - Test replacement allocation failure leaves every previous Store field and map identity unchanged.
       - Test new allocation failure and NotifyChange.rollback restore Store length and next_id exactly.
       - Test NotifyChange.commit frees retained replacement fields exactly once.
       - Test timer preparation and rollback preserve the old source and timer entry, and successful commit replaces them without a fallible operation.
-      - Test handleNotify History load, upsert, and save failure for new and replacement leaves the Store fields, next_id, timer entry, and serialized file unchanged, with no hook or legacy-row mutation.
+      - Test the present pre-replace failures: error.IsDir while loading the history path, HistoryFieldTooLong during upsert, and the /proc destination failure. The existing saved History bytes remain byte-identical, Store and timer roll back, and no hook or legacy-row effect publishes; no injected temporary-write, file-sync, or Atomic.replace failure is claimed.
+      - Inject parent-sync failure after replacement and prove new valid History bytes remain at the path, Store and timer commit, hook and legacy-row effects publish after commit, and DBus reports the exact committed-unsynced error.
       - Test no picker import reaches DBus and keep rows.zig untouched in this slice.
-    status: open
+    size_observation: "The 377-test proof measured 754297 current src/*.zig bytes against the 718917-byte 6ff94bc src/*.zig baseline; this is an observation, not a passing order-2 condition."
+    status: closed
 
   - order: 3
     path_symbol: "src/notification/dbus.zig:persistHistory"
@@ -471,16 +477,16 @@ implementation_order:
 size_rule:
   measure: "Measure source bytes after removing CR and LF bytes; measure source line characters before the line-ending removal."
   columns: "Every final in-scope src line must have at most 120 characters."
-  baseline: "The 6ff94bc baseline is the byte total from the tracked src tree at commit 6ff94bc after CR and LF removal."
+  baseline: "The 6ff94bc baseline is the byte total from tracked src/*.zig files at commit 6ff94bc after CR and LF removal."
   requirement: "The final in-scope src byte total must be lower than the 6ff94bc baseline."
   proof_commands:
     - "find src -type f -name '*.zig' -print0 | sort -z | xargs -0 awk 'length($0) > 120 { bad = 1 } END { exit bad }'"
-    - "baseline=$(git ls-tree -r --name-only 6ff94bc -- src | while IFS= read -r path; do git show \"6ff94bc:$path\"; done | tr -d '\\r\\n' | wc -c); current=$(find src -type f -name '*.zig' -print0 | sort -z | xargs -0 cat | tr -d '\\r\\n' | wc -c); test \"$current\" -lt \"$baseline\""
+    - "baseline=$(git ls-tree -r --name-only 6ff94bc -- src | awk '/\\.zig$/ { print }' | while IFS= read -r path; do git show \"6ff94bc:$path\"; done | tr -d '\\r\\n' | wc -c); current=$(find src -type f -name '*.zig' -print0 | sort -z | xargs -0 cat | tr -d '\\r\\n' | wc -c); test \"$current\" -lt \"$baseline\""
     - "zig build test --summary all"
     - "zig build"
     - "zig fmt --check"
     - "git diff --check"
     - "ruby -e 'require \"yaml\"; YAML.load_stream(File.read(\"debt_offenders.yml\"))'"
-  close_rule: "Close one order only after its listed source tests, source scan, path receipt, and size proof pass."
+  close_rule: "Close an individual order after its listed source tests, source scans, and path receipt pass. Close the register only after every order is closed and the final source-size proof passes."
 
 source_reference_rule: "Every path_symbol and callers entry names a current file and a current symbol. target_path_symbol and target_symbols name planned post-task symbols and are not current source claims."

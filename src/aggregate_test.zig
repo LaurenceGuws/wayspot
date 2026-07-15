@@ -120,6 +120,8 @@ pub const retention_ns = notification_history_source.retention_ns;
 pub const RowInput = notification_history_source.RowInput;
 pub const Row = notification_history_source.Row;
 pub const History = notification_history_source.History;
+pub const ParentSyncError = notification_history_source.ParentSyncError;
+pub const SaveResult = notification_history_source.SaveResult;
 pub const path = notification_history_source.path;
 
 pub const preview = notification_preview_source;

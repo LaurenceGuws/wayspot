@@ -35,6 +35,7 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     map: std.AutoHashMap(u32, Notification),
     next_id: u32 = 1,
+    change_active: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Store {
         return .{
@@ -44,6 +45,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        std.debug.assert(!self.change_active);
         var iter = self.map.iterator();
         while (iter.next()) |entry| {
             freeNotification(self.allocator, entry.value_ptr.*);
@@ -56,38 +58,63 @@ pub const Store = struct {
     }
 
     pub fn notify(self: *Store, req: NotifyRequest) !u32 {
-        if (req.replaces_id != 0 and self.map.getPtr(req.replaces_id) != null) {
-            try self.replace(req.replaces_id, req);
-            return req.replaces_id;
-        }
-        if (self.len() >= max_notifications) return error.NotificationStoreFull;
+        var change = try self.prepareNotify(req);
+        change.commit();
+        return change.id;
+    }
 
-        const id = try self.allocateId();
-        try self.map.put(id, try duplicateNotification(self.allocator, req));
-        return id;
+    /// prepareNotify completes all fallible allocation and map-capacity work before
+    /// changing Store. The returned change must be committed or rolled back once.
+    pub fn prepareNotify(self: *Store, req: NotifyRequest) !NotifyChange {
+        if (self.change_active) return error.NotificationChangePending;
+        const previous_next_id = self.next_id;
+
+        if (req.replaces_id != 0) {
+            if (self.map.getPtr(req.replaces_id)) |slot| {
+                const replacement = try duplicateNotification(self.allocator, req);
+                self.change_active = true;
+                const previous = slot.*;
+                slot.* = replacement;
+                return .{
+                    .store = self,
+                    .id = req.replaces_id,
+                    .previous = previous,
+                    .previous_next_id = previous_next_id,
+                };
+            }
+        }
+
+        if (self.len() >= max_notifications) return error.NotificationStoreFull;
+        const id = try self.findFreeId();
+        const replacement = try duplicateNotification(self.allocator, req);
+        errdefer freeNotification(self.allocator, replacement);
+        try self.map.ensureUnusedCapacity(1);
+
+        self.change_active = true;
+        self.map.putAssumeCapacity(id, replacement);
+        self.next_id = nextIdAfter(id);
+        return .{
+            .store = self,
+            .id = id,
+            .previous = null,
+            .previous_next_id = previous_next_id,
+        };
     }
 
     pub fn close(self: *Store, id: u32) bool {
+        std.debug.assert(!self.change_active);
         const owned = self.map.fetchRemove(id) orelse return false;
         freeNotification(self.allocator, owned.value);
         return true;
     }
 
-    fn replace(self: *Store, id: u32, req: NotifyRequest) !void {
-        const slot = self.map.getPtr(id) orelse return;
-        freeNotification(self.allocator, slot.*);
-        slot.* = try duplicateNotification(self.allocator, req);
-    }
-
-    fn allocateId(self: *Store) !u32 {
+    fn findFreeId(self: *const Store) !u32 {
         var attempts: u32 = 0;
         var id = self.next_id;
 
         while (attempts < max_notifications) : (attempts += 1) {
             if (id == 0) id = 1;
             if (!self.map.contains(id)) {
-                self.next_id = id +% 1;
-                if (self.next_id == 0) self.next_id = 1;
                 return id;
             }
             id +%= 1;
@@ -97,11 +124,61 @@ pub const Store = struct {
     }
 };
 
+/// NotifyChange owns the previous Store row until commit or rollback.
+/// Both completion paths are non-fallible and must run exactly once.
+pub const NotifyChange = struct {
+    store: *Store,
+    id: u32,
+    previous: ?Notification,
+    previous_next_id: u32,
+    completed: bool = false,
+
+    /// commit releases retained previous fields after the new row is durable.
+    pub fn commit(self: *NotifyChange) void {
+        std.debug.assert(!self.completed);
+        if (self.previous) |previous| {
+            self.previous = null;
+            freeNotification(self.store.allocator, previous);
+        }
+        self.store.change_active = false;
+        self.completed = true;
+    }
+
+    /// rollback restores the old row or removes the prepared new row.
+    pub fn rollback(self: *NotifyChange) void {
+        std.debug.assert(!self.completed);
+        if (self.previous) |previous| {
+            self.previous = null;
+            const slot = self.store.map.getPtr(self.id) orelse unreachable;
+            const replacement = slot.*;
+            slot.* = previous;
+            freeNotification(self.store.allocator, replacement);
+        } else {
+            const removed = self.store.map.fetchRemove(self.id) orelse unreachable;
+            freeNotification(self.store.allocator, removed.value);
+        }
+        self.store.next_id = self.previous_next_id;
+        self.store.change_active = false;
+        self.completed = true;
+    }
+};
+
+fn nextIdAfter(id: u32) u32 {
+    const next = id +% 1;
+    return if (next == 0) 1 else next;
+}
+
 fn duplicateNotification(allocator: std.mem.Allocator, req: NotifyRequest) !Notification {
+    const app_name = try duplicateBounded(allocator, req.app_name, max_app_name_bytes);
+    errdefer allocator.free(app_name);
+    const summary = try duplicateBounded(allocator, req.summary, max_summary_bytes);
+    errdefer allocator.free(summary);
+    const body = try duplicateBounded(allocator, req.body, max_body_bytes);
+    errdefer allocator.free(body);
     return .{
-        .app_name = try duplicateBounded(allocator, req.app_name, max_app_name_bytes),
-        .summary = try duplicateBounded(allocator, req.summary, max_summary_bytes),
-        .body = try duplicateBounded(allocator, req.body, max_body_bytes),
+        .app_name = app_name,
+        .summary = summary,
+        .body = body,
         .expire_timeout = req.expire_timeout,
         .has_actions = req.has_actions,
     };
@@ -170,6 +247,103 @@ test "store notify replaces existing id" {
     try std.testing.expectEqualStrings("body-2", entry.body);
     try std.testing.expectEqual(@as(i32, 5000), entry.expire_timeout);
     try std.testing.expect(entry.has_actions);
+}
+
+test "Store replacement allocation failure preserves the previous row" {
+    var failing_state = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing_state.allocator();
+    var store = Store.init(allocator);
+
+    const id = try store.notify(.{
+        .app_name = "old-app",
+        .summary = "old-summary",
+        .body = "old-body",
+        .expire_timeout = 4000,
+        .has_actions = true,
+    });
+    const previous_next_id = store.next_id;
+    failing_state.fail_index = failing_state.alloc_index + 1;
+
+    try std.testing.expectError(error.OutOfMemory, store.prepareNotify(.{
+        .app_name = "new-app",
+        .summary = "new-summary",
+        .body = "new-body",
+        .replaces_id = id,
+    }));
+    try std.testing.expectEqual(previous_next_id, store.next_id);
+    const entry = store.map.get(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("old-app", entry.app_name);
+    try std.testing.expectEqualStrings("old-summary", entry.summary);
+    try std.testing.expectEqualStrings("old-body", entry.body);
+    try std.testing.expectEqual(@as(i32, 4000), entry.expire_timeout);
+    try std.testing.expect(entry.has_actions);
+
+    store.deinit();
+    try std.testing.expectEqual(failing_state.allocated_bytes, failing_state.freed_bytes);
+}
+
+test "Store new allocation failure leaves id state unchanged" {
+    var failing_state = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var store = Store.init(failing_state.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, store.prepareNotify(.{
+        .app_name = "app",
+        .summary = "summary",
+        .body = "body",
+    }));
+    try std.testing.expectEqual(@as(u32, 0), store.len());
+    try std.testing.expectEqual(@as(u32, 1), store.next_id);
+    try std.testing.expect(!store.change_active);
+    store.deinit();
+    try std.testing.expectEqual(failing_state.allocated_bytes, failing_state.freed_bytes);
+}
+
+test "Store new capacity failure frees the prepared row" {
+    var failing_state = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    var store = Store.init(failing_state.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, store.prepareNotify(.{
+        .app_name = "app",
+        .summary = "summary",
+        .body = "body",
+    }));
+    try std.testing.expectEqual(@as(u32, 0), store.len());
+    try std.testing.expectEqual(@as(u32, 1), store.next_id);
+    try std.testing.expect(!store.change_active);
+    store.deinit();
+    try std.testing.expectEqual(failing_state.allocated_bytes, failing_state.freed_bytes);
+}
+
+test "NotifyChange rollback restores and commit releases ownership" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    const id = try store.notify(.{
+        .app_name = "old-app",
+        .summary = "old-summary",
+        .body = "old-body",
+    });
+    const previous_next_id = store.next_id;
+    var replacement = try store.prepareNotify(.{
+        .app_name = "new-app",
+        .summary = "new-summary",
+        .body = "new-body",
+        .replaces_id = id,
+    });
+    try std.testing.expectEqualStrings("new-summary", store.map.get(id).?.summary);
+    replacement.rollback();
+    try std.testing.expectEqual(previous_next_id, store.next_id);
+    try std.testing.expectEqualStrings("old-summary", store.map.get(id).?.summary);
+
+    var new_change = try store.prepareNotify(.{
+        .app_name = "second-app",
+        .summary = "second-summary",
+        .body = "second-body",
+    });
+    try std.testing.expectEqual(@as(u32, 2), new_change.id);
+    new_change.commit();
+    try std.testing.expectEqual(@as(u32, 2), store.len());
+    try std.testing.expectEqualStrings("second-body", store.map.get(new_change.id).?.body);
 }
 
 test "store refuses more than retained notification bound" {

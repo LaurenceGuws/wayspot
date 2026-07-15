@@ -13,6 +13,19 @@ pub const retention_ns: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
 
 const relative_path = "wayspot/notifications-history.json";
 
+/// ParentSyncError is the exact error set returned by the parent directory
+/// sync after a history replacement has been published.
+pub const ParentSyncError = error{ InputOutput, NoSpaceLeft, DiskQuota } || std.posix.UnexpectedError;
+
+/// SaveResult distinguishes a durable replacement from a published replacement
+/// whose parent directory sync failed after the destination changed.
+pub const SaveResult = union(enum) {
+    published,
+    parent_sync_failed: ParentSyncError,
+};
+
+const ParentSync = *const fn (std.Io.Dir) ParentSyncError!void;
+
 comptime {
     std.debug.assert(max_file_bytes > 0);
     std.debug.assert(max_rows > 0);
@@ -106,11 +119,29 @@ pub const History = struct {
         }
     }
 
-    /// saveAtPath writes the history atomically to one explicit path.
+    /// saveAtPath writes the history atomically to one explicit path. A
+    /// parent-sync error means replacement already published new bytes.
     pub fn saveAtPath(self: *const History, history_path: []const u8) !void {
+        switch (try self.saveAtPathResult(history_path)) {
+            .published => {},
+            .parent_sync_failed => |err| return err,
+        }
+    }
+
+    /// saveAtPathResult reports whether replacement and parent sync completed.
+    /// Other errors occur before destination replacement and leave old bytes.
+    pub fn saveAtPathResult(self: *const History, history_path: []const u8) !SaveResult {
+        return self.saveAtPathResultWithParentSync(history_path, syncParentDir);
+    }
+
+    fn saveAtPathResultWithParentSync(
+        self: *const History,
+        history_path: []const u8,
+        sync_parent: ParentSync,
+    ) !SaveResult {
         const data = try serialize(self.allocator, self);
         defer self.allocator.free(data);
-        try writeAtomicAnyPath(history_path, data);
+        return writeAtomicAnyPathWithParentSync(history_path, data, sync_parent);
     }
 
     fn keepNewestRows(self: *History) void {
@@ -412,7 +443,11 @@ fn readAnyPath(allocator: std.mem.Allocator, history_path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, history_path, allocator, .limited(max_file_bytes));
 }
 
-fn writeAtomicAnyPath(history_path: []const u8, data: []const u8) !void {
+fn writeAtomicAnyPathWithParentSync(
+    history_path: []const u8,
+    data: []const u8,
+    sync_parent: ParentSync,
+) !SaveResult {
     try ensureParentDir(history_path);
     const io = std.Options.debug_io;
     const dir_path = std.fs.path.dirname(history_path) orelse ".";
@@ -429,10 +464,11 @@ fn writeAtomicAnyPath(history_path: []const u8, data: []const u8) !void {
     try atomic_file.file.writeStreamingAll(io, data);
     try atomic_file.file.sync(io);
     try atomic_file.replace(io);
-    try syncParentDir(dir);
+    sync_parent(dir) catch |err| return .{ .parent_sync_failed = err };
+    return .published;
 }
 
-fn syncParentDir(dir: std.Io.Dir) !void {
+fn syncParentDir(dir: std.Io.Dir) ParentSyncError!void {
     const rc = std.posix.system.fsync(dir.handle);
     switch (std.posix.errno(rc)) {
         .SUCCESS => return,
@@ -871,6 +907,34 @@ test "save writes and replaces one JSON object atomically" {
     defer loaded.deinit();
     try std.testing.expectEqual(@as(u32, 1), loaded.len());
     try std.testing.expectEqualStrings("replacement", loaded.rows.items[0].summary);
+}
+
+fn failParentSyncForTest(_: std.Io.Dir) ParentSyncError!void {
+    return error.InputOutput;
+}
+
+test "save reports parent sync failure after publishing new bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const history_path = try testPath(tmp, "history.json");
+    defer std.testing.allocator.free(history_path);
+
+    var history = History.init(std.testing.allocator);
+    defer history.deinit();
+    try history.upsert(.{ .id = 12, .created_ns = 1, .updated_ns = 2, .summary = "old" });
+    try history.saveAtPath(history_path);
+    try history.upsert(.{ .id = 12, .created_ns = 1, .updated_ns = 3, .summary = "new" });
+
+    const result = try history.saveAtPathResultWithParentSync(history_path, failParentSyncForTest);
+    switch (result) {
+        .published => return error.TestUnexpectedResult,
+        .parent_sync_failed => |err| try std.testing.expectEqual(error.InputOutput, err),
+    }
+
+    var loaded = try History.loadAtPath(std.testing.allocator, history_path, 3);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(u32, 1), loaded.len());
+    try std.testing.expectEqualStrings("new", loaded.rows.items[0].summary);
 }
 
 test "save creates nested absolute parent directories" {
