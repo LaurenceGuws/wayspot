@@ -244,11 +244,19 @@ implementation_order:
       - Test the present pre-replace failures: error.IsDir while loading the history path, HistoryFieldTooLong during upsert, and the /proc destination failure. The existing saved History bytes remain byte-identical, Store and timer roll back, and no hook or legacy-row effect publishes; no injected temporary-write, file-sync, or Atomic.replace failure is claimed.
       - Inject parent-sync failure after replacement and prove new valid History bytes remain at the path, Store and timer commit, hook and legacy-row effects publish after commit, and DBus reports the exact committed-unsynced error.
       - Test no picker import reaches DBus and keep rows.zig untouched in this slice.
-    size_observation: "The 377-test proof measured 754297 current src/*.zig bytes against the 718917-byte 6ff94bc src/*.zig baseline; this is an observation, not a passing order-2 condition."
+    size_observation: "Historical order-2 checkpoint: the 377-test proof measured 754297 current src/*.zig bytes against the 718917-byte 6ff94bc src/*.zig baseline; this was not a passing size condition and is not the current worktree measure."
     status: closed
 
   - order: 3
     path_symbol: "src/notification/dbus.zig:persistHistory"
+    target_symbols:
+      - "src/notification/dbus.zig:CloseResult"
+      - "src/notification/dbus.zig:closeWithReason"
+      - "src/notification/dbus.zig:closeWithReasonAtPathWithPersistence"
+      - "src/notification/dbus.zig:expireAtPathWithPersistence"
+      - "src/notification/dbus.zig:onNotificationExpired"
+      - "src/notification/dbus.zig:persistHistory"
+      - "src/notification/dbus.zig:persistCloseHistory"
     callers:
       - "src/notification/dbus.zig:handleNotify"
       - "src/notification/dbus.zig:closeWithReason"
@@ -257,16 +265,19 @@ implementation_order:
       - 1
       - 2
     task: >-
-      Make persistHistory write the History row for notify, replacement, close, and expiry. Order 3 owns close and expiry persistence: load the complete existing History.Row and change only updated_ns, active, and closed_reason; preserve every other row field without reading src/notification/rows.zig. A missing durable row returns error.HistoryRowNotFound. Return the exact History read and write error to the DBus boundary and leave Store state, timers, the file, hooks, and legacy-row state consistent after a failed History write. DBus deinit creates no row; clean shutdown only proves previously written rows survive a reload.
+      Make persistHistory write notify and replacement rows through History.saveAtPathResult. A live replacement loads the existing durable row and preserves its created_ns; a new durable row uses the current time. Make closeWithReasonAtPathWithPersistence load the complete History.Row and change only updated_ns, active, and closed_reason, preserving id, created_ns, app_name, app_icon, summary, body, urgency, and transient without reading src/notification/rows.zig. A missing durable row returns error.HistoryRowNotFound. Pre-replace load, upsert, serialize, temporary-write, or file-sync errors leave Store, timer, history bytes, hooks, and legacy rows unchanged. A parent-sync error is post-replace: return DBus.CloseResult.committed_unsynced with the exact History.ParentSyncError, then commit live close, timer removal, NotificationClosed, on_closed, and the legacy row. Expiry keeps the current source and live row and returns a continuing source result after a pre-replace error; it removes and closes only after published or committed-unsynced persistence. Explicit CloseNotification distinguishes an unknown live id, HistoryRowNotFound, and other write errors. DBus deinit creates no row; clean shutdown only proves previously written rows survive reload.
     acceptance_proof:
-      - Test new notification and replaces_id preserve the expected complete History fields and created_ns behavior.
-      - Test explicit close and timer expiry preserve the complete existing History.Row and change only updated_ns, active, and closed_reason.
-      - Test a missing durable close row returns error.HistoryRowNotFound without reading rows.zig.
-      - Test History load and write failure leaves Store identity, timers, file contents, close state, hooks, and legacy-row state consistent.
-      - Test DBus deinit creates no row and a successful row survives reload after clean shutdown.
+      - Test "notify history preserves replacement created time and dates new rows" for replacement created_ns preservation and new-row timestamps.
+      - Test "close persists every durable field before live removal" for id, created_ns, all text, urgency, transient, active, closed_reason, timer removal, NotificationClosed, on_closed, and the legacy row.
+      - Test "close missing durable row leaves live state and timer unchanged" for UnknownNotificationId, HistoryRowNotFound, unchanged Store/timer, and no effects.
+      - Test "close pre-replace failure preserves live state timer file and effects" for load/path and injected write failure with unchanged Store, timer, bytes, hooks, and legacy rows.
+      - Test "close parent sync failure commits live close and effects" for published bytes, committed Store/timer/effects, and exact error.InputOutput.
+      - Test "expiry retries pre-replace failure and closes on success" for a continuing current timer, unchanged live state and bytes, then successful close.
+      - Test "DBus deinit creates no durable history row" and reload previously written rows after clean shutdown.
       - Test no picker import reaches DBus and no DBus path writes picker history.log.
       - Run bounded notification start, notify, close, expiry, and clean-shutdown receipts.
-    status: open
+    size_observation: "Current order-3 worktree proof measures 777209 src/*.zig bytes excluding line endings against the 718917-byte 6ff94bc src/*.zig baseline; the final size gate remains failing."
+    status: closed
 
   - order: 4
     path_symbol: "src/notification/state.zig:Store"
