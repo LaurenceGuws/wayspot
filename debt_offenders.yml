@@ -282,19 +282,70 @@ implementation_order:
   - order: 4
     path_symbol: "src/notification/state.zig:Store"
     depends_on: [3]
+    target_symbols:
+      - "src/notification/state.zig:NotifyRequest"
+      - "src/notification/state.zig:Notification"
+      - "src/notification/state.zig:Store"
+      - "src/notification/state.zig:Store.close"
+      - "src/notification/state.zig:NotifyChange"
+      - "src/notification/dbus.zig:applyNotify"
+      - "src/notification/dbus.zig:applyNotifyAtPath"
+      - "src/notification/dbus.zig:applyNotifyAtPathWithPersistence"
+      - "src/notification/dbus.zig:DBus.NotifyEvent"
     delete_paths:
       - "src/notification/rows.zig"
     delete_symbols:
-      - "src/notification/dbus.zig:notification_rows/recordNotify/recordClosed"
+      - "src/notification/dbus.zig:notification_rows"
+      - "src/notification/dbus.zig:recordNotificationRow"
+      - "src/notification/dbus.zig:recordNotificationClosed"
       - "src/notification/mod.zig:rows"
       - "src/notification/rows.zig:row_store/Rows/Snapshot/registerCloser/clearCloser/recordNotify/recordClosed/closeById/closeAllActive/snapshot/freeSnapshot"
-    task: Keep Store as the only live notification row allocation and mutation site with the 256 notification bound. Delete src/notification/rows.zig, remove notification_rows from dbus.zig, remove recordNotify and recordClosed calls, remove the rows export, and remove rows tests from build and aggregate imports. Extend Store.Notification fields and Store.close to carry the live fields needed by DBus and banners. Free every Store notification exactly once at replace, close, timer failure, DBus deinit, and allocation failure.
+    task: >-
+      Keep src/notification/state.zig:Store as the only live notification
+      allocation and mutation site with a 256-entry bound. Make
+      src/notification/state.zig:NotifyRequest borrow app_name, app_icon,
+      summary, body, expire_timeout, has_actions, urgency, and transient.
+      Make src/notification/state.zig:Notification own those live fields.
+      Make src/notification/dbus.zig:applyNotify pass one request, prepare
+      every Store and timer allocation before History persistence, and build
+      DBus.NotifyEvent and the banner request from the committed Store map
+      entry. Keep actions as a bounded DBus-local slice and never store them.
+      Preserve the 256-byte bounded truncation for text. Keep
+      src/notification/state.zig:Store.close as bool; it removes and frees
+      the owned notification internally with no row transfer. Delete
+      src/notification/rows.zig, its DBus wrappers and calls, its module
+      export, and its aggregate/build test roots. Free each Store-owned field
+      exactly once on replacement commit or rollback, close, timer failure,
+      DBus deinit, and allocation failure.
     acceptance_proof:
-      - Run rg for notification_rows, rows.zig, row_store, recordNotify, and recordClosed and accept only historical register text.
-      - Test Store replacement, 256-row capacity, 257th notification failure, close, expiry, timer failure, OOM, and deinit.
-      - Test failed text duplication leaves the previous Store notification unchanged.
-      - Run notification resident reachability and clean-shutdown receipts with no rows.zig process and no unfreed allocation remaining.
-    status: open
+      - >-
+        Run rg for src/notification/rows.zig, notification_rows, row_store,
+        recordNotify, recordClosed, registerCloser, clearCloser, closeById,
+        closeAllActive, and freeSnapshot across src and build.zig; it must
+        return no live source or build match, with historical debt register
+        records the only allowed matches.
+      - >-
+        Test complete Store fields, replacement identity and freeing, 256
+        retained notifications, the 257th rejection, Store.close, expiry,
+        timer preparation failure, DBus deinit, and no legacy row side effect.
+      - >-
+        Test 256-byte and 257-byte app_icon/body inputs with the existing
+        bounded truncation, plus allocation and text-duplication failure
+        rollback that leaves the previous Store fields and next_id unchanged.
+      - >-
+        Test committed DBus NotifyEvent/banner fields come from the committed
+        Store notification while actions remain only in the DBus callback.
+      - >-
+        Run zig build test --summary all (389/389), zig build, zig fmt --check,
+        YAML validation, the exact negative-space scan, a 120-column scan, and
+        git diff --check.
+      - >-
+        Run an isolated canonical wayspot notifications receipt that sends
+        Notify, reloads the row from XDG_STATE_HOME/wayspot/
+        notifications-history.json, closes it through DBus, verifies the
+        process remains alive before close, and stops it cleanly.
+    size_observation: "Current order-4 worktree proof measures 772241 src/*.zig bytes excluding line endings against the 718917-byte 6ff94bc src/*.zig baseline; the final size gate remains failing."
+    status: closed
 
   - order: 5
     path_symbol: "src/notification/history_list.zig:NotificationHistoryList.cache/collectAtPathAtTime"

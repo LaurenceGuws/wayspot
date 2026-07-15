@@ -654,9 +654,9 @@ build_graph:
   test_coverage:
     command: "zig build test --summary all"
     accepted_minimum: 320
-    current_verified: 377
-    aggregate_root_tests: 187
-    direct_root_tests: 190
+    current_verified: 389
+    aggregate_root_tests: 193
+    direct_root_tests: 196
     note: aggregate source imports run together; direct module roots remain additional checks; the accepted 320 count is a total baseline, not an aggregate-only count
   packaging:
     systemd_exec_start: "wayspot notifications"

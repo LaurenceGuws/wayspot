@@ -1,10 +1,8 @@
 //! Notification DBus owns the Freedesktop interface and banner dispatch.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const history = @import("wayspot_history");
 const notifications_state = @import("state.zig");
-const notification_rows = @import("rows.zig");
 const banner = @import("banner.zig");
 
 const log = std.log.scoped(.notifications);
@@ -684,20 +682,16 @@ fn handleNotify(self: *DBus, parameters: ?*GVariant, invocation: *GDBusMethodInv
 
     const request = notifications_state.NotifyRequest{
         .app_name = std.mem.span(app_name),
+        .app_icon = std.mem.span(app_icon),
         .summary = std.mem.span(summary),
         .body = std.mem.span(body),
         .replaces_id = replaces_id,
         .expire_timeout = expire_timeout,
         .has_actions = has_actions,
+        .urgency = parsed_hints.urgency,
+        .transient = parsed_hints.transient,
     };
-    const commit = applyNotify(
-        self,
-        request,
-        std.mem.span(app_icon),
-        parsed_hints.urgency,
-        parsed_hints.transient,
-        action_pairs,
-    ) catch |err| {
+    const commit = applyNotify(self, request, action_pairs) catch |err| {
         returnNotifyFailure(invocation, err);
         return;
     };
@@ -765,37 +759,28 @@ fn returnNotifyCommittedUnsynced(
     );
 }
 
-/// applyNotify commits Store, timer, History, hooks, and legacy rows in order.
+/// applyNotify commits Store, timer, History, and hooks in order.
 /// Pre-replace History errors roll back Store and timer; post-replace parent sync
 /// errors return a committed-but-unsynced result after all effects publish.
 fn applyNotify(
     self: *DBus,
     request: notifications_state.NotifyRequest,
-    app_icon: []const u8,
-    urgency: u8,
-    transient: bool,
     actions: []const DBus.Action,
 ) anyerror!NotifyCommit {
     const history_path = try history.path(self.allocator);
     defer self.allocator.free(history_path);
-    return applyNotifyAtPath(self, request, app_icon, urgency, transient, actions, history_path);
+    return applyNotifyAtPath(self, request, actions, history_path);
 }
 
 fn applyNotifyAtPath(
     self: *DBus,
     request: notifications_state.NotifyRequest,
-    app_icon: []const u8,
-    urgency: u8,
-    transient: bool,
     actions: []const DBus.Action,
     history_path: []const u8,
 ) anyerror!NotifyCommit {
     return applyNotifyAtPathWithPersistence(
         self,
         request,
-        app_icon,
-        urgency,
-        transient,
         actions,
         history_path,
         persistHistory,
@@ -805,16 +790,13 @@ fn applyNotifyAtPath(
 fn applyNotifyAtPathWithPersistence(
     self: *DBus,
     request: notifications_state.NotifyRequest,
-    app_icon: []const u8,
-    urgency: u8,
-    transient: bool,
     actions: []const DBus.Action,
     history_path: []const u8,
     persist: PersistHistory,
 ) anyerror!NotifyCommit {
     const replaced = request.replaces_id != 0 and self.state.map.getPtr(request.replaces_id) != null;
     var store_change = try self.state.prepareNotify(request);
-    var timer_change = self.prepareTimer(store_change.id, request.expire_timeout, urgency) catch |err| {
+    var timer_change = self.prepareTimer(store_change.id, request.expire_timeout, request.urgency) catch |err| {
         store_change.rollback();
         return err;
     };
@@ -823,11 +805,11 @@ fn applyNotifyAtPathWithPersistence(
         .created_ns = 0,
         .updated_ns = 0,
         .app_name = request.app_name,
-        .app_icon = app_icon,
+        .app_icon = request.app_icon,
         .summary = request.summary,
         .body = request.body,
-        .urgency = urgency,
-        .transient = transient,
+        .urgency = request.urgency,
+        .transient = request.transient,
         .active = true,
     }, replaced) catch |err| {
         timer_change.rollback();
@@ -838,32 +820,21 @@ fn applyNotifyAtPathWithPersistence(
     timer_change.commit();
     store_change.commit();
 
+    const live = self.state.map.get(store_change.id) orelse unreachable;
     if (self.hooks.on_notify) |on_notify| {
         on_notify(.{
             .id = store_change.id,
-            .app_name = request.app_name,
-            .app_icon = app_icon,
-            .summary = request.summary,
-            .body = request.body,
-            .expire_timeout = request.expire_timeout,
+            .app_name = live.app_name,
+            .app_icon = live.app_icon,
+            .summary = live.summary,
+            .body = live.body,
+            .expire_timeout = live.expire_timeout,
             .replaced = replaced,
-            .urgency = urgency,
-            .transient = transient,
+            .urgency = live.urgency,
+            .transient = live.transient,
             .actions = actions,
         });
     }
-    recordNotificationRow(
-        self.allocator,
-        store_change.id,
-        request.app_name,
-        app_icon,
-        request.summary,
-        request.body,
-        urgency,
-        transient,
-    ) catch |err| {
-        std.log.warn("notification rows record failed id={d} err={s}", .{ store_change.id, @errorName(err) });
-    };
     return switch (save_result) {
         .published => .{ .accepted = store_change.id },
         .parent_sync_failed => |err| .{ .committed_unsynced = .{
@@ -888,7 +859,6 @@ fn closeWithReasonAtPathWithPersistence(
     const closed = self.state.close(id);
     std.debug.assert(closed);
     self.cancelTimer(id);
-    recordNotificationClosed(id, reason);
     emitNotificationClosed(self, id, reason);
     if (self.hooks.on_closed) |on_closed| {
         on_closed(.{
@@ -901,40 +871,6 @@ fn closeWithReasonAtPathWithPersistence(
         .published => .closed,
         .parent_sync_failed => |err| .{ .committed_unsynced = err },
     };
-}
-
-fn recordNotificationRow(
-    allocator: std.mem.Allocator,
-    id: u32,
-    app_name: []const u8,
-    app_icon: []const u8,
-    summary: []const u8,
-    body: []const u8,
-    urgency: u8,
-    transient: bool,
-) !void {
-    if (builtin.is_test) {
-        test_legacy_row_calls += 1;
-        if (!test_record_legacy_rows) return;
-    }
-    return notification_rows.recordNotify(
-        allocator,
-        id,
-        app_name,
-        app_icon,
-        summary,
-        body,
-        urgency,
-        transient,
-    );
-}
-
-fn recordNotificationClosed(id: u32, reason: u32) void {
-    if (builtin.is_test) {
-        test_legacy_close_calls += 1;
-        if (!test_record_legacy_rows) return;
-    }
-    notification_rows.recordClosed(id, reason);
 }
 
 fn persistHistory(
@@ -1219,12 +1155,25 @@ test "dbus expiry timeout follows notification spec sentinel values" {
 }
 
 var test_notify_hook_count: u32 = 0;
-var test_legacy_row_calls: u32 = 0;
-var test_legacy_close_calls: u32 = 0;
-var test_record_legacy_rows: bool = true;
+var test_notify_fields_match: bool = false;
 
 fn countTestNotify(_: DBus.NotifyEvent) void {
     test_notify_hook_count += 1;
+}
+
+fn assertCommittedNotify(event: DBus.NotifyEvent) void {
+    test_notify_hook_count += 1;
+    test_notify_fields_match =
+        event.id == 1 and
+        std.mem.eql(u8, event.app_name, "new-app") and
+        std.mem.eql(u8, event.app_icon, "new-icon") and
+        std.mem.eql(u8, event.summary, "new-summary") and
+        std.mem.eql(u8, event.body, "new-body") and
+        event.expire_timeout == 5000 and
+        !event.replaced and
+        event.urgency == 1 and
+        event.transient and
+        event.actions.len == 0;
 }
 
 var test_closed_hook_count: u32 = 0;
@@ -1279,15 +1228,17 @@ fn expectNotifyRollback(
     try std.testing.expectEqual(timer, dbus.timers.get(id));
     const state_row = dbus.state.map.get(id) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("old-app", state_row.app_name);
+    try std.testing.expectEqualStrings("old-icon", state_row.app_icon);
     try std.testing.expectEqualStrings("old-summary", state_row.summary);
     try std.testing.expectEqualStrings("old-body", state_row.body);
     try std.testing.expectEqual(@as(i32, 5000), state_row.expire_timeout);
     try std.testing.expect(!state_row.has_actions);
+    try std.testing.expectEqual(@as(u8, 1), state_row.urgency);
+    try std.testing.expect(!state_row.transient);
     const current_file = try readTestHistory(history_path);
     defer std.testing.allocator.free(current_file);
     try std.testing.expectEqualStrings(old_file, current_file);
     try std.testing.expectEqual(@as(u32, 0), test_notify_hook_count);
-    try std.testing.expectEqual(@as(u32, 0), test_legacy_row_calls);
 }
 
 fn expectCloseRollback(
@@ -1307,7 +1258,6 @@ fn expectCloseRollback(
     defer std.testing.allocator.free(current_file);
     try std.testing.expectEqualStrings(old_file, current_file);
     try std.testing.expectEqual(@as(u32, 0), test_closed_hook_count);
-    try std.testing.expectEqual(@as(u32, 0), test_legacy_close_calls);
 }
 
 test "TimerChange keeps old source until commit or rollback" {
@@ -1331,6 +1281,72 @@ test "TimerChange keeps old source until commit or rollback" {
     third.commit();
     try std.testing.expectEqual(third.new_source.?, dbus.timers.get(7).?);
     dbus.cancelTimer(7);
+}
+
+test "prepareTimer allocation failure preserves timer and state" {
+    var dbus = try DBus.init(std.testing.allocator);
+    defer dbus.deinit();
+    const original_dbus_allocator = dbus.allocator;
+    const original_timer_allocator = dbus.timers.allocator;
+    defer {
+        dbus.allocator = original_dbus_allocator;
+        dbus.timers.allocator = original_timer_allocator;
+    }
+
+    const id = try dbus.state.notify(.{
+        .app_name = "timer-app",
+        .app_icon = "timer-icon",
+        .summary = "timer-summary",
+        .body = "timer-body",
+        .expire_timeout = 5000,
+    });
+    var old_timer = try dbus.prepareTimer(id, 5000, 1);
+    old_timer.commit();
+    const old_source = dbus.timers.get(id) orelse return error.TestUnexpectedResult;
+    const old_state_len = dbus.state.len();
+    const old_next_id = dbus.state.next_id;
+
+    var filler_id: u32 = 1000;
+    var filler_attempts: u32 = 0;
+    while (filler_attempts < 64 and dbus.timers.count() < (dbus.timers.capacity() * 80) / 100) {
+        var filler = try dbus.prepareTimer(filler_id, 5000, 1);
+        filler.commit();
+        filler_id += 1;
+        filler_attempts += 1;
+    }
+    try std.testing.expectEqual((dbus.timers.capacity() * 80) / 100, dbus.timers.count());
+    const timer_count_after_fill = dbus.timers.count();
+
+    var capacity_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    dbus.timers.allocator = capacity_failure.allocator();
+    const capacity_result = dbus.prepareTimer(id, 6000, 1);
+    dbus.timers.allocator = original_timer_allocator;
+    try std.testing.expectError(error.OutOfMemory, capacity_result);
+    try std.testing.expect(capacity_failure.has_induced_failure);
+    try std.testing.expectEqual(capacity_failure.allocated_bytes, capacity_failure.freed_bytes);
+    try std.testing.expectEqual(old_source, dbus.timers.get(id).?);
+    try std.testing.expectEqual(timer_count_after_fill, dbus.timers.count());
+    try std.testing.expectEqual(old_state_len, dbus.state.len());
+    try std.testing.expectEqual(old_next_id, dbus.state.next_id);
+    try std.testing.expectEqualStrings("timer-summary", dbus.state.map.get(id).?.summary);
+
+    var allocation_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    dbus.allocator = allocation_failure.allocator();
+    const allocation_result = dbus.prepareTimer(id, 7000, 1);
+    dbus.allocator = original_dbus_allocator;
+    try std.testing.expectError(error.OutOfMemory, allocation_result);
+    try std.testing.expect(allocation_failure.has_induced_failure);
+    try std.testing.expectEqual(allocation_failure.allocated_bytes, allocation_failure.freed_bytes);
+    try std.testing.expectEqual(old_source, dbus.timers.get(id).?);
+    try std.testing.expectEqual(old_state_len, dbus.state.len());
+    try std.testing.expectEqual(old_next_id, dbus.state.next_id);
+    try std.testing.expectEqualStrings("timer-body", dbus.state.map.get(id).?.body);
 }
 
 test "timer expiry rejects stale source and accepts current source" {
@@ -1405,8 +1421,6 @@ test "notify History failure rolls back Store timer file hooks and rows" {
 
     test_notify_hook_count = 0;
     defer test_notify_hook_count = 0;
-    test_legacy_row_calls = 0;
-    defer test_legacy_row_calls = 0;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1415,12 +1429,13 @@ test "notify History failure rolls back Store timer file hooks and rows" {
     dbus.state.next_id = 200;
     const old_request = notifications_state.NotifyRequest{
         .app_name = "old-app",
+        .app_icon = "old-icon",
         .summary = "old-summary",
         .body = "old-body",
         .expire_timeout = 5000,
     };
     const id = try dbus.state.notify(old_request);
-    var old_timer_change = try dbus.prepareTimer(id, old_request.expire_timeout, 1);
+    var old_timer_change = try dbus.prepareTimer(id, old_request.expire_timeout, old_request.urgency);
     old_timer_change.commit();
     var old_history = history.History.init(std.testing.allocator);
     defer old_history.deinit();
@@ -1446,11 +1461,14 @@ test "notify History failure rolls back Store timer file hooks and rows" {
         error.HistoryFieldTooLong,
         applyNotifyAtPath(&dbus, .{
             .app_name = "new-app",
+            .app_icon = "new-icon",
             .summary = "new-summary",
             .body = &oversized_body,
             .replaces_id = id,
             .expire_timeout = 9000,
-        }, "new-icon", 2, true, no_actions, history_path),
+            .urgency = 2,
+            .transient = true,
+        }, no_actions, history_path),
     );
     try expectNotifyRollback(&dbus, id, old_next_id, old_timer, history_path, old_file);
 
@@ -1458,10 +1476,13 @@ test "notify History failure rolls back Store timer file hooks and rows" {
         error.IsDir,
         applyNotifyAtPath(&dbus, .{
             .app_name = "new-app",
+            .app_icon = "new-icon",
             .summary = "new-summary",
             .body = "new-body",
             .replaces_id = id,
-        }, "new-icon", 2, true, no_actions, directory_path),
+            .urgency = 2,
+            .transient = true,
+        }, no_actions, directory_path),
     );
     try expectNotifyRollback(&dbus, id, old_next_id, old_timer, history_path, old_file);
 
@@ -1469,19 +1490,25 @@ test "notify History failure rolls back Store timer file hooks and rows" {
         error.HistoryFieldTooLong,
         applyNotifyAtPath(&dbus, .{
             .app_name = "new-app",
+            .app_icon = "new-icon",
             .summary = "new-summary",
             .body = &oversized_body,
-        }, "new-icon", 2, true, no_actions, history_path),
+            .urgency = 2,
+            .transient = true,
+        }, no_actions, history_path),
     );
     try expectNotifyRollback(&dbus, id, old_next_id, old_timer, history_path, old_file);
 
     const save_failure_path = "/proc/wayspot-notification-history-order2.json";
     const save_result = applyNotifyAtPath(&dbus, .{
         .app_name = "new-app",
+        .app_icon = "new-icon",
         .summary = "new-summary",
         .body = "new-body",
         .replaces_id = id,
-    }, "new-icon", 2, true, no_actions, save_failure_path);
+        .urgency = 2,
+        .transient = true,
+    }, no_actions, save_failure_path);
     if (save_result) |_| return error.TestUnexpectedResult else |_| {}
     try expectNotifyRollback(&dbus, id, old_next_id, old_timer, history_path, old_file);
 }
@@ -1494,26 +1521,24 @@ test "post-replace History failure commits Store timer and effects" {
 
     test_notify_hook_count = 0;
     defer test_notify_hook_count = 0;
-    test_legacy_row_calls = 0;
-    defer test_legacy_row_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
+    test_notify_fields_match = false;
+    defer test_notify_fields_match = false;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
-    dbus.setHooks(.{ .on_notify = countTestNotify });
+    dbus.setHooks(.{ .on_notify = assertCommittedNotify });
     const no_actions: []const DBus.Action = &.{};
     const commit = try applyNotifyAtPathWithPersistence(
         &dbus,
         .{
             .app_name = "new-app",
+            .app_icon = "new-icon",
             .summary = "new-summary",
             .body = "new-body",
             .expire_timeout = 5000,
+            .urgency = 1,
+            .transient = true,
         },
-        "new-icon",
-        1,
-        true,
         no_actions,
         history_path,
         persistHistoryPublishedUnsynced,
@@ -1533,7 +1558,7 @@ test "post-replace History failure commits Store timer and effects" {
     try std.testing.expectEqualStrings("new-summary", row.summary);
     try std.testing.expect(dbus.timers.get(1) != null);
     try std.testing.expectEqual(@as(u32, 1), test_notify_hook_count);
-    try std.testing.expectEqual(@as(u32, 1), test_legacy_row_calls);
+    try std.testing.expect(test_notify_fields_match);
 
     var saved = try history.History.loadAtPath(std.testing.allocator, history_path, 0);
     defer saved.deinit();
@@ -1549,10 +1574,6 @@ test "notify history preserves replacement created time and dates new rows" {
 
     test_notify_hook_count = 0;
     defer test_notify_hook_count = 0;
-    test_legacy_row_calls = 0;
-    defer test_legacy_row_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1577,13 +1598,13 @@ test "notify history preserves replacement created time and dates new rows" {
         &dbus,
         .{
             .app_name = "new-app",
+            .app_icon = "new-icon",
             .summary = "new-summary",
             .body = "new-body",
             .replaces_id = old_id,
+            .urgency = 2,
+            .transient = true,
         },
-        "new-icon",
-        2,
-        true,
         &.{},
         history_path,
     );
@@ -1597,12 +1618,10 @@ test "notify history preserves replacement created time and dates new rows" {
         &dbus,
         .{
             .app_name = "fresh-app",
+            .app_icon = "fresh-icon",
             .summary = "fresh-summary",
             .body = "fresh-body",
         },
-        "fresh-icon",
-        1,
-        false,
         &.{},
         history_path,
     );
@@ -1640,10 +1659,6 @@ test "close persists every durable field before live removal" {
 
     test_closed_hook_count = 0;
     defer test_closed_hook_count = 0;
-    test_legacy_close_calls = 0;
-    defer test_legacy_close_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1682,7 +1697,6 @@ test "close persists every durable field before live removal" {
     try std.testing.expectEqual(@as(u32, 1), test_closed_hook_count);
     try std.testing.expectEqual(id, test_closed_hook_id);
     try std.testing.expectEqual(close_reason_closed, test_closed_hook_reason);
-    try std.testing.expectEqual(@as(u32, 1), test_legacy_close_calls);
 
     var loaded = try history.History.loadAtPath(std.testing.allocator, history_path, realtimeNs());
     defer loaded.deinit();
@@ -1708,10 +1722,6 @@ test "close missing durable row leaves live state and timer unchanged" {
 
     test_closed_hook_count = 0;
     defer test_closed_hook_count = 0;
-    test_legacy_close_calls = 0;
-    defer test_legacy_close_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1746,7 +1756,6 @@ test "close missing durable row leaves live state and timer unchanged" {
     try std.testing.expectEqual(@as(u32, 1), dbus.state.len());
     try std.testing.expectEqual(timer.new_source, dbus.timers.get(id));
     try std.testing.expectEqual(@as(u32, 0), test_closed_hook_count);
-    try std.testing.expectEqual(@as(u32, 0), test_legacy_close_calls);
     try std.testing.expectError(
         error.FileNotFound,
         readTestHistory(history_path),
@@ -1763,10 +1772,6 @@ test "close pre-replace failure preserves live state timer file and effects" {
 
     test_closed_hook_count = 0;
     defer test_closed_hook_count = 0;
-    test_legacy_close_calls = 0;
-    defer test_legacy_close_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1824,10 +1829,6 @@ test "close parent sync failure commits live close and effects" {
 
     test_closed_hook_count = 0;
     defer test_closed_hook_count = 0;
-    test_legacy_close_calls = 0;
-    defer test_legacy_close_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1866,7 +1867,6 @@ test "close parent sync failure commits live close and effects" {
     try std.testing.expect(dbus.state.map.get(id) == null);
     try std.testing.expectEqual(@as(?guint, null), dbus.timers.get(id));
     try std.testing.expectEqual(@as(u32, 1), test_closed_hook_count);
-    try std.testing.expectEqual(@as(u32, 1), test_legacy_close_calls);
 
     var loaded = try history.History.loadAtPath(std.testing.allocator, history_path, realtimeNs());
     defer loaded.deinit();
@@ -1890,10 +1890,6 @@ test "expiry retries pre-replace failure and closes on success" {
 
     test_closed_hook_count = 0;
     defer test_closed_hook_count = 0;
-    test_legacy_close_calls = 0;
-    defer test_legacy_close_calls = 0;
-    test_record_legacy_rows = false;
-    defer test_record_legacy_rows = true;
 
     var dbus = try DBus.init(std.testing.allocator);
     defer dbus.deinit();
@@ -1926,7 +1922,6 @@ test "expiry retries pre-replace failure and closes on success" {
     try std.testing.expectEqual(source_id, dbus.timers.get(id).?);
     try std.testing.expect(dbus.state.map.get(id) != null);
     try std.testing.expectEqual(@as(u32, 0), test_closed_hook_count);
-    try std.testing.expectEqual(@as(u32, 0), test_legacy_close_calls);
     const current_file = try readTestHistory(history_path);
     defer std.testing.allocator.free(current_file);
     try std.testing.expectEqualStrings(old_file, current_file);
@@ -1938,7 +1933,6 @@ test "expiry retries pre-replace failure and closes on success" {
     try std.testing.expect(dbus.state.map.get(id) == null);
     try std.testing.expectEqual(@as(?guint, null), dbus.timers.get(id));
     try std.testing.expectEqual(@as(u32, 1), test_closed_hook_count);
-    try std.testing.expectEqual(@as(u32, 1), test_legacy_close_calls);
 
     var loaded = try history.History.loadAtPath(std.testing.allocator, history_path, realtimeNs());
     defer loaded.deinit();

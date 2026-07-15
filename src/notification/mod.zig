@@ -11,7 +11,6 @@ pub const banner = @import("banner.zig");
 pub const state = @import("state.zig");
 pub const dbus = @import("dbus.zig");
 pub const DBus = dbus.DBus;
-pub const rows = @import("rows.zig");
 pub const preview = @import("wayspot_notification_preview");
 pub const history = @import("wayspot_history");
 pub const history_list = @import("wayspot_history_list");
