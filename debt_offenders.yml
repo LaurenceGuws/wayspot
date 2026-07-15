@@ -1,1818 +1,442 @@
-# WAYS POT DEBT INDEX: exhaustive post-cleanup source shape and required code changes.
-# This is a design index, not an implementation authorization.
-project: wayspot
-checkpoint: 6ff94bc
-status: closed
-implementation_status: null
-review_gate:
-  current_slice: null
-  implementation_authorized: false
-  forbidden_before_approval: []
+# Wayspot cache, config, history, and state marathon register.
+# Current source evidence is recorded separately from target names.
 
-shape_bars:
-  required_vocabulary:
-    - Cmd
-    - SubCmd
-    - Candidate
-    - Concrete
-    - Lifecycle
-    - Input
-    - ScalarInput
-    - ToggleInput
-    - PathInput
-    - DimSubCmd
-    - FilterSubCmd
-    - ImageSubCmd
-    - mode
-    - apps
-    - notifications
-    - wallpaper
-    - sunglasses
-  deprecated_implementation_vocabulary:
-    - Command
-    - commands
-    - Mode_struct_as_parallel_collection
-    - flat_Candidate_List_as_command_tree
-    - UserInput
-    - user_input_types
-    - CandidateType
-    - Candidate.types
-  ownership_rules:
-    - Cmd is the one top-level tagged union.
-    - Cmd arms are concrete and ordered apps, notifications, wallpaper, sunglasses.
-    - apps is the first arm and the default picker mode.
-    - resident Cmd arms own NotificationsSubCmd, WallpaperSubCmd, or SunglassesSubCmd.
-    - SubCmd is one shared closed union with explicit resident child arms.
-    - src/picker/sub_cmd.zig is the only declaration owner for SubCmd and every resident child union, including nested input routes; route arms do not embed Input.
-    - resident mode files own route behavior, candidate construction, resolution, and lifecycle intent; they do not declare child-union types.
-    - Candidate.sub_cmd stores SubCmd; Candidate.concrete stores Concrete.
-    - Concrete is exactly app, open, lifecycle, and notification.
-    - Lifecycle is exactly the nine declared resident leaf arms.
-    - Input is exactly none, scalar, toggle, and path; it is the typed value contract carried by a Concrete leaf.
-    - ScalarInput owns value, min, max, and positive step; value is inside its inclusive bounds and aligned to min by whole step increments; ToggleInput owns enabled; PathInput owns one bounded absolute path copy.
-    - Every typed Concrete leaf declares its accepted Input arms; no parallel CandidateType or input-kind field exists.
-    - GUI controls are reusable presentation drafts and commit the same Input values that CLI argv constructs.
-    - notification Concrete leaves are display-only and explicitly rejected at selection and launch boundaries.
-    - hint and mode are not Concrete arms.
-    - apps has no SubCmd and exposes Concrete application and fixed-local open leaves directly.
-    - GUI and CLI consume the same Cmd array, SubCmd unions, and Candidate values.
-    - resident runtime code has an explicit entrypoint separate from picker code.
-    - process code executes resolved leaf intent; Cmd code never forks or runs a shell.
-  comment_rules:
-    every_target_zig_file:
-      - one current //! file contract naming scope, owner, bounds, cleanup, and failure meaning
-      - one current /// comment for every public type, field group, constant, and function
-      - local // comments only for non-obvious platform or ownership decisions
-    forbidden_comment_shape:
-      - stale claims about rows, commands, forms, or GUI-only apps
-      - comments that describe a future owner instead of the current owner
-      - comments that hide allocation, cleanup, or failure meaning
-  test_rules:
-    - tests stay beside the owner symbol in the owning .zig file
-    - every tagged union has an exhaustive-arm test
-    - every bounded array has a boundary test
-    - every ownership transfer has success, failure, cleanup, and retry proof
-    - every CLI, GUI, and resident entrypoint has a real receipt
-  candidate_representation:
-    shared_union:
-      path: src/picker/sub_cmd.zig
-      symbol: SubCmd
-      arms:
-        - notifications: NotificationsSubCmd
-        - wallpaper: WallpaperSubCmd
-        - sunglasses: SunglassesSubCmd
-    candidate_union:
-      path: src/picker/candidate.zig
-      symbol: Candidate
-      arms:
-        - sub_cmd: SubCmd
-        - concrete: Concrete
-    concrete_union:
-      path: src/picker/candidate.zig
-      symbol: Concrete
-      arms:
-        - app
-        - open
-        - lifecycle: Lifecycle
-        - notification
-      lifecycle_union:
-        symbol: Lifecycle
-        arms:
-          - notifications_restart
-          - wallpaper_restart
-          - wallpaper_rotate
-          - sunglasses_restart
-          - sunglasses_apply
-          - sunglasses_reconcile
-          - sunglasses_dim
-          - sunglasses_filter
-          - sunglasses_image
-      input_union:
-        path: src/picker/candidate.zig
-        symbol: Input
-        arms:
-          - none
-          - scalar: ScalarInput
-          - toggle: ToggleInput
-          - path: PathInput
-        scalar_fields:
-          - value: i32
-          - min: i32
-          - max: i32
-          - step: i32
-        toggle_fields:
-          - enabled: bool
-        path_fields:
-          - bytes: fixed_storage
-          - length: usize
-        ownership: Input is copied into a Concrete leaf; PathInput owns its bounded path bytes and does not borrow GUI or argv storage.
-        bounds:
-          arm_count: project_version_scope.yml:max_input_arms
-          scalar: project_version_scope.yml:sunglasses_scalar_bounds
-          path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
-      typed_leaf_policy:
-        app: Input.none
-        open: Input.none
-        lifecycle:
-          notifications_restart: Input.none
-          wallpaper_restart: Input.none
-          wallpaper_rotate: Input.none
-          sunglasses_restart: Input.none
-          sunglasses_apply: Input.none
-          sunglasses_reconcile: Input.none
-          sunglasses_dim: scalar_or_toggle
-          sunglasses_filter: scalar_or_toggle
-          sunglasses_image: none_or_scalar_or_toggle_or_path
-        notification: Input.none
-      owners:
-        declaration: src/picker/candidate.zig
-        app: src/picker/mode/apps.zig
-        open: src/picker/mode/apps.zig
-        lifecycle: selected resident mode route owner
-        notification: src/notification/history_list.zig
-      resolution:
-        app: executable leaf intent
-        open: executable leaf intent
-        lifecycle: typed resident leaf intent
-        notification: explicit display-only rejection at selection and launch
-      bounds:
-        arm_count: project_version_scope.yml:max_concrete_arms
-        lifecycle_arm_count: project_version_scope.yml:max_lifecycle_arms
-        monitor_name_bytes: project_version_scope.yml:sunglasses_monitor_name_bytes
-        image_path_bytes: project_version_scope.yml:sunglasses_image_path_bytes
-        scalar_bounds: project_version_scope.yml:sunglasses_scalar_bounds
-    apps_rule: apps has no child union and produces Candidate.concrete application and fixed-local open leaves
-    equivalence_rule:
-      - GUI slider, toggle, and textbox commits construct equal Input and Concrete values to equivalent CLI argv.
-      - GUI and CLI reject the same invalid scalar, toggle, path, and monitor values.
+register:
+  checkpoint: 6ff94bc
+  status: open
+  implementation_status: not_started
+  review_gate:
+    state: operator_review_required
+    source_changes: false
+    uncommitted_register: true
 
-target_tree:
-  root_files:
-    - build.zig
-    - build.zig.zon
-    - re-run.sh
-  packaging_files:
-    - packaging/desktop/wayspot.desktop
-    - packaging/systemd/wayspot.service
-    - packaging/bash/wayspot.bash
-  source_files:
-    src:
-      - src/main.zig
-      - src/root.zig
-      - src/identity.zig
-      - src/c/sdl.h
-      - src/c/text.h
-      - src/c/wayland.h
-      - src/c/wayspot_layer_shell.c
-      - src/config/defaults.zig
-      - src/config/mod.zig
-      - src/env/hyprland.zig
-      - src/env/mod.zig
-      - src/env/monitor.zig
-      - src/env/state.zig
-      - src/env/window.zig
-      - src/env/workspace.zig
-      - src/cli/entry.zig
-      - src/cli/bash_completion.zig
-      - src/gui/surface.zig
-      - src/process/launch.zig
-      - src/notification/banner.zig
-      - src/notification/dbus.zig
-      - src/notification/history_cache.zig
-      - src/notification/history_list.zig
-      - src/notification/mod.zig
-      - src/notification/preview.zig
-      - src/notification/rows.zig
-      - src/notification/state.zig
-      - src/picker/appearance.zig
-      - src/picker/candidate.zig
-      - src/picker/cmd.zig
-      - src/picker/sub_cmd.zig
-      - src/picker/cursor_blink.zig
-      - src/picker/icon_cache.zig
-      - src/picker/icon_diag.zig
-      - src/picker/icons.zig
-      - src/picker/mod.zig
-      - src/picker/mode/apps.zig
-      - src/picker/mode/mod.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/sunglasses.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/query.zig
-      - src/picker/rank.zig
-      - src/picker/scale.zig
-      - src/picker/signal.zig
-      - src/picker/slider.zig
-      - src/picker/text.zig
-      - src/picker/textbox.zig
-      - src/picker/viewport.zig
-      - src/sunglasses/mod.zig
-      - src/sunglasses/overlay.zig
-      - src/sunglasses/state.zig
-      - src/sunglasses/surface.zig
-      - src/wallpaper/config.zig
-      - src/wallpaper/image_info.zig
-      - src/wallpaper/library.zig
-      - src/wallpaper/loop.zig
-      - src/wallpaper/mod.zig
-      - src/wallpaper/surface.zig
-  removed_files:
-    - src/picker/command.zig
-    - src/picker/open.zig
-    - src/picker/surface.zig
-  moved_files:
-    - from: src/picker/surface.zig
-      to: src/gui/surface.zig
-      reason: GUI SDL lifecycle must have a GUI-owned folder boundary.
-  preserved_non_source:
-    - assets/icons/wayspot.svg
-    - assets/lua/defaults.lua
-    - tools/hypr-wallpaper-window-probe.py
-    - tools/re-run_test.sh
-    - tools/wayspot-sample-process.sh
-    - vendor/howl-lua/build.zig
-    - vendor/howl-lua/build.zig.zon
-    - vendor/howl-lua/src/api.zig
-    - vendor/howl-lua/src/reader.zig
-    - vendor/howl-lua/src/root.zig
-    - vendor/howl-lua/src/trace.zig
+meanings:
+  cache:
+    meaning: "A bounded derived value rebuilt from a source; it does not record past product events."
+    current_uses:
+      - app metadata derived from desktop files
+      - converted app icon files and their two-field index
+      - decoded app icon textures held until AppIconStore.deinit
+  config:
+    meaning: "A bounded user-authored file read to select appearance defaults and wallpaper settings."
+    paths: defaults.lua and wallpaper.conf
+  history:
+    meaning: "A bounded record of past product events and past picker selections."
+    records:
+      notification: History rows with notification identity, text, timestamps, and close fields
+      picker: Recent candidate selection strings used by picker ranking
+    separation: "Notification history and picker selection history use different files, types, bounds, and tests."
+  state:
+    meaning: "Current UI and resident values held in memory and persisted for restart."
+    records:
+      surface: SurfaceState zoom value
+      sunglasses: State monitor filter and image values
+      environment: EnvState compositor facts held only in memory
+    separation: "State does not record past events and is not rebuilt app and icon data."
 
-target_files:
-  - path: src/picker/candidate.zig
-    status: reshape
-    owner: picker.candidate
-    role: bounded Candidate, Concrete, Lifecycle, and Input unions with explicit leaf-value ownership and borrowed display-string contract
-    symbols:
-      public:
-        - max_candidates
-        - max_monitor_name_bytes
-        - max_image_path_bytes
-        - InputError
-        - Input
-        - ScalarInput
-        - ToggleInput
-        - PathInput
-        - MonitorName
-        - ActionLeaf
-        - MonitorLeaf
-        - Input.none
-        - Input.scalar
-        - Input.toggle
-        - Input.path
-        - Concrete
-        - Lifecycle
-        - Concrete.app
-        - Concrete.open
-        - Concrete.lifecycle
-        - Concrete.notification
-        - Lifecycle.notifications_restart
-        - Lifecycle.wallpaper_restart
-        - Lifecycle.wallpaper_rotate
-        - Lifecycle.sunglasses_restart
-        - Lifecycle.sunglasses_apply
-        - Lifecycle.sunglasses_reconcile
-        - Lifecycle.sunglasses_dim
-        - Lifecycle.sunglasses_filter
-        - Lifecycle.sunglasses_image
-        - Lifecycle.sunglasses_dim.monitor
-        - Lifecycle.sunglasses_dim.input
-        - Lifecycle.sunglasses_filter.monitor
-        - Lifecycle.sunglasses_filter.input
-        - Lifecycle.sunglasses_image.monitor
-        - Lifecycle.sunglasses_image.input
-        - ScalarInput.value
-        - ScalarInput.min
-        - ScalarInput.max
-        - ScalarInput.step
-        - ToggleInput.enabled
-        - PathInput.bytes
-        - PathInput.length
-        - Input.scalarInput
-        - Input.toggleInput
-        - Input.pathInput
-        - Input.validate
-        - ScalarInput.init
-        - ScalarInput.validate
-        - ScalarInput.validateFor
-        - PathInput.init
-        - PathInput.validate
-        - PathInput.slice
-        - MonitorName.init
-        - MonitorName.validate
-        - MonitorName.slice
-        - Lifecycle.input
-        - Lifecycle.validate
-        - Concrete.input
-        - Concrete.isLaunchable
-        - Concrete.validate
-        - Candidate
-        - Candidate.List
-        - Candidate.List.append
-        - Candidate.List.slice
-        - Candidate.List.clearRetainingCapacity
-        - Candidate.List.deinit
-        - Candidate.accepts
-        - "Candidate.sub_cmd: SubCmd"
-        - "Candidate.concrete: Concrete"
-        - Candidate.title
-        - Candidate.subtitle
-        - Candidate.iconName
-        - Candidate.concreteValue
-        - Candidate.isApp
-        - Candidate.isOpen
-        - Candidate.isSubCmd
-        - Candidate.isLaunchable
-        - Candidate.validate
-        - Candidate.input
-        - Candidate.subCmd
-        - Candidate.appLeaf
-        - Candidate.openLeaf
-        - Candidate.notificationLeaf
-        - Candidate.lifecycleLeaf
-        - Candidate.typeOf
-      removed:
-        - Candidate.Type
-        - Candidate.types
-        - Candidate.makeApp
-        - Candidate.openRow
-        - Candidate.makeMode
-        - Candidate.makeLifecycle
-        - Candidate.makeNotification
-        - Candidate.makeHint
-        - Candidate.openPayload
-    comments:
-      file: "//! Candidate owns the bounded reachable-node union, terminal Concrete unions, typed Input values, and borrowed display strings consumed by Cmd, GUI, and CLI."
-      symbols:
-        - "/// Input is the exact typed value vocabulary carried by Concrete leaves."
-        - "/// ScalarInput owns value, min, max, and step within the selected leaf bounds and enforces grid alignment from min by whole step increments."
-        - "/// ToggleInput owns one enabled value and PathInput owns one bounded path copy."
-        - "/// MonitorName owns one bounded monitor copy; ActionLeaf and MonitorLeaf own terminal Input storage."
-        - "/// Concrete is the exact terminal union of app, open, lifecycle, and notification leaves."
-        - "/// Lifecycle is the exact nine-arm resident leaf vocabulary, including typed sunglasses inputs."
-        - "/// Every typed leaf declares accepted Input arms and copies them at construction."
-        - "/// Candidate stores one shared SubCmd union or one Concrete terminal leaf."
-        - "/// List publishes one bounded collection without taking producer string ownership."
-    tests:
-      - candidate union exposes exactly sub_cmd and concrete arms
-      - Input exposes exactly none, scalar, toggle, and path arms
-      - ScalarInput validates value, min, max, positive step, and grid alignment
-      - aligned positive and negative scalar ranges, misaligned positive and negative ranges, and exact endpoints are covered
-      - ToggleInput maps on and off without a second input tag
-      - PathInput owns a bounded absolute path copy and rejects invalid bytes
-      - Concrete exposes exactly app, open, lifecycle, and notification arms
-      - Lifecycle exposes exactly the nine declared resident leaf arms
-      - typed sunglasses leaves carry bounded monitor and Input values
-      - each typed leaf rejects non-applicable Input arms explicitly
-      - CLI and GUI construct equal Concrete values for scalar, toggle, and path inputs
-      - CLI and GUI reject equal invalid scalar, toggle, path, and monitor values
-      - candidate capacity rejects the first record beyond the bound
-      - borrowed producer strings remain valid until producer cleanup
-      - notification leaves are rendered and reported but rejected explicitly at selection and launch
-      - hint and mode are absent from Concrete
-      - candidate policy rejects non-applicable leaves explicitly
+path_table:
+  - surface: appearance_defaults
+    current_source: "src/config/defaults.zig:load"
+    current_path: "$HOME/.config/wayspot/defaults.lua"
+    current_rule: load joins the supplied HOME value with .config/wayspot/defaults.lua
+    target_path: "$XDG_CONFIG_HOME/wayspot/defaults.lua"
+    target_fallback: "$HOME/.config/wayspot/defaults.lua"
+  - surface: wallpaper_config
+    current_source: "src/wallpaper/config.zig:Config.defaultPath"
+    current_path: "$HOME/.config/wayspot/wallpaper.conf"
+    current_rule: defaultPath reads HOME and appends .config/wayspot/wallpaper.conf
+    target_path: "$XDG_CONFIG_HOME/wayspot/wallpaper.conf"
+    target_fallback: "$HOME/.config/wayspot/wallpaper.conf"
+  - surface: app_cache
+    current_source: "src/main.zig:setupPickerBundle and src/picker/mode/apps.zig:invalidateDefaultCache"
+    current_path: "$HOME/.cache/waybar/wofi-app-launcher.tsv"
+    current_rule: setupPickerBundle formats the path from HOME and Apps receives it as cache_path
+    target_path: "$XDG_CACHE_HOME/wayspot/apps.tsv"
+    target_fallback: "$HOME/.cache/wayspot/apps.tsv"
+  - surface: icon_cache
+    current_source: "src/picker/icon_cache.zig:refresh and src/picker/icons.zig:findCachedIconPath"
+    current_path: "$HOME/.cache/wayspot/icons/index.tsv and $HOME/.cache/wayspot/icons/icon-CRC32.png"
+    current_rule: refresh receives HOME from CLI and icons.zig reads HOME directly
+    target_path: "$XDG_CACHE_HOME/wayspot/icons/index.tsv and $XDG_CACHE_HOME/wayspot/icons/icon-CRC32.png"
+    target_fallback: "$HOME/.cache/wayspot/icons/index.tsv and $HOME/.cache/wayspot/icons/icon-CRC32.png"
+  - surface: picker_selection_history
+    current_source: "src/main.zig:setupPickerBundle"
+    current_path: "$HOME/.local/state/wayspot/history.log"
+    current_rule: setupPickerBundle formats the path from HOME
+    target_path: "$XDG_STATE_HOME/wayspot/history.log"
+    target_fallback: "$HOME/.local/state/wayspot/history.log"
+  - surface: notification_history
+    current_source: "src/notification/history_cache.zig:cachePath"
+    current_path: "$XDG_STATE_HOME/wayspot/notifications-history.json; HOME fallback is $HOME/.local/state/wayspot/notifications-history.json"
+    current_rule: cache_relative_path is wayspot/notifications-history.json; XDG_STATE_HOME is used verbatim; a value already ending in /wayspot produces a doubled wayspot component
+    target_path: "$XDG_STATE_HOME/wayspot/notifications-history.json"
+    target_fallback: "$HOME/.local/state/wayspot/notifications-history.json"
+    target_rule: XDG_STATE_HOME is the parent state directory and never includes the /wayspot suffix
+  - surface: sunglasses_state
+    current_source: "src/sunglasses/state.zig:statePath"
+    current_path: "$HOME/.local/state/wayspot/sunglasses.conf"
+    current_rule: statePath reads HOME and appends .local/state/wayspot/sunglasses.conf
+    target_path: "$XDG_STATE_HOME/wayspot/sunglasses.conf"
+    target_fallback: "$HOME/.local/state/wayspot/sunglasses.conf"
+  - surface: surface_state
+    current_source: "src/picker/scale.zig:statePath"
+    current_path: "$HOME/.local/state/wayspot/surface.conf"
+    current_rule: statePath reads HOME and appends .local/state/wayspot/surface.conf
+    target_path: "$XDG_STATE_HOME/wayspot/surface.conf"
+    target_fallback: "$HOME/.local/state/wayspot/surface.conf"
 
-  - path: src/picker/mode/mod.zig
-    status: preserved
-    owner: picker.mode
-    role: mode-folder export index for concrete mode owners consumed by Cmd
-    symbols:
-      public:
-        - apps
-        - notifications
-        - sunglasses
-        - wallpaper
-    comments:
-      file: "//! Picker mode exports the concrete mode owners consumed by Cmd."
-    tests:
-      - mode-folder exports apps, notifications, sunglasses, and wallpaper
+bounds:
+  candidate_list: 1024
+  app_cache_read_bytes: 2097152
+  app_tsv_field_bytes: 256
+  desktop_file_bytes: 131072
+  desktop_path_bytes: 512
+  icon_index_bytes: 262144
+  icon_refresh_rows: 768
+  icon_cache_entries: 128
+  icon_name_bytes: 192
+  icon_path_bytes: 768
+  icon_file_bytes: 2097152
+  icon_source_dimension: 4096
+  icon_texture_dimension: 64
+  icon_roots: 8
+  icon_probes: 96
+  icon_path_entries: 64
+  icon_path_entry_bytes: 512
+  icon_command_name_bytes: 128
+  icon_wait_interrupts: 8
+  appearance_embedded_bytes: 32768
+  appearance_user_bytes: 32768
+  lua_instructions: 100000
+  lua_table_depth: 4
+  lua_total_keys: 128
+  lua_color_entries: 32
+  wallpaper_config_bytes: 4096
+  wallpaper_interval_seconds: "30..86400"
+  surface_state_bytes: 64
+  surface_zoom_step: "-2..5"
+  sunglasses_state_bytes: 16384
+  sunglasses_monitors: 8
+  sunglasses_monitor_name_bytes: 96
+  sunglasses_image_path_bytes: 1024
+  sunglasses_red_blue: "-100..100"
+  sunglasses_dim: "0..100"
+  sunglasses_image_opacity: "0..100"
+  notification_history_bytes: 2097152
+  notification_history_rows: 512
+  notification_history_retention_days: 7
+  notification_app_name_bytes: 256
+  notification_app_icon_bytes: 256
+  notification_summary_bytes: 512
+  notification_body_bytes: 4096
+  notification_live_rows: 256
+  notification_selection_bytes: 32
+  picker_history_entries: 64
+  picker_selection_bytes: 256
+  picker_history_file_bytes: 16384
 
-  - path: src/picker/sub_cmd.zig
-    status: new
-    owner: picker.sub_cmd
-    role: sole declaration owner for one shared closed SubCmd union and all concrete resident child-union types
-    symbols:
-      public:
-        - SubCmd
-        - NotificationsSubCmd
-        - WallpaperSubCmd
-        - SunglassesSubCmd
-        - DimSubCmd
-        - FilterSubCmd
-        - ImageSubCmd
-        - "SubCmd.notifications: NotificationsSubCmd"
-        - "SubCmd.wallpaper: WallpaperSubCmd"
-        - "SubCmd.sunglasses: SunglassesSubCmd"
-      consumers:
-        - src/picker/mode/notifications.zig route behavior only
-        - src/picker/mode/wallpaper.zig route behavior only
-        - src/picker/mode/sunglasses.zig route behavior only
-    comments:
-      file: "//! SubCmd is the sole declaration owner for the explicit closed child-union types; mode files consume it and apps has no arm."
-      symbols:
-        - "/// NotificationsSubCmd is the concrete notification child union consumed by the notifications mode."
-        - "/// WallpaperSubCmd is the concrete wallpaper child union consumed by the wallpaper mode."
-        - "/// SunglassesSubCmd is the concrete sunglasses child union consumed by the sunglasses mode."
-        - "/// DimSubCmd selects set, on, or off; the sunglasses leaf builder enforces scalar or toggle Input."
-        - "/// FilterSubCmd selects set, on, or off; the sunglasses leaf builder enforces scalar or toggle Input."
-        - "/// ImageSubCmd selects set, opacity, on, off, or clear; the sunglasses leaf builder enforces path, scalar, toggle, or none Input."
-        - "/// SubCmd.notifications carries NotificationsSubCmd without erasing its type."
-        - "/// SubCmd.wallpaper carries WallpaperSubCmd without erasing its type."
-        - "/// SubCmd.sunglasses carries SunglassesSubCmd without erasing its type."
-    tests:
-      - SubCmd has exactly notifications, wallpaper, and sunglasses arms
-      - each arm carries its named concrete child union
-      - SunglassesSubCmd exposes exactly restart, apply, reconcile, dim, filter, and image
-      - DimSubCmd exposes exactly set, on, and off and constrains Input at leaf construction
-      - FilterSubCmd exposes exactly set, on, and off and constrains Input at leaf construction
-      - ImageSubCmd exposes exactly set, opacity, on, off, and clear and constrains Input at leaf construction
-      - SubCmd has no apps arm
-      - mode files do not redeclare NotificationsSubCmd, WallpaperSubCmd, or SunglassesSubCmd
-      - no generic, erased, or mode-kind child storage exists
+current_failure_behavior:
+  - path_symbol: "src/notification/history_cache.zig:Cache.loadAtPath"
+    behavior: "Every read error returns an empty Cache; malformed JSON returns an empty Cache; malformed rows are skipped."
+  - path_symbol: "src/notification/history_cache.zig:duplicateBounded"
+    behavior: "Text beyond a field bound is truncated and the last retained byte becomes ~."
+  - path_symbol: "src/picker/cmd.zig:loadHistorySelections"
+    behavior: "FileNotFound returns; other read errors return; blank lines are skipped; line size and candidate reachability are unchecked."
+  - path_symbol: "src/picker/scale.zig:SurfaceConfig.loadAtPath"
+    behavior: "FileNotFound and StreamTooLong return default state; malformed text returns default state."
+  - path_symbol: "src/sunglasses/state.zig:State.loadAtPath"
+    behavior: "FileNotFound and StreamTooLong return empty State; malformed text returns empty State; other read errors return."
+  - path_symbol: "src/wallpaper/config.zig:Config.parse"
+    behavior: "Unknown keys and missing and relative library paths return errors; interval values clamp; duplicate keys use the last value."
+  - path_symbol: "src/picker/mode/apps.zig:Apps.collectCandidates"
+    behavior: "Missing, NotDir, and AccessDenied trigger desktop scan; malformed cache lines skip; cache rebuild write errors are logged and ignored."
+  - path_symbol: "src/picker/icon_cache.zig:refresh"
+    behavior: "Missing converter returns an error; converter and wait failures leave direct index and PNG writes in place."
+  - path_symbol: "src/picker/icons.zig:AppIconStore.textureForWithRoots"
+    behavior: "Missing and failed icons retain a missing entry until AppIconStore.deinit."
 
-  - path: src/picker/cmd.zig
-    status: new_replacement_for_src/picker/command.zig
-    owner: picker.cmd
-    role: top-level Cmd union, ordered mode array, shared tree construction, ranking, and leaf resolution
-    symbols:
-      public:
-        - Cmd
-        - cmds
-        - Picker
-        - max_cmd_bytes
-        - max_completion_candidates
-        - CompletionPosition
-        - Completion
-        - complete
-        - init
-        - deinit
-        - rankQuery
-        - resolveCandidate
-        - loadHistory
-        - saveHistory
-        - recordSelection
-      private:
-        - buildCandidatesTransactional
-        - resolveSubCmd
-        - resolveConcrete
-    comments:
-      file: "//! Cmd owns the bounded Cmd tree and never imports SDL, Bash formatting, or resident runtime code."
-      symbols:
-        - "/// Cmd is the four-arm tagged union in fixed apps-first order."
-        - "/// cmds is the bounded ordered array consumed identically by GUI and CLI."
-        - "/// Picker owns history and published candidate lifetime around Cmd values."
-        - "/// buildCandidatesTransactional publishes a complete set or leaves published storage empty after rollback."
-        - "/// resolveConcrete returns an executable leaf intent or the exact rejection for a display-only Concrete arm."
-        - "/// complete returns one bounded next shell argument for an explicit Cmd-tree position."
-    tests:
-      - Cmd arms are exhaustive and ordered apps, notifications, wallpaper, sunglasses
-      - apps is the default mode on picker initialization
-      - resident Cmd arms expose their child unions through the shared SubCmd wrapper
-      - apps exposes Concrete leaves directly and has no SubCmd
-      - GUI and CLI receive identical mode and candidate composition
-      - equivalent CLI argv and GUI control commits produce equal Input and Concrete values
-      - equivalent invalid GUI and CLI inputs return the same bounded rejection
-      - candidate construction overflow rolls back completely
-      - failed construction can retry without duplicate or dangling candidates
-      - concrete leaves resolve without forking or shell execution
-      - notification Concrete leaves reject explicitly without forking or shell execution
-      - history remains bounded and cleanup is exact
-      - completion semantics return position-aware next arguments and never full command payloads
-      - top-level completion includes apps in fixed Cmd order
-      - subcommand and operation completion expose only the next route word
+duplicate_representations:
+  - "src/notification/state.zig:Store and src/notification/rows.zig:row_store retain live notification text; src/notification/history_cache.zig:Cache retains a durable copy."
+  - "src/notification/history_cache.zig:Cache.rows and src/notification/history_list.zig:NotificationHistoryList.cache retain the same full notification rows before Candidate.notification construction."
+  - "src/notification/history_list.zig:appendRow embeds notification rank in selection text; src/notification/history_cache.zig:rowNewer already orders rows by timestamp and identity."
+  - "src/picker/cmd.zig:Picker.history retains selection strings in memory and history.log; src/picker/rank.zig:notificationHistoryOrderBoost reads notification order from those strings."
+  - "src/picker/mode/apps.zig reads desktop-file values, raw TSV bytes, Candidate fields, and fixed local Spec values."
+  - "src/picker/icons.zig:Candidate.iconName and AppIconStore repeat icon identity held by src/picker/icon_cache.zig:index.tsv and icon-CRC32.png."
+  - "assets/lua/defaults.lua and src/picker/appearance.zig:currentHardcodedDefaults both hold appearance values."
+  - "src/picker/scale.zig:SurfaceConfig is loaded and written by src/gui/surface.zig and src/notification/banner.zig."
+  - "src/sunglasses/state.zig:State is loaded into src/sunglasses/overlay.zig:Overlay slots and written again by sunglasses apply."
+  - "src/notification/history_cache.zig:max_rows 512 and src/notification/state.zig:max_notifications 256 express different notification counts beside project_version_scope.yml:notification_count 256."
 
-  - path: src/picker/mode/apps.zig
-    status: reshape
-    owner: picker.mode.apps
-    role: first normal Cmd arm, default picker mode, installed app and fixed local candidate source
-    symbols:
-      public:
-        - Apps
-        - init
-        - deinit
-        - collectCandidates
-        - resolve
-        - invalidateDefaultCache
-      merged_from_src/picker/open.zig:
-        - fixed local app candidates
-        - dependency checks
-        - executable leaf resolution
-    comments:
-      file: "//! Apps owns the default mode, installed application discovery, fixed local candidates, and producer strings."
-      symbols:
-        - "/// Apps emits Candidate.concrete leaves directly because this mode has no child union."
-        - "/// Apps owns every allocated candidate string until Picker deinit."
-        - "/// collectCandidates is bounded, failure-atomic, and safe to retry."
-    tests:
-      - apps mode is first in the Cmd array and selected by default
-      - /apps reaches the same candidates as wayspot apps
-      - cache candidates collect bounded application Candidates
-      - desktop-file fallback collects bounded application Candidates
-      - fixed local candidates are included only when dependencies exist
-      - producer cleanup after candidate overflow leaves no borrowed strings
-      - app leaf resolves to an executable intent without executing it
-
-  - path: src/picker/mode/notifications.zig
-    status: reshape
-    owner: picker.mode.notifications
-    role: notifications Cmd arm, NotificationsSubCmd route behavior, and lifecycle intent
-    symbols:
-      public:
-        - history_selection
-        - restart_selection
-        - collectCandidates
-        - resolve
-        - restartIntent
-    comments:
-      file: "//! Notifications owns route behavior for the imported NotificationsSubCmd; src/picker/sub_cmd.zig declares it and DBus runtime stays in src/notification/."
-      symbols:
-        - "/// collectCandidates constructs the shared SubCmd.notifications route and its terminal leaves."
-        - "/// restartIntent selects the notifications resident owner without running it."
-    tests:
-      - NotificationsSubCmd arms are exhaustive
-      - NotificationsSubCmd is imported from src/picker/sub_cmd.zig and not redeclared
-      - /notifications history reaches the history child union
-      - restart intent names the canonical wayspot notifications entry
-      - no picker symbol imports notification DBus runtime state
-
-  - path: src/picker/mode/wallpaper.zig
-    status: reshape
-    owner: picker.mode.wallpaper
-    role: wallpaper Cmd arm, WallpaperSubCmd route behavior, and lifecycle intent
-    symbols:
-      public:
-        - restart_selection
-        - collectCandidates
-        - resolve
-        - restartIntent
-    comments:
-      file: "//! Wallpaper owns route behavior for the imported WallpaperSubCmd; src/picker/sub_cmd.zig declares it and image and Wayland runtime stay in src/wallpaper/."
-      symbols:
-        - "/// collectCandidates constructs the shared SubCmd.wallpaper route and its terminal leaves."
-        - "/// restartIntent selects the canonical wayspot wallpaper entry."
-    tests:
-      - WallpaperSubCmd arms are exhaustive
-      - WallpaperSubCmd is imported from src/picker/sub_cmd.zig and not redeclared
-      - wallpaper rotate resolves to one bounded leaf intent
-      - restart intent names the canonical wayspot wallpaper entry
-      - monitor and image runtime code is not imported
-
-  - path: src/picker/mode/sunglasses.zig
-    status: new
-    owner: picker.mode.sunglasses
-    role: sunglasses Cmd arm, SunglassesSubCmd route behavior, and lifecycle intent
-    symbols:
-      public:
-        - collectCandidates
-        - resolve
-        - restartIntent
-    comments:
-      file: "//! Sunglasses owns route behavior for the imported SunglassesSubCmd; src/picker/sub_cmd.zig declares it and monitor overlay state and runtime stay in src/sunglasses/."
-      symbols:
-        - "/// collectCandidates constructs the shared SubCmd.sunglasses route and its terminal leaves."
-        - "/// resolve returns bounded leaf intent and never mutates sunglasses runtime state."
-    tests:
-      - SunglassesSubCmd arms are exhaustive
-      - SunglassesSubCmd is imported from src/picker/sub_cmd.zig and not redeclared
-      - /sunglasses reaches restart, apply, reconcile, dim, filter, and image routes
-      - dim set/on/off constructs scalar or toggle leaves with bounded monitor values
-      - filter set/on/off constructs scalar or toggle leaves with bounded monitor values
-      - image set/opacity/on/off/clear constructs path, scalar, toggle, or none leaves
-      - monitor, scalar, toggle, and path inputs obey named bounds
-      - equivalent CLI argv and GUI control commits reach equal typed leaves
-      - restart intent names the canonical wayspot sunglasses entry
-      - picker mode does not import overlay runtime implementation
-
-  - path: src/picker/query.zig
-    status: reshape
-    owner: picker.query
-    role: bounded text and mode-route input parsing for the Cmd tree
-    symbols:
-      public:
-        - Route
-        - Query
-        - parse
-    comments:
-      file: "//! Query owns bounded picker input parsing and maps only to reachable Cmd routes."
-      symbols:
-        - "/// Route names the bounded mode route selected by picker input."
-        - "/// parse preserves borrowed input and rejects no route by inventing a new arm."
-    tests:
-      - empty input selects the default apps route
-      - /apps, /notifications, /wallpapers, and /sunglasses parse explicitly
-      - nested history, rotate, and overlay inputs preserve the selected SubCmd
-      - oversized input is rejected at the Cmd bound
-
-  - path: src/picker/rank.zig
-    status: reshape
-    owner: picker.rank
-    role: deterministic ranking of reachable Candidate values
-    symbols:
-      public:
-        - RankedCandidate
-        - rankCandidates
-        - rankCandidatesWithHistory
-        - rankCandidatesWithOldestFirstHistory
-    comments:
-      file: "//! Ranking owns deterministic scoring without knowing GUI, CLI, or resident runtime details."
-      symbols:
-        - "/// rankCandidates ranks only candidates reachable from the selected Cmd route."
-        - "/// lessThan provides deterministic title, input, kind, and icon tie breaks."
-    tests:
-      - exact app leaf outranks prefix leaf
-      - default route ranks apps mode leaves only
-      - mode and SubCmd route filters are exhaustive
-      - history ranking remains equivalent in both storage orders
-      - candidate result allocation failure is propagated
-      - adding a Candidate arm requires an explicit ranking policy
-
-  - path: src/cli/entry.zig
-    status: implemented_checkpoint
-    owner: cli
-    role: CLI consumer of the shared Cmd tree and Bash completion caller
-    symbols:
-      public:
-        - accepts
-        - run
-        - bash_completion
-      private:
-        - parseCompletionPosition
-    comments:
-      file: "//! CLI consumes Cmd, SubCmd, and Candidate values; Bash position mapping and serialization are delegated to the completion boundary."
-      symbols:
-        - "/// run consumes one already-wired Picker through the terminal boundary."
-        - "/// bash_completion owns shell quoting and complete-record byte accounting."
-    tests:
-      - wayspot apps uses the shared apps Cmd arm
-      - CLI candidate output matches GUI candidate meaning
-      - CLI and GUI typed commits produce equal Concrete values and rejection
-      - completion caller passes Cmd-approved next arguments to the Bash serializer
-
-  - path: src/cli/bash_completion.zig
-    status: new
-    owner: cli
-    role: Bash word quoting, complete-record serialization, and output bound
-    symbols:
-      public:
-        - write
-        - writeWord
-        - max_completion_output_bytes
-      private:
-        - escapedLength
-    comments:
-      file: "//! Bash serialization owns shell quoting and complete-record byte accounting, not Cmd meaning."
-      symbols:
-        - "/// write serializes bounded next arguments supplied by Cmd completion policy."
-        - "/// writeWord emits one exact Bash word with its newline included in the bound."
-    tests:
-      - single quotes escape exactly
-      - Cmd excludes notification and non-completable Candidate arms before serialization
-      - exact maximum output including newline is accepted
-      - one byte beyond maximum output is rejected
-
-  - path: src/gui/surface.zig
-    status: moved_and_reshape
-    owner: gui
-    role: SDL picker lifecycle, input, Candidate rendering, selection, and intent queue
-    symbols:
-      public:
-        - run
-      private:
-        - Surface
-        - LaunchQueue
-        - LaunchRunner
-        - refreshResults
-        - queueLaunchAtResult
-        - drainLaunchQueue
-        - switchSubCmd
-        - render
-        - handleEvent
-    comments:
-      file: "//! GUI owns SDL lifecycle and Candidate presentation; it does not own Cmd construction or resident runtime state."
-      symbols:
-        - "/// run creates, drives, and destroys one GUI picker lifecycle."
-        - "/// LaunchQueue owns one bounded leaf intent until GUI shutdown handoff."
-        - "/// queueLaunchAtResult enters SubCmd or queues one concrete leaf intent."
-    tests:
-      - default picker opens apps mode candidates
-      - /apps enters the shared apps SubCmd
-      - selecting a SubCmd enters its next list without launching
-      - selecting a concrete leaf queues exactly one intent
-      - queue success, failure, empty, and overflow cleanup remain proven
-      - LaunchQueue passes only resolved intent to process.runDetached
-      - text, clipboard, viewport, and SDL lifecycle tests remain beside Surface
-
-  - path: src/process/launch.zig
-    status: new
-    owner: process
-    role: bounded executable leaf launch and child-wait ownership
-    symbols:
-      public:
-        - max_intent_bytes
-        - max_wait_interrupts
-        - LaunchError
-        - runDetached
-      private:
-        - launchFork
-        - launchChild
-        - launchExecShell
-        - launchWait
-        - launchWaitWith
-    comments:
-      file: "//! Process launch owns fork, shell execution, wait bounds, and exact failure mapping."
-      symbols:
-        - "/// runDetached accepts one bounded []const u8 resolved leaf intent, rejects empty, overlong, and embedded NUL input before fork, and owns sentinel construction."
-        - "/// LaunchError distinguishes child, fork, wait, and interrupt failures."
-    tests:
-      - successful launch returns after the wrapper wait
-      - successful child wait returns normally
-      - child failure maps to IntentFailed
-      - fork failure maps before child creation
-      - wait interruption reaches max_wait_interrupts exactly
-      - wait failure maps to WaitFailed
-      - empty and overlong leaf intents are rejected before fork
-      - embedded NUL leaf intents are rejected before sentinel construction
-      - exact maximum intent is accepted and one byte beyond it is rejected
-      - process module imports no Cmd, GUI, or CLI code
-
-  - path: src/main.zig
-    status: reshape
-    owner: process
-    role: top-level argv selection, identity setup, and explicit runtime entry invocation
-    symbols:
-      public:
-        - main
-      private:
-        - selectEntry
-        - runResidentMode
-        - runGui
-        - runCli
-    comments:
-      file: "//! Entrypoint selects CLI, GUI, or one resident mode and owns only top-level cleanup order."
-      symbols:
-        - "/// main rejects legacy flag entry paths and selects one canonical entry."
-        - "/// runResidentMode invokes the selected resident owner without importing picker GUI code."
-    tests:
-      - wayspot apps selects CLI apps mode
-      - wayspot notifications selects notification runtime
-      - wayspot wallpaper selects wallpaper runtime
-      - wayspot sunglasses selects sunglasses runtime
-      - --ui selects GUI only
-      - legacy resident flags are rejected
-      - unknown input produces bounded help
-
-  - path: src/root.zig
-    status: reshape
-    owner: wayspot
-    role: explicit module exports and bounded help fallback
-    symbols:
-      public:
-        - config
-        - env
-        - notification
-        - picker
-        - wallpaper
-        - sunglasses
-        - identity
-        - bufferedPrint
-        - cli
-        - gui
-        - process
-    comments:
-      file: "//! Root exports product owners and contains no mode policy beyond bounded help."
-      symbols:
-        - "/// bufferedPrint describes the canonical Cmd tree and interface entrypoints."
-    tests:
-      - root references every target owner module
-      - help contains apps first and all four modes
-      - help contains no deprecated resident flags
-
-  - path: build.zig
-    status: reshape
-    owner: build
-    role: target module graph, C imports, and test roots for the new boundaries
-    symbols:
-      public:
-        - build
-        - translateCModule
-    comments:
-      file: "// Build graph keeps picker candidate, CLI, GUI, process, and resident runtime imports explicit."
-      symbols:
-        - "// Test roots mirror the executable backend and cover every changed owner."
-    tests:
-      - picker Cmd module is linked into executable and module tests
-      - CLI Bash module has a direct test root
-      - GUI and process modules link required C backends only
-      - no deleted path remains in module imports
-
-  - path: src/notification/mod.zig
-    status: reshape
-    owner: notification
-    role: explicit notification resident runtime entrypoint and exports
-    symbols:
-      public:
-        - run
-        - DBus
-        - banner
-        - state
-        - rows
-        - preview
-        - history_cache
-        - history_list
-    comments:
-      file: "//! Notification is a resident runtime owner; picker mode code selects it but never imports its DBus loop."
-      symbols:
-        - "/// run owns one notification process lifecycle from DBus acquisition to cleanup."
-    tests:
-      - module exports are reachable
-      - runtime entry identity and duplicate-owner behavior are proven by resident receipts
-
-  - path: src/wallpaper/mod.zig
-    status: reshape
-    owner: wallpaper
-    role: explicit wallpaper resident runtime entrypoint and exports
-    symbols:
-      public:
-        - run
-        - rotateNow
-        - Loop
-        - config
-    comments:
-      file: "//! Wallpaper is a resident runtime owner; picker mode code selects it without importing its loop."
-      symbols:
-        - "/// run owns one wallpaper loop lifecycle and cleanup."
-        - "/// rotateNow performs one bounded direct rotation action."
-    tests:
-      - runtime entry owns one pid identity
-      - event-source loss recovery remains explicit
-      - rotate leaf reaches the runtime owner without GUI imports
-
-  - path: src/sunglasses/mod.zig
-    status: reshape
-    owner: sunglasses
-    role: explicit sunglasses resident runtime entrypoint and exports
-    symbols:
-      public:
-        - run
-        - applyNow
-        - reconcileSavedState
-        - Overlay
-        - state
-    comments:
-      file: "//! Sunglasses is a resident overlay runtime owner; picker mode code carries only bounded leaf meaning."
-      symbols:
-        - "/// run owns one per-monitor overlay lifecycle and cleanup."
-    tests:
-      - runtime entry owns one pid identity
-      - duplicate owner and stale status behavior remain proven
-      - overlay runtime is unreachable from GUI surface imports
-
-  - path: src/picker/mod.zig
-    status: reshape
-    owner: picker
-    role: concrete picker exports without deprecated Command or Mode aliases
-    symbols:
-      public:
-        - candidate
-        - cmd
-        - query
-        - rank
-        - appearance
-        - cursor_blink
-        - icons
-        - scale
-        - signal
-        - slider
-        - text
-        - textbox
-        - viewport
-    comments:
-      file: "//! Picker exports Cmd, Candidate, and GUI-independent picker values."
-      symbols:
-        - "/// Picker is the shared Cmd consumer state used by GUI and CLI."
-    tests:
-      - no deprecated command or Mode struct export remains
-      - every exported picker owner is reachable from root
-
-  - path: src/picker/appearance.zig
-    status: comment_and_test_cleanup
-    owner: picker.appearance
-    role: unchanged bounded visual values with stale vocabulary removed
-    symbols:
-      preserve:
-        - Rgba8
-        - FontCandidate
-        - FontCandidates
-        - PickerAppearance
-        - BannerAppearance
-        - Appearance
-        - currentHardcodedDefaults
-    comments:
-      file: current //! contract retained
-      symbols:
-        - picker input wording remains current
-    tests:
-      - named product defaults preserve current picker appearance
-
-  - path: src/picker/text.zig
-    status: comment_and_test_cleanup
-    owner: gui.text
-    role: unchanged text engine with stale vocabulary removed
-    symbols:
-      preserve:
-        - TextEngine
-        - TextStyle
-        - TextRangeXOffsets
-    comments:
-      file: current //! or add one describing SDL text ownership and bounds
-      symbols:
-        - picker-input wording remains current
-    tests:
-      - boundedCodepoints sanitizes picker input and truncates
-
-  - path: src/picker/icon_cache.zig
-    status: symbol_cleanup
-    owner: picker.icons
-    role: bounded icon cache utility consumed by diagnostic and GUI paths
-    symbols:
-      preserve:
-        - RefreshCounts
-        - refresh
-        - printRefreshSummary
-      rename:
-        - pathEntryContainsCommand -> pathEntryContainsCmd
-    comments:
-      file: current //! contract retained or corrected to the current icon owner
-      symbols:
-        - public refresh and summary ownership documented
-    tests:
-      - invalid cmd-name path test uses the new symbol vocabulary
-
-  - path: re-run.sh
-    status: reshape
-    owner: process
-    role: local release build, canonical resident restart, and runtime receipt helper
-    symbols:
-      shell_functions:
-        - sync_binary
-        - restart_notifications
-        - pid_has_wayspot_arg
-        - collect_wallpaper_pids
-        - restart_wallpaper
-    comments:
-      file: "# Rebuild, install, and start only the canonical Wayspot entries."
-      symbols:
-        - "# PID checks must identify the mode by its canonical argv."
-    tests:
-      - bash -n re-run.sh
-      - notification restart uses wayspot notifications
-      - wallpaper restart uses wayspot wallpaper
-      - stale pid files are rejected by canonical argv
-
-  - path: packaging/systemd/wayspot.service
-    status: reshape
-    owner: notification
-    role: user service entry for the notification resident mode
-    symbols:
-      directives:
-        - ExecStart=/usr/bin/wayspot notifications
-        - Restart=on-failure
-    comments:
-      file: "# The service owns only the notifications resident entry."
-    tests:
-      - service ExecStart matches canonical notifications argv
-
-  - path: packaging/bash/wayspot.bash
-    status: new
-    owner: cli
-    role: installable Bash completion entrypoint for the wayspot binary
-    symbols:
-      shell:
-        - wayspot Bash completion registration
-        - COMP_LINE
-        - COMP_POINT
-        - COMP_WORDS
-        - COMP_CWORD
-        - _WAYSPOT_COMPLETION_MAX_WORDS
-        - _WAYSPOT_COMPLETION_MAX_LINE_CHARS
-        - _WAYSPOT_COMPLETION_MAX_WORD_CHARS
-    comments:
-      file: "# Register the canonical Wayspot completion entrypoint without rebuilding Cmd meaning in Bash."
-      symbols:
-        - "# The shell entrypoint delegates bounded completion input and consumes one complete record per result."
-    tests:
-      - bash -n packaging/bash/wayspot.bash
-      - isolated Bash source registers completion for wayspot only
-      - canonical mode position reaches Cmd completion
-      - nested SubCmd position reaches Cmd completion
-      - app position reaches the shared apps candidate source
-      - notification display leaves are absent
-      - shell receipt exercises the installed entrypoint without eval or command-string reconstruction
-
-  - path: packaging/bash/wayspot_test.bash
-    status: new
-    owner: cli
-    role: exact real Bash COMPREPLY acceptance assertions
-    symbols:
-      shell:
-        - complete_line
-        - expect_exact
-        - top-level mode assertion
-        - sunglasses subcommand assertion
-        - sunglasses operation assertion
-        - apps assertion
-    comments:
-      file: "# Exercise the installed Bash boundary with exact next-argument assertions."
-      symbols:
-        - "# top-level and nested replies must not contain full wayspot command payloads."
-    tests:
-      - wayspot <TAB> returns apps, notifications, wallpaper, sunglasses exactly
-      - wayspot sunglasses <TAB> returns the six SunglassesSubCmd words exactly
-      - wayspot sunglasses dim <TAB> returns set, on, off exactly
-      - wayspot apps <TAB> returns a nonempty app list without a duplicated command prefix
-      - apps output excludes notification-history display records
-      - middle-of-word COMP_POINT is rejected without invoking Wayspot
-
-offenders:
-  - id: cmd_union_and_order
-    status: closed
-    owner: picker.cmd
-    evidence:
-      - src/picker/command.zig
-      - src/picker/mode/mod.zig
-      - src/picker/mod.zig
-      - build.zig
-    target_files:
-      - src/picker/cmd.zig
-      - src/picker/sub_cmd.zig
-      - src/picker/mod.zig
-      - src/picker/candidate.zig
-      - build.zig
-    changes:
-      - delete Command and replace it with Cmd
-      - delete the parallel Mode struct and its enabled flag
-      - add the four concrete Cmd arms in apps-first order
-      - add one bounded ordered cmds array
-      - make Picker initialization use that array for GUI and CLI
-      - remove the deleted module aliases from root and build imports
-    required_symbols:
-      - Cmd
-      - cmds
-      - Picker
-      - Input
-      - Candidate
-    required_tests:
-      - Cmd arm exhaustiveness
-      - fixed array order
-      - apps default selection
-      - no duplicate composition between interfaces
-    required_comments:
-      - Cmd file contract
-      - array order and default explanation
-      - Picker ownership and cleanup
-
-  - id: candidate_input_contract_and_typed_leaves
-    status: closed
-    owner: picker.candidate
-    evidence:
-      - src/picker/candidate.zig
-      - src/picker/sub_cmd.zig
-      - src/picker/mode/sunglasses.zig
-      - src/picker/slider.zig
-      - src/picker/surface.zig
-      - src/main.zig
-    target_files:
-      - src/picker/candidate.zig
-      - src/picker/sub_cmd.zig
-      - src/picker/mode/sunglasses.zig
-      - src/picker/query.zig
-      - src/picker/rank.zig
-      - src/picker/cmd.zig
-      - src/picker/surface.zig
-      - src/main.zig
-    changes:
-      - replace UserInput and user_input_types with the exact Input union none, scalar, toggle, and path
-      - define ScalarInput as value, min, max, and positive step with leaf-selected scalar bounds
-      - define ToggleInput as one enabled bool with exact on and off construction
-      - define PathInput as an owned bounded absolute path copy independent of GUI and argv storage
-      - define Concrete exactly as app, open, lifecycle, and notification
-      - define Lifecycle exactly as the nine declared resident leaf arms
-      - make every Concrete leaf carry an explicit Input contract, including Input.none for action leaves
-      - make sunglasses dim, filter, and image leaves carry an owned bounded monitor value and typed Input
-      - add nested DimSubCmd, FilterSubCmd, and ImageSubCmd declarations to the sole SubCmd owner
-      - make CLI raw argv and GUI slider, toggle, and textbox commits construct equal Input and Concrete values
-      - keep GUI draft/control state in the GUI owner and resident state in the sunglasses runtime owner
-      - forbid CandidateType, Candidate.types, and any parallel input-kind field
-    required_symbols:
-      - Input
-      - Input.none
-      - Input.scalar
-      - Input.toggle
-      - Input.path
-      - ScalarInput
-      - ToggleInput
-      - PathInput
-      - Concrete
-      - Lifecycle
-      - Lifecycle.sunglasses_dim
-      - Lifecycle.sunglasses_filter
-      - Lifecycle.sunglasses_image
-      - DimSubCmd
-      - FilterSubCmd
-      - ImageSubCmd
-    required_tests:
-      - Input arm exhaustiveness and exact four-arm declaration
-      - scalar min, max, step, out-of-bound rejection, signed grid alignment, and exact endpoint acceptance
-      - toggle on and off exact mapping
-      - PathInput copy, absolute-path validation, and byte bound
-      - typed sunglasses dim, filter, and image leaf construction
-      - typed sunglasses dim, filter, and image leaf resolution produces bounded argv meaning
-      - monitor bound and invalid monitor rejection
-      - each typed leaf rejects non-applicable Input arms explicitly
-      - CLI scalar argv and GUI slider commit produce equal Concrete values
-      - CLI toggle argv and GUI toggle commit produce equal Concrete values
-      - CLI path argv and GUI textbox commit produce equal Concrete values
-      - GUI and CLI reject equal invalid scalar, toggle, path, and monitor values
-      - GUI control state never persists or mutates resident sunglasses state
-      - no CandidateType, Candidate.types, or parallel input-kind field exists
-    required_comments:
-      - Input ownership, bounds, and failure meaning
-      - ScalarInput, ToggleInput, and PathInput field ownership
-      - typed Concrete leaf policy and monitor ownership
-      - GUI draft versus typed leaf versus resident runtime boundaries
-      - CLI/GUI equivalence proof boundary
-
-  - id: sub_cmd_and_candidate_reachability
-    status: closed
-    owner: picker.mode
-    evidence:
-      - src/picker/mode/apps.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/cmd.zig
-      - src/picker/rank.zig
-      - src/picker/surface.zig
-      - src/picker/candidate.zig
-    target_files:
-      - src/picker/sub_cmd.zig
-      - src/picker/mode/apps.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/mode/sunglasses.zig
-      - src/picker/cmd.zig
-      - src/picker/rank.zig
-      - src/picker/surface.zig
-      - src/picker/candidate.zig
-    changes:
-      - declare NotificationsSubCmd, WallpaperSubCmd, and SunglassesSubCmd only in src/picker/sub_cmd.zig
-      - declare DimSubCmd, FilterSubCmd, and ImageSubCmd only in src/picker/sub_cmd.zig
-      - add one shared SubCmd wrapper with explicit resident arms
-      - keep apps without a SubCmd and expose its application route directly to Concrete construction
-      - make resident mode files own route behavior and construct Candidate.sub_cmd values through the shared wrapper
-      - make each direct route operation an explicit reachable arm
-      - carry the selected nested route into the typed Concrete leaf builder, where the accepted Input arm is validated
-      - remove string comparisons as the primary route vocabulary
-    required_symbols:
-      - SubCmd
-      - NotificationsSubCmd
-      - WallpaperSubCmd
-      - SunglassesSubCmd
-      - DimSubCmd
-      - FilterSubCmd
-      - ImageSubCmd
-      - Candidate.sub_cmd
-      - Candidate.routeQuery
-      - sunglasses.select
-    required_tests:
-      - shared SubCmd wrapper arms are exhaustive
-      - apps has no SubCmd
-      - the modes route exposes every resident Cmd arm and omits apps as a SubCmd
-      - every documented mode route reaches the expected arm
-      - every SubCmd route has a typed GUI route query distinct from its executable payload
-      - sunglasses nested routes preserve the selected scalar, toggle, path, or none Input arm
-      - mode files do not redeclare child-union types
-    required_comments:
-      - each mode //! names its runtime separation
-      - each SubCmd /// names its arms, inputs, bounds, and failure meaning
-      - Candidate.routeQuery owns typed SubCmd to GUI route serialization
-      - sunglasses.select owns route-to-Concrete Input-arm selection without resident state
-
-  - id: concrete_leaf_union_and_resolution
-    status: closed
-    owner: picker.candidate
-    evidence:
-      - src/picker/candidate.zig
-      - src/picker/command.zig
-      - src/picker/mode/apps.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/notification/history_list.zig
-      - src/picker/rank.zig
-      - src/picker/surface.zig
-    target_files:
-      - src/picker/candidate.zig
-      - src/picker/cmd.zig
-      - src/picker/mode/apps.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/mode/sunglasses.zig
-      - src/notification/history_list.zig
-      - src/picker/rank.zig
-      - src/gui/surface.zig
-      - src/cli/entry.zig
-    changes:
-      - define Concrete as exactly app, open, lifecycle, and notification
-      - define Lifecycle as exactly the nine resident leaf arms with typed sunglasses monitor and Input fields
-      - make apps own app and open Concrete construction and resolution
-      - make resident mode route owners construct typed Lifecycle Concrete leaves
-      - make notification history construct Concrete.notification display leaves
-      - enforce the per-leaf Input policy during Concrete construction and resolution
-      - replace old mode candidates with Candidate.sub_cmd values
-      - remove the old hint arm and every flat Candidate kind constructor
-      - make ranking, selection, rendering, CLI output, and Bash policy switch exhaustively on Candidate and Concrete
-      - make notification selection and launch return explicit rejection without forking
-      - make GUI and CLI construct equal typed leaves for equal accepted input
-      - keep process launch limited to resolved app, open, and lifecycle intent
-    required_symbols:
-      - Concrete
-      - Concrete.app
-      - Concrete.open
-      - Concrete.lifecycle
-      - Concrete.notification
-      - Lifecycle
-      - Candidate.sub_cmd
-      - Candidate.concrete
-      - resolveConcrete
-      - appendShellQuoted
-    required_tests:
-      - Concrete arm exhaustiveness
-      - Lifecycle arm exhaustiveness
-      - Input and typed leaf policy exhaustiveness
-      - apps app and open leaves resolve to executable intent
-      - every resident lifecycle leaf resolves to its owning mode intent
-      - notification leaves render and serialize but reject selection and launch explicitly
-      - scalar, toggle, path, and monitor bounds reject identically in GUI and CLI
-      - dynamic monitor and path values are shell-quoted for spaces, quotes, $, backticks, semicolons, and newlines are rejected
-      - hint and mode are absent from Concrete
-      - ranking, selection, rendering, and completion cover every Candidate and Concrete arm
-    required_comments:
-      - Concrete declaration, arm meaning, owner, bounds, and failure policy
-      - Lifecycle declaration and each resident leaf meaning
-      - explicit notification rejection at selection and launch boundaries
-      - interim shell-string resolution quotes every dynamic monitor and path word until structured argv owns process launch
-
-  - id: apps_default_mode_and_single_source
-    status: closed
-    owner: picker.mode.apps
-    evidence:
-      - src/picker/mode/apps.zig
-      - src/picker/open.zig
-      - src/main.zig
-      - src/picker/command.zig
-    target_files:
-      - src/picker/mode/apps.zig
-      - src/picker/cmd.zig
-      - src/cli/entry.zig
-      - src/gui/surface.zig
-      - src/picker/open.zig
-    changes:
-      - merge fixed local candidates into the apps mode owner
-      - delete the separate Open owner and its duplicate source path
-      - make apps first and default on picker initialization
-      - make /apps and wayspot apps consume the same apps owner
-      - keep apps independent of compositor facts and resident runtime code
-    required_symbols:
-      - Apps
-      - Apps.collectCandidates
-      - Apps.resolve
-      - Cmd.apps
-      - cmds[0]
-    required_tests:
-      - default picker starts in apps mode
-      - GUI /apps and CLI wayspot apps produce identical candidates
-      - fixed local and installed app leaves share one cleanup owner
-      - apps has no runtime identity or process entry
-    required_comments:
-      - apps is explicitly the first happy path
-      - one producer owns all app candidate strings
-
-  - id: candidate_failure_atomicity_and_lifetime
-    status: closed
-    owner: picker.cmd
-    evidence:
-      - src/picker/cmd.zig
-      - src/picker/candidate.zig
-      - src/picker/mode/apps.zig
-      - src/notification/history_list.zig
-    target_files:
-      - src/picker/cmd.zig
-      - src/picker/candidate.zig
-      - src/picker/mode/apps.zig
-      - src/notification/history_list.zig
-    changes:
-      - construct into a temporary bounded Candidate list
-      - publish only after every Cmd arm succeeds
-      - rollback the temporary list and producer-owned strings on any error
-      - make retries start from an empty published set
-      - document borrowed slices and producer cleanup at the Candidate boundary
-    required_symbols:
-      - buildCandidatesTransactional
-      - Candidate.List.clearRetainingCapacity
-      - Apps.freeOwnedStrings
-      - NotificationHistoryList.clearCandidateProduction
-    required_tests:
-      - forced overflow after partial app production
-      - desktop scan overflow reaches Picker transaction and propagates
-      - unexpected cache read errors propagate without fixed-local partial success
-      - retry has no duplicates
-      - retry has no dangling borrowed strings
-      - producer cleanup runs exactly once on success and failure
-      - notification producer cache and owned strings clear on rollback
-    required_comments:
-      - transaction publication point
-      - rollback order
-      - string lifetime contract
-      - producer cleanup invalidates no published Candidate
-      - only explicitly tolerated filesystem discovery errors become an empty discovery result
-      - cache read classification propagates allocation and unexpected errors
-
-  - id: query_rank_and_leaf_resolution
-    status: closed
-    owner: picker.cmd
-    evidence:
-      - src/picker/query.zig
-      - src/picker/rank.zig
-      - src/picker/candidate.zig
-      - src/picker/sub_cmd.zig
-      - src/picker/cmd.zig
-      - src/picker/surface.zig
-    target_files:
-      - src/picker/query.zig
-      - src/picker/rank.zig
-      - src/picker/cmd.zig
-    changes:
-      - parse the bounded query grammar for four mode routes and nested SubCmd input
-      - reject query input beyond project_version_scope.yml query_bytes before candidate loading
-      - rank Candidate union arms through explicit policy switches
-      - resolve only concrete leaves and reject SubCmd leaves explicitly
-      - use direct Candidate route identity for GUI selection; retain terminal lookup only as the bounded CLI bridge until shared interface work
-    required_symbols:
-      - Route
-      - Query
-      - rankCandidates
-      - resolveSubCmd
-      - resolveConcrete
-    required_tests:
-      - default empty input selects apps
-      - every mode and nested route preserves its parsed term
-      - exact query bound is accepted and one byte beyond it returns QueryTooLong
-      - every Candidate arm has ranking coverage
-      - concrete leaf resolution is deterministic and bounded
-      - every SubCmd arm and every non-launchable leaf returns its exact error
-    required_comments:
-      - bounded query route grammar and borrowed lifetime
-      - ranking policy per Candidate arm
-      - direct route identity versus the legacy terminal lookup
-      - resolution ownership and rejection meaning
-
-  - id: shared_cli_gui_consumption
-    status: closed
-    owner: project
-    evidence:
-      - src/main.zig
-      - src/cli/entry.zig
-      - src/gui/surface.zig
-      - src/picker/cmd.zig
-    target_files:
-      - src/cli/entry.zig
-      - src/gui/surface.zig
-      - src/picker/cmd.zig
-      - src/main.zig
-    changes:
-      - extract CLI consumption from main.zig
-      - move GUI surface ownership into src/gui/surface.zig
-      - make both interfaces receive the same Picker/Cmd composition
-      - keep presentation, help, input, and SDL decisions outside Cmd
-      - remove duplicate app/mode construction from entrypoints
-    required_symbols:
-      - cli.run
-      - gui.run
-      - Picker
-      - Cmd
-    required_tests:
-      - identical mode order in CLI and GUI
-      - identical apps candidate source in CLI and GUI
-      - identical scalar Input and Concrete leaf from CLI argv and GUI slider commit
-      - identical toggle Input and Concrete leaf from CLI argv and GUI toggle commit
-      - identical path Input and Concrete leaf from CLI argv and GUI textbox commit
-      - identical rejection for invalid scalar, toggle, path, and monitor values
-      - GUI selects SubCmd without changing Cmd ownership
-      - CLI help and GUI route display use the same Candidate meaning
-    required_comments:
-      - CLI boundary
-      - GUI boundary
-      - shared composition ownership
-
-  - id: bash_serialization_boundary
-    status: closed
-    owner: cli
-    evidence:
-      - src/picker/cmd.zig
-      - src/cli/entry.zig
-      - src/cli/bash_completion.zig
-      - packaging/bash/wayspot.bash
-      - packaging/bash/wayspot_test.bash
-    target_files:
-      - src/cli/bash_completion.zig
-      - src/cli/entry.zig
-      - src/picker/cmd.zig
-      - build.zig
-      - packaging/bash/wayspot.bash
-      - packaging/bash/wayspot_test.bash
-    changes:
-      - keep position-aware completion selection and Candidate policy in Cmd.complete
-      - remove Bash quoting and output accounting from Cmd
-      - make Cmd return bounded Completion.argument next-shell-word values
-      - serialize Bash words only in the CLI file
-      - count every escaped byte and newline before writing
-      - add packaging/bash/wayspot.bash as the installable Bash completion entrypoint
-      - pass COMP_LINE, COMP_POINT, COMP_WORDS, and COMP_CWORD through the bounded CLI boundary
-      - make the shell entrypoint consume completion records without eval or shell reconstruction
-      - bound and reject external COMP_LINE, COMP_POINT, COMP_WORDS, and COMP_CWORD state before invoking Wayspot
-      - add exact COMPREPLY assertions for top-level, nested, operation, and apps positions
-      - add a direct CLI test root if required by build wiring
-    required_symbols:
-      - cli.bash_completion.write
-      - cli.bash_completion.writeWord
-      - Cmd.CompletionPosition
-      - Cmd.Completion
-      - Cmd.complete
-    required_tests:
-      - quote escaping
-      - notification exclusion
-      - exact newline-inclusive maximum
-      - one-byte-over maximum
-      - real wayspot complete bash receipt
-      - real installed packaging/bash/wayspot.bash receipt
-      - exact COMPREPLY for wayspot <TAB>
-      - exact COMPREPLY for wayspot sunglasses <TAB>
-      - exact COMPREPLY for wayspot sunglasses dim <TAB>
-      - nonempty wayspot apps <TAB> with no duplicated command prefix
-      - Bash state-bound rejection receipts
-    required_comments:
-      - semantic/presentation split
-      - complete record bound
-
-  - id: process_leaf_launch_boundary
-    status: closed
-    owner: process
-    evidence:
-      - src/picker/cmd.zig
-      - src/cli/entry.zig
-      - src/gui/surface.zig
-      - src/process/launch.zig
-    target_files:
-      - src/process/launch.zig
-      - src/gui/surface.zig
-      - src/cli/entry.zig
-      - src/picker/cmd.zig
-    changes:
-      - move fork, shell, wait, and launch error mapping out of picker Cmd
-      - give process launch ownership of the bounded resolved-intent size
-      - accept one bounded []const u8 intent and reject embedded NUL before sentinel construction
-      - construct the shell sentinel only inside process launch
-      - keep GUI LaunchQueue as a bounded GUI shutdown handoff
-      - pass only resolved concrete leaf intent to process launch
-      - make CLI and GUI call process.runDetached without rebuilding intent
-      - forbid Cmd, GUI, and CLI imports from process launch code
-    required_symbols:
-      - LaunchError
-      - max_intent_bytes
-      - max_wait_interrupts
-      - runDetached
-      - IntentContainsNul
-      - LaunchQueue
-      - resolveConcrete
-    required_tests:
-      - successful launch
-      - successful child wait
-      - child failure maps to IntentFailed
-      - fork failure
-      - wait interruption bound
-      - wait failure maps to WaitFailed
-      - empty and overlong intent rejection before fork
-      - embedded NUL rejection before fork and sentinel construction
-      - exact maximum intent acceptance and one-byte overflow rejection
-      - queue cleanup after success and failure
-    required_comments:
-      - process owns child lifecycle
-      - process owns sentinel construction from the bounded intent slice
-      - GUI owns queue lifetime
-      - Cmd never executes a leaf
-
-  - id: canonical_mode_entrypoints
-    status: closed
-    owner: process
-    evidence:
-      - src/main.zig
-      - src/root.zig
-      - src/notification/mod.zig
-      - src/wallpaper/mod.zig
-      - src/sunglasses/mod.zig
-      - src/wallpaper/loop.zig
-      - src/sunglasses/overlay.zig
-    target_files:
-      - src/main.zig
-      - src/picker/cmd.zig
-      - src/root.zig
-      - src/notification/mod.zig
-      - src/wallpaper/mod.zig
-      - src/sunglasses/mod.zig
-      - src/wallpaper/loop.zig
-      - src/sunglasses/overlay.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/mode/sunglasses.zig
-    changes:
-      - route wayspot notifications to notification.run
-      - route wayspot wallpaper to wallpaper.run
-      - route wayspot sunglasses to sunglasses.run
-      - route wallpaper rotate and sunglasses operations through owning SubCmd or typed Concrete values
-      - make resolved resident lifecycle leaves emit canonical mode argv
-      - make resident pid identity recognize canonical root argv while retaining bounded legacy compatibility
-      - remove every legacy resident flag branch from src/main.zig
-      - keep --ui as the GUI entry flag only
-      - replace root help with canonical mode entries
-      - keep packaging/systemd and rerun migration for build_packaging_and_rerun_wiring
-    required_symbols:
-      - main
-      - selectEntry
-      - resolveLifecycle
-      - notification.run
-      - wallpaper.run
-      - wallpaper.rotateNow
-      - sunglasses.run
-      - sunglasses.applyNow
-      - sunglasses.reconcileSavedState
-      - sunglasses.applyLeaf
-    required_tests:
-      - each canonical mode argv path
-      - wallpaper rotate and typed sunglasses argv construction
-      - each resident identity
-      - canonical resident pid identity and child argv
-      - each legacy flag rejection
-      - unknown input help
-      - direct canonical runtime receipts
-      - systemd receipt deferred to build_packaging_and_rerun_wiring without source changes here
-    required_comments:
-      - main owns selection only
-      - each resident mod owns its runtime lifecycle
-      - legacy main-branch removal is intentional; runtime compatibility is bounded transition state
-
-  - id: runtime_entrypoint_separation
-    status: closed
-    owner: process
-    evidence:
-      - src/notification/mod.zig
-      - src/wallpaper/mod.zig
-      - src/sunglasses/mod.zig
-      - src/main.zig
-      - src/gui/surface.zig
-      - src/notification/banner.zig
-      - src/notification/rows.zig
-      - src/wallpaper/config.zig
-      - src/wallpaper/library.zig
-      - src/wallpaper/loop.zig
-    target_files:
-      - src/notification/mod.zig
-      - src/wallpaper/mod.zig
-      - src/sunglasses/mod.zig
-      - src/main.zig
-      - src/gui/surface.zig
-      - src/root.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/mode/sunglasses.zig
-      - src/notification/banner.zig
-      - src/notification/rows.zig
-      - src/wallpaper/config.zig
-      - src/wallpaper/library.zig
-      - src/wallpaper/loop.zig
-    changes:
-      - replace resident mod aliases with explicit owner functions for run and direct lifecycle operations
-      - move resident identity setup into notification, wallpaper, and sunglasses owner entrypoints
-      - move wallpaper failure logging and sunglasses startup recovery into their resident owners
-      - keep DBus, Wayland, SDL, state, cleanup, and recovery in resident folders
-      - remove picker surface imports of resident implementation files
-      - keep mode files limited to SubCmd and leaf intent
-      - retain resident cleanup and recovery coverage as reachable module tests
-      - fix notification monitor-slice lifetime and global row test cleanup exposed by resident reachability
-    required_symbols:
-      - notification.run
-      - wallpaper.run
-      - wallpaper.rotateNow
-      - sunglasses.run
-      - sunglasses.applyNow
-      - sunglasses.reconcileSavedState
-      - gui.run
-    required_tests:
-      - resident module reachability
-      - no GUI-to-resident import path
-      - notification banner child failure maps to ChildFailed
-      - sunglasses overlay child failure maps to ChildFailed
-      - duplicate owner, cleanup, and recovery tests remain green
-    required_comments:
-      - resident mod //! entrypoint ownership
-      - mode //! semantic-only ownership
-
-  - id: build_packaging_and_rerun_wiring
-    status: closed
-    owner: build
-    evidence:
-      - build.zig
-      - src/aggregate_test.zig
-      - packaging/systemd/wayspot.service
-      - re-run.sh
-      - src/root.zig
-    target_files:
-      - build.zig
-      - src/aggregate_test.zig
-      - packaging/systemd/wayspot.service
-      - re-run.sh
-      - tools/re-run_test.sh
-      - src/root.zig
-      - src/main.zig
-    changes:
-      - declare direct CLI, GUI, process, Cmd, picker mode, and resident roots with named imports
-      - preserve src/aggregate_test.zig as the source-tree aggregate test root alongside direct module roots
-      - give each direct test root its native backend links and make the aggregate test step depend on all roots
-      - remove deleted picker module paths from the build graph
-      - change systemd notification ExecStart to wayspot notifications
-      - make rerun stop exact legacy argv only during the bounded transition to canonical mode argv
-      - make rerun validate exact comm plus complete argv identity before every stop or start decision
-      - bound pgrep records, /proc argv words, PID-file lines, PID values, and stop/start wait loops
-      - add an isolated rerun PID receipt that cannot select live desktop residents
-    required_symbols:
-      - build
-      - translateCModule
-      - root exports
-      - src/cli/entry.zig direct module root
-      - src/cli/bash_completion.zig direct module root
-      - src/gui/surface.zig direct module root
-      - src/process/launch.zig direct module root
-      - src/picker/cmd.zig direct module root
-      - src/notification/mod.zig direct module root
-      - src/wallpaper/mod.zig direct module root
-      - src/sunglasses/mod.zig direct module root
-      - pid_has_canonical_mode
-      - pid_has_legacy_mode
-      - collect_mode_pids
-      - collect_wallpaper_pids
-      - stop_pid_list
-      - wait_for_pid_list
-      - max_pid_candidates
-      - max_pid_argv
-      - max_pid_value
-      - max_wait_cycles
-    required_tests:
-      - zig build test --summary all reports 339/339 tests and remains at or above the accepted 320-test baseline; the aggregate root reports 168 tests and direct roots report 171 tests
-      - zig build
-      - bash -n re-run.sh
-      - systemd-analyze verify packaging/systemd/wayspot.service
-      - exact systemd ExecStart receipt for wayspot notifications
-      - rerun notification receipt with RERUN_UI=false
-      - rerun wallpaper receipt with RERUN_UI=false
-      - tools/re-run_test.sh
-      - exact legacy notification and wallpaper cleanup before canonical start
-      - malformed and stale PID data is rejected without a kill
-      - duplicate and over-bound PID records are rejected
-      - no rerun receipt process remains after cleanup
-    required_comments:
-      - build import rationale
-      - rerun ownership, exact canonical identity, and one-way legacy transition rationale
-
-  - id: stale_shape_cleanup
-    status: closed
-    owner: project
-    evidence:
-      - src/picker/appearance.zig
-      - src/picker/text.zig
-      - src/picker/icon_cache.zig
-      - src/picker/command.zig
-      - src/picker/mode/mod.zig
-      - src/picker/open.zig
-      - src/root.zig
-    target_files:
-      - src/picker/appearance.zig
-      - src/picker/text.zig
-      - src/picker/icon_cache.zig
-      - src/picker/mod.zig
-      - src/root.zig
-      - src/picker/candidate.zig
-      - src/picker/cmd.zig
-      - src/picker/mode/apps.zig
-      - src/picker/mode/notifications.zig
-      - src/picker/mode/wallpaper.zig
-      - src/picker/mode/sunglasses.zig
-      - src/picker/query.zig
-      - src/picker/rank.zig
-      - src/cli/entry.zig
-      - src/cli/bash_completion.zig
-      - src/gui/surface.zig
-      - src/process/launch.zig
-      - src/main.zig
-      - src/notification/mod.zig
-      - src/wallpaper/mod.zig
-      - src/sunglasses/mod.zig
-      - build.zig
-      - re-run.sh
-      - packaging/systemd/wayspot.service
-    changes:
-      - delete deprecated Command, Mode, Open, and picker flat row vocabulary while retaining notification Row API and viewport geometry
-      - keep picker-input comments and test names aligned with their current meaning
-      - remove stale module exports and imports
-      - update inline test names to the accepted vocabulary
-      - prove negative space with bounded grep
-    required_symbols:
-      - no Command type
-      - no Mode struct collection
-      - no Open candidate owner
-      - no commands method
-      - no stale form comment for picker input
-      - notification RowInput, Row, and Cache.rows remain canonical
-    required_tests:
-      - source scan finds no deleted owner symbols
-      - source scan finds no picker Row or payload bridge while retaining notification Row symbols
-      - all remaining public symbols have current comments
-      - full unit and build proof
-    required_comments:
-      - every moved file has a current //! contract
-      - every public Cmd/SubCmd/Candidate symbol has current /// documentation
+source_files:
+  - build.zig
+  - src/aggregate_test.zig
+  - src/cli/entry.zig
+  - src/main.zig
+  - src/gui/surface.zig
+  - src/notification/banner.zig
+  - src/notification/dbus.zig
+  - src/notification/history_cache.zig
+  - src/notification/history_list.zig
+  - src/notification/mod.zig
+  - src/notification/rows.zig
+  - src/notification/state.zig
+  - src/picker/appearance.zig
+  - src/picker/cmd.zig
+  - src/picker/icon_cache.zig
+  - src/picker/icons.zig
+  - src/picker/mode/apps.zig
+  - src/picker/rank.zig
+  - src/picker/scale.zig
+  - src/config/defaults.zig
+  - src/wallpaper/config.zig
+  - src/wallpaper/loop.zig
+  - src/sunglasses/state.zig
+  - src/sunglasses/mod.zig
+  - src/sunglasses/overlay.zig
+  - assets/lua/defaults.lua
 
 implementation_order:
-  - cmd_union_and_order
-  - candidate_input_contract_and_typed_leaves
-  - sub_cmd_and_candidate_reachability
-  - concrete_leaf_union_and_resolution
-  - apps_default_mode_and_single_source
-  - candidate_failure_atomicity_and_lifetime
-  - query_rank_and_leaf_resolution
-  - shared_cli_gui_consumption
-  - bash_serialization_boundary
-  - process_leaf_launch_boundary
-  - canonical_mode_entrypoints
-  - runtime_entrypoint_separation
-  - build_packaging_and_rerun_wiring
-  - stale_shape_cleanup
+  - order: 1
+    path_symbol: "src/notification/history_cache.zig:Cache/loadAtPath/cachePath/serialize"
+    target_path_symbol: "src/notification/history.zig:History/loadAtPath/path/serialize"
+    callers:
+      - "build.zig:history_cache_mod"
+      - "src/notification/mod.zig:history_cache"
+      - "src/notification/dbus.zig:history_cache/persistHistory"
+      - "src/notification/history_list.zig:history_cache/collectAtPathAtTime"
+      - "src/aggregate_test.zig:notification_cache_source/history_cache/Cache/cachePath"
+    task: >-
+      Move the notification history implementation to src/notification/history.zig. Name its record container History, its path function path, and its relative path constant relative_path. Keep RowInput, Row, History.rows, upsert, pruneOld, saveAtPath, load, loadAtPath, serialize, duplicateRow, freeRow, and rowNewer as notification record operations. Rename the build module, imports, notification module exports, aggregate exports, and notification history test roots to wayspot_history and History. Remove deprecated notification-history storage vocabulary from comments, fields, locals, imports, module names, and test names.
+    acceptance_proof:
+      - Test source rename and exact import graph with rg for history_cache, wayspot_history_cache, cachePath, and Cache under notification paths returning no current match.
+      - Test RowInput and Row retain all current record fields and History.rows holds at most 512 rows.
+      - Test path returns XDG_STATE_HOME/wayspot/notifications-history.json and HOME/.local/state/wayspot/notifications-history.json with XDG_STATE_HOME treated as a parent directory.
+      - Test missing file, permission error, directory, allocation error, StreamTooLong, invalid JSON, unsupported version, invalid row, row overflow, and serialized byte overflow as exact errors.
+      - Test serialize only builds bounded bytes; test History.saveAtPath writes those bytes through createFileAtomic replacement, file sync, and parent directory creation.
+      - Run zig build test --summary all, zig build, zig fmt --check, source scans, YAML validation, and git diff --check.
+    status: open
 
-acceptance:
-  required_before_any_item_closes:
-    - design YAML remains aligned with this index
-    - "src/picker/sub_cmd.zig defines exactly SubCmd.notifications: NotificationsSubCmd, SubCmd.wallpaper: WallpaperSubCmd, and SubCmd.sunglasses: SunglassesSubCmd"
-    - "src/picker/sub_cmd.zig defines exactly DimSubCmd.set/on/off, FilterSubCmd.set/on/off, and ImageSubCmd.set/opacity/on/off/clear"
-    - "src/picker/candidate.zig defines exactly Candidate.sub_cmd: SubCmd and Candidate.concrete: Concrete"
-    - "src/picker/candidate.zig defines Input exactly as none, scalar, toggle, and path"
-    - "src/picker/candidate.zig defines ScalarInput, ToggleInput, and PathInput with the listed owned fields and bounds"
-    - "src/picker/candidate.zig enforces ScalarInput grid alignment with signed-safe (value - min) % step == 0 validation"
-    - "src/picker/candidate.zig defines Concrete exactly as app, open, lifecycle, and notification"
-    - "src/picker/candidate.zig defines Lifecycle exactly as the nine declared resident leaf arms"
-    - every Concrete leaf has explicit Input policy coverage and typed sunglasses leaves own bounded monitor values
-    - GUI and CLI construct equal Input and Concrete values for equivalent scalar, toggle, and path input
-    - GUI and CLI reject the same invalid scalar, toggle, path, and monitor values
-    - src/picker/sub_cmd.zig is the sole declaration owner for all SubCmd types; mode files own behavior only
-    - apps has no SubCmd arm and emits Candidate.concrete application and fixed-local open leaves
-    - notification Concrete leaves have explicit selection and launch rejection
-    - no generic, erased, or mode-kind child storage is introduced
-    - no CandidateType, Candidate.types, or parallel input-kind field is introduced
-    - every target file exists at the exact listed path
-    - every target public symbol exists with its listed owner
-    - every target file has its listed //! and /// contract
-    - every target test exists beside the owning implementation
-    - no removed file, symbol, import, or stale command path remains
-    - zig build test --summary all
-    - zig build
-    - git diff --check
-    - real CLI apps and resident mode receipts
-    - real GUI /apps receipt
-    - real Bash completion receipt
-    - packaging/bash/wayspot.bash is syntax-checked, source-isolated, and exercised through Bash completion
-    - reviewer approval after each implementation slice
+  - order: 2
+    path_symbol: "src/notification/dbus.zig:persistHistory"
+    callers:
+      - "src/notification/dbus.zig:handleNotify"
+      - "src/notification/dbus.zig:closeWithReason"
+      - "src/notification/dbus.zig:onNotificationExpired"
+    task: Make persistHistory write the History row for notify, replacement, close, and expiry. Keep Store notification identity and timers in memory. Write active, updated_ns, and closed_reason from the current event. Return the exact History read and write error to the DBus boundary and leave Store state consistent after a failed History write.
+    acceptance_proof:
+      - Test new notification, replaces_id, explicit close, timer expiry, and DBus deinit produce the expected durable History row.
+      - Test History write failure leaves Store identity, timers, and close state consistent.
+      - Test no picker import reaches DBus and no DBus path writes picker history.log.
+      - Run bounded notification start, notify, close, expiry, and clean-shutdown receipts.
+    status: open
+
+  - order: 3
+    path_symbol: "src/notification/state.zig:Store"
+    delete_paths:
+      - "src/notification/rows.zig"
+    delete_symbols:
+      - "src/notification/dbus.zig:notification_rows/recordNotify/recordClosed"
+      - "src/notification/mod.zig:rows"
+      - "src/notification/rows.zig:row_store/Rows/Snapshot/registerCloser/clearCloser/recordNotify/recordClosed/closeById/closeAllActive/snapshot/freeSnapshot"
+    task: Keep Store as the only live notification row allocation and mutation site with the 256 notification bound. Delete src/notification/rows.zig, remove notification_rows from dbus.zig, remove recordNotify and recordClosed calls, remove the rows export, and remove rows tests from build and aggregate imports. Extend Store.Notification fields and Store.close to carry the live fields needed by DBus and banners. Free every Store notification exactly once at replace, close, timer failure, DBus deinit, and allocation failure.
+    acceptance_proof:
+      - Run rg for notification_rows, rows.zig, row_store, recordNotify, and recordClosed and accept only historical register text.
+      - Test Store replacement, 256-row capacity, 257th notification failure, close, expiry, timer failure, OOM, and deinit.
+      - Test failed text duplication leaves the previous Store notification unchanged.
+      - Run notification resident reachability and clean-shutdown receipts with no rows.zig process and no unfreed allocation remaining.
+    status: open
+
+  - order: 4
+    path_symbol: "src/notification/history_list.zig:NotificationHistoryList.cache/collectAtPathAtTime"
+    target_symbols:
+      - "src/notification/history_list.zig:NotificationHistoryList.loaded"
+      - "src/notification/history_list.zig:collectAtPathAtTime"
+      - "src/notification/history_list.zig:appendRow"
+    task: >-
+      Delete NotificationHistoryList.cache. Add one loaded bool. Make collectAtPathAtTime load one local History, sort its rows, append bounded Candidate.notification strings, deinit the local History, and set loaded true. Make clearCandidateProduction free owned_strings and set loaded false. Make appendRow write stable selection text notification-history:<id> with no rank and retain max_open_bytes 32.
+    acceptance_proof:
+      - Test source has no NotificationHistoryList.cache field and no retained History after collectAtPathAtTime returns.
+      - Test loaded false, one successful load, repeated collect without a second read, clear reset, and retry after failure.
+      - Test newest timestamp order, identity tie order, the largest u32 id selection, the 32-byte bound, and formatter rejection of a constructed overlong selection.
+      - Test allocation failure frees title, subtitle, selection, local History rows, and Candidate list state.
+      - Run notification picker output and GUI/CLI byte-equivalence receipts.
+    status: open
+
+  - order: 5
+    path_symbol: "src/picker/cmd.zig:Picker.history/recordHistory/loadHistorySelections/writeHistoryAtomic"
+    delete_symbols:
+      - "src/picker/cmd.zig:Picker.max_history"
+    task: >-
+      Set one picker history bound of 64 entries, 256 bytes per selection, and 16384 serialized bytes. Keep Picker.history in unique oldest-first order. Make recordHistory reject empty, overlong, and unreachable selection text; remove an existing equal selection, free it, then append the new allocator-owned copy at the newest end. Add Picker.history_loaded, make loadHistorySelections return on the second call, set history_loaded after a successful missing-file read, and leave it false after another read error. Keep PickerBundle.wirePicker and delete only its max_history assignment. Make writeHistoryAtomic preserve the old file, remove its temporary file after every failure, and let the last successful rename define the file contents.
+    acceptance_proof:
+      - Test 64 entries, 65th entry, 256-byte selection, 257-byte selection, 16384-byte file, and one-byte overflow.
+      - Test missing file, permission error, directory, malformed line, unreachable selection, duplicate selection replacement and freeing, second load, and failed launch recording.
+      - Test the 32-value field and the max_history assignment in src/main.zig:PickerBundle.wirePicker are deleted and no other picker history bound remains.
+      - Test writeHistoryAtomic leaves the old file valid and removes the temporary file after write, sync, rename, and parent-sync failure.
+      - Test deinit frees every selection copy and every selection is an allocator-owned copy independent of query and Candidate bytes.
+      - Run GUI and CLI selection-history receipts.
+    status: open
+
+  - order: 6
+    path_symbol: "src/picker/rank.zig:rankCandidatesWithHistory/rankCandidatesWithOldestFirstHistory"
+    delete_symbols:
+      - "src/picker/rank.zig:rankCandidatesWithHistory"
+    task: >-
+      Keep rankCandidatesWithOldestFirstHistory as the sole picker history rank function. Delete rankCandidatesWithHistory, its wrapper call, its newest-first tests, and notificationHistoryOrderBoost. Make NotificationHistoryList emit notification candidates newest-first. Store each source index in RankedCandidate. After score, title, subtitle, selection, type, and icon comparisons are equal, sort the lower source index first. Rank only the unique oldest-first Picker.history list and preserve notification row order independently of picker ranking.
+    acceptance_proof:
+      - Run rg for rankCandidatesWithHistory and notificationHistoryOrderBoost and accept only the deleted-symbol record in this register.
+      - Test empty history, one selection, 64 selections, duplicate selection, oldest-first order, and deterministic title, selection, type, and icon tie breaks.
+      - Test notification timestamps do not change picker scores and picker history does not change notification row order.
+      - Test two equal-score notification rows prove the newest source index remains first after ranking.
+      - Run zig build test --summary all and zig build.
+    status: open
+
+  - order: 7
+    path_symbol: "src/picker/mode/apps.zig:Apps.cache_path/cache_data/owned_strings/collectCandidates/collectFromDesktopFiles"
+    target_symbols:
+      - "src/picker/mode/apps.zig:Apps.defaultCachePath"
+    callers:
+      - "src/picker/cmd.zig:buildCandidatesTransactional"
+      - "src/cli/entry.zig:runIconDiag"
+      - "src/cli/entry.zig:runIconCacheRefresh"
+    delete_symbols:
+      - "src/picker/mode/apps.zig:Apps.cache_data"
+    task: >-
+      Make Apps.cache_path an owned []u8 freed by Apps.deinit. Keep owned_strings only for Candidate fields. Delete Apps.cache_data. Read cache bytes into a local buffer, parse each TSV field into an owned copy, free the raw buffer before Candidate publication, and free every owned string in Apps.deinit and picker rollback. Make Apps.defaultCachePath build XDG_CACHE_HOME/wayspot/apps.tsv with HOME/.cache/wayspot/apps.tsv fallback. Remove app_cache_path from PickerBundle. Bound category, name, executable selection, and icon fields at 256 bytes. When no valid cache record remains, call collectFromDesktopFiles and then write valid records through writeAppCacheFromCandidates. Keep fixed local Spec values separate from desktop records.
+    acceptance_proof:
+      - Test cache parse, desktop fallback, no-valid-record fallback, fixed-local availability, duplicate executable, malformed field, 256-byte field, 257-byte field, 1024-candidate bound, allocation failure, and retry.
+      - Test no Candidate points into the raw cache read buffer after collectCandidates returns.
+      - Test failed collection publishes no partial Candidate and frees Apps.owned_strings exactly once.
+      - Run wayspot apps and GUI /apps output receipts with byte equality.
+    status: open
+
+  - order: 8
+    path_symbol: "src/picker/mode/apps.zig:writeAppCacheFromCandidates/invalidateDefaultCache"
+    target_symbols:
+      - "src/picker/mode/apps.zig:Apps.defaultCachePath"
+    delete_symbols:
+      - "src/picker/mode/apps.zig:invalidateDefaultCache"
+    callers:
+      - "src/main.zig:setupPickerBundle"
+      - "src/picker/mode/apps.zig:writeAppCacheFromCandidates"
+    task: >-
+      Make Apps.defaultCachePath the only path construction function. It returns XDG_CACHE_HOME/wayspot/apps.tsv and HOME/.cache/wayspot/apps.tsv fallback. Make the exact first line # wayspot-apps-v1. Make every following record exactly category<TAB>name<TAB>executable<TAB>icon with no fifth field. Make the parser reject a missing, duplicate, or wrong first version line. Move app path construction out of src/main.zig:setupPickerBundle and call Apps.defaultCachePath from that function. Make writeAppCacheFromCandidates write a bounded TSV through a same-directory temporary file, sync it, rename it, and sync the parent. Keep the previous valid file after write, sync, and rename failure. Delete invalidateDefaultCache, its tests, its docs, and its callers.
+    acceptance_proof:
+      - Test XDG_CACHE_HOME path, HOME fallback, parent creation, version line, four 256-byte fields, malformed cache, and cache overflow.
+      - Inject write, sync, rename, and parent-sync failures and prove the previous file remains valid and the temporary file is removed.
+      - Run rg for invalidateDefaultCache and accept only this deletion record.
+      - Run CLI app collection, GUI /apps, and isolated cache rebuild receipts.
+    status: open
+
+  - order: 9
+    path_symbol: "src/picker/icon_cache.zig:refresh"
+    target_path_symbol: "src/picker/icon_cache.zig:refresh"
+    callers:
+      - "src/cli/entry.zig:runIconCacheRefresh"
+      - "src/picker/icons.zig:findCachedIconPath"
+    task: >-
+      Make refresh write exactly two TSV fields: icon name and PNG path. Define stale as an index record whose PNG path is missing or not a regular file; do not claim source freshness because the two-field record stores no source data. Preserve the prior index and all old PNGs on failure. Write each new PNG to a temporary name, detect a CRC32 collision before replacement, and on failure remove every temporary PNG and every newly published PNG while retaining old PNGs. Replace the index last. After success, delete unreferenced icon-*.png files. State that the PNG set is not atomically published. Resolve paths under XDG_CACHE_HOME/wayspot/icons with HOME/.cache/wayspot/icons fallback. Retain missing icon entries in AppIconStore and count each entry toward 128 until deinit.
+    acceptance_proof:
+      - Test two-field index parsing, missing source, unsupported extension, converter missing, converter failure, wait interruption bound 8, path bound 768, refresh row bound 768, and CRC32 collision before overwrite.
+      - Test failed refresh keeps the previous index and old PNGs, removes temporary and newly published PNGs, and leaves no old PNG removed; test successful refresh deletes unreferenced icon-*.png files.
+      - Test no claim of atomic PNG-set publication or source freshness appears in comments and docs.
+      - Test XDG_CACHE_HOME and HOME fallback paths remain inside wayspot/icons.
+      - Run isolated wayspot --icon-cache-refresh receipts and inspect index fields and temporary-file removal.
+    status: open
+
+  - order: 10
+    path_symbol: "src/picker/icons.zig:findCachedIconPath/AppIconStore"
+    task: Make findCachedIconPath read the same two-field icon name and PNG path record emitted by refresh. Treat a missing or non-regular PNG path as stale and reject malformed, duplicate, stale, wrong-kind, overlong, and unsupported records. Make AppIconStore retain missing entries, count them toward 128, and free every loaded SDL texture at deinit. Keep icon name 192, path 768, file 2 MiB, source dimension 4096, texture dimension 64, roots 8, probes 96, and index 256 KiB.
+    acceptance_proof:
+      - Test exact name, path, file, source dimension, texture dimension, root, probe, index, and 128-entry limits with one-byte overflow cases.
+      - Test malformed index, duplicate name, stale PNG, directory path, unsupported extension, missing icon, load failure, scale failure, texture failure, and retained missing entries.
+      - Test AppIconStore.deinit after loaded, missing, and mixed entries with one texture destruction per texture.
+      - Run GUI icon rendering and CLI icon diagnostics from the same isolated XDG cache path.
+    status: open
+
+  - order: 11
+    path_symbol: "src/config/defaults.zig:load/applyBuffer"
+    target_paths:
+      - "assets/lua/defaults.lua"
+    target_symbols:
+      - "src/picker/appearance.zig:currentHardcodedDefaults"
+    callers:
+      - "src/config/defaults.zig:loadEmbedded"
+      - "src/gui/surface.zig:Surface.init"
+      - "src/notification/banner.zig:show"
+      - "src/picker/appearance.zig:currentHardcodedDefaults"
+    delete_symbols:
+      - "src/picker/appearance.zig:currentHardcodedDefaults"
+      - "src/picker/appearance.zig:test named product defaults preserve current picker appearance"
+      - "src/picker/appearance.zig:test named product defaults preserve banner and picker appearance"
+    task: Make assets/lua/defaults.lua the sole appearance value source. Make loadEmbedded parse into zeroed Appearance and require every production field through applyBuffer. Keep load user application transactional by applying into a candidate Appearance and assigning only after success. Delete currentHardcodedDefaults, its duplicate value tests, aggregate exports, GUI tests, and build imports.
+    acceptance_proof:
+      - Test embedded defaults, missing user file, malformed user file, unknown field, depth 4, key 128, color 32, instruction 100000, embedded 32768-byte, user 32768-byte, and one-byte overflow.
+      - Test user failure leaves the embedded Appearance unchanged.
+      - Test Lua state and user bytes are freed on every success and error path.
+      - Run GUI and notification banner startup receipts from assets/lua/defaults.lua.
+    status: open
+
+  - order: 12
+    path_symbol: "src/picker/scale.zig:SurfaceConfig"
+    target_path_symbol: "src/picker/scale.zig:SurfaceState"
+    callers:
+      - "src/gui/surface.zig:scale_owner.SurfaceConfig"
+      - "src/notification/banner.zig:scale_owner.SurfaceConfig"
+      - "src/aggregate_test.zig:scale_source/SurfaceConfig"
+    task: >-
+      Rename SurfaceConfig to SurfaceState in scale.zig and all callers. Make scale.zig:statePath read XDG_STATE_HOME as the parent and use HOME/.local/state/wayspot/surface.conf as fallback. Rename scale_owner imports to surface_state in src/gui/surface.zig and src/notification/banner.zig. Keep scale math, ZoomAction, scaledDimensions, and scaledLength in scale.zig. Make one atomic saveAtPath writer for GUI and banner: write at most 64 bytes to a same-directory temporary file, sync, rename, and sync the parent; remove the temporary file after every failed write, sync, and rename; the last successful rename wins and no merge occurs. Make loadAtPath reject malformed and oversized text with exact errors and use default state only for FileNotFound.
+    acceptance_proof:
+      - Test SurfaceState name has no SurfaceConfig residue and all GUI/banner/build/aggregate imports use SurfaceState.
+      - Test zoom -2, 5, 0, 64-byte, 65-byte, malformed, and missing-file cases with exact errors.
+      - Inject write, sync, rename, and parent-sync failures and prove old surface.conf remains valid and the temporary file is removed.
+      - Run bounded GUI zoom and notification banner zoom receipts and verify last successful rename contents.
+    status: open
+
+  - order: 13
+    path_symbol: "src/wallpaper/config.zig:Config/parse"
+    callers:
+      - "src/wallpaper/config.zig:Config.loadAtPath"
+      - "src/wallpaper/loop.zig:Loop.run"
+    task: >-
+      Put wallpaper.conf at XDG_CONFIG_HOME/wayspot/wallpaper.conf with HOME/.config/wayspot/wallpaper.conf fallback. Make Config.parse reject duplicate keys, unknown keys, malformed lines, empty values, every control byte below 0x20 except LF line separators, relative library paths, interval values below 30, and interval values above 86400. Return error.FileNotFound unchanged when Config.loadAtPath cannot read a missing file; do not create a default config. Return error.InvalidWallpaperConfig for control and line errors, error.InvalidWallpaperLibraryPath for library errors, and error.InvalidWallpaperInterval for empty, non-decimal, under-range, over-range, and overflowing interval values. Free Config.library_path exactly once.
+    acceptance_proof:
+      - Test XDG_CONFIG_HOME and HOME fallback paths, 4096-byte file, one-byte overflow, missing path returning error.FileNotFound, duplicate key, unknown key, malformed line, NUL, CR, tab, empty path, relative path, low interval, high interval, non-decimal interval, overflow interval, and exact endpoints.
+      - Test errors named InvalidWallpaperConfig, InvalidWallpaperLibraryPath, InvalidWallpaperInterval, MissingWallpaperLibraryPath, error.FileNotFound, and StreamTooLong at the correct boundary.
+      - Test Loop.run frees Config and Library after empty-library, monitor, SDL, and wake failures.
+      - Run isolated wallpaper startup and bounded rotation receipts.
+    status: open
+
+  - order: 14
+    path_symbol: "src/sunglasses/state.zig:State"
+    target_path_symbol: "src/sunglasses/state.zig:State"
+    callers:
+      - "src/sunglasses/mod.zig:applyLeaf"
+      - "src/sunglasses/overlay.zig:Overlay.reconcileSavedState"
+      - "src/sunglasses/overlay.zig:Overlay.runApplyLoop"
+    task: >-
+      Put sunglasses.conf at XDG_STATE_HOME/wayspot/sunglasses.conf with HOME/.local/state/wayspot/sunglasses.conf fallback. Make State.loadAtPath return an empty State only for error.FileNotFound. Return error.StateTooLarge for StreamTooLong, error.MalformedState for malformed lines, duplicate monitor records, invalid monitor names, invalid image paths, invalid image bytes, and red_blue, dim, and image opacity values outside their bounds. Do not clamp stored scalar values. Make saveAtPath write at most 16384 bytes through a same-directory temporary file, sync, rename, and parent sync; remove the temporary file after every failure.
+    acceptance_proof:
+      - Test XDG_STATE_HOME and HOME fallback paths, missing file returning empty State, permission error, directory, malformed record, oversized file returning StateTooLarge, 8-monitor bound, 9-monitor overflow, name, image path, red_blue, dim, and opacity bounds.
+      - Test parse rejects values instead of clamping and returns exact MalformedState for every invalid stored scalar, InvalidMonitorName, InvalidImagePath, TooManyMonitors, and StateTooLarge errors.
+      - Test serialize exact 16384-byte bound and one-byte overflow without partial target writes.
+      - Inject save, sync, rename, and monitor-query failures and prove State and Overlay slots remain freeable and consistent.
+      - Run sunglasses apply, reconcile, monitor-change, overlay startup, and clean-shutdown receipts.
+    status: open
+
+size_rule:
+  measure: "Measure source bytes after removing CR and LF bytes; measure source line characters before the line-ending removal."
+  columns: "Every final in-scope src line must have at most 120 characters."
+  baseline: "The 6ff94bc baseline is the byte total from the tracked src tree at commit 6ff94bc after CR and LF removal."
+  requirement: "The final in-scope src byte total must be lower than the 6ff94bc baseline."
+  proof_commands:
+    - "find src -type f -name '*.zig' -print0 | sort -z | xargs -0 awk 'length($0) > 120 { bad = 1 } END { exit bad }'"
+    - "baseline=$(git ls-tree -r --name-only 6ff94bc -- src | while IFS= read -r path; do git show \"6ff94bc:$path\"; done | tr -d '\\r\\n' | wc -c); current=$(find src -type f -name '*.zig' -print0 | sort -z | xargs -0 cat | tr -d '\\r\\n' | wc -c); test \"$current\" -lt \"$baseline\""
+    - "zig build test --summary all"
+    - "zig build"
+    - "zig fmt --check"
+    - "git diff --check"
+    - "ruby -e 'require \"yaml\"; YAML.load_stream(File.read(\"debt_offenders.yml\"))'"
+  close_rule: "Close one order only after its listed source tests, source scan, path receipt, and size proof pass."
+
+source_reference_rule: "Every path_symbol and callers entry names a current file and a current symbol. target_path_symbol and target_symbols name planned post-task symbols and are not current source claims."
