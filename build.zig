@@ -26,9 +26,29 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/c/sdl_io.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const sdl_native_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/sdl_native.zig"),
+        .target = target,
+        .optimize = optimize,
         .link_libc = true,
     });
-    sdl_io_mod.addImport("sdl_c", sdl_c_mod);
+    sdl_native_mod.addImport("sdl_c", sdl_c_mod);
+    sdl_native_mod.addImport("sdl_io", sdl_io_mod);
+    sdl_native_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    const wayland_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/wayland_io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wayland_io_mod.addImport("sdl_io", sdl_io_mod);
+    const sunglasses_setup_mod = b.createModule(.{
+        .root_source_file = b.path("src/sunglasses/setup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sunglasses_setup_mod.addImport("sdl_io", sdl_io_mod);
+    sunglasses_setup_mod.addImport("wayland_io", wayland_io_mod);
     const wayland_c_mod = translateCModule(b, b.path("src/c/wayland.h"), target, optimize, &.{});
     const text_c_mod = translateCModule(b, b.path("src/c/text.h"), target, optimize, &.{
         .{ .cwd_relative = "/usr/include/freetype2" },
@@ -64,6 +84,39 @@ pub fn build(b: *std.Build) void {
         .name = "wayspot_layer_shell",
         .root_module = layer_shell_mod,
     });
+
+    const wayland_native_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/wayland_native.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    wayland_native_mod.addImport("sdl_c", sdl_c_mod);
+    wayland_native_mod.addImport("sdl_io", sdl_io_mod);
+    wayland_native_mod.addImport("sdl_native", sdl_native_mod);
+    wayland_native_mod.addImport("sunglasses_setup", sunglasses_setup_mod);
+    wayland_native_mod.addImport("wayland_io", wayland_io_mod);
+    wayland_native_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    wayland_native_mod.linkLibrary(layer_shell);
+    wayland_native_mod.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
+
+    const io_simulation_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/io_simulation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    io_simulation_mod.addImport("sdl_io", sdl_io_mod);
+    io_simulation_mod.addImport("sunglasses_setup", sunglasses_setup_mod);
+    io_simulation_mod.addImport("wayland_io", wayland_io_mod);
+
+    const native_io_check_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/native_io_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    native_io_check_mod.addImport("sdl_native", sdl_native_mod);
+    native_io_check_mod.addImport("wayland_native", wayland_native_mod);
 
     const identity_mod = b.createModule(.{
         .root_source_file = b.path("src/identity.zig"),
@@ -112,8 +165,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    env_mod.addImport("sdl_c", sdl_c_mod);
     env_mod.addImport("sdl_io", sdl_io_mod);
+    env_mod.addImport("sdl_native", sdl_native_mod);
 
     const scale_mod = b.createModule(.{
         .root_source_file = b.path("src/picker/scale.zig"),
@@ -309,6 +362,10 @@ pub fn build(b: *std.Build) void {
     sunglasses_mod.addImport("picker_candidate", picker_candidate_mod);
     sunglasses_mod.addImport("wayspot_env", env_mod);
     sunglasses_mod.addImport("wayspot_identity", identity_mod);
+    sunglasses_mod.addImport("sdl_io", sdl_io_mod);
+    sunglasses_mod.addImport("sdl_native", sdl_native_mod);
+    sunglasses_mod.addImport("sunglasses_setup", sunglasses_setup_mod);
+    sunglasses_mod.addImport("wayland_native", wayland_native_mod);
     sunglasses_mod.addImport("sdl_c", sdl_c_mod);
     sunglasses_mod.addIncludePath(sdl_include);
     sunglasses_mod.linkLibrary(sdl_dep.artifact("SDL3"));
@@ -342,8 +399,12 @@ pub fn build(b: *std.Build) void {
     aggregate_test_mod.addImport("picker_sub_cmd", picker_sub_cmd_mod);
     aggregate_test_mod.addImport("sdl_c", sdl_c_mod);
     aggregate_test_mod.addImport("sdl_io", sdl_io_mod);
+    aggregate_test_mod.addImport("sdl_native", sdl_native_mod);
+    aggregate_test_mod.addImport("sunglasses_setup", sunglasses_setup_mod);
     aggregate_test_mod.addImport("text_c", text_c_mod);
     aggregate_test_mod.addImport("wayland_c", wayland_c_mod);
+    aggregate_test_mod.addImport("wayland_io", wayland_io_mod);
+    aggregate_test_mod.addImport("wayland_native", wayland_native_mod);
     aggregate_test_mod.addIncludePath(sdl_include);
     aggregate_test_mod.linkLibrary(sdl_dep.artifact("SDL3"));
     aggregate_test_mod.linkLibrary(layer_shell);
@@ -366,7 +427,11 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.addImport("sdl_c", sdl_c_mod);
+    mod.addImport("sdl_io", sdl_io_mod);
+    mod.addImport("sdl_native", sdl_native_mod);
     mod.addImport("wayland_c", wayland_c_mod);
+    mod.addImport("wayland_io", wayland_io_mod);
+    mod.addImport("wayland_native", wayland_native_mod);
     mod.addImport("text_c", text_c_mod);
     mod.addImport("picker_candidate", picker_candidate_mod);
     mod.addImport("picker_sub_cmd", picker_sub_cmd_mod);
@@ -420,6 +485,18 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(sdl_include);
     exe.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
 
+    const native_io_check = b.addExecutable(.{
+        .name = "wayspot_native_io_check",
+        .root_module = native_io_check_mod,
+    });
+    native_io_check.use_llvm = true;
+    native_io_check.use_lld = true;
+    const native_io_check_step = b.step(
+        "native_io_check",
+        "Compile and link every native SDL and Wayland adapter entry point without running it",
+    );
+    native_io_check_step.dependOn(&native_io_check.step);
+
     b.installArtifact(exe);
     b.installFile("packaging/bash/wayspot.bash", "share/bash-completion/completions/wayspot");
 
@@ -448,9 +525,45 @@ pub fn build(b: *std.Build) void {
     const sdl_io_tests = b.addTest(.{ .root_module = sdl_io_mod });
     sdl_io_tests.use_llvm = true;
     sdl_io_tests.use_lld = true;
-    sdl_io_tests.root_module.addIncludePath(sdl_include);
-    sdl_io_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
     const run_sdl_io_tests = b.addRunArtifact(sdl_io_tests);
+
+    const wayland_io_tests = b.addTest(.{ .root_module = wayland_io_mod });
+    const run_wayland_io_tests = b.addRunArtifact(wayland_io_tests);
+
+    const io_simulation_tests = b.addTest(.{ .root_module = io_simulation_mod });
+    const run_io_simulation_tests = b.addRunArtifact(io_simulation_tests);
+
+    const sdl_native_tests = b.addTest(.{ .root_module = sdl_native_mod });
+    sdl_native_tests.use_llvm = true;
+    sdl_native_tests.use_lld = true;
+    sdl_native_tests.root_module.addIncludePath(sdl_include);
+    sdl_native_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    const run_sdl_native_tests = b.addRunArtifact(sdl_native_tests);
+
+    const wayland_native_tests = b.addTest(.{ .root_module = wayland_native_mod });
+    wayland_native_tests.use_llvm = true;
+    wayland_native_tests.use_lld = true;
+    wayland_native_tests.root_module.addIncludePath(sdl_include);
+    wayland_native_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
+    wayland_native_tests.root_module.linkLibrary(layer_shell);
+    wayland_native_tests.root_module.linkSystemLibrary("wayland-client", .{ .use_pkg_config = .yes });
+    const run_wayland_native_tests = b.addRunArtifact(wayland_native_tests);
+
+    const sdl_io_unit_fuzz_step = b.step(
+        "sdl_io_unit_fuzz",
+        "Run pure SDL display and window contract tests",
+    );
+    sdl_io_unit_fuzz_step.dependOn(&run_sdl_io_tests.step);
+    const wayland_io_unit_fuzz_step = b.step(
+        "wayland_io_unit_fuzz",
+        "Run pure Wayland layer contract tests",
+    );
+    wayland_io_unit_fuzz_step.dependOn(&run_wayland_io_tests.step);
+    const sdl_wayland_simulation_step = b.step(
+        "sdl_wayland_simulation",
+        "Run the pure paired SDL and Wayland simulation",
+    );
+    sdl_wayland_simulation_step.dependOn(&run_io_simulation_tests.step);
 
     const aggregate_tests = b.addTest(.{ .root_module = aggregate_test_mod });
     aggregate_tests.use_llvm = true;
@@ -537,6 +650,10 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_sdl_io_tests.step);
+    test_step.dependOn(&run_wayland_io_tests.step);
+    test_step.dependOn(&run_io_simulation_tests.step);
+    test_step.dependOn(&run_sdl_native_tests.step);
+    test_step.dependOn(&run_wayland_native_tests.step);
     test_step.dependOn(&run_aggregate_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_notification_preview_tests.step);

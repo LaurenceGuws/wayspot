@@ -1,8 +1,8 @@
 //! Monitor owns bounded screen-output facts from SDL or compositor sources.
 
 const std = @import("std");
-const c = @import("sdl_c");
 const sdl_io = @import("sdl_io");
+const sdl_native = @import("sdl_native");
 
 pub const max_monitors: u32 = sdl_io.max_displays;
 pub const max_monitor_name_bytes: u32 = sdl_io.max_display_name_bytes;
@@ -135,15 +135,9 @@ pub const MonitorList = struct {
     }
 };
 
-/// WaylandHandles stores SDL-provided Wayland handles for one Wayspot window.
-pub const WaylandHandles = struct {
-    wl_display: *c.struct_wl_display,
-    wl_surface: *c.struct_wl_surface,
-};
-
 /// queryMonitors loads monitor facts through the production SDL display source.
 pub fn queryMonitors() !MonitorList {
-    var io = sdl_io.SdlDisplayIo.native();
+    var io = sdl_io.SdlDisplayIo.native(sdl_native.displaySource());
     return queryMonitorsWith(&io);
 }
 
@@ -167,38 +161,6 @@ pub fn queryMonitorsWith(io: *sdl_io.SdlDisplayIo) !MonitorList {
 fn monitorId(id: sdl_io.DisplayId) !MonitorId {
     const value = std.math.cast(i32, id) orelse return error.MonitorIdOutOfRange;
     return .{ .value = value };
-}
-
-/// waylandOutput remains a native handle lookup for the later Wayland seam.
-pub fn waylandOutput(source_id: c.SDL_DisplayID) !*c.struct_wl_output {
-    const props = c.SDL_GetDisplayProperties(source_id);
-    if (props == 0) return error.SdlMonitorPropertyMissing;
-    const raw = c.SDL_GetPointerProperty(
-        props,
-        c.SDL_PROP_DISPLAY_WAYLAND_WL_OUTPUT_POINTER,
-        null,
-    ) orelse return error.SdlMonitorPropertyMissing;
-    return @ptrCast(@alignCast(raw));
-}
-
-/// windowWaylandHandles returns SDL's Wayland handles for a Wayspot-owned window.
-pub fn windowWaylandHandles(window: *c.SDL_Window) !WaylandHandles {
-    const props = c.SDL_GetWindowProperties(window);
-    if (props == 0) return error.SdlWindowPropertyMissing;
-    const raw_display = c.SDL_GetPointerProperty(
-        props,
-        c.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER,
-        null,
-    ) orelse return error.SdlWindowPropertyMissing;
-    const raw_surface = c.SDL_GetPointerProperty(
-        props,
-        c.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER,
-        null,
-    ) orelse return error.SdlWindowPropertyMissing;
-    return .{
-        .wl_display = @ptrCast(@alignCast(raw_display)),
-        .wl_surface = @ptrCast(@alignCast(raw_surface)),
-    };
 }
 
 test "monitor list and current active refs are bounded" {

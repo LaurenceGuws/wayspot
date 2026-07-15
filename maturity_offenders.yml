@@ -5,7 +5,7 @@
 register:
   name: external_io_maturity
   status: open
-  implementation_status: partial_sdl_display_facts
+  implementation_status: partial_sdl_display_with_paired_window_layer_adapters
   source_changes: true
   implementation_order:
     - sdl_wayland_window_display_events
@@ -395,16 +395,16 @@ rules:
 boundaries:
   - order: 1
     name: sdl_wayland_window_display_events
-    status: partial_sdl_display_facts
+    status: partial_sdl_display_with_paired_window_layer_adapters
     next_design:
-      status: pending
+      status: implemented
       scope: >-
         This is one paired window/property and Wayland layer slice for the
         sunglasses consumer. The implemented display-facts slice remains
         unchanged. Wallpaper and the image, SHM, render, texture, clipboard,
         event, and standalone Wayland connection slices remain deferred.
       no_c_mock_build:
-        status: required
+        status: implemented
         rule: >-
           Transcript, unit, fuzz, and simulation code is plain typed Zig. It
           does not import sdl_c or wayland_c, link libc or SDL3, link a
@@ -422,24 +422,38 @@ boundaries:
               Own WaylandIo, its plain layer/display/surface result types, and
               fixed typed transcripts. This module is the mock source used by
               unit, fuzz, and simulation targets.
-            imports: []
+            imports:
+              - sdl_io
             links: []
           - path: src/c/io_simulation_test.zig
             role: >-
-              Test the paired sunglasses transcript against exact typed mock
-              operation records; it imports only sdl_io and wayland_io.
+              Run the production sunglasses_setup plan against exact typed
+              SDL and Wayland mock operation records; it imports no native
+              adapter or C module.
+            imports:
+              - sdl_io
+              - sunglasses_setup
+              - wayland_io
+            links: []
+            display: absent
+          - path: src/sunglasses/setup.zig
+            status: implemented
+            role: >-
+              Own SetupPlan and the fixed window/layer command sequences. The
+              transcript executor in this module is production setup code; it
+              consumes only plain typed adapters and no native or C module.
             imports:
               - sdl_io
               - wayland_io
             links: []
-            display: absent
         native_modules:
           - path: src/c/sdl_native.zig
-            status: planned
+            status: implemented
             role: >-
               Implement the native SdlDisplayIo, SdlWindowIo, and
               SdlWindowPropertyIo sources. It is the only Zig module in this
-              slice that imports sdl_c or calls SDL_*.
+              slice that calls SDL_*; Wayland native imports sdl_c only for
+              adapter-internal C handle types.
             imports:
               - sdl_c
               - sdl_io
@@ -447,31 +461,38 @@ boundaries:
               - libc
               - SDL3
           - path: src/c/wayland_native.zig
-            status: planned
+            status: implemented
             role: >-
               Implement the native WaylandIo source by invoking the listed
               wayspot_* wrappers. Raw wl_* calls remain in
               src/c/wayspot_layer_shell.c. It consumes the native-only SDL
               handle handoff and never changes the plain transcript types.
             imports:
-              - wayland_c
-              - wayland_io
+              - sdl_c
+              - sdl_io
               - sdl_native
+              - sunglasses_setup
+              - wayland_io
             links:
               - libc
+              - SDL3
+              - wayspot_layer_shell
               - wayland-client
           - path: src/c/native_io_check.zig
-            status: planned
+            status: implemented
             role: >-
-              Compile and link the native adapter modules without starting a
-              window, compositor, or DE. This is a compile/link check, not a
-              simulation source.
+              Compile and link the explicit native entry-point table: all four
+              sdl_native display callbacks, every SdlWindowPropertyIo and
+              SdlWindowIo method, and WaylandIo.init/globalsPtr/surfacePtr/
+              displayPtr/deinit. It invokes no native function and starts no
+              window, compositor, or DE; it is not simulation evidence.
             imports:
               - sdl_native
               - wayland_native
             links:
               - libc
               - SDL3
+              - wayspot_layer_shell
               - wayland-client
         targets:
           - name: sdl_io_unit_fuzz
@@ -481,19 +502,24 @@ boundaries:
             runs_without: [SDL3, wayland-client, libc, DE]
           - name: wayland_io_unit_fuzz
             root: src/c/wayland_io.zig
-            imports: []
+            imports: [sdl_io]
             links: []
             runs_without: [SDL3, wayland-client, libc, DE]
           - name: sdl_wayland_simulation
             root: src/c/io_simulation_test.zig
-            imports: [sdl_io, wayland_io]
+            imports: [sdl_io, sunglasses_setup, wayland_io]
             links: []
             runs_without: [SDL3, wayland-client, libc, DE]
             forbidden_imports: [sdl_c, wayland_c, sdl_native, wayland_native]
           - name: wayspot_native_io_check
             root: src/c/native_io_check.zig
             imports: [sdl_native, wayland_native]
-            links: [libc, SDL3, wayland-client]
+            links: [libc, SDL3, wayspot_layer_shell, wayland-client]
+            entry_points:
+              - sdl_native.displaySource.query_displays/query_name/query_bounds/query_scale
+              - sdl_native.SdlWindowPropertyIo.create/setTitle/setWidth/setHeight/setHidden/setCustomSurfaceRole/setCreateEglWindow/deinit
+              - sdl_native.SdlWindowIo.create/nativeWaylandHandles/resize/deinit
+              - wayland_native.WaylandIo.init/globalsPtr/surfacePtr/displayPtr/deinit
             invokes_simulation: false
             starts_de: false
           - name: wayspot
@@ -506,17 +532,33 @@ boundaries:
             The simulation target must compile and run when SDL3, Wayland,
             libc, sdl_c, wayland_c, and DE environment inputs are absent.
           - >-
-            The native check and production targets compile/link native
-            adapters separately; neither target is used as simulation proof.
+            The native check references every listed adapter entry point and
+            links the native modules separately; it invokes no adapter method
+            and is never used as simulation proof. Production links the same
+            adapters for the real callers.
           - >-
             No simulation transcript may contain a native pointer or invoke a
             function from sdl_native, wayland_native, sdl_c, or wayland_c.
+          - >-
+            The simulation executes sunglasses_setup.runTranscript, while the
+            native surface and Wayland adapter consume the same SetupPlan and
+            fixed command sequences with real SDL and Wayland calls.
       ownership:
         - path: src/c/sdl_io.zig
           symbols:
+            - DisplayName
+            - DisplayBounds
+            - DisplayFacts
+            - DisplayList
+            - DisplayTranscript
+            - SdlDisplayIo
             - SdlWindowIo
             - SdlWindowPropertyIo
-          owns_calls:
+          owns_calls: []
+          role: >-
+            Owns plain bounded values and fixed typed transcripts only. It
+            does not import sdl_c and does not call native SDL.
+          does_not_own:
             - SDL_CreateProperties
             - SDL_DestroyProperties
             - SDL_SetStringProperty
@@ -527,13 +569,40 @@ boundaries:
             - SDL_GetPointerProperty
             - SDL_SetWindowSize
             - SDL_DestroyWindow
-          does_not_own:
             - SDL image calls
             - SDL SHM, render, texture, clipboard, or event calls
+        - path: src/c/sdl_native.zig
+          symbols:
+            - displaySource
+            - SdlWindowPropertyIo
+            - SdlWindowIo
+          owns_calls:
+            - SDL_GetDisplays
+            - SDL_free
+            - SDL_GetDisplayName
+            - SDL_GetDisplayBounds
+            - SDL_GetDisplayContentScale
+            - SDL_CreateProperties
+            - SDL_DestroyProperties
+            - SDL_SetStringProperty
+            - SDL_SetNumberProperty
+            - SDL_SetBooleanProperty
+            - SDL_CreateWindowWithProperties
+            - SDL_GetWindowProperties
+            - SDL_GetPointerProperty
+            - SDL_SetWindowSize
+            - SDL_DestroyWindow
+          role: >-
+            Owns native SDL display, property, window, and borrowed Wayland
+            handle calls. Native pointers stay inside this adapter handoff.
         - path: src/c/wayland_io.zig
           symbols:
             - WaylandIo
-          owns_calls:
+          owns_calls: []
+          role: >-
+            Owns plain layer/display/surface values and fixed typed
+            transcripts only. It does not import wayland_c or call C.
+          does_not_own:
             - wayspot_layer_globals_init
             - wayspot_layer_globals_deinit
             - wayspot_layer_find_output
@@ -549,6 +618,35 @@ boundaries:
             - wayspot_wl_surface_commit
             - wayspot_wl_display_roundtrip
             - wayspot_wl_display_roundtrip_cleanup
+        - path: src/c/wayland_native.zig
+          symbols:
+            - WaylandIo.init
+            - WaylandIo.globalsPtr
+            - WaylandIo.surfacePtr
+            - WaylandIo.displayPtr
+            - WaylandIo.deinit
+          owns_calls:
+            - wayspot_layer_globals_init
+            - wayspot_layer_globals_deinit
+            - wayspot_layer_find_output
+            - wayspot_layer_get_surface_on_layer
+            - wayspot_layer_surface_add_listener
+            - wayspot_layer_surface_set_size
+            - wayspot_layer_surface_set_anchor
+            - wayspot_layer_surface_set_exclusive_zone
+            - wayspot_layer_surface_set_keyboard_interactivity
+            - wayspot_wl_surface_set_empty_input_region
+            - wayspot_wl_surface_commit
+            - wayspot_wl_display_roundtrip
+            - wayspot_layer_surface_ack_configure
+            - wayspot_wl_display_roundtrip_cleanup
+            - wayspot_layer_surface_destroy
+          role: >-
+            Owns the native wayspot_* wrapper calls for the SetupPlan's
+            paired layer setup.
+            Deferred buffer calls remain in sunglasses/surface until their
+            named seam. It never calls SDL_*; raw wl_* calls remain in
+            src/c/wayspot_layer_shell.c.
           raw_calls_owned_by:
             path: src/c/wayspot_layer_shell.c
             calls:
@@ -604,6 +702,20 @@ boundaries:
             wl_output, or layer-surface pointer for window/layer setup.
             Deferred image, SHM, buffer, and render code may retain its current
             C state until those named seams land.
+        - path: src/sunglasses/setup.zig
+          symbols:
+            - SetupPlan
+            - WindowCommand
+            - window_commands
+            - LayerCommand
+            - layer_commands
+            - SetupResult
+            - CleanupSession
+            - runTranscript
+          owns_calls: []
+          role: >-
+            Owns the fixed typed setup sequence shared by the native executor
+            and the pure transcript executor; it owns no native handle.
         - path: src/env/monitor.zig
           symbols:
             - queryMonitorsWith
@@ -613,13 +725,15 @@ boundaries:
       plain_transcript_types:
         - "SdlPropertyId: u32"
         - "SdlWindowId: u32"
-        - "SdlWaylandIds: { display_id: u32, surface_id: u32 }"
-        - "WindowSize: { width: u32, height: u32 }"
+        - "SdlWaylandHandleId: u32"
+        - "SdlWaylandIds: { display_id: SdlWaylandHandleId, surface_id: SdlWaylandHandleId }"
+        - "WindowSize: { width: i32, height: i32 }"
         - "WaylandDisplayId: u32"
         - "WaylandOutputId: u32"
         - "WaylandSurfaceId: u32"
         - "LayerSurfaceId: u32"
-        - "ConfigureFacts: { configured: bool, closed: bool, serial: u32, width: u32, height: u32 }"
+        - "LayerValue: raw value 3 only for the active sunglasses overlay"
+        - "ConfigureFacts: configured replies require closed=false, serial 1..u32, and width/height 1..2147483647; a closed reply requires serial/width/height zero"
         - "WindowTitle: owned bytes, 1..160, no embedded NUL (src/sunglasses/surface.zig:max_title_bytes)"
         - "MonitorName: owned bytes, 1..96, no embedded NUL"
         - "OutputName: owned bytes, 1..96, no embedded NUL"
@@ -628,59 +742,68 @@ boundaries:
         - "Every transcript ID is a nonzero local u32 token; zero is invalid and is never a native pointer."
         - "One transcript permits at most one live SdlPropertyId, SdlWindowId, WaylandDisplayId, WaylandSurfaceId, and LayerSurfaceId; WaylandOutputId values are 1..8."
         - "A token is published only after its create operation succeeds, is not reused while live, and is consumed by its matching destroy operation exactly once."
+        - "SDL property/window operations reject use after deinit; positive width and height are rejected before the transcript records them."
+        - "WaylandIo requires findOutput to publish the selected output before layer creation, installs one listener, and rejects repeated or skipped phases without consuming a transcript call."
+        - "The one sunglasses sequence is the SetupPlan's window commands, handle lookup, globals, output, layer value, setup, first commit/roundtrip, matching configure ack, second commit/roundtrip, layer destroy, cleanup roundtrip, and globals deinit; cleanup and reuse are rejected after deinit."
+        - "Layer operations after destroy are rejected; anchor is 1..15, closed configure facts are rejected, and ack serials must match the published first configure serial."
         - "Native SDL and Wayland pointers are separate adapter-internal values and never appear in transcript or product state."
       native_only_handoff: >-
-        WaylandIo receives an SdlWindowId. Native SdlWindowIo resolves it to
-        NativeWaylandHandles containing the borrowed SDL-provided wl_display
-        and wl_surface pointers. The handoff is adapter-internal only; it is
-        never stored in a transcript, SunglassesSurface, or product state;
-        transcript IDs remain local nonzero tokens, not pointer values.
-        SDL owns those borrowed handles, so WaylandIo never disconnects the
-        display or destroys the surface.
+        Native WaylandIo receives a mutable native SdlWindowIo and resolves it
+        to NativeWaylandHandles containing the borrowed SDL-provided
+        wl_display and wl_surface pointers. The handoff is adapter-internal
+        only; it is never stored in a transcript, SunglassesSurface, or
+        product state. Transcript IDs remain local nonzero tokens, not pointer
+        values. SDL owns those borrowed handles, so WaylandIo never
+        disconnects the display or destroys the surface.
       transcript_operations:
         sdl_window:
           - "property_create -> SdlPropertyId | SdlWindowFailed"
           - "set_title(SdlPropertyId, WindowTitle) -> void | SdlWindowFailed"
-          - "set_width(SdlPropertyId, u32) -> void | SdlWindowFailed"
-          - "set_height(SdlPropertyId, u32) -> void | SdlWindowFailed"
+          - "set_width(SdlPropertyId, i32) -> void | InvalidWindowSize/SdlWindowFailed/InvalidPropertyId"
+          - "set_height(SdlPropertyId, i32) -> void | InvalidWindowSize/SdlWindowFailed/InvalidPropertyId"
           - "set_hidden(SdlPropertyId, bool) -> void | SdlWindowFailed"
           - "set_custom_surface_role(SdlPropertyId, bool) -> void | SdlWindowFailed"
           - "set_create_egl_window(SdlPropertyId, bool) -> void | SdlWindowFailed"
           - "window_create(SdlPropertyId) -> SdlWindowId | SdlWindowFailed"
-          - "window_wayland_ids(SdlWindowId) -> SdlWaylandIds | WaylandSurfaceUnavailable"
-          - "window_resize(SdlWindowId, WindowSize) -> void | SdlWindowSizeFailed"
+          - "window_properties(SdlWindowId) -> SdlPropertyId | SdlWindowPropertyMissing/InvalidPropertyId"
+          - "wayland_display_pointer(SdlPropertyId) -> SdlWaylandHandleId | WaylandSurfaceUnavailable/InvalidWaylandIds"
+          - "wayland_surface_pointer(SdlPropertyId) -> SdlWaylandHandleId | WaylandSurfaceUnavailable/InvalidWaylandIds"
+          - "window_resize(SdlWindowId, WindowSize) -> void | InvalidWindowSize/SdlWindowSizeFailed/InvalidWindowId"
           - "property_destroy(SdlPropertyId) -> void"
           - "window_destroy(SdlWindowId) -> void"
         wayland_layer:
-          - "globals_init(SdlWaylandIds.display_id) -> void | LayerShellRegistryFailed/LayerShellRegistryListenerFailed/LayerShellRoundtripFailed/LayerShellMissing/LayerShellCompositorMissing/LayerShellShmMissing"
-          - "find_output(MonitorName) -> WaylandOutputId | LayerShellOutputMissing"
-          - "create_layer_surface(SdlWaylandIds.surface_id, WaylandOutputId, u32, LayerNamespace) -> LayerSurfaceId | LayerShellSurfaceCreateFailed"
-          - "add_listener(LayerSurfaceId) -> void"
-          - "set_size/set_anchor/set_exclusive_zone/set_keyboard_interactivity(LayerSurfaceId, plain value) -> void"
-          - "set_empty_input_region(SdlWaylandIds.surface_id) -> void | LayerShellInputRegionFailed/LayerShellCompositorMissing/LayerShellUnexpectedResult"
-          - "commit(SdlWaylandIds.surface_id) -> void"
-          - "roundtrip(SdlWaylandIds.display_id) -> ConfigureFacts | LayerShellConfigureFailed"
-          - "ack_configure(LayerSurfaceId, u32) -> void"
-          - "destroy_layer_surface(LayerSurfaceId) -> void"
-          - "roundtrip_cleanup(SdlWaylandIds.display_id) -> void"
-          - "globals_deinit(SdlWaylandIds.display_id) -> void"
+          - "globals_init(WaylandDisplayId) -> void | WaylandGlobalsAlreadyInitialized/WaylandIoDeinitialized/LayerShellRegistryFailed/LayerShellRegistryListenerFailed/LayerShellRoundtripFailed/LayerShellMissing/LayerShellCompositorMissing/LayerShellShmMissing"
+          - "find_output(MonitorName) -> WaylandOutputId | WaylandGlobalsNotInitialized/WaylandProtocolOutOfOrder/WaylandLayerDestroyed/LayerShellOutputMissing"
+          - "create_layer_surface(WaylandSurfaceId, WaylandOutputId, LayerValue, LayerNamespace) -> LayerSurfaceId | InvalidWaylandLayerValue/WaylandOutputNotSelected/WaylandProtocolOutOfOrder/WaylandLayerAlreadyCreated/WaylandLayerDestroyed/LayerShellSurfaceCreateFailed"
+          - "add_listener(LayerSurfaceId) -> void | WaylandLayerNotCreated/WaylandLayerDestroyed/WaylandProtocolOutOfOrder"
+          - "set_size/set_anchor/set_exclusive_zone/set_keyboard_interactivity(LayerSurfaceId, plain value) -> void | WaylandLayerDestroyed/WaylandProtocolOutOfOrder/InvalidWaylandAnchor/SdlWindowSizeFailed"
+          - "set_empty_input_region(WaylandSurfaceId) -> void | WaylandLayerNotCreated/WaylandLayerDestroyed/WaylandProtocolOutOfOrder/LayerShellInputRegionFailed"
+          - "commit(WaylandSurfaceId) -> void | WaylandLayerNotCreated/WaylandLayerDestroyed/WaylandProtocolOutOfOrder"
+          - "roundtrip(WaylandDisplayId) -> ConfigureFacts | LayerShellConfigureFailed/LayerShellClosed/InvalidConfigureFacts/WaylandProtocolOutOfOrder"
+          - "ack_configure(LayerSurfaceId, u32) -> void | InvalidConfigureFacts/WaylandConfigureSerialMismatch/WaylandLayerDestroyed/WaylandProtocolOutOfOrder"
+          - "destroy_layer_surface(LayerSurfaceId) -> void | WaylandLayerNotCreated/WaylandLayerDestroyed"
+          - "roundtrip_cleanup(WaylandDisplayId) -> void | WaylandCleanupOutOfOrder"
+          - "globals_deinit(WaylandDisplayId) -> void | WaylandCleanupOutOfOrder/WaylandIoDeinitialized"
       success_order:
         - "Create properties and apply the six typed setters in their fixed transcript order."
         - "Create the SDL window, then destroy the property object exactly once."
-        - "Resolve borrowed Wayland ids, initialize globals, find the output, and create the layer surface."
-        - "Install the listener, set layer values, set the empty input region, commit, and roundtrip until configured or closed."
+        - "Resolve and retain the returned SdlWaylandIds, then pass its display_id and surface_id through globals, output, layer, commit, roundtrip, and cleanup calls."
+        - "Install the listener, set layer values, set the empty input region, commit, and roundtrip until configured; closed facts are rejected and trigger rollback."
         - "Acknowledge configure, resize the SDL window, commit, and roundtrip again."
+        - "The native first and second roundtrips validate the same ConfigureFacts bounds as the pure transcript; the second commit clears the prior facts before waiting for a fresh reply."
         - "Publish only plain ids after every required step succeeds."
       rollback_order:
         - "A failed property setter destroys the new property object and publishes no window."
         - "A failed window creation destroys the property object and publishes no window."
         - "A resize failure leaves the SDL window owned and available for caller cleanup."
-        - "A missing Wayland property, globals failure, output failure, layer creation failure, input-region failure, closed configure, or roundtrip failure destroys only newly created layer state, then deinitializes partial globals."
-        - "The sunglasses consumer destroys the SDL window after Wayland rollback; borrowed SDL display and surface handles are never disconnected or destroyed by WaylandIo."
+        - "A missing Wayland property, globals failure, output failure, layer creation failure, input-region failure, closed configure, or roundtrip failure returns the newly created owners in CleanupSession until retryCleanup completes."
+        - "CleanupSession is the one owner for the SDL window and partial Wayland state; borrowed SDL display and surface handles are never disconnected or destroyed by WaylandIo."
       cleanup_order:
         - "Success deinit destroys the layer surface, performs roundtrip cleanup, deinitializes globals, then destroys the SDL window."
         - "Each SDL property and window id is destroyed exactly once."
         - "Each Wayland layer id and initialized global resource is destroyed exactly once in reverse creation order."
+        - "runTranscript returns SetupResult.failure with CleanupSession when cleanup fails; retryCleanup retains pending state, retries the failed operation, and does not issue a duplicate successful destroy."
+        - "Native Wayland deinit performs layer destroy and roundtrip cleanup only when layer_surface was published; a globals-only failure deinitializes globals without a cleanup roundtrip."
         - "Image, SHM, buffer, render, texture, clipboard, event, and standalone display cleanup is outside this slice."
       errors:
         sdl:
@@ -702,18 +825,31 @@ boundaries:
           - LayerShellConfigureFailed
           - LayerShellClosed
           - LayerShellUnexpectedResult
+          - WaylandProtocolOutOfOrder
+          - WaylandOutputNotSelected
+          - WaylandConfigureSerialMismatch
+          - WaylandCleanupOutOfOrder
+          - InvalidConfigureFacts
       unit_gates:
         - "Test pure SDL property/result mapping, plain-id publication, bounds, and every listed SDL/Wayland error without C handles."
-        - "Test configure success/closed/roundtrip mapping and exact reverse cleanup state transitions."
+        - "Test SDL live guards, foreign property transcripts, pre-record dimension rejection, and exact property/window cleanup."
+        - "Test native SDL resize rejects non-positive dimensions before SDL_SetWindowSize without creating a native window."
+        - "Test Wayland globals/layer ownership, repeated and out-of-order cleanup, post-destroy rejection, anchor bounds, configure bounds, and exact reverse cleanup state transitions."
       fuzz_gates:
         - "Fuzz bounded names, sizes, ids, layer values, configure facts, typed result codes, and fixed transcript lengths; assert termination, no invalid id publication, and no double cleanup."
       simulation_gates:
-        - "Run one exact sunglasses transcript for property creation/setters, window creation, property destruction, Wayland setup/configure, resize, deinit, and window destruction."
+        - "Run one ordered sunglasses setup protocol: property creation/setters, window creation, immediate property destruction, plain Wayland id handoff, Wayland setup/configure, resize, layer cleanup, globals cleanup, and window destruction."
         - "Run setter, window-create, property-lookup, globals, output, layer, input-region, closed-configure, roundtrip, and resize failures; assert exact operation order and reverse cleanup."
         - "Assert the transcript contains only plain ids and values, native handles never enter transcript state, borrowed SDL display/surface handles are not disconnected or destroyed, and no deferred image/SHM/render/event operation is called."
+        - "Run sunglasses_setup.runTranscript with the same fixed SetupPlan and command sequences consumed by native setup; assert split SDL property/pointer calls, layer value 3, ordered Wayland calls, and reverse cleanup."
+        - "Run runTranscript-driven property-set, output, resize, configure-roundtrip, cleanup-flush, globals-deinit, and layer-destroy failures; assert SetupResult.failure retains CleanupSession, retryCleanup consumes the bounded repeated operation, and cleanup finishes exactly once."
     current_owner_paths:
-      - "src/env/monitor.zig:queryMonitors/queryMonitorsWith/monitorId/waylandOutput/windowWaylandHandles"
-      - "src/c/sdl_io.zig:DisplayName/DisplayBounds/DisplayFacts/DisplayList/DisplayTranscript/SdlDisplayIo/queryDisplaysNative/queryNameNative/queryBoundsNative/queryScaleNative"
+      - "src/env/monitor.zig:queryMonitors/queryMonitorsWith/monitorId"
+      - "src/c/sdl_io.zig:DisplayName/DisplayBounds/DisplayFacts/DisplayList/DisplayTranscript/SdlDisplayIo/SdlWindowIo/SdlWindowPropertyIo"
+      - "src/c/sdl_native.zig:NativeWaylandHandles/displaySource/queryDisplays/queryName/queryBounds/queryScale/displayNameFromSentinel/SdlWindowPropertyIo/SdlWindowIo"
+      - "src/c/wayland_io.zig:WaylandIo/WaylandTranscript/WaylandCall/WaylandReply"
+      - "src/c/wayland_native.zig:WaylandIo.init/WaylandIo.globalsPtr/WaylandIo.surfacePtr/WaylandIo.displayPtr/WaylandIo.deinit"
+      - "src/sunglasses/setup.zig:SetupPlan/WindowCommand/window_commands/LayerCommand/layer_commands/SetupResult/CleanupSession/runTranscript/CleanupSession.retryCleanup"
       - "src/gui/surface.zig:run; Surface.init/deinit/handleEvent/render"
       - "src/notification/banner.zig:show/render/eventLoop/applySurfaceScale/setDrawColor"
       - "src/picker/icon_diag.zig:writeReport"
@@ -730,15 +866,42 @@ boundaries:
       - "src/c/wayspot_layer_shell.c:wayspot_wayland_connect/wayspot_shm_buffer_create/wayspot_layer_globals_init"
     current_direct_calls:
       src/env/monitor.zig:
-        - SDL_GetDisplayProperties
-        - SDL_GetPointerProperty
-        - SDL_GetWindowProperties
-      src/c/sdl_io.zig:
+        []
+      src/c/sdl_io.zig: []
+      src/c/sdl_native.zig:
         - SDL_GetDisplays
         - SDL_free
         - SDL_GetDisplayName
         - SDL_GetDisplayBounds
         - SDL_GetDisplayContentScale
+        - SDL_CreateProperties
+        - SDL_DestroyProperties
+        - SDL_SetStringProperty
+        - SDL_SetNumberProperty
+        - SDL_SetBooleanProperty
+        - SDL_CreateWindowWithProperties
+        - SDL_GetWindowProperties
+        - SDL_GetPointerProperty
+        - SDL_SetWindowSize
+        - SDL_DestroyWindow
+      src/c/wayland_io.zig:
+        []
+      src/c/wayland_native.zig:
+        - wayspot_layer_globals_init
+        - wayspot_layer_globals_deinit
+        - wayspot_layer_find_output
+        - wayspot_layer_get_surface_on_layer
+        - wayspot_layer_surface_add_listener
+        - wayspot_layer_surface_set_size
+        - wayspot_layer_surface_set_anchor
+        - wayspot_layer_surface_set_exclusive_zone
+        - wayspot_layer_surface_set_keyboard_interactivity
+        - wayspot_wl_surface_set_empty_input_region
+        - wayspot_wl_surface_commit
+        - wayspot_wl_display_roundtrip
+        - wayspot_layer_surface_ack_configure
+        - wayspot_wl_display_roundtrip_cleanup
+        - wayspot_layer_surface_destroy
       src/gui/surface.zig:
         - SDL_Init
         - SDL_Quit
@@ -816,15 +979,12 @@ boundaries:
         - SDL_PollEvent
         - SDL_PushEvent
       src/sunglasses/surface.zig:
-        - SDL_CreateWindowWithProperties
-        - SDL_DestroyWindow
-        - SDL_CreateProperties
-        - SDL_DestroyProperties
-        - SDL_SetStringProperty
-        - SDL_SetNumberProperty
-        - SDL_SetBooleanProperty
-        - SDL_GetWindowProperties
-        - SDL_GetPointerProperty
+        - wayspot_shm_buffer_create
+        - wayspot_shm_buffer_destroy
+        - wayspot_wl_surface_attach_buffer
+        - wayspot_wl_surface_detach_buffer
+        - wayspot_wl_surface_commit
+        - wayspot_wl_display_roundtrip_cleanup
         - SDL_LoadPNG
         - SDL_LoadBMP
         - SDL_ConvertSurface
@@ -832,7 +992,6 @@ boundaries:
         - SDL_CreateSurfaceFrom
         - SDL_BlitSurfaceScaled
         - SDL_DestroySurface
-        - SDL_SetWindowSize
       src/wallpaper/loop.zig:
         - SDL_SetHint
         - SDL_Init
@@ -918,12 +1077,22 @@ boundaries:
           - SdlDisplayIo.queryName
           - SdlDisplayIo.queryBounds
           - SdlDisplayIo.queryScale
-        deferred_operations:
-          - SdlDisplayIo.queryProperties
+          - SdlWindowPropertyIo.create/setTitle/setWidth/setHeight/setHidden/setCustomSurfaceRole/setCreateEglWindow/deinit
+          - SdlWindowIo.create/waylandIds/resize/deinit; waylandIds expands to three typed calls
+            window_properties/wayland_display_pointer/wayland_surface_pointer
+          - SetupPlan/window_commands/layer_commands/SetupResult/CleanupSession/runTranscript/CleanupSession.retryCleanup
       - path: src/c/wayland_io.zig
         module: wayland_io
-        planned_design: true
-        operator_decision_required: true
+        planned_design: false
+        implemented: true
+        operator_decision_required: false
+        implemented_operations:
+          - WaylandIo.globalsInit
+          - WaylandIo.findOutput
+          - WaylandIo.createLayerSurface
+          - WaylandIo.addListener/setSize/setAnchor/setExclusiveZone/setKeyboardInteractivity
+          - WaylandIo.setEmptyInputRegion/commit/roundtrip/ackConfigure
+          - WaylandIo.destroyLayerSurface/roundtripCleanup/globalsDeinit
     mock_contract:
       native_calls: current_direct_calls
       targets:
@@ -945,24 +1114,24 @@ boundaries:
               input_type: DisplayId
               result_type: f64
               error_set: [SdlMonitorScaleMissing]
-            - operation: SdlDisplayIo.queryProperties
-              status: deferred
-              input_type: DisplayId
-              result_type: DisplayProperties
-              error_set: [SdlMonitorPropertyMissing]
             - operation: SdlRuntimeIo.init/quit/setHint/startTextInput/stopTextInput
               status: deferred
               input_type: SdlRuntimeRequest
               result_type: SdlRuntimeResult
               error_set: [SdlInitFailed, SdlHintFailed, SdlTextInputFailed]
-            - operation: SdlWindowIo.create/destroy/show/raise/size/sync
-              input_type: WindowSpec or WindowHandle
-              result_type: WindowHandle or bool or void
-              error_set: [SdlWindowFailed, SdlShowFailed, SdlResizeFailed]
-            - operation: SdlWindowPropertyIo.create/destroy/set/get
-              input_type: WindowPropertyRequest or WindowHandle
-              result_type: PropertySetResult or WaylandHandles
-              error_set: [SdlWindowFailed, SdlWindowPropertyMissing, WaylandSurfaceUnavailable]
+            - operation: SdlWindowIo.create/waylandIds/resize/deinit
+              input_type: "SdlPropertyId, SdlWindowId, or WindowSize"
+              result_type: "SdlWindowId, SdlWaylandIds, or void"
+              error_set: [SdlWindowFailed, InvalidPropertyId, InvalidWindowId, InvalidWaylandIds, InvalidWindowSize, SdlWindowSizeFailed]
+              expansion: >-
+                waylandIds records window_properties, then
+                wayland_display_pointer and wayland_surface_pointer with the
+                same borrowed SdlPropertyId; nativeWaylandHandles is the
+                native pointer adapter for the same three external calls.
+            - operation: SdlWindowPropertyIo.create/setTitle/setWidth/setHeight/setHidden/setCustomSurfaceRole/setCreateEglWindow/deinit
+              input_type: "WindowTitle, SdlPropertyId, i32, or bool"
+              result_type: "SdlPropertyId or void"
+              error_set: [SdlWindowFailed, InvalidPropertyId, InvalidWindowTitle, InvalidWindowSize]
             - operation: SdlEventIo.wait/poll/push/ticks
               input_type: SdlEvent or EventTimeoutMs or void
               result_type: SdlEvent or bool or u64
@@ -989,35 +1158,41 @@ boundaries:
             SDL, and clipboard/display allocations receive one free record.
         - path: src/c/wayland_io.zig
           mock_call_transcript:
-            - operation: WaylandDisplayIo.connect/disconnect/roundtrip
-              input_type: WaylandDisplayHandle or void
-              result_type: WaylandDisplayHandle or i32 or void
-              error_set: [WaylandDisplayUnavailable, LayerShellRoundtripFailed]
-            - operation: WaylandRegistryIo.bind/listen/destroy
-              input_type: RegistryHandle or RegistryBindRequest
-              result_type: RegistryBinding or void
-              error_set: [LayerShellRegistryFailed, LayerShellRegistryListenerFailed]
-            - operation: LayerShellIo.create/configure/destroy
-              input_type: LayerGlobals or LayerSurfaceRequest
-              result_type: LayerSurfaceHandle or ConfigureState or void
-              error_set: [LayerShellMissing, LayerShellSurfaceCreateFailed, LayerShellConfigureFailed]
-            - operation: WaylandBufferIo.create/attach/detach/destroy
-              input_type: LayerGlobals or BufferHandle or BufferAttach
-              result_type: BufferHandle or void
-              error_set: [WallpaperInvalidBufferSize, WallpaperMemfdFailed, WallpaperTruncateFailed, WallpaperMmapFailed, WallpaperShmPoolFailed, WallpaperWlBufferFailed, SunglassesInvalidBufferSize, SunglassesMemfdFailed, SunglassesTruncateFailed, SunglassesMmapFailed, SunglassesShmPoolFailed, SunglassesWlBufferFailed]
-            - operation: WaylandMemoryIo.createMap/unmap/close
-              input_type: BufferByteLength or FileDescriptor
-              result_type: MappedBytes or void
-              error_set: [WallpaperMemfdFailed, WallpaperTruncateFailed, WallpaperMmapFailed, SunglassesMemfdFailed, SunglassesTruncateFailed, SunglassesMmapFailed]
+            - operation: WaylandIo.globalsInit/globalsDeinit
+              input_type: WaylandDisplayId
+              result_type: void
+              error_set: [InvalidWaylandId, WaylandGlobalsAlreadyInitialized, WaylandCleanupOutOfOrder, WaylandIoDeinitialized, LayerShellRegistryFailed, LayerShellRegistryListenerFailed, LayerShellRoundtripFailed, LayerShellMissing, LayerShellCompositorMissing, LayerShellShmMissing]
+            - operation: WaylandIo.findOutput
+              input_type: DisplayName
+              result_type: WaylandOutputId
+              error_set: [WaylandGlobalsNotInitialized, WaylandProtocolOutOfOrder, WaylandLayerAlreadyCreated, WaylandLayerDestroyed, WaylandOutputNotSelected, InvalidWaylandOutput, LayerShellOutputMissing]
+            - operation: WaylandIo.createLayerSurface/destroyLayerSurface
+              input_type: WaylandSurfaceId or WaylandOutputId or LayerValue or LayerNamespace or LayerSurfaceId
+              result_type: LayerSurfaceId or void
+              error_set: [WaylandGlobalsNotInitialized, WaylandProtocolOutOfOrder, WaylandLayerAlreadyCreated, WaylandLayerNotCreated, WaylandLayerDestroyed, WaylandOutputNotSelected, InvalidWaylandLayerValue, InvalidWaylandId, InvalidWaylandOutput, InvalidLayerSurface, LayerShellSurfaceCreateFailed]
+            - operation: WaylandIo.addListener/setSize/setAnchor/setExclusiveZone/setKeyboardInteractivity/setEmptyInputRegion/commit/ackConfigure
+              input_type: LayerSurfaceId or WaylandSurfaceId or WindowSize or u32 or i32 or bool
+              result_type: void
+              error_set: [WaylandGlobalsNotInitialized, WaylandProtocolOutOfOrder, WaylandLayerNotCreated, WaylandLayerDestroyed, InvalidWaylandId, InvalidLayerSurface, InvalidWaylandAnchor, InvalidConfigureFacts, WaylandConfigureSerialMismatch, SdlWindowSizeFailed, LayerShellInputRegionFailed, LayerShellCompositorMissing, LayerShellUnexpectedResult]
+            - operation: WaylandIo.roundtrip/roundtripCleanup
+              input_type: WaylandDisplayId
+              result_type: ConfigureFacts or void
+              error_set: [WaylandGlobalsNotInitialized, WaylandProtocolOutOfOrder, WaylandLayerNotCreated, WaylandLayerDestroyed, WaylandCleanupOutOfOrder, InvalidWaylandId, InvalidConfigureFacts, LayerShellClosed, LayerShellConfigureFailed]
           cleanup_record: >-
-            A failed layer or buffer operation destroys only handles created by
-            that transcript; successful deinit destroys layer, pool, buffer,
-            mapping, output, and display handles once in reverse ownership order.
+            SetupResult.failure returns CleanupSession with optional
+            SdlWaylandIds, the live window, and pending Wayland state. The
+            caller invokes retryCleanup until the failed operation succeeds;
+            successful setup destroys the layer before roundtrip cleanup and
+            globals deinit. Every local id is consumed by its owner and no
+            transcript stores a native pointer.
     exact_bounds:
       - "WAYSPOT_LAYER_MAX_OUTPUTS is 8; output_count never exceeds 8."
       - "WAYSPOT_LAYER_MAX_OUTPUT_NAME is 96; one terminating byte is retained by the C slot."
       - "The env monitor bound is src/env/monitor.zig:max_monitors = 8."
       - "The SDL display adapter copies at most 8 display ids and 96 name bytes; one display transcript has at most 26 operations."
+      - "The SDL window/property transcript has at most 32 operations; one title has 1..160 bytes and one window/property id is the nonzero token 1."
+      - "Window property width and height are positive i32 values and are rejected before transcript publication; the Wayland anchor mask is 1..15."
+      - "A configured reply has serial 1..u32 and width/height 1..2147483647; a closed reply has zero serial and dimensions."
       - "Display names are non-empty, contain no embedded NUL, and have at most 96 bytes; display scales are finite and strictly positive or absent only for the explicit SDL scale-missing error."
       - "The C buffer accepts width and height greater than zero, rejects multiplication overflow, and stores stride * height bytes."
       - "One SDL_Event is the input/output unit for wait, poll, and push; shutdown uses the exact SDL quit, terminating, and window-close event types."
@@ -1045,6 +1220,15 @@ boundaries:
         LayerShellClosed, LayerShellUnexpectedResult,
         WallpaperImageUnexpectedResult, and SunglassesBufferUnexpectedResult.
       - >-
+        The pure Wayland transcript additionally rejects invalid lifecycle and
+        fact use with WaylandGlobalsNotInitialized,
+        WaylandGlobalsAlreadyInitialized, WaylandLayerNotCreated,
+        WaylandLayerAlreadyCreated, WaylandLayerDestroyed,
+        WaylandCleanupOutOfOrder, WaylandIoDeinitialized,
+        InvalidWaylandAnchor, InvalidConfigureFacts,
+        InvalidWaylandLayerValue, WaylandProtocolOutOfOrder, WaylandOutputNotSelected, and
+        WaylandConfigureSerialMismatch.
+      - >-
         The wallpaper and sunglasses image mapping is exhaustive:
         WallpaperUnsupportedImageExtension, WallpaperImageLoadFailed,
         WallpaperImageConvertFailed, WallpaperImageTargetFailed,
@@ -1061,22 +1245,21 @@ boundaries:
         SunglassesMmapFailed, SunglassesShmPoolFailed, and
         SunglassesWlBufferFailed.
     exact_cleanup:
-      - "Surface init destroys a created renderer/window and calls SDL_Quit on later failure."
-      - "Surface deinit stops text input, destroys renderer/window, and calls SDL_Quit once."
-      - "Every created Wayland layer, SHM pool, buffer, mmap region, display, and output is destroyed or disconnected exactly once on success and failure."
-      - "A failed buffer attach destroys only the newly created buffer; the previously attached buffer remains owned until replacement or deinit."
+      - "Native SDL property cleanup follows failed setters and window cleanup follows failed layer setup; each native object is destroyed once."
+      - "Native Wayland cleanup destroys the layer, flushes, and deinitializes globals; borrowed SDL display and surface handles are never disconnected or destroyed."
+      - "The pure transcript completes property, window, layer, and globals cleanup exactly once; a failed cleanup remains in CleanupSession and a retry consumes only the repeated failed operation."
     pure_internal_paths:
       - "src/gui/surface.zig:handleEvent/routeQueryForSelection/queryMouseByteOffset"
       - "src/wallpaper/surface.zig:imageKind/coverSourceRect/positiveRect/mapWallpaperImageResult"
       - "src/sunglasses/surface.zig:imageKind/coverSourceRect/positiveRect/mapSunglassesBufferResult"
     unit_gates:
-      - "Test bounded display count, name, size, scale, and monitor-id mapping with exact values; test event shutdown classification, geometry, image-kind selection, and every remaining C result mapping with exact values."
+      - "Test bounded display count, name, size, scale, monitor-id mapping, window/property result mapping, and layer result mapping with exact plain values."
     fuzz_gates:
-      - "Fuzz bounded display counts, names, scales, event values, image path suffix bytes, geometry dimensions, and remaining C result values; assert termination and no owned-handle mutation."
+      - "Fuzz bounded display counts, names, scales, ids, sizes, configure facts, and fixed transcript lengths; assert termination and no invalid token publication."
     simulation_gates:
       - "Drive queryMonitorsWith through a DisplayTranscript for valid ids, null and invalid SDL lists, name/size/scale failures, out-of-range ids, exact SDL_free order, and no partial published list."
-      - "Drive Surface, wallpaper LayerShellRole, and sunglasses LayerShellRole through SdlRuntimeIo, SdlDisplayIo, SdlWindowIo, SdlWindowPropertyIo, SdlEventIo, SdlRenderIo, SdlTextureIo, SdlImageIo, SdlClipboardIo, WaylandDisplayIo, WaylandRegistryIo, LayerShellIo, WaylandBufferIo, and WaylandMemoryIo mocks for create, configure, draw, replace, close, and every listed failure."
-      - "Assert exact operation order, returned errors, new-buffer rollback, old-buffer retention, and one cleanup for every created handle."
+      - "Run src/c/io_simulation_test.zig for exact SDL property/window success and failure, the ordered Wayland sunglasses protocol through both configure rounds, returned CleanupSession retry, setup failure, reverse cleanup, and plain-id-only transcripts."
+      - "Compile/link src/c/native_io_check.zig separately; its explicit table proves every implemented native display callback and SDL/Wayland setup entry point is analyzed and linked without invoking native code. Surface image, SHM, render, event, and wallpaper paths remain deferred."
   - order: 2
     name: hyprland_ipc_wire
     status: open
@@ -1931,7 +2114,6 @@ boundaries:
     status: open
     current_owner_paths:
       - "src/picker/text.zig:TextEngine.init/deinit/draw/measureRangeXOffsets/loadPrimaryFace/setFontSize/shape/measure/rasterize/glyphBounds"
-      - "src/c/text.h:FT_Library/FT_Face/FT_GlyphSlot/FT_Bitmap/hb_font_t/hb_buffer_t"
     current_direct_calls:
       freetype:
         - FT_Init_FreeType

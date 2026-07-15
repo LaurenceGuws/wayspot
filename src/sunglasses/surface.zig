@@ -3,14 +3,15 @@
 const std = @import("std");
 const monitor_facts = @import("wayspot_env").monitor;
 const sunglasses_state = @import("../sunglasses/state.zig");
+const sdl_io = @import("sdl_io");
+const sdl_native = @import("sdl_native");
+const sunglasses_setup = @import("sunglasses_setup");
+const wayland_native = @import("wayland_native");
 
 const c = @import("sdl_c");
 
 pub const class_name = "wayspot-sunglasses";
-const max_title_bytes: u32 = 160;
-const layer_namespace = "wayspot-sunglasses";
-const anchor_all_edges: u32 = 1 | 2 | 4 | 8;
-const layer_overlay: u32 = 3;
+const max_title_bytes: u32 = sdl_io.max_window_title_bytes;
 const tint_max_alpha: u32 = 120;
 const dim_max_alpha: u32 = 220;
 const max_image_path_z_bytes: u32 = sunglasses_state.max_image_path_bytes + 1;
@@ -23,7 +24,7 @@ const ImageKind = enum {
 };
 
 pub const SunglassesSurface = struct {
-    window: *c.SDL_Window,
+    window: sdl_native.SdlWindowIo,
     layer: LayerShellRole,
     monitor: monitor_facts.Monitor,
 
@@ -31,22 +32,14 @@ pub const SunglassesSurface = struct {
     pub fn init(monitor: monitor_facts.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !SunglassesSurface {
         var title_buf: [max_title_bytes:0]u8 = undefined;
         const window_title = try writeTitle(&title_buf, monitor.nameText());
+        const title = try sdl_io.WindowTitle.init(window_title[0..window_title.len]);
+        const monitor_name = try sdl_io.DisplayName.init(monitor.nameText());
+        const size = try sdl_io.WindowSize.init(monitor.size.width, monitor.size.height);
+        const plan = sunglasses_setup.SetupPlan.init(monitor_name, title, size);
+        var window = try createNativeWindow(plan);
+        errdefer window.deinit();
 
-        const props = c.SDL_CreateProperties();
-        if (props == 0) return error.SdlWindowFailed;
-        defer c.SDL_DestroyProperties(props);
-
-        if (!c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, window_title.ptr)) return error.SdlWindowFailed;
-        if (!c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, monitor.size.width)) return error.SdlWindowFailed;
-        if (!c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, monitor.size.height)) return error.SdlWindowFailed;
-        if (!c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_HIDDEN_BOOLEAN, true)) return error.SdlWindowFailed;
-        if (!c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_WAYLAND_SURFACE_ROLE_CUSTOM_BOOLEAN, true)) return error.SdlWindowFailed;
-        if (!c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_WAYLAND_CREATE_EGL_WINDOW_BOOLEAN, true)) return error.SdlWindowFailed;
-
-        const window = c.SDL_CreateWindowWithProperties(props) orelse return error.SdlWindowFailed;
-        errdefer c.SDL_DestroyWindow(window);
-
-        var layer = try LayerShellRole.init(window, monitor);
+        var layer = try LayerShellRole.init(&window, plan);
         errdefer layer.deinit();
 
         try layer.drawStateSurface(monitor, monitor_state);
@@ -60,8 +53,7 @@ pub const SunglassesSurface = struct {
 
     pub fn deinit(self: *SunglassesSurface) void {
         self.layer.deinit();
-        c.SDL_DestroyWindow(self.window);
-        self.layer.flushDisplay();
+        self.window.deinit();
     }
 
     pub fn redraw(self: *SunglassesSurface, monitor_state: ?*const sunglasses_state.MonitorState) !void {
@@ -69,63 +61,33 @@ pub const SunglassesSurface = struct {
     }
 };
 
+fn createNativeWindow(plan: sunglasses_setup.SetupPlan) !sdl_native.SdlWindowIo {
+    var properties: ?sdl_native.SdlWindowPropertyIo = null;
+    errdefer if (properties) |*value| value.deinit();
+    var window: ?sdl_native.SdlWindowIo = null;
+    for (sunglasses_setup.window_commands) |command| switch (command) {
+        .property_create => properties = try sdl_native.SdlWindowPropertyIo.create(),
+        .set_title => try properties.?.setTitle(plan.title),
+        .set_width => try properties.?.setWidth(plan.size.width),
+        .set_height => try properties.?.setHeight(plan.size.height),
+        .set_hidden => try properties.?.setHidden(true),
+        .set_custom_surface_role => try properties.?.setCustomSurfaceRole(true),
+        .set_create_egl_window => try properties.?.setCreateEglWindow(true),
+        .window_create => window = try sdl_native.SdlWindowIo.create(&properties.?),
+        .property_destroy => properties.?.deinit(),
+    };
+    return window orelse unreachable;
+}
+
 const LayerShellRole = struct {
-    globals: c.struct_wayspot_layer_globals = undefined,
-    layer_surface: ?*c.struct_zwlr_layer_surface_v1 = null,
-    wl_surface: ?*c.struct_wl_surface = null,
-    display: ?*c.struct_wl_display = null,
+    native: wayland_native.WaylandIo,
     attached_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 },
     attached_buffer_created: bool = false,
 
-    fn init(window: *c.SDL_Window, monitor: monitor_facts.Monitor) !LayerShellRole {
-        const props = c.SDL_GetWindowProperties(window);
-        if (props == 0) return error.SdlWindowFailed;
-
-        const display_ptr = c.SDL_GetPointerProperty(props, c.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, null) orelse return error.WaylandSurfaceUnavailable;
-        const surface_ptr = c.SDL_GetPointerProperty(props, c.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, null) orelse return error.WaylandSurfaceUnavailable;
-        const display: *c.struct_wl_display = @ptrCast(@alignCast(display_ptr));
-        const wl_surface: *c.struct_wl_surface = @ptrCast(@alignCast(surface_ptr));
-
-        var role = LayerShellRole{};
-        role.display = display;
-        role.wl_surface = wl_surface;
-        try mapLayerGlobalsResult(c.wayspot_layer_globals_init(&role.globals, display));
-        errdefer c.wayspot_layer_globals_deinit(&role.globals);
-
-        var monitor_name_buf: [monitor_facts.max_monitor_name_bytes:0]u8 = undefined;
-        const monitor_name = try std.fmt.bufPrintZ(&monitor_name_buf, "{s}", .{monitor.nameText()});
-        const output = c.wayspot_layer_find_output(&role.globals, monitor_name.ptr) orelse return error.LayerShellOutputMissing;
-        const layer_surface = c.wayspot_layer_get_surface_on_layer(&role.globals, wl_surface, output, layer_overlay, layer_namespace) orelse return error.LayerShellSurfaceCreateFailed;
-        role.layer_surface = layer_surface;
-        errdefer role.destroyLayerSurface();
-
-        var configure_state = c.struct_wayspot_layer_configure_state{
-            .configured = 0,
-            .closed = 0,
-            .serial = 0,
-            .width = 0,
-            .height = 0,
+    fn init(window: *sdl_native.SdlWindowIo, plan: sunglasses_setup.SetupPlan) !LayerShellRole {
+        return .{
+            .native = try wayland_native.WaylandIo.init(window, plan),
         };
-        c.wayspot_layer_surface_add_listener(layer_surface, &configure_state);
-        c.wayspot_layer_surface_set_size(layer_surface, @intCast(monitor.size.width), @intCast(monitor.size.height));
-        c.wayspot_layer_surface_set_anchor(layer_surface, anchor_all_edges);
-        c.wayspot_layer_surface_set_exclusive_zone(layer_surface, -1);
-        c.wayspot_layer_surface_set_keyboard_interactivity(layer_surface, 0);
-        try mapLayerInputRegionResult(c.wayspot_wl_surface_set_empty_input_region(&role.globals, wl_surface));
-        c.wayspot_wl_surface_commit(wl_surface);
-
-        while (configure_state.configured == 0) {
-            if (configure_state.closed != 0) {
-                return error.LayerShellClosed;
-            }
-            if (c.wayspot_wl_display_roundtrip(display) < 0) return error.LayerShellConfigureFailed;
-        }
-
-        c.wayspot_layer_surface_ack_configure(layer_surface, configure_state.serial);
-        if (!c.SDL_SetWindowSize(window, monitor.size.width, monitor.size.height)) return error.SdlWindowSizeFailed;
-        c.wayspot_wl_surface_commit(wl_surface);
-        if (c.wayspot_wl_display_roundtrip(display) < 0) return error.LayerShellConfigureFailed;
-        return role;
     }
 
     fn drawStateSurface(self: *LayerShellRole, monitor: monitor_facts.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !void {
@@ -142,8 +104,9 @@ const LayerShellRole = struct {
         var path_buf: [max_image_path_z_bytes:0]u8 = undefined;
         const image_path = try writeImagePath(&path_buf, monitor_state.imagePath());
         var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
+        const globals = self.native.globalsPtr() orelse return error.LayerShellShmMissing;
         try mapSunglassesBufferResult(c.wayspot_shm_buffer_create(
-            &self.globals,
+            globals,
             &next_buffer,
             @intCast(monitor.size.width),
             @intCast(monitor.size.height),
@@ -156,8 +119,9 @@ const LayerShellRole = struct {
 
     fn drawStateTint(self: *LayerShellRole, monitor: monitor_facts.Monitor, monitor_state: ?*const sunglasses_state.MonitorState) !void {
         var next_buffer: c.struct_wayspot_shm_buffer = .{ .buffer = null, .data = null, .byte_len = 0 };
+        const globals = self.native.globalsPtr() orelse return error.LayerShellShmMissing;
         try mapSunglassesBufferResult(c.wayspot_shm_buffer_create(
-            &self.globals,
+            globals,
             &next_buffer,
             @intCast(monitor.size.width),
             @intCast(monitor.size.height),
@@ -169,54 +133,42 @@ const LayerShellRole = struct {
     }
 
     fn attachCreatedBuffer(self: *LayerShellRole, monitor: monitor_facts.Monitor, next_buffer: *c.struct_wayspot_shm_buffer) !void {
-        const wl_surface = self.wl_surface orelse {
-            destroyBuffer(next_buffer);
+        const wl_surface = self.native.surfacePtr() orelse {
+            c.wayspot_shm_buffer_destroy(next_buffer);
             return error.WaylandSurfaceUnavailable;
         };
+        c.wayspot_wl_surface_attach_buffer(
+            wl_surface,
+            next_buffer,
+            @intCast(monitor.size.width),
+            @intCast(monitor.size.height),
+        );
+        c.wayspot_wl_surface_commit(wl_surface);
+        if (self.native.displayPtr()) |display| {
+            c.wayspot_wl_display_roundtrip_cleanup(display);
+        }
         var old_buffer = self.takeAttachedBuffer();
         self.attached_buffer = next_buffer.*;
         next_buffer.* = .{ .buffer = null, .data = null, .byte_len = 0 };
         self.attached_buffer_created = true;
-        c.wayspot_wl_surface_attach_buffer(wl_surface, &self.attached_buffer, @intCast(monitor.size.width), @intCast(monitor.size.height));
-        c.wayspot_wl_surface_commit(wl_surface);
-        if (self.display) |display| {
-            c.wayspot_wl_display_roundtrip_cleanup(display);
-        }
         if (old_buffer) |*buffer| {
-            destroyBuffer(buffer);
+            c.wayspot_shm_buffer_destroy(buffer);
         }
     }
 
     fn deinit(self: *LayerShellRole) void {
-        if (self.wl_surface) |wl_surface| {
+        if (self.native.surfacePtr()) |wl_surface| {
             c.wayspot_wl_surface_detach_buffer(wl_surface);
             c.wayspot_wl_surface_commit(wl_surface);
-            if (self.display) |display| {
+            if (self.native.displayPtr()) |display| {
                 c.wayspot_wl_display_roundtrip_cleanup(display);
             }
         }
         var attached_buffer = self.takeAttachedBuffer();
         if (attached_buffer) |*buffer| {
-            destroyBuffer(buffer);
+            c.wayspot_shm_buffer_destroy(buffer);
         }
-        self.destroyLayerSurface();
-        if (self.display) |display| {
-            c.wayspot_wl_display_roundtrip_cleanup(display);
-        }
-        c.wayspot_layer_globals_deinit(&self.globals);
-    }
-
-    fn destroyLayerSurface(self: *LayerShellRole) void {
-        if (self.layer_surface) |layer_surface| {
-            c.wayspot_layer_surface_destroy(layer_surface);
-            self.layer_surface = null;
-        }
-    }
-
-    fn flushDisplay(self: *LayerShellRole) void {
-        if (self.display) |display| {
-            c.wayspot_wl_display_roundtrip_cleanup(display);
-        }
+        self.native.deinit();
     }
 
     fn takeAttachedBuffer(self: *LayerShellRole) ?c.struct_wayspot_shm_buffer {
@@ -227,10 +179,6 @@ const LayerShellRole = struct {
         return buffer;
     }
 };
-
-fn destroyBuffer(buffer: *c.struct_wayspot_shm_buffer) void {
-    c.wayspot_shm_buffer_destroy(buffer);
-}
 
 fn mapLayerGlobalsResult(result: c.enum_wayspot_layer_result) !void {
     return switch (result) {
@@ -586,6 +534,7 @@ test "image path formatting rejects overlong path" {
 
 test "sunglasses attach failure destroys next empty buffer and keeps previous attachment" {
     var role = LayerShellRole{
+        .native = wayland_native.WaylandIo.emptyForTest(),
         .attached_buffer = .{ .buffer = null, .data = null, .byte_len = 64 },
         .attached_buffer_created = true,
     };
@@ -600,7 +549,7 @@ test "sunglasses attach failure destroys next empty buffer and keeps previous at
 
 test "sunglasses redraw failure keeps attached buffer state" {
     var role = LayerShellRole{
-        .globals = emptyLayerGlobals(),
+        .native = wayland_native.WaylandIo.emptyForTest(),
         .attached_buffer = .{ .buffer = null, .data = null, .byte_len = 88 },
         .attached_buffer_created = true,
     };
@@ -611,20 +560,9 @@ test "sunglasses redraw failure keeps attached buffer state" {
     try std.testing.expectEqual(@as(u32, 88), role.attached_buffer.byte_len);
 }
 
-fn emptyLayerGlobals() c.struct_wayspot_layer_globals {
-    return .{
-        .display = null,
-        .registry = null,
-        .compositor = null,
-        .shm = null,
-        .layer_shell = null,
-        .outputs = std.mem.zeroes([c.WAYSPOT_LAYER_MAX_OUTPUTS]c.struct_wayspot_layer_output),
-        .output_count = 0,
-    };
-}
-
 test "sunglasses attached buffer cleanup is single owner transition" {
     var role = LayerShellRole{
+        .native = wayland_native.WaylandIo.emptyForTest(),
         .attached_buffer = .{ .buffer = null, .data = null, .byte_len = 31 },
         .attached_buffer_created = true,
     };
