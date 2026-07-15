@@ -66,9 +66,9 @@ path_table:
     target_path: "$XDG_STATE_HOME/wayspot/history.log"
     target_fallback: "$HOME/.local/state/wayspot/history.log"
   - surface: notification_history
-    current_source: "src/notification/history_cache.zig:cachePath"
+    current_source: "src/notification/history.zig:path"
     current_path: "$XDG_STATE_HOME/wayspot/notifications-history.json; HOME fallback is $HOME/.local/state/wayspot/notifications-history.json"
-    current_rule: cache_relative_path is wayspot/notifications-history.json; XDG_STATE_HOME is used verbatim; a value already ending in /wayspot produces a doubled wayspot component
+    current_rule: path treats XDG_STATE_HOME as the parent state directory and appends wayspot/notifications-history.json; HOME fallback appends .local/state/wayspot/notifications-history.json
     target_path: "$XDG_STATE_HOME/wayspot/notifications-history.json"
     target_fallback: "$HOME/.local/state/wayspot/notifications-history.json"
     target_rule: XDG_STATE_HOME is the parent state directory and never includes the /wayspot suffix
@@ -136,10 +136,10 @@ bounds:
   picker_history_file_bytes: 16384
 
 current_failure_behavior:
-  - path_symbol: "src/notification/history_cache.zig:Cache.loadAtPath"
-    behavior: "Every read error returns an empty Cache; malformed JSON returns an empty Cache; malformed rows are skipped."
-  - path_symbol: "src/notification/history_cache.zig:duplicateBounded"
-    behavior: "Text beyond a field bound is truncated and the last retained byte becomes ~."
+  - path_symbol: "src/notification/history.zig:History.loadAtPath"
+    behavior: "Only error.FileNotFound returns an empty History; permission, directory, allocation, StreamTooLong, invalid JSON, unsupported version, and invalid-row errors propagate, and malformed rows reject the complete load."
+  - path_symbol: "src/notification/history.zig:duplicateBounded"
+    behavior: "Text beyond a field bound returns error.HistoryFieldTooLong before allocation; no text is truncated and a failed upsert leaves the previous row unchanged."
   - path_symbol: "src/picker/cmd.zig:loadHistorySelections"
     behavior: "FileNotFound returns; other read errors return; blank lines are skipped; line size and candidate reachability are unchecked."
   - path_symbol: "src/picker/scale.zig:SurfaceConfig.loadAtPath"
@@ -156,16 +156,16 @@ current_failure_behavior:
     behavior: "Missing and failed icons retain a missing entry until AppIconStore.deinit."
 
 duplicate_representations:
-  - "src/notification/state.zig:Store and src/notification/rows.zig:row_store retain live notification text; src/notification/history_cache.zig:Cache retains a durable copy."
-  - "src/notification/history_cache.zig:Cache.rows and src/notification/history_list.zig:NotificationHistoryList.cache retain the same full notification rows before Candidate.notification construction."
-  - "src/notification/history_list.zig:appendRow embeds notification rank in selection text; src/notification/history_cache.zig:rowNewer already orders rows by timestamp and identity."
+  - "src/notification/state.zig:Store and src/notification/rows.zig:row_store retain live notification text; src/notification/history.zig:History retains a durable copy."
+  - "src/notification/history.zig:History.rows and src/notification/history_list.zig:NotificationHistoryList.cache retain the same full notification rows before Candidate.notification construction."
+  - "src/notification/history_list.zig:appendRow embeds notification rank in selection text; src/notification/history.zig:rowNewer already orders rows by timestamp and identity."
   - "src/picker/cmd.zig:Picker.history retains selection strings in memory and history.log; src/picker/rank.zig:notificationHistoryOrderBoost reads notification order from those strings."
   - "src/picker/mode/apps.zig reads desktop-file values, raw TSV bytes, Candidate fields, and fixed local Spec values."
   - "src/picker/icons.zig:Candidate.iconName and AppIconStore repeat icon identity held by src/picker/icon_cache.zig:index.tsv and icon-CRC32.png."
   - "assets/lua/defaults.lua and src/picker/appearance.zig:currentHardcodedDefaults both hold appearance values."
   - "src/picker/scale.zig:SurfaceConfig is loaded and written by src/gui/surface.zig and src/notification/banner.zig."
   - "src/sunglasses/state.zig:State is loaded into src/sunglasses/overlay.zig:Overlay slots and written again by sunglasses apply."
-  - "src/notification/history_cache.zig:max_rows 512 and src/notification/state.zig:max_notifications 256 express different notification counts beside project_version_scope.yml:notification_count 256."
+  - "src/notification/history.zig:max_rows 512 and src/notification/state.zig:max_notifications 256 express different notification counts beside project_version_scope.yml:notification_count 256."
 
 source_files:
   - build.zig
@@ -175,7 +175,7 @@ source_files:
   - src/gui/surface.zig
   - src/notification/banner.zig
   - src/notification/dbus.zig
-  - src/notification/history_cache.zig
+  - src/notification/history.zig
   - src/notification/history_list.zig
   - src/notification/mod.zig
   - src/notification/rows.zig
@@ -197,16 +197,15 @@ source_files:
 
 implementation_order:
   - order: 1
-    path_symbol: "src/notification/history_cache.zig:Cache/loadAtPath/cachePath/serialize"
-    target_path_symbol: "src/notification/history.zig:History/loadAtPath/path/serialize"
+    path_symbol: "src/notification/history.zig:History/loadAtPath/path/serialize"
     callers:
-      - "build.zig:history_cache_mod"
-      - "src/notification/mod.zig:history_cache"
-      - "src/notification/dbus.zig:history_cache/persistHistory"
-      - "src/notification/history_list.zig:history_cache/collectAtPathAtTime"
-      - "src/aggregate_test.zig:notification_cache_source/history_cache/Cache/cachePath"
+      - "build.zig:history_mod"
+      - "src/notification/mod.zig:history"
+      - "src/notification/dbus.zig:persistHistory"
+      - "src/notification/history_list.zig:collectAtPathAtTime"
+      - "src/aggregate_test.zig:notification_history_source/History/path"
     task: >-
-      Move the notification history implementation to src/notification/history.zig. Name its record container History, its path function path, and its relative path constant relative_path. Keep RowInput, Row, History.rows, upsert, pruneOld, saveAtPath, load, loadAtPath, serialize, duplicateRow, freeRow, and rowNewer as notification record operations. Rename the build module, imports, notification module exports, aggregate exports, and notification history test roots to wayspot_history and History. Remove deprecated notification-history storage vocabulary from comments, fields, locals, imports, module names, and test names.
+      Keep the notification history implementation at src/notification/history.zig. Its record container is History, its path function is path, and its relative path constant is relative_path. RowInput, Row, History.rows, upsert, pruneOld, saveAtPath, load, loadAtPath, serialize, duplicateRow, freeRow, and rowNewer remain notification record operations. The build module, imports, notification module export, aggregate export, and notification history test roots use wayspot_history and History.
     acceptance_proof:
       - Test source rename and exact import graph with rg for history_cache, wayspot_history_cache, cachePath, and Cache under notification paths returning no current match.
       - Test RowInput and Row retain all current record fields and History.rows holds at most 512 rows.
@@ -214,24 +213,58 @@ implementation_order:
       - Test missing file, permission error, directory, allocation error, StreamTooLong, invalid JSON, unsupported version, invalid row, row overflow, and serialized byte overflow as exact errors.
       - Test serialize only builds bounded bytes; test History.saveAtPath writes those bytes through createFileAtomic replacement, file sync, and parent directory creation.
       - Run zig build test --summary all, zig build, zig fmt --check, source scans, YAML validation, and git diff --check.
-    status: open
+    status: closed
 
   - order: 2
+    name: notification_live_change_atomicity
+    path_symbol: "src/notification/state.zig:Store"
+    target_paths:
+      - "src/notification/state.zig"
+      - "src/notification/dbus.zig"
+    target_symbols:
+      - "src/notification/state.zig:Store.prepareNotify"
+      - "src/notification/state.zig:NotifyChange"
+      - "src/notification/dbus.zig:DBus.prepareTimer"
+      - "src/notification/dbus.zig:TimerChange"
+    callers:
+      - "src/notification/dbus.zig:handleNotify"
+    depends_on:
+      - 1
+    task: >-
+      Add a bounded Store change transaction for new and replacement notifications. Store.prepareNotify must perform every fallible notification allocation and capacity check before changing the map, retain the exact previous Notification and next_id, and return NotifyChange. NotifyChange.rollback restores the previous Store fields and next_id or removes the new row; NotifyChange.commit performs only non-fallible ownership swaps and frees. Add DBus.prepareTimer and TimerChange. Timer preparation reserves timer-map capacity and creates the new source while the old timer entry remains installed; rollback removes only the new source and commit performs only the prepared map swap and old-source removal. Use this change in handleNotify before new or replacement History persistence. Close and expiry History persistence belong only to order 3. Keep src/notification/rows.zig, notification_rows, and their callers untouched.
+    acceptance_proof:
+      - Test replacement allocation failure leaves every previous Store field and map identity unchanged.
+      - Test new allocation failure and NotifyChange.rollback restore Store length and next_id exactly.
+      - Test NotifyChange.commit frees retained replacement fields exactly once.
+      - Test timer preparation and rollback preserve the old source and timer entry, and successful commit replaces them without a fallible operation.
+      - Test handleNotify History load, upsert, and save failure for new and replacement leaves the Store fields, next_id, timer entry, and serialized file unchanged, with no hook or legacy-row mutation.
+      - Test no picker import reaches DBus and keep rows.zig untouched in this slice.
+    status: open
+
+  - order: 3
     path_symbol: "src/notification/dbus.zig:persistHistory"
     callers:
       - "src/notification/dbus.zig:handleNotify"
       - "src/notification/dbus.zig:closeWithReason"
       - "src/notification/dbus.zig:onNotificationExpired"
-    task: Make persistHistory write the History row for notify, replacement, close, and expiry. Keep Store notification identity and timers in memory. Write active, updated_ns, and closed_reason from the current event. Return the exact History read and write error to the DBus boundary and leave Store state consistent after a failed History write.
+    depends_on:
+      - 1
+      - 2
+    task: >-
+      Make persistHistory write the History row for notify, replacement, close, and expiry. Order 3 owns close and expiry persistence: load the complete existing History.Row and change only updated_ns, active, and closed_reason; preserve every other row field without reading src/notification/rows.zig. A missing durable row returns error.HistoryRowNotFound. Return the exact History read and write error to the DBus boundary and leave Store state, timers, the file, hooks, and legacy-row state consistent after a failed History write. DBus deinit creates no row; clean shutdown only proves previously written rows survive a reload.
     acceptance_proof:
-      - Test new notification, replaces_id, explicit close, timer expiry, and DBus deinit produce the expected durable History row.
-      - Test History write failure leaves Store identity, timers, and close state consistent.
+      - Test new notification and replaces_id preserve the expected complete History fields and created_ns behavior.
+      - Test explicit close and timer expiry preserve the complete existing History.Row and change only updated_ns, active, and closed_reason.
+      - Test a missing durable close row returns error.HistoryRowNotFound without reading rows.zig.
+      - Test History load and write failure leaves Store identity, timers, file contents, close state, hooks, and legacy-row state consistent.
+      - Test DBus deinit creates no row and a successful row survives reload after clean shutdown.
       - Test no picker import reaches DBus and no DBus path writes picker history.log.
       - Run bounded notification start, notify, close, expiry, and clean-shutdown receipts.
     status: open
 
-  - order: 3
+  - order: 4
     path_symbol: "src/notification/state.zig:Store"
+    depends_on: [3]
     delete_paths:
       - "src/notification/rows.zig"
     delete_symbols:
@@ -246,8 +279,9 @@ implementation_order:
       - Run notification resident reachability and clean-shutdown receipts with no rows.zig process and no unfreed allocation remaining.
     status: open
 
-  - order: 4
+  - order: 5
     path_symbol: "src/notification/history_list.zig:NotificationHistoryList.cache/collectAtPathAtTime"
+    depends_on: [4]
     target_symbols:
       - "src/notification/history_list.zig:NotificationHistoryList.loaded"
       - "src/notification/history_list.zig:collectAtPathAtTime"
@@ -262,8 +296,9 @@ implementation_order:
       - Run notification picker output and GUI/CLI byte-equivalence receipts.
     status: open
 
-  - order: 5
+  - order: 6
     path_symbol: "src/picker/cmd.zig:Picker.history/recordHistory/loadHistorySelections/writeHistoryAtomic"
+    depends_on: [5]
     delete_symbols:
       - "src/picker/cmd.zig:Picker.max_history"
     task: >-
@@ -277,8 +312,9 @@ implementation_order:
       - Run GUI and CLI selection-history receipts.
     status: open
 
-  - order: 6
+  - order: 7
     path_symbol: "src/picker/rank.zig:rankCandidatesWithHistory/rankCandidatesWithOldestFirstHistory"
+    depends_on: [6]
     delete_symbols:
       - "src/picker/rank.zig:rankCandidatesWithHistory"
     task: >-
@@ -291,8 +327,9 @@ implementation_order:
       - Run zig build test --summary all and zig build.
     status: open
 
-  - order: 7
+  - order: 8
     path_symbol: "src/picker/mode/apps.zig:Apps.cache_path/cache_data/owned_strings/collectCandidates/collectFromDesktopFiles"
+    depends_on: [7]
     target_symbols:
       - "src/picker/mode/apps.zig:Apps.defaultCachePath"
     callers:
@@ -310,8 +347,9 @@ implementation_order:
       - Run wayspot apps and GUI /apps output receipts with byte equality.
     status: open
 
-  - order: 8
+  - order: 9
     path_symbol: "src/picker/mode/apps.zig:writeAppCacheFromCandidates/invalidateDefaultCache"
+    depends_on: [8]
     target_symbols:
       - "src/picker/mode/apps.zig:Apps.defaultCachePath"
     delete_symbols:
@@ -328,8 +366,9 @@ implementation_order:
       - Run CLI app collection, GUI /apps, and isolated cache rebuild receipts.
     status: open
 
-  - order: 9
+  - order: 10
     path_symbol: "src/picker/icon_cache.zig:refresh"
+    depends_on: [9]
     target_path_symbol: "src/picker/icon_cache.zig:refresh"
     callers:
       - "src/cli/entry.zig:runIconCacheRefresh"
@@ -344,8 +383,9 @@ implementation_order:
       - Run isolated wayspot --icon-cache-refresh receipts and inspect index fields and temporary-file removal.
     status: open
 
-  - order: 10
+  - order: 11
     path_symbol: "src/picker/icons.zig:findCachedIconPath/AppIconStore"
+    depends_on: [10]
     task: Make findCachedIconPath read the same two-field icon name and PNG path record emitted by refresh. Treat a missing or non-regular PNG path as stale and reject malformed, duplicate, stale, wrong-kind, overlong, and unsupported records. Make AppIconStore retain missing entries, count them toward 128, and free every loaded SDL texture at deinit. Keep icon name 192, path 768, file 2 MiB, source dimension 4096, texture dimension 64, roots 8, probes 96, and index 256 KiB.
     acceptance_proof:
       - Test exact name, path, file, source dimension, texture dimension, root, probe, index, and 128-entry limits with one-byte overflow cases.
@@ -354,8 +394,9 @@ implementation_order:
       - Run GUI icon rendering and CLI icon diagnostics from the same isolated XDG cache path.
     status: open
 
-  - order: 11
+  - order: 12
     path_symbol: "src/config/defaults.zig:load/applyBuffer"
+    depends_on: [11]
     target_paths:
       - "assets/lua/defaults.lua"
     target_symbols:
@@ -377,8 +418,9 @@ implementation_order:
       - Run GUI and notification banner startup receipts from assets/lua/defaults.lua.
     status: open
 
-  - order: 12
+  - order: 13
     path_symbol: "src/picker/scale.zig:SurfaceConfig"
+    depends_on: [12]
     target_path_symbol: "src/picker/scale.zig:SurfaceState"
     callers:
       - "src/gui/surface.zig:scale_owner.SurfaceConfig"
@@ -393,8 +435,9 @@ implementation_order:
       - Run bounded GUI zoom and notification banner zoom receipts and verify last successful rename contents.
     status: open
 
-  - order: 13
+  - order: 14
     path_symbol: "src/wallpaper/config.zig:Config/parse"
+    depends_on: [13]
     callers:
       - "src/wallpaper/config.zig:Config.loadAtPath"
       - "src/wallpaper/loop.zig:Loop.run"
@@ -407,8 +450,9 @@ implementation_order:
       - Run isolated wallpaper startup and bounded rotation receipts.
     status: open
 
-  - order: 14
+  - order: 15
     path_symbol: "src/sunglasses/state.zig:State"
+    depends_on: [14]
     target_path_symbol: "src/sunglasses/state.zig:State"
     callers:
       - "src/sunglasses/mod.zig:applyLeaf"
