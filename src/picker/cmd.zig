@@ -16,9 +16,18 @@ const sub_cmd = @import("picker_sub_cmd");
 
 pub const max_cmd_bytes = 4096;
 pub const max_completion_candidates: usize = 256;
+/// max_history_entries bounds owned picker selections in oldest-first order.
+pub const max_history_entries: usize = 64;
+/// max_selection_bytes bounds one owned picker selection copy and history line.
+pub const max_selection_bytes: usize = 256;
+/// max_history_file_bytes bounds serialized picker history before replacement.
+pub const max_history_file_bytes: usize = 16384;
 
 comptime {
     std.debug.assert(max_cmd_bytes > 0);
+    std.debug.assert(max_history_entries > 0);
+    std.debug.assert(max_selection_bytes > 0);
+    std.debug.assert(max_history_file_bytes > 0);
     const fields = std.meta.fields(Cmd);
     std.debug.assert(fields.len == 4);
     std.debug.assert(std.mem.eql(u8, fields[0].name, "apps"));
@@ -70,8 +79,10 @@ pub const Picker = struct {
     history_path: ?[]const u8 = null,
     candidates: candidate.Candidate.List = .empty,
     candidates_loaded: bool = false,
+    /// history owns one allocator copy for each unique oldest-first selection.
     history: std.ArrayListUnmanaged([]u8) = .empty,
-    max_history: u32 = 32,
+    /// history_loaded prevents a second read after success; failures remain retryable.
+    history_loaded: bool = false,
 
     /// Builds Picker with the optional Apps owner as the first Cmd arm.
     pub fn init(apps: ?*apps_mode.Apps) Picker {
@@ -121,18 +132,30 @@ pub const Picker = struct {
         );
     }
 
-    /// recordSelection keeps the selected candidate value in bounded oldest-first order.
+    /// recordSelection rejects unreachable live selections before history mutation.
     pub fn recordSelection(self: *Picker, allocator: std.mem.Allocator, selected_selection: []const u8) !void {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
-        try recordHistory(&self.history, self.max_history, allocator, selected_selection);
+        try validateSelection(selected_selection);
+        if (!self.selectionIsReachable(selected_selection)) return error.SelectionUnreachable;
+        try recordHistory(&self.history, allocator, selected_selection);
     }
 
-    /// loadHistory reads persisted selection history when a path was configured.
+    /// loadHistory stages bounded persisted strings before candidate production; later live
+    /// recording still validates reachability through recordSelection.
     pub fn loadHistory(self: *Picker, allocator: std.mem.Allocator) !void {
         self.query_mu.lockUncancelable(std.Options.debug_io);
         defer self.query_mu.unlock(std.Options.debug_io);
-        try loadHistorySelections(&self.history, self.max_history, self.history_path, allocator);
+        if (self.history_loaded) return;
+
+        var staged = std.ArrayListUnmanaged([]u8).empty;
+        errdefer deinitHistory(&staged, allocator);
+        try loadHistorySelections(&staged, self.history_path, allocator);
+
+        deinitHistory(&self.history, allocator);
+        self.history = staged;
+        staged = .empty;
+        self.history_loaded = true;
     }
 
     /// saveHistory writes persisted selection history when a path was configured.
@@ -149,7 +172,6 @@ pub const Picker = struct {
         allocator: std.mem.Allocator,
         value: candidate.Candidate,
     ) ![]u8 {
-        std.debug.assert(self.max_history > 0);
         return switch (value) {
             .sub_cmd => |sub_cmd_value| resolveSubCmd(sub_cmd_value),
             .concrete => |leaf| self.resolveConcrete(allocator, leaf),
@@ -364,6 +386,14 @@ pub const Picker = struct {
             try appendCompletion(out, count, item.candidate.selection(), "");
         }
     }
+
+    fn selectionIsReachable(self: *const Picker, selection: []const u8) bool {
+        if (!self.candidates_loaded) return false;
+        for (self.candidates.slice()) |value| {
+            if (std.mem.eql(u8, value.selection(), selection) and value.isLaunchable()) return true;
+        }
+        return false;
+    }
 };
 
 fn appendCompletion(
@@ -517,77 +547,182 @@ fn printCandidate(out: *std.Io.Writer, value: candidate.Candidate) !void {
     });
 }
 
+// HistoryWriteFailure injects write phases and one cleanup error for deterministic
+// source-local tests of the pre/post-replacement contract.
+const HistoryWriteFailure = enum {
+    write,
+    file_sync,
+    rename,
+    parent_sync,
+    cleanup,
+};
+
+fn validateSelection(selection: []const u8) !void {
+    if (selection.len == 0) return error.EmptySelection;
+    if (selection.len > max_selection_bytes) return error.SelectionTooLong;
+}
+
 fn recordHistory(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: u32,
     allocator: std.mem.Allocator,
     selected_selection: []const u8,
 ) !void {
-    if (selected_selection.len == 0) return;
-    const copy = try allocator.dupe(u8, selected_selection);
-    try history.append(allocator, copy);
+    try validateSelection(selected_selection);
+    if (history.items.len > max_history_entries) return error.HistoryTooManyEntries;
 
-    if (history.items.len > max_history) {
-        const oldest = history.orderedRemove(0);
-        allocator.free(oldest);
+    if (history.items.len < max_history_entries) {
+        try history.ensureTotalCapacity(allocator, history.items.len + 1);
     }
+    const copy = try allocator.dupe(u8, selected_selection);
+    errdefer allocator.free(copy);
+
+    var index: usize = 0;
+    while (index < history.items.len) {
+        if (!std.mem.eql(u8, history.items[index], selected_selection)) {
+            index += 1;
+            continue;
+        }
+        allocator.free(history.orderedRemove(index));
+    }
+
+    if (history.items.len == max_history_entries) {
+        allocator.free(history.orderedRemove(0));
+    }
+    history.appendAssumeCapacity(copy);
 }
 
 fn loadHistorySelections(
     history: *std.ArrayListUnmanaged([]u8),
-    max_history: u32,
     history_path: ?[]const u8,
     allocator: std.mem.Allocator,
 ) !void {
     const path = history_path orelse return;
-    const data = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+    const data = std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        path,
+        allocator,
+        .limited(max_history_file_bytes + 1),
+    ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     defer allocator.free(data);
+    if (data.len > max_history_file_bytes) return error.StreamTooLong;
 
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
-        try recordHistory(history, max_history, allocator, trimmed);
+        try recordHistory(history, allocator, trimmed);
     }
+}
+
+fn serializeHistory(history: []const []const u8, buffer: *[max_history_file_bytes]u8) ![]const u8 {
+    if (history.len > max_history_entries) return error.HistoryTooManyEntries;
+
+    var used: usize = 0;
+    for (history) |entry| {
+        try validateSelection(entry);
+        const required = entry.len + 1;
+        if (required > max_history_file_bytes - used) return error.HistoryFileTooLong;
+        @memcpy(buffer[used .. used + entry.len], entry);
+        used += entry.len;
+        buffer[used] = '\n';
+        used += 1;
+    }
+    return buffer[0..used];
 }
 
 fn saveHistorySelections(history: []const []const u8, history_path: ?[]const u8, allocator: std.mem.Allocator) !void {
     const path = history_path orelse return;
-
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(allocator);
-
-    for (history) |entry| {
-        try out.appendSlice(allocator, entry);
-        try out.append(allocator, '\n');
-    }
-    try writeHistoryAtomic(allocator, path, out.items);
+    var buffer: [max_history_file_bytes]u8 = undefined;
+    const data = try serializeHistory(history, &buffer);
+    try writeHistoryAtomic(allocator, path, data);
 }
 
 fn writeHistoryAtomic(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    return writeHistoryAtomicWithFailure(allocator, path, data, null);
+}
+
+fn writeHistoryAtomicWithFailure(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    data: []const u8,
+    failure: ?HistoryWriteFailure,
+) !void {
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
     defer allocator.free(tmp_path);
     try ensureParentDir(path);
     const io = std.Options.debug_io;
+    var file = if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true }) catch |err| {
+            removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+            return err;
+        }
+    else
+        std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true }) catch |err| {
+            removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+            return err;
+        };
 
-    if (std.fs.path.isAbsolute(path)) {
-        const file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true });
-        defer file.close(io);
-        try file.writeStreamingAll(io, data);
-        try file.sync(io);
-        try std.Io.Dir.renameAbsolute(tmp_path, path, io);
-        try syncParentDir(path);
-        return;
+    if (failure == .write or failure == .cleanup) {
+        file.close(io);
+        removeHistoryTemp(tmp_path, failure == .cleanup) catch |cleanup_err| return cleanup_err;
+        return error.InputOutput;
     }
-    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
-    defer file.close(io);
-    try file.writeStreamingAll(io, data);
-    try file.sync(io);
-    try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io);
+    file.writeStreamingAll(io, data) catch |err| {
+        file.close(io);
+        removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+        return err;
+    };
+
+    if (failure == .file_sync) {
+        file.close(io);
+        removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+        return error.InputOutput;
+    }
+    file.sync(io) catch |err| {
+        file.close(io);
+        removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+        return err;
+    };
+    file.close(io);
+
+    if (failure == .rename) {
+        removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+        return error.InputOutput;
+    }
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.renameAbsolute(tmp_path, path, io) catch |err| {
+            removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+            return err;
+        };
+    } else {
+        std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, io) catch |err| {
+            removeHistoryTemp(tmp_path, false) catch |cleanup_err| return cleanup_err;
+            return err;
+        };
+    }
+
+    if (failure == .parent_sync) return error.InputOutput;
     try syncParentDir(path);
+}
+
+fn removeHistoryTemp(path: []const u8, inject_failure: bool) !void {
+    // FileNotFound means the temporary path is already clean; every other delete error returns.
+    if (inject_failure) return error.AccessDenied;
+    const io = std.Options.debug_io;
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.deleteFileAbsolute(io, path) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+    } else {
+        std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+    }
 }
 
 fn ensureParentDir(path: []const u8) !void {
@@ -617,6 +752,53 @@ fn syncParentDir(path: []const u8) !void {
 fn deinitHistory(history: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allocator) void {
     for (history.items) |item| allocator.free(item);
     history.deinit(allocator);
+}
+
+fn pickerHistoryTestPath(tmp: *const std.testing.TmpDir, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+}
+
+fn expectHistoryTempMissing(path: []const u8) !void {
+    const temp_path = try std.fmt.allocPrint(std.testing.allocator, "{s}.tmp", .{path});
+    defer std.testing.allocator.free(temp_path);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().access(std.Options.debug_io, temp_path, .{}),
+    );
+}
+
+fn expectHistoryWriteFailure(failure: HistoryWriteFailure) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pickerHistoryTestPath(&tmp, "history.log");
+    defer std.testing.allocator.free(path);
+
+    try writeHistoryAtomic(std.testing.allocator, path, "old\n");
+    const expected_error = if (failure == .cleanup) error.AccessDenied else error.InputOutput;
+    try std.testing.expectError(
+        expected_error,
+        writeHistoryAtomicWithFailure(std.testing.allocator, path, "new\n", failure),
+    );
+    const saved = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        path,
+        std.testing.allocator,
+        .limited(max_history_file_bytes + 1),
+    );
+    defer std.testing.allocator.free(saved);
+    if (failure == .parent_sync) {
+        try std.testing.expectEqualStrings("new\n", saved);
+    } else {
+        try std.testing.expectEqualStrings("old\n", saved);
+    }
+    if (failure == .cleanup) {
+        const temp_path = try std.fmt.allocPrint(std.testing.allocator, "{s}.tmp", .{path});
+        defer std.testing.allocator.free(temp_path);
+        try std.Io.Dir.cwd().access(std.Options.debug_io, temp_path, .{});
+        try std.Io.Dir.cwd().deleteFile(std.Options.debug_io, temp_path);
+        return;
+    }
+    try expectHistoryTempMissing(path);
 }
 
 test "Cmd picker collects candidates once per picker lifecycle" {
@@ -893,7 +1075,7 @@ test "Cmd picker ranks retained history without query history allocation" {
     var model = Picker.init(null);
     defer model.deinit(std.testing.allocator);
     model.candidates_loaded = true;
-    try recordHistory(&model.history, model.max_history, std.testing.allocator, "power");
+    try recordHistory(&model.history, std.testing.allocator, "power");
 
     var zero_buf: [0]u8 = .{};
     var fba = std.heap.FixedBufferAllocator.init(&zero_buf);
@@ -918,6 +1100,285 @@ test "picker history save creates nested parent directories" {
     const saved = try tmp.dir.readFileAlloc(std.Options.debug_io, "nested/history/history.log", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(saved);
     try std.testing.expectEqualStrings("settings\npower\n", saved);
+}
+
+test "picker history keeps unique oldest-first owned selections" {
+    var history = std.ArrayListUnmanaged([]u8).empty;
+    defer deinitHistory(&history, std.testing.allocator);
+
+    var source = [_]u8{ 'p', 'o', 'w', 'e', 'r' };
+    try recordHistory(&history, std.testing.allocator, source[0..]);
+    source[0] = 'P';
+    try std.testing.expectEqualStrings("power", history.items[0]);
+    const old_pointer = history.items[0].ptr;
+
+    var index: usize = 1;
+    while (index < max_history_entries) : (index += 1) {
+        var selection_buffer: [32]u8 = undefined;
+        const selection = try std.fmt.bufPrint(&selection_buffer, "selection-{d}", .{index});
+        try recordHistory(&history, std.testing.allocator, selection);
+    }
+    try std.testing.expectEqual(max_history_entries, history.items.len);
+    try std.testing.expectEqualStrings("power", history.items[0]);
+
+    try recordHistory(&history, std.testing.allocator, "selection-64");
+    try std.testing.expectEqual(max_history_entries, history.items.len);
+    try std.testing.expectEqualStrings("selection-1", history.items[0]);
+    try std.testing.expectEqualStrings("selection-64", history.items[history.items.len - 1]);
+
+    const duplicate_pointer = for (history.items) |selection| {
+        if (std.mem.eql(u8, selection, "selection-10")) break selection.ptr;
+    } else null;
+    try std.testing.expect(duplicate_pointer != null);
+    try recordHistory(&history, std.testing.allocator, "selection-10");
+    try std.testing.expectEqualStrings("selection-10", history.items[history.items.len - 1]);
+    var duplicate_count: usize = 0;
+    for (history.items) |selection| {
+        if (std.mem.eql(u8, selection, "selection-10")) duplicate_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), duplicate_count);
+    try std.testing.expect(old_pointer != history.items[history.items.len - 1].ptr);
+    try std.testing.expect(duplicate_pointer.? != history.items[history.items.len - 1].ptr);
+}
+
+test "picker history rejects empty and overlong selections before mutation" {
+    var history = std.ArrayListUnmanaged([]u8).empty;
+    defer deinitHistory(&history, std.testing.allocator);
+
+    try std.testing.expectError(error.EmptySelection, recordHistory(&history, std.testing.allocator, ""));
+    var exact: [max_selection_bytes]u8 = undefined;
+    @memset(&exact, 'x');
+    try recordHistory(&history, std.testing.allocator, &exact);
+    const old_pointer = history.items[0].ptr;
+    var overlong: [max_selection_bytes + 1]u8 = undefined;
+    @memset(&overlong, 'y');
+    try std.testing.expectError(error.SelectionTooLong, recordHistory(&history, std.testing.allocator, &overlong));
+    try std.testing.expectEqual(@as(usize, 1), history.items.len);
+    try std.testing.expectEqual(old_pointer, history.items[0].ptr);
+}
+
+test "picker history record rejects unreachable selections" {
+    var list = candidate.Candidate.List.empty;
+    try list.append(candidate.Candidate.appLeaf("Terminal", "Utilities", "foot", ""));
+    var model = Picker{
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    try model.recordSelection(std.testing.allocator, "foot");
+    try std.testing.expectError(
+        error.SelectionUnreachable,
+        model.recordSelection(std.testing.allocator, "missing-launch-selection"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), model.history.items.len);
+    try std.testing.expectError(error.EmptySelection, model.recordSelection(std.testing.allocator, ""));
+}
+
+test "picker history rejects persisted unreachable selection without mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pickerHistoryTestPath(&tmp, "stale.log");
+    defer std.testing.allocator.free(path);
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "stale.log", .data = "missing\n" });
+
+    var list = candidate.Candidate.List.empty;
+    try list.append(candidate.Candidate.appLeaf("Terminal", "Utilities", "foot", ""));
+    var model = Picker{
+        .history_path = path,
+        .candidates = list,
+        .candidates_loaded = true,
+    };
+    list = .empty;
+    defer model.deinit(std.testing.allocator);
+
+    try model.loadHistory(std.testing.allocator);
+    try std.testing.expect(model.history_loaded);
+    try std.testing.expectEqual(@as(usize, 1), model.history.items.len);
+    const old_pointer = model.history.items[0].ptr;
+    try std.testing.expectError(
+        error.SelectionUnreachable,
+        model.recordSelection(std.testing.allocator, "missing"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), model.history.items.len);
+    try std.testing.expectEqual(old_pointer, model.history.items[0].ptr);
+    try std.testing.expectEqualStrings("missing", model.history.items[0]);
+}
+
+test "picker history append failure preserves owned state" {
+    var history = std.ArrayListUnmanaged([]u8).empty;
+    defer deinitHistory(&history, std.testing.allocator);
+    try history.ensureTotalCapacity(std.testing.allocator, max_history_entries);
+    try recordHistory(&history, std.testing.allocator, "old");
+    const old_pointer = history.items[0].ptr;
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        recordHistory(&history, failing.allocator(), "new"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), history.items.len);
+    try std.testing.expectEqualStrings("old", history.items[0]);
+    try std.testing.expectEqual(old_pointer, history.items[0].ptr);
+
+    var empty = std.ArrayListUnmanaged([]u8).empty;
+    defer deinitHistory(&empty, std.testing.allocator);
+    var capacity_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        recordHistory(&empty, capacity_failure.allocator(), "new"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty.items.len);
+}
+
+test "picker history load remembers missing file and retries every other failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const missing_path = try pickerHistoryTestPath(&tmp, "missing.log");
+    defer std.testing.allocator.free(missing_path);
+
+    var missing = Picker.initWithHistoryPath(null, missing_path);
+    defer missing.deinit(std.testing.allocator);
+    try missing.loadHistory(std.testing.allocator);
+    try std.testing.expect(missing.history_loaded);
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "missing.log", .data = "later\n" });
+    try missing.loadHistory(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), missing.history.items.len);
+
+    const retry_path = try pickerHistoryTestPath(&tmp, "retry");
+    defer std.testing.allocator.free(retry_path);
+    try tmp.dir.createDir(std.Options.debug_io, "retry", .default_dir);
+    var retry = Picker.initWithHistoryPath(null, retry_path);
+    defer retry.deinit(std.testing.allocator);
+    try std.testing.expectError(error.IsDir, retry.loadHistory(std.testing.allocator));
+    try std.testing.expect(!retry.history_loaded);
+    try tmp.dir.deleteDir(std.Options.debug_io, "retry");
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "retry", .data = "recovered\n" });
+    try retry.loadHistory(std.testing.allocator);
+    try std.testing.expect(retry.history_loaded);
+    try std.testing.expectEqual(@as(usize, 1), retry.history.items.len);
+    try std.testing.expectEqualStrings("recovered", retry.history.items[0]);
+}
+
+test "picker history load failure publishes no partial list and retries" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pickerHistoryTestPath(&tmp, "malformed.log");
+    defer std.testing.allocator.free(path);
+
+    var malformed: [max_selection_bytes + 7]u8 = undefined;
+    @memcpy(malformed[0..6], "valid\n");
+    @memset(malformed[6..], 'x');
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "malformed.log", .data = &malformed });
+
+    var model = Picker.initWithHistoryPath(null, path);
+    defer model.deinit(std.testing.allocator);
+    try std.testing.expectError(error.SelectionTooLong, model.loadHistory(std.testing.allocator));
+    try std.testing.expect(!model.history_loaded);
+    try std.testing.expectEqual(@as(usize, 0), model.history.items.len);
+
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "malformed.log", .data = "valid\n" });
+    try model.loadHistory(std.testing.allocator);
+    try std.testing.expect(model.history_loaded);
+    try std.testing.expectEqualStrings("valid", model.history.items[0]);
+}
+
+test "picker history load rejects oversized files and permission failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const oversized_path = try pickerHistoryTestPath(&tmp, "oversized.log");
+    defer std.testing.allocator.free(oversized_path);
+
+    var oversized: [max_history_file_bytes + 1]u8 = undefined;
+    @memset(&oversized, 'x');
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "oversized.log", .data = &oversized });
+    var oversized_picker = Picker.initWithHistoryPath(null, oversized_path);
+    defer oversized_picker.deinit(std.testing.allocator);
+    try std.testing.expectError(error.StreamTooLong, oversized_picker.loadHistory(std.testing.allocator));
+    try std.testing.expect(!oversized_picker.history_loaded);
+
+    const blocked_path = try pickerHistoryTestPath(&tmp, "blocked.log");
+    defer std.testing.allocator.free(blocked_path);
+    try tmp.dir.writeFile(std.Options.debug_io, .{ .sub_path = "blocked.log", .data = "blocked\n" });
+    var blocked_file = try tmp.dir.openFile(std.Options.debug_io, "blocked.log", .{});
+    defer {
+        blocked_file.setPermissions(std.Options.debug_io, .fromMode(0o600)) catch {};
+        blocked_file.close(std.Options.debug_io);
+    }
+    try blocked_file.setPermissions(std.Options.debug_io, .fromMode(0));
+    var blocked_picker = Picker.initWithHistoryPath(null, blocked_path);
+    defer blocked_picker.deinit(std.testing.allocator);
+    try std.testing.expectError(error.AccessDenied, blocked_picker.loadHistory(std.testing.allocator));
+    try std.testing.expect(!blocked_picker.history_loaded);
+}
+
+test "picker history serialization accepts exact file bound and rejects one byte over" {
+    var full_entry: [max_selection_bytes]u8 = undefined;
+    @memset(&full_entry, 'a');
+    var exact_final_entry: [192]u8 = undefined;
+    var overlong_final_entry: [193]u8 = undefined;
+    @memset(&exact_final_entry, 'b');
+    var entries: [max_history_entries][]const u8 = undefined;
+    for (entries[0..63]) |*entry| entry.* = &full_entry;
+    entries[63] = &exact_final_entry;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pickerHistoryTestPath(&tmp, "exact.log");
+    defer std.testing.allocator.free(path);
+
+    var buffer: [max_history_file_bytes]u8 = undefined;
+    const exact = try serializeHistory(entries[0..], &buffer);
+    try std.testing.expectEqual(max_history_file_bytes, exact.len);
+    try saveHistorySelections(entries[0..], path, std.testing.allocator);
+    const saved = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        path,
+        std.testing.allocator,
+        .limited(max_history_file_bytes + 1),
+    );
+    defer std.testing.allocator.free(saved);
+    try std.testing.expectEqual(max_history_file_bytes, saved.len);
+
+    @memset(&overlong_final_entry, 'c');
+    var overlong_entries = entries;
+    overlong_entries[63] = &overlong_final_entry;
+    try std.testing.expectError(error.HistoryFileTooLong, serializeHistory(overlong_entries[0..], &buffer));
+}
+
+test "picker history save preflights file overflow before replacement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pickerHistoryTestPath(&tmp, "overflow.log");
+    defer std.testing.allocator.free(path);
+
+    try writeHistoryAtomic(std.testing.allocator, path, "old\n");
+    var entry: [max_selection_bytes]u8 = undefined;
+    @memset(&entry, 'x');
+    var entries: [max_history_entries][]const u8 = undefined;
+    for (entries[0..]) |*value| value.* = &entry;
+    try std.testing.expectError(
+        error.HistoryFileTooLong,
+        saveHistorySelections(entries[0..], path, std.testing.allocator),
+    );
+    const saved = try std.Io.Dir.cwd().readFileAlloc(
+        std.Options.debug_io,
+        path,
+        std.testing.allocator,
+        .limited(max_history_file_bytes),
+    );
+    defer std.testing.allocator.free(saved);
+    try std.testing.expectEqualStrings("old\n", saved);
+    try expectHistoryTempMissing(path);
+}
+
+test "picker history atomic write preserves phases and cleans temporary files" {
+    try expectHistoryWriteFailure(.write);
+    try expectHistoryWriteFailure(.file_sync);
+    try expectHistoryWriteFailure(.rename);
+    try expectHistoryWriteFailure(.parent_sync);
+    try expectHistoryWriteFailure(.cleanup);
 }
 
 test "Cmd picker resolves app and lifecycle intents" {

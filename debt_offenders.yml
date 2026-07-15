@@ -141,7 +141,7 @@ current_failure_behavior:
   - path_symbol: "src/notification/history.zig:duplicateBounded"
     behavior: "Text beyond a field bound returns error.HistoryFieldTooLong before allocation; no text is truncated and a failed upsert leaves the previous row unchanged."
   - path_symbol: "src/picker/cmd.zig:loadHistorySelections"
-    behavior: "FileNotFound returns; other read errors return; blank lines are skipped; line size and candidate reachability are unchecked."
+    behavior: "FileNotFound returns; other read errors return; blank lines are skipped; persisted line size is bounded. Picker.recordSelection validates new live selections after candidate production; saveHistory may serialize a stale loaded line unchanged."
   - path_symbol: "src/picker/scale.zig:SurfaceConfig.loadAtPath"
     behavior: "FileNotFound and StreamTooLong return default state; malformed text returns default state."
   - path_symbol: "src/sunglasses/state.zig:State.loadAtPath"
@@ -379,15 +379,17 @@ implementation_order:
     delete_symbols:
       - "src/picker/cmd.zig:Picker.max_history"
     task: >-
-      Set one picker history bound of 64 entries, 256 bytes per selection, and 16384 serialized bytes. Keep Picker.history in unique oldest-first order. Make recordHistory reject empty, overlong, and unreachable selection text; remove an existing equal selection, free it, then append the new allocator-owned copy at the newest end. Add Picker.history_loaded, make loadHistorySelections return on the second call, set history_loaded after a successful missing-file read, and leave it false after another read error. Keep PickerBundle.wirePicker and delete only its max_history assignment. Make writeHistoryAtomic preserve the old file, remove its temporary file after every failure, and let the last successful rename define the file contents.
+      Set one picker history bound of 64 entries, 256 bytes per selection, and 16384 serialized bytes. Keep Picker.history in unique oldest-first order. Make Picker.recordSelection reject empty, overlong, and unreachable live selection text before recordHistory mutates history; loadHistorySelections stages bounded persisted strings before candidate production, and saveHistory may serialize a stale loaded line unchanged. Remove an existing equal selection, free it, then append the new allocator-owned copy at the newest end. Add Picker.history_loaded, make loadHistorySelections return on the second call, set history_loaded after a successful missing-file read, and leave it false after another read error. Keep PickerBundle.wirePicker and delete only its max_history assignment. Make writeHistoryAtomic remove its temporary file after write, file-sync, and rename failures when cleanup succeeds; if cleanup fails, return the exact delete error and leave the cleanup failure visible. Parent-directory sync failure occurs after replacement, leaves the new bytes published, and returns the exact durability error.
     acceptance_proof:
       - Test 64 entries, 65th entry, 256-byte selection, 257-byte selection, 16384-byte file, and one-byte overflow.
-      - Test missing file, permission error, directory, malformed line, unreachable selection, duplicate selection replacement and freeing, second load, and failed launch recording.
-      - Test the 32-value field and the max_history assignment in src/main.zig:PickerBundle.wirePicker are deleted and no other picker history bound remains.
-      - Test writeHistoryAtomic leaves the old file valid and removes the temporary file after write, sync, rename, and parent-sync failure.
+      - Test missing file, permission error, directory, malformed line, and second load. Load a persisted unreachable selection, then prove Picker.recordSelection rejects it before mutation and leaves the owned history copy unchanged; test duplicate replacement/freeing and pre-launch recording of a reachable selection. Launch success and failure belong to process tests, not this history slice.
+      - Scan src/picker/cmd.zig and src/main.zig for Picker.max_history and max_history assignments; accept only max_history_entries, max_selection_bytes, and max_history_file_bytes as live picker-history bounds, with no src/picker/rank.zig change.
+      - Test pre-replacement write, file-sync, and rename failures preserve the old destination bytes and remove the temporary file when cleanup succeeds. Inject cleanup failure and prove the exact delete error is returned, the old destination remains, and the temp remains visible. Test post-replacement parent-directory sync failure leaves the new bytes published, confirms the temporary file is already gone, and returns the exact durability error.
       - Test deinit frees every selection copy and every selection is an allocator-owned copy independent of query and Candidate bytes.
-      - Run GUI and CLI selection-history receipts.
-    status: open
+      - Run zig build test --summary all (408/408), zig build, zig fmt --check, YAML stream validation, exact max_history and order-7 scans, and git diff --check.
+      - Run the CLI selection-history receipt and an isolated Hyprland GUI startup receipt with seeded history; verify the candidate appears and stop the bounded GUI process cleanly.
+    size_observation: "Current worktree measures 799548 src/*.zig bytes excluding CR/LF against the 718917-byte 6ff94bc checkpoint; the final source-size gate remains failing."
+    status: closed
 
   - order: 7
     path_symbol: "src/picker/rank.zig:rankCandidatesWithHistory/rankCandidatesWithOldestFirstHistory"

@@ -248,7 +248,6 @@ const PickerBundle = struct {
     fn wirePicker(self: *PickerBundle) void {
         self.picker = wayspot.picker.Picker.initWithHistoryPath(&self.apps, self.history_path);
         self.picker.notification_history = &self.notification_history;
-        self.picker.max_history = 64;
     }
 };
 
