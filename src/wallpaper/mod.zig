@@ -4,7 +4,7 @@
 //! recovery, and cleanup. Picker mode code carries only typed route meaning.
 
 const std = @import("std");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 const identity = @import("wayspot_identity");
 
 pub const config = @import("config.zig");
@@ -12,7 +12,7 @@ pub const config = @import("config.zig");
 pub const Loop = @import("loop.zig").Loop;
 
 /// run owns one wallpaper resident loop lifecycle and its vendor cleanup.
-pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
+pub fn run(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !void {
     try identity.set(identity.wallpaper);
     Loop.run(allocator, monitor_source) catch |err| {
         std.log.err("wallpaper loop failed: {s}", .{@errorName(err)});

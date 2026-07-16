@@ -3,7 +3,7 @@
 const std = @import("std");
 pub const cli = @import("wayspot_cli");
 pub const config = @import("wayspot_config");
-pub const env = @import("wayspot_env");
+pub const env = @import("wayspot_env_native");
 pub const gui = @import("wayspot_gui");
 pub const notification = @import("wayspot_notification");
 pub const process = @import("wayspot_process");

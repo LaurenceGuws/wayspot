@@ -1,6 +1,7 @@
-//! Env exports dumb desktop-environment entity fact owners.
+//! Env owns pure monitor control composition and dumb desktop fact values.
 
 const std = @import("std");
+const io = @import("hyprland_io");
 
 pub const monitor = @import("monitor.zig");
 pub const workspace = @import("workspace.zig");
@@ -9,101 +10,112 @@ pub const state = @import("state.zig");
 pub const hyprland = @import("hyprland.zig");
 
 pub const Connection = hyprland.Connection;
-pub const fillState = hyprland.fillState;
 
 /// MonitorFactWake is the env-owned wake result visible to product loops.
-pub const MonitorFactWake = enum {
-    stopped,
-    changed,
-};
+pub const MonitorFactWake = enum { stopped, changed };
 
-/// MonitorSource owns access to env monitor facts from the active implementation source.
-pub const MonitorSource = struct {
-    connection: hyprland.Connection,
+/// MonitorSourceWith composes one borrowed Source with pure monitor controls.
+pub fn MonitorSourceWith(comptime Source: type) type {
+    return struct {
+        source: *Source,
+        connection: Connection,
 
-    /// init retains the source connection details without exposing source mechanics.
-    pub fn init(connection: hyprland.Connection) MonitorSource {
-        return .{ .connection = connection };
-    }
+        const Self = @This();
 
-    /// fromProcessEnv returns the active monitor source when the process has one.
-    pub fn fromProcessEnv() ?MonitorSource {
-        const runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |runtime_dir_z|
-            std.mem.span(runtime_dir_z)
-        else
-            return null;
-        const signature = if (std.c.getenv("HYPRLAND_INSTANCE_SIGNATURE")) |signature_z|
-            std.mem.span(signature_z)
-        else
-            return null;
-        return init(.{
-            .runtime_dir = runtime_dir,
-            .signature = signature,
-        });
-    }
+        /// init retains only a pointer-stable Source address and connection facts.
+        pub fn init(source: *Source, connection: Connection) Self {
+            return .{ .source = source, .connection = connection };
+        }
 
-    /// runtimeDir returns the retained runtime dir used by pid-file owners.
-    pub fn runtimeDir(self: MonitorSource) []const u8 {
-        return self.connection.runtime_dir;
-    }
+        /// deinit clears control state; the caller still owns Source cleanup.
+        pub fn deinit(self: *Self) void {
+            self.source = undefined;
+        }
 
-    /// queryMonitors loads bounded monitor facts without exposing source parsing.
-    pub fn queryMonitors(self: MonitorSource, allocator: std.mem.Allocator) !monitor.MonitorList {
-        return hyprland.queryMonitors(allocator, self.connection);
-    }
+        /// runtimeDir returns the caller-owned runtime directory.
+        pub fn runtimeDir(self: *const Self) []const u8 {
+            return self.connection.runtime_dir;
+        }
 
-    /// monitorStream opens an env monitor fact stream; caller must deinit it.
-    pub fn monitorStream(self: MonitorSource, allocator: std.mem.Allocator) !MonitorFactStream {
-        return MonitorFactStream.init(allocator, self.connection);
-    }
-};
+        /// queryMonitors publishes facts only after the parser completes.
+        pub fn queryMonitors(self: *Self, allocator: std.mem.Allocator) hyprland.MonitorQueryError!monitor.MonitorList {
+            return hyprland.queryMonitorsWith(Source, allocator, self.source, self.connection);
+        }
 
-/// MonitorFactStream maps implementation events to monitor-only wakes.
-pub const MonitorFactStream = struct {
-    allocator: std.mem.Allocator,
-    connection: hyprland.Connection,
-    stream: hyprland.EventStream,
+        /// monitorStream opens a borrowed-source event stream.
+        pub fn monitorStream(
+            self: *Self,
+            allocator: std.mem.Allocator,
+        ) hyprland.EventStreamInitError!MonitorFactStreamWith(Source) {
+            return MonitorFactStreamWith(Source).init(allocator, self.source, self.connection);
+        }
+    };
+}
 
-    /// init opens the source event stream behind an env monitor-fact boundary.
-    pub fn init(allocator: std.mem.Allocator, connection: hyprland.Connection) !MonitorFactStream {
-        return .{
-            .allocator = allocator,
-            .connection = connection,
-            .stream = try hyprland.EventStream.init(allocator, connection),
-        };
-    }
+/// MonitorFactStreamWith owns event control state and borrows Source storage.
+pub fn MonitorFactStreamWith(comptime Source: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        source: *Source,
+        connection: Connection,
+        stream: hyprland.EventStream,
 
-    /// deinit closes the retained stream once.
-    pub fn deinit(self: *MonitorFactStream) void {
-        self.stream.deinit();
-    }
+        const Self = @This();
 
-    /// wait returns only monitor fact changes or caller stop.
-    pub fn wait(self: *MonitorFactStream, stop_fd: std.posix.fd_t) !MonitorFactWake {
-        while (true) {
-            const event = self.stream.wait(stop_fd) catch |err| {
-                if (!eventStreamErrorRecoverable(err)) return err;
-                self.stream.deinit();
-                while (true) {
-                    if (try waitForEventStreamReconnect(stop_fd)) return .stopped;
-                    self.stream = hyprland.EventStream.init(self.allocator, self.connection) catch |reconnect_err| {
-                        if (!eventStreamErrorRecoverable(reconnect_err)) return reconnect_err;
-                        continue;
-                    };
-                    break;
-                }
-                continue;
+        /// init publishes no stream until event socket setup succeeds.
+        pub fn init(
+            allocator: std.mem.Allocator,
+            source: *Source,
+            connection: Connection,
+        ) hyprland.EventStreamInitError!Self {
+            return .{
+                .allocator = allocator,
+                .source = source,
+                .connection = connection,
+                .stream = try hyprland.EventStream.initWith(Source, allocator, source, connection),
             };
-            switch (event) {
-                .stopped => return .stopped,
-                .monitor_changed => return .changed,
-                .workspace_changed, .window_changed => {},
+        }
+
+        /// deinit closes the event socket once; Source remains caller-owned.
+        pub fn deinit(self: *Self) io.SocketCloseError!void {
+            try self.stream.deinit(Source, self.source);
+        }
+
+        /// wait returns only monitor changes or the caller stop token.
+        pub fn wait(self: *Self, stop: io.StopId) (hyprland.EventWaitError || error{
+            HyprlandSocketPathInvalid,
+            HyprlandSocketPathTooLong,
+            HyprlandSocketOpenFailed,
+            HyprlandSocketConnectFailed,
+        })!MonitorFactWake {
+            while (true) {
+                const event = self.stream.waitWith(Source, self.source, stop) catch |err| {
+                    if (!eventStreamErrorRecoverable(err)) return err;
+                    self.stream.deinit(Source, self.source) catch |close_err| return close_err;
+                    while (true) {
+                        if (try waitForEventStreamReconnect(Source, self.source, stop)) return .stopped;
+                        self.stream = hyprland.EventStream.initWith(
+                            Source,
+                            self.allocator,
+                            self.source,
+                            self.connection,
+                        ) catch |reconnect_err| {
+                            if (!eventStreamErrorRecoverable(reconnect_err)) return reconnect_err;
+                            continue;
+                        };
+                        break;
+                    }
+                    continue;
+                };
+                return switch (event) {
+                    .stopped => .stopped,
+                    .monitor_changed => .changed,
+                    .workspace_changed, .window_changed => continue,
+                };
             }
         }
-    }
-};
-
-const event_stream_reconnect_wait_ms: i32 = 1000;
+    };
+}
 
 fn eventStreamErrorRecoverable(err: anyerror) bool {
     return switch (err) {
@@ -115,30 +127,34 @@ fn eventStreamErrorRecoverable(err: anyerror) bool {
     };
 }
 
-fn waitForEventStreamReconnect(stop_fd: std.posix.fd_t) !bool {
-    var poll_fds = [_]std.posix.pollfd{
-        .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+fn waitForEventStreamReconnect(comptime Source: type, source: *Source, stop: io.StopId) hyprland.EventWaitError!bool {
+    const result = source.poll(.{
+        .event = null,
+        .stop = stop,
+        .timeout = io.PollTimeout.fromMilliseconds(1000) catch unreachable,
+    }) catch |err| switch (err) {
+        error.SignalInterrupted => return false,
+        else => return err,
     };
-    while (true) {
-        poll_fds[0].revents = 0;
-        const ready = std.os.linux.poll(poll_fds[0..].ptr, 1, event_stream_reconnect_wait_ms);
-        switch (std.os.linux.errno(ready)) {
-            .SUCCESS => return ready > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0,
-            .INTR => continue,
-            else => return error.EnvironmentReconnectWaitFailed,
-        }
-    }
+    return switch (result.stop) {
+        .readable => true,
+        .readable_hangup, .closed => error.HyprlandStopClosed,
+        .failed => error.SystemCallFailed,
+        .idle => false,
+    };
 }
 
-test "env declarations are reachable" {
+test "pure env composition exposes only fact values" {
     std.testing.refAllDecls(monitor);
     std.testing.refAllDecls(workspace);
     std.testing.refAllDecls(window);
     std.testing.refAllDecls(state);
     std.testing.refAllDecls(hyprland);
+    _ = MonitorSourceWith(io.SocketTranscript);
+    _ = MonitorFactStreamWith(io.SocketTranscript);
 }
 
-test "environment reconnects only external event socket loss" {
+test "env reconnect classifies only recoverable event loss" {
     try std.testing.expect(eventStreamErrorRecoverable(error.HyprlandEventSocketClosed));
     try std.testing.expect(eventStreamErrorRecoverable(error.HyprlandSocketOpenFailed));
     try std.testing.expect(eventStreamErrorRecoverable(error.HyprlandSocketConnectFailed));

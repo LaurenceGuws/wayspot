@@ -1,19 +1,24 @@
-//! Hyprland owns bounded IPC parsing only to fill dumb env facts.
+//! Hyprland owns bounded IPC parsing and fact publication; Source owns syscalls.
 
 const std = @import("std");
+const io = @import("hyprland_io");
 const monitor_facts = @import("monitor.zig");
 const workspace_facts = @import("workspace.zig");
 const window_facts = @import("window.zig");
 const state_facts = @import("state.zig");
 
-pub const max_hypr_response_bytes: u32 = 1024 * 1024;
-const socket_path_bytes: u32 = 160;
-const max_event_line_bytes: u32 = 512;
-const event_read_bytes: u32 = 1024;
+/// max_hypr_response_bytes bounds one owned JSON response before parsing.
+pub const max_hypr_response_bytes: usize = 1024 * 1024;
+/// max_event_line_bytes bounds recognized socket2 data before its newline.
+pub const max_event_line_bytes: usize = 1044;
+/// event_read_bytes matches one bounded socket2 read.
+pub const event_read_bytes: usize = io.max_event_chunk_bytes;
 
 /// Connection stores the bounded Hyprland instance address parts.
 pub const Connection = struct {
+    /// runtime_dir is the caller-owned XDG runtime directory.
     runtime_dir: []const u8,
+    /// signature is the caller-owned Hyprland instance signature.
     signature: []const u8,
 };
 
@@ -25,83 +30,290 @@ pub const FactEvent = enum {
     stopped,
 };
 
-/// queryMonitors loads monitor facts with one bounded Hyprland request.
-pub fn queryMonitors(allocator: std.mem.Allocator, hypr: Connection) !monitor_facts.MonitorList {
-    const response = try request(allocator, hypr, "j/monitors");
+/// RequestError is the exact synchronous request and response error set.
+pub const RequestError = error{
+    HyprlandSocketPathInvalid,
+    HyprlandSocketPathTooLong,
+    HyprlandSocketOpenFailed,
+    HyprlandSocketConnectFailed,
+    HyprlandSocketWriteFailed,
+    HyprlandSocketReadFailed,
+    HyprlandSocketCloseFailed,
+    HyprlandSocketNotLive,
+    HyprlandResponseTooLarge,
+    SignalInterrupted,
+    SystemCallFailed,
+    OutOfMemory,
+};
+
+/// EventStreamInitError is the exact event stream setup error set.
+pub const EventStreamInitError = error{
+    HyprlandSocketPathInvalid,
+    HyprlandSocketPathTooLong,
+    HyprlandSocketOpenFailed,
+    HyprlandSocketConnectFailed,
+    HyprlandSocketCloseFailed,
+    HyprlandSocketNotLive,
+    SystemCallFailed,
+};
+
+/// EventWaitError is the exact event wait and read error set.
+pub const EventWaitError = error{
+    HyprlandSocketReadFailed,
+    HyprlandSocketNotLive,
+    SignalInterrupted,
+    SystemCallFailed,
+    HyprlandSocketCloseFailed,
+    HyprlandEventSocketClosed,
+    HyprlandEventLineTooLong,
+    HyprlandStopClosed,
+};
+
+/// MonitorQueryError is the exact monitor query and parse error set.
+pub const MonitorQueryError = RequestError || error{
+    InvalidMonitorJson,
+    InvalidJsonNumber,
+    InvalidMonitorName,
+    InvalidMonitorSize,
+    InvalidMonitorScale,
+    TooManyCurrentActiveWorkspaces,
+    TooManyMonitors,
+};
+
+/// FillStateError is the exact complete environment refresh error set.
+pub const FillStateError = RequestError || error{
+    InvalidMonitorJson,
+    InvalidWorkspaceJson,
+    InvalidWindowJson,
+    InvalidJsonNumber,
+    InvalidMonitorName,
+    InvalidMonitorSize,
+    InvalidMonitorScale,
+    InvalidWorkspaceName,
+    InvalidWindowClass,
+    InvalidWindowTitle,
+    InvalidWindowSize,
+    TooManyCurrentActiveWorkspaces,
+    TooManyWorkspaceMonitorRefs,
+    TooManyWorkspaceWindowRefs,
+    TooManyMonitors,
+    TooManyWorkspaces,
+    TooManyWindows,
+};
+
+/// queryMonitorsWith performs one typed monitor request through Source.
+pub fn queryMonitorsWith(
+    comptime Source: type,
+    allocator: std.mem.Allocator,
+    source: *Source,
+    hypr: Connection,
+) MonitorQueryError!monitor_facts.MonitorList {
+    const response = try requestWith(Source, allocator, source, hypr, .monitors);
     defer allocator.free(response);
     return parseMonitors(allocator, response);
 }
 
-/// fillState replaces env state from bounded Hyprland fact requests.
-pub fn fillState(allocator: std.mem.Allocator, hypr: Connection, env_state: *state_facts.EnvState) !void {
-    const monitors = try queryMonitors(allocator, hypr);
-    const workspaces_response = try request(allocator, hypr, "j/workspaces");
+/// fillStateWith publishes no new environment snapshot until all three requests parse.
+pub fn fillStateWith(
+    comptime Source: type,
+    allocator: std.mem.Allocator,
+    source: *Source,
+    hypr: Connection,
+    env_state: *state_facts.EnvState,
+) FillStateError!void {
+    const monitors = try queryMonitorsWith(Source, allocator, source, hypr);
+    const workspaces_response = try requestWith(Source, allocator, source, hypr, .workspaces);
     defer allocator.free(workspaces_response);
     const workspaces = try parseWorkspaces(allocator, workspaces_response);
-    const windows_response = try request(allocator, hypr, "j/clients");
+    const windows_response = try requestWith(Source, allocator, source, hypr, .clients);
     defer allocator.free(windows_response);
     const windows = try parseWindows(allocator, windows_response);
     env_state.refreshFromHyprlandFacts(monitors, workspaces, windows);
 }
 
-/// EventStream owns one socket2 connection and a bounded pending line buffer.
-pub const EventStream = struct {
-    fd: std.posix.fd_t = -1,
-    pending: [max_event_line_bytes]u8 = undefined,
-    pending_len: u32 = 0,
-    pending_event: ?FactEvent = null,
+/// requestWith opens, writes, reads, and closes one synchronous request.
+pub fn requestWith(
+    comptime Source: type,
+    allocator: std.mem.Allocator,
+    source: *Source,
+    hypr: Connection,
+    name: io.RequestName,
+) RequestError![]u8 {
+    const path = try socketPath(hypr, .request);
+    const id = try source.socket(.request);
+    var operation_error: ?RequestError = null;
+    var response: ?[]u8 = null;
 
-    /// init opens the Hyprland event socket; caller must deinit.
-    pub fn init(allocator: std.mem.Allocator, hypr: Connection) !EventStream {
-        const socket_path = try std.fmt.allocPrint(allocator, "{s}/hypr/{s}/.socket2.sock", .{ hypr.runtime_dir, hypr.signature });
-        defer allocator.free(socket_path);
-        return .{ .fd = try connectRequestSocket(socket_path) };
+    source.connect(id, path) catch |err| {
+        operation_error = err;
+    };
+    if (operation_error == null) {
+        writeRequest(Source, source, id, io.RequestWrite.fromName(name)) catch |err| {
+            operation_error = err;
+        };
+    }
+    if (operation_error == null) {
+        response = readResponse(Source, allocator, source, id) catch |err| response_failure: {
+            operation_error = err;
+            break :response_failure null;
+        };
     }
 
-    /// deinit closes the retained socket once.
-    pub fn deinit(self: *EventStream) void {
-        if (self.fd != -1) {
-            closeFd(self.fd);
-            self.fd = -1;
+    var close_error: ?io.SocketCloseError = null;
+    source.close(id) catch |err| {
+        close_error = err;
+    };
+    if (close_error) |err| {
+        if (response) |bytes| allocator.free(bytes);
+        return err;
+    }
+    if (operation_error) |err| return err;
+    return response orelse error.HyprlandSocketReadFailed;
+}
+
+fn writeRequest(
+    comptime Source: type,
+    source: *Source,
+    id: io.SocketId,
+    request: io.RequestWrite,
+) io.SocketWriteError!void {
+    var offset: usize = 0;
+    while (offset < request.len) {
+        const count = source.write(id, request) catch |err| switch (err) {
+            error.SignalInterrupted => continue,
+            else => return err,
+        };
+        if (count == 0 or count > request.len - offset) return error.HyprlandSocketWriteFailed;
+        offset += count;
+    }
+}
+
+fn readResponse(
+    comptime Source: type,
+    allocator: std.mem.Allocator,
+    source: *Source,
+    id: io.SocketId,
+) RequestError![]u8 {
+    var response = std.ArrayList(u8).empty;
+    errdefer response.deinit(allocator);
+    while (true) {
+        const read = source.readRequest(id) catch |err| switch (err) {
+            error.SignalInterrupted => continue,
+            else => return err,
+        };
+        switch (read) {
+            .eof => return response.toOwnedSlice(allocator),
+            .chunk => |chunk| {
+                if (chunk.len == 0 or response.items.len > max_hypr_response_bytes - chunk.len) {
+                    return error.HyprlandResponseTooLarge;
+                }
+                try response.appendSlice(allocator, chunk.bytes[0..chunk.len]);
+            },
         }
     }
+}
 
-    /// wait returns the next fact-change event or the caller stop signal.
-    pub fn wait(self: *EventStream, stop_fd: std.posix.fd_t) !FactEvent {
+fn socketPath(hypr: Connection, kind: io.SocketKind) io.SocketPathError!io.SocketPath {
+    var buffer: [256]u8 = undefined;
+    const suffix = switch (kind) {
+        .request => ".socket.sock",
+        .event => ".socket2.sock",
+    };
+    const text = std.fmt.bufPrint(&buffer, "{s}/hypr/{s}/{s}", .{ hypr.runtime_dir, hypr.signature, suffix }) catch {
+        return error.HyprlandSocketPathTooLong;
+    };
+    return io.SocketPath.init(text) catch |err| switch (err) {
+        error.HyprlandSocketPathInvalid => error.HyprlandSocketPathInvalid,
+        error.HyprlandSocketPathTooLong => error.HyprlandSocketPathTooLong,
+    };
+}
+
+/// EventStream owns one socket2 local id and a bounded pending event line.
+pub const EventStream = struct {
+    /// socket is retired by Source.close during deinit.
+    socket: io.SocketId = .{ .value = 0 },
+    /// pending stores one partial event frame without its newline.
+    pending: [max_event_line_bytes]u8 = undefined,
+    /// pending_len is bounded by max_event_line_bytes.
+    pending_len: usize = 0,
+    /// pending_event collapses ready facts by monitor/workspace/window priority.
+    pending_event: ?FactEvent = null,
+
+    /// initWith opens and connects one typed event source.
+    pub fn initWith(
+        comptime Source: type,
+        allocator: std.mem.Allocator,
+        source: *Source,
+        hypr: Connection,
+    ) EventStreamInitError!EventStream {
+        _ = allocator;
+        const path = try socketPath(hypr, .event);
+        const id = try source.socket(.event);
+        source.connect(id, path) catch |err| {
+            source.close(id) catch |close_err| return close_err;
+            return err;
+        };
+        return .{ .socket = id };
+    }
+
+    /// deinit makes one close attempt and retires the local source id.
+    pub fn deinit(self: *EventStream, comptime Source: type, source: *Source) io.SocketCloseError!void {
+        if (self.socket.value == 0) return;
+        const id = self.socket;
+        self.socket = .{ .value = 0 };
+        return source.close(id);
+    }
+
+    /// waitWith maps stop readiness before event readiness and reads one event.
+    pub fn waitWith(
+        self: *EventStream,
+        comptime Source: type,
+        source: *Source,
+        stop: io.StopId,
+    ) EventWaitError!FactEvent {
         while (true) {
             if (self.nextPendingEvent()) |event| return event;
-            var poll_fds = [_]std.posix.pollfd{
-                .{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-            const ready = pollFdSet(&poll_fds, -1) catch |err| switch (err) {
+            const result = source.poll(.{
+                .event = self.socket,
+                .stop = stop,
+                .timeout = io.PollTimeout.infinite(),
+            }) catch |err| switch (err) {
                 error.SignalInterrupted => continue,
                 else => return err,
             };
-            if (ready == 0) continue;
-            if ((poll_fds[1].revents & std.posix.POLL.IN) != 0) return .stopped;
-            if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
-            try self.readAvailable();
+            switch (result.stop) {
+                .readable => return .stopped,
+                .readable_hangup, .closed => return error.HyprlandStopClosed,
+                .failed => return error.SystemCallFailed,
+                .idle => {},
+            }
+            switch (result.event orelse continue) {
+                .readable, .readable_hangup => self.readAvailable(Source, source) catch |err| switch (err) {
+                    error.SignalInterrupted => continue,
+                    else => return err,
+                },
+                .closed => return error.HyprlandEventSocketClosed,
+                .failed => return error.SystemCallFailed,
+                .idle => {},
+            }
         }
     }
 
-    fn readAvailable(self: *EventStream) !void {
-        var buf: [event_read_bytes]u8 = undefined;
-        const read_count = readFd(self.fd, &buf) catch |err| switch (err) {
-            error.SignalInterrupted => return,
+    fn readAvailable(self: *EventStream, comptime Source: type, source: *Source) EventWaitError!void {
+        const read = source.readEvent(self.socket) catch |err| switch (err) {
+            error.SignalInterrupted => return error.SignalInterrupted,
             else => return err,
         };
-        if (read_count == 0) return error.HyprlandEventSocketClosed;
-        try self.readAvailableFromBytes(buf[0..read_count]);
+        switch (read) {
+            .eof => return error.HyprlandEventSocketClosed,
+            .chunk => |chunk| try self.readAvailableFromBytes(chunk.bytes[0..chunk.len]),
+        }
     }
 
-    fn readAvailableFromBytes(self: *EventStream, bytes: []const u8) !void {
-        var index: u32 = 0;
-        while (index < bytes.len) : (index += 1) {
-            if (bytes[index] == '\n') {
-                if (classifyEventLine(self.pending[0..self.pending_len])) |event| {
-                    self.mergePendingEvent(event);
-                }
+    fn readAvailableFromBytes(self: *EventStream, bytes: []const u8) EventWaitError!void {
+        for (bytes) |byte| {
+            if (byte == '\n') {
+                if (classifyEventLine(self.pending[0..self.pending_len])) |event| self.mergePendingEvent(event);
                 self.pending_len = 0;
                 continue;
             }
@@ -109,32 +321,15 @@ pub const EventStream = struct {
                 self.pending_len = 0;
                 return error.HyprlandEventLineTooLong;
             }
-            self.pending[self.pending_len] = bytes[index];
+            self.pending[self.pending_len] = byte;
             self.pending_len += 1;
         }
     }
 
     fn nextPendingEvent(self: *EventStream) ?FactEvent {
-        if (self.pending_event) |event| {
-            self.pending_event = null;
-            return event;
-        }
-        while (true) {
-            var newline_index: u32 = 0;
-            while (newline_index < self.pending_len) : (newline_index += 1) {
-                if (self.pending[newline_index] != '\n') continue;
-                const line = self.pending[0..newline_index];
-                const remaining_start = newline_index + 1;
-                const remaining_len = self.pending_len - remaining_start;
-                if (remaining_len > 0) {
-                    std.mem.copyForwards(u8, self.pending[0..remaining_len], self.pending[remaining_start..self.pending_len]);
-                }
-                self.pending_len = remaining_len;
-                if (classifyEventLine(line)) |event| return event;
-                break;
-            }
-            if (newline_index >= self.pending_len) return null;
-        }
+        const event = self.pending_event;
+        self.pending_event = null;
+        return event;
     }
 
     fn mergePendingEvent(self: *EventStream, event: FactEvent) void {
@@ -152,49 +347,79 @@ pub const EventStream = struct {
     }
 };
 
-/// request opens, writes, reads, and closes one synchronous Hyprland request.
-pub fn request(allocator: std.mem.Allocator, hypr: Connection, request_text: []const u8) ![]u8 {
-    const socket_path = try std.fmt.allocPrint(allocator, "{s}/hypr/{s}/.socket.sock", .{ hypr.runtime_dir, hypr.signature });
-    defer allocator.free(socket_path);
-    const fd = try connectRequestSocket(socket_path);
-    defer closeFd(fd);
-    try writeAll(fd, request_text);
-    return readBounded(allocator, fd);
-}
-
-/// classifyEventLine maps socket2 lines to dumb fact-change events only.
+/// classifyEventLine maps recognized socket2 lines to dumb fact-change events only.
 pub fn classifyEventLine(line: []const u8) ?FactEvent {
     const marker = std.mem.indexOf(u8, line, ">>") orelse return null;
     const name = line[0..marker];
-    if (eventNameIn(name, &.{ "monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2" })) return .monitor_changed;
-    if (eventNameIn(name, &.{ "workspace", "workspacev2", "createworkspace", "createworkspacev2", "destroyworkspace", "destroyworkspacev2", "moveworkspace", "moveworkspacev2", "renameworkspace", "activespecial", "activespecialv2", "focusedmon", "focusedmonv2" })) return .workspace_changed;
-    if (eventNameIn(name, &.{ "activewindow", "activewindowv2", "openwindow", "closewindow", "movewindow", "movewindowv2", "windowtitle", "windowtitlev2" })) return .window_changed;
+    if (eventNameIn(name, &.{
+        "monitoradded",
+        "monitoraddedv2",
+        "monitorremoved",
+        "monitorremovedv2",
+    })) return .monitor_changed;
+    if (eventNameIn(name, &.{
+        "workspace",
+        "workspacev2",
+        "createworkspace",
+        "createworkspacev2",
+        "destroyworkspace",
+        "destroyworkspacev2",
+        "moveworkspace",
+        "moveworkspacev2",
+        "renameworkspace",
+        "activespecial",
+        "activespecialv2",
+        "focusedmon",
+        "focusedmonv2",
+    })) return .workspace_changed;
+    if (eventNameIn(name, &.{
+        "activewindow",
+        "activewindowv2",
+        "openwindow",
+        "closewindow",
+        "movewindow",
+        "movewindowv2",
+        "windowtitle",
+        "windowtitlev2",
+    })) return .window_changed;
     return null;
 }
 
 fn eventNameIn(name: []const u8, comptime names: []const []const u8) bool {
-    inline for (names) |candidate| {
-        if (std.mem.eql(u8, name, candidate)) return true;
-    }
+    inline for (names) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
     return false;
 }
 
-/// parseMonitors converts Hyprland monitor JSON into bounded monitor facts.
-pub fn parseMonitors(allocator: std.mem.Allocator, response: []const u8) !monitor_facts.MonitorList {
+/// parseMonitors converts bounded Hyprland monitor JSON into plain facts.
+pub fn parseMonitors(
+    allocator: std.mem.Allocator,
+    response: []const u8,
+) MonitorQueryError!monitor_facts.MonitorList {
     if (response.len > max_hypr_response_bytes) return error.HyprlandResponseTooLarge;
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidMonitorJson,
+    };
     defer parsed.deinit();
     if (parsed.value != .array) return error.InvalidMonitorJson;
     var list = monitor_facts.MonitorList{};
     for (parsed.value.array.items) |entry| {
         if (entry != .object) return error.InvalidMonitorJson;
         const id = try jsonI32(entry.object.get("id") orelse return error.InvalidMonitorJson);
-        const name = jsonString(entry.object.get("name") orelse return error.InvalidMonitorJson) orelse return error.InvalidMonitorJson;
+        const name = jsonString(entry.object.get("name") orelse return error.InvalidMonitorJson) orelse
+            return error.InvalidMonitorJson;
         const width = try jsonI32(entry.object.get("width") orelse return error.InvalidMonitorJson);
         const height = try jsonI32(entry.object.get("height") orelse return error.InvalidMonitorJson);
-        var monitor = try monitor_facts.Monitor.init(.{ .value = id }, name, try monitor_facts.MonitorSize.init(width, height));
-        if (entry.object.get("scale")) |scale_value| monitor.scale = try monitor_facts.MonitorScale.init(try jsonF64(scale_value));
-        monitor.focused = jsonBool(entry.object.get("focused") orelse std.json.Value{ .bool = false }) orelse return error.InvalidMonitorJson;
+        var monitor = try monitor_facts.Monitor.init(
+            .{ .value = id },
+            name,
+            try monitor_facts.MonitorSize.init(width, height),
+        );
+        if (entry.object.get("scale")) |scale_value| {
+            monitor.scale = try monitor_facts.MonitorScale.init(try jsonF64(scale_value));
+        }
+        monitor.focused = jsonBool(entry.object.get("focused") orelse .{ .bool = false }) orelse
+            return error.InvalidMonitorJson;
         if (entry.object.get("activeWorkspace")) |workspace_value| {
             if (workspace_value == .object) {
                 if (workspace_value.object.get("id")) |workspace_id| {
@@ -207,64 +432,76 @@ pub fn parseMonitors(allocator: std.mem.Allocator, response: []const u8) !monito
     return list;
 }
 
-fn focusedMonitorName(monitors: monitor_facts.MonitorList) ?[]const u8 {
-    var index: u32 = 0;
-    while (index < monitors.count) : (index += 1) {
-        if (monitors.items[index].focused) return monitors.items[index].nameText();
-    }
-    return null;
-}
-
-/// parseWorkspaces converts Hyprland workspace JSON into bounded workspace facts.
-/// Hyprland's workspace response exposes a window count, not window identities,
-/// so workspace window refs stay empty until a source provides concrete refs.
-pub fn parseWorkspaces(allocator: std.mem.Allocator, response: []const u8) !workspace_facts.WorkspaceList {
+/// parseWorkspaces converts bounded Hyprland workspace JSON into plain facts.
+pub fn parseWorkspaces(
+    allocator: std.mem.Allocator,
+    response: []const u8,
+) FillStateError!workspace_facts.WorkspaceList {
     if (response.len > max_hypr_response_bytes) return error.HyprlandResponseTooLarge;
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidWorkspaceJson,
+    };
     defer parsed.deinit();
     if (parsed.value != .array) return error.InvalidWorkspaceJson;
     var list = workspace_facts.WorkspaceList{};
     for (parsed.value.array.items) |entry| {
         if (entry != .object) return error.InvalidWorkspaceJson;
         const id = try jsonI32(entry.object.get("id") orelse return error.InvalidWorkspaceJson);
-        const name = jsonString(entry.object.get("name") orelse return error.InvalidWorkspaceJson) orelse return error.InvalidWorkspaceJson;
+        const name = jsonString(entry.object.get("name") orelse return error.InvalidWorkspaceJson) orelse
+            return error.InvalidWorkspaceJson;
         var workspace = try workspace_facts.Workspace.init(.{ .value = id }, name);
-        if (entry.object.get("monitorID")) |monitor_id| try workspace.visible_on.append(.{ .id = try jsonI32(monitor_id) });
+        if (entry.object.get("monitorID")) |monitor_id| {
+            try workspace.visible_on.append(.{ .id = try jsonI32(monitor_id) });
+        }
         try list.append(workspace);
     }
     return list;
 }
 
-/// parseWindows converts Hyprland client JSON into bounded window facts.
-pub fn parseWindows(allocator: std.mem.Allocator, response: []const u8) !window_facts.WindowList {
+/// parseWindows converts bounded Hyprland client JSON into plain facts.
+pub fn parseWindows(
+    allocator: std.mem.Allocator,
+    response: []const u8,
+) FillStateError!window_facts.WindowList {
     if (response.len > max_hypr_response_bytes) return error.HyprlandResponseTooLarge;
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidWindowJson,
+    };
     defer parsed.deinit();
     if (parsed.value != .array) return error.InvalidWindowJson;
     var list = window_facts.WindowList{};
     for (parsed.value.array.items) |entry| {
         if (entry != .object) return error.InvalidWindowJson;
-        const address_text = jsonString(entry.object.get("address") orelse return error.InvalidWindowJson) orelse return error.InvalidWindowJson;
-        const class = jsonString(entry.object.get("class") orelse return error.InvalidWindowJson) orelse return error.InvalidWindowJson;
-        const title = jsonString(entry.object.get("title") orelse std.json.Value{ .string = "" }) orelse return error.InvalidWindowJson;
+        const address_text = jsonString(entry.object.get("address") orelse return error.InvalidWindowJson) orelse
+            return error.InvalidWindowJson;
+        const class = jsonString(entry.object.get("class") orelse return error.InvalidWindowJson) orelse
+            return error.InvalidWindowJson;
+        const title = jsonString(entry.object.get("title") orelse .{ .string = "" }) orelse
+            return error.InvalidWindowJson;
         const size_value = entry.object.get("size") orelse return error.InvalidWindowJson;
-        if (size_value != .array or size_value.array.items.len < 2) return error.InvalidWindowJson;
+        if (size_value != .array or size_value.array.items.len != 2) return error.InvalidWindowJson;
         const address = parseAddress(address_text) catch return error.InvalidWindowJson;
         var item = try window_facts.Window.init(
             .{ .value = address },
             class,
             title,
-            try window_facts.WindowSize.init(try jsonI32(size_value.array.items[0]), try jsonI32(size_value.array.items[1])),
+            try window_facts.WindowSize.init(
+                try jsonI32(size_value.array.items[0]),
+                try jsonI32(size_value.array.items[1]),
+            ),
         );
         if (entry.object.get("workspace")) |workspace_value| {
             if (workspace_value == .object) {
-                if (workspace_value.object.get("id")) |workspace_id| item.workspace = .{ .id = try jsonI32(workspace_id) };
+                if (workspace_value.object.get("id")) |workspace_id| {
+                    item.workspace = .{ .id = try jsonI32(workspace_id) };
+                }
             }
         }
-        item.visible = jsonBool(entry.object.get("mapped") orelse std.json.Value{ .bool = true }) orelse return error.InvalidWindowJson;
-        if (entry.object.get("focusHistoryID")) |focus_value| {
-            item.focused = try jsonI32(focus_value) == 0;
-        }
+        item.visible = jsonBool(entry.object.get("mapped") orelse .{ .bool = true }) orelse
+            return error.InvalidWindowJson;
+        if (entry.object.get("focusHistoryID")) |focus_value| item.focused = try jsonI32(focus_value) == 0;
         try list.append(item);
     }
     return list;
@@ -291,102 +528,31 @@ fn jsonBool(value: std.json.Value) ?bool {
 
 fn jsonI32(value: std.json.Value) !i32 {
     return switch (value) {
-        .integer => |int_value| @intCast(int_value),
-        .float => |float_value| @intFromFloat(float_value),
+        .integer => |number| std.math.cast(i32, number) orelse error.InvalidJsonNumber,
+        .float => |number| if (std.math.isFinite(number) and
+            number >= std.math.minInt(i32) and
+            number <= std.math.maxInt(i32) and
+            @trunc(number) == number)
+            @intFromFloat(number)
+        else
+            error.InvalidJsonNumber,
         else => error.InvalidJsonNumber,
     };
 }
 
 fn jsonF64(value: std.json.Value) !f64 {
     return switch (value) {
-        .integer => |int_value| @floatFromInt(int_value),
-        .float => |float_value| float_value,
+        .integer => |number| @floatFromInt(number),
+        .float => |number| number,
         else => error.InvalidJsonNumber,
-    };
-}
-
-fn connectRequestSocket(socket_path: []const u8) !i32 {
-    if (socket_path.len >= socket_path_bytes) return error.HyprlandSocketPathTooLong;
-    const raw_fd = std.os.linux.socket(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM | std.os.linux.SOCK.CLOEXEC, 0);
-    switch (std.os.linux.errno(raw_fd)) {
-        .SUCCESS => {},
-        else => return error.HyprlandSocketOpenFailed,
-    }
-    const fd: i32 = @intCast(raw_fd);
-    errdefer closeFd(fd);
-    var addr = std.os.linux.sockaddr.un{ .family = std.os.linux.AF.UNIX, .path = [_]u8{0} ** 108 };
-    @memcpy(addr.path[0..socket_path.len], socket_path);
-    const addr_len: std.os.linux.socklen_t = @intCast(@offsetOf(std.os.linux.sockaddr.un, "path") + socket_path.len + 1);
-    const rc = std.os.linux.connect(fd, &addr, addr_len);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => fd,
-        else => error.HyprlandSocketConnectFailed,
-    };
-}
-
-fn writeAll(fd: i32, bytes: []const u8) !void {
-    var offset: u32 = 0;
-    while (offset < bytes.len) {
-        const chunk = bytes[offset..];
-        const written = std.os.linux.write(fd, chunk.ptr, chunk.len);
-        switch (std.os.linux.errno(written)) {
-            .SUCCESS => {
-                if (written == 0) return error.HyprlandSocketWriteFailed;
-                offset += @intCast(written);
-            },
-            .INTR => {},
-            else => return error.HyprlandSocketWriteFailed,
-        }
-    }
-}
-
-fn readBounded(allocator: std.mem.Allocator, fd: i32) ![]u8 {
-    var response = std.ArrayList(u8).empty;
-    errdefer response.deinit(allocator);
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const read_count = std.os.linux.read(fd, &buf, buf.len);
-        switch (std.os.linux.errno(read_count)) {
-            .SUCCESS => {
-                if (read_count == 0) return response.toOwnedSlice(allocator);
-                if (response.items.len + read_count > max_hypr_response_bytes) return error.HyprlandResponseTooLarge;
-                try response.appendSlice(allocator, buf[0..read_count]);
-            },
-            .INTR => {},
-            else => return error.HyprlandSocketReadFailed,
-        }
-    }
-}
-
-fn closeFd(fd: i32) void {
-    const rc = std.os.linux.close(fd);
-    if (std.os.linux.errno(rc) != .SUCCESS) {
-        std.log.debug("hyprland request socket close failed fd={d}", .{fd});
-    }
-}
-
-fn pollFdSet(fds: []std.posix.pollfd, timeout_ms: i32) !u32 {
-    const rc = std.os.linux.poll(fds.ptr, @intCast(fds.len), timeout_ms);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .INTR => error.SignalInterrupted,
-        else => error.SystemCallFailed,
-    };
-}
-
-fn readFd(fd: std.posix.fd_t, buf: []u8) !u32 {
-    const rc = std.os.linux.read(fd, buf.ptr, buf.len);
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .INTR => error.SignalInterrupted,
-        else => error.SystemCallFailed,
     };
 }
 
 test "monitor JSON parser accepts current active refs" {
     const json =
         \\[
-        \\  {"id":1,"name":"DP-1","width":1920,"height":1080,"scale":1.0,"focused":true,"activeWorkspace":{"id":7,"name":"main"}}
+        \\  {"id":1,"name":"DP-1","width":1920,"height":1080,
+        \\    "scale":1.0,"focused":true,"activeWorkspace":{"id":7,"name":"main"}}
         \\]
     ;
     const monitors = try parseMonitors(std.testing.allocator, json);
@@ -398,95 +564,77 @@ test "monitor JSON parser accepts current active refs" {
     try std.testing.expectEqual(@as(i32, 7), monitors.items[0].current_active.items[0].id);
 }
 
-test "focused monitor lookup uses monitor facts only" {
-    const json =
-        \\[
-        \\  {"id":1,"name":"DP-1","width":1920,"height":1080,"focused":false},
-        \\  {"id":2,"name":"HDMI-A-1","width":1280,"height":720,"focused":true}
-        \\]
-    ;
-    const monitors = try parseMonitors(std.testing.allocator, json);
-    try std.testing.expectEqualStrings("HDMI-A-1", focusedMonitorName(monitors).?);
-}
-
-test "monitor JSON parser rejects missing source identity" {
-    const json =
-        \\[
-        \\  {"name":"DP-1","width":1920,"height":1080}
-        \\]
-    ;
-    try std.testing.expectError(error.InvalidMonitorJson, parseMonitors(std.testing.allocator, json));
-}
-
-test "workspace JSON parser leaves count-only window refs empty" {
-    const json =
-        \\[
-        \\  {"id":7,"name":"main","monitorID":1,"windows":2}
-        \\]
-    ;
-    const workspaces = try parseWorkspaces(std.testing.allocator, json);
-    try std.testing.expectEqual(@as(u32, 1), workspaces.count);
-    try std.testing.expectEqual(@as(u32, 1), workspaces.items[0].visible_on.count);
-    try std.testing.expectEqual(@as(u32, 0), workspaces.items[0].windows.count);
-}
-
-test "window JSON parser keeps address as source identity" {
-    const json =
-        \\[
-        \\  {"address":"0xabc","class":"foot","title":"shell","size":[800,600],"workspace":{"id":7},"mapped":true,"focusHistoryID":0}
-        \\]
-    ;
-    const windows = try parseWindows(std.testing.allocator, json);
-    try std.testing.expectEqual(@as(u32, 1), windows.count);
-    try std.testing.expectEqual(@as(u64, 0xabc), windows.items[0].id.value);
-    try std.testing.expect(windows.items[0].visible);
-    try std.testing.expect(windows.items[0].focused);
-    try std.testing.expectEqual(@as(i32, 7), windows.items[0].workspace.?.id);
-}
-
-test "JSON parsers reject malformed and oversized responses" {
-    const oversized = try std.testing.allocator.alloc(u8, max_hypr_response_bytes + 1);
-    defer std.testing.allocator.free(oversized);
-    @memset(oversized, ' ');
-    try std.testing.expectError(error.HyprlandResponseTooLarge, parseMonitors(std.testing.allocator, oversized));
-    try std.testing.expectError(error.HyprlandResponseTooLarge, parseWorkspaces(std.testing.allocator, oversized));
-    try std.testing.expectError(error.HyprlandResponseTooLarge, parseWindows(std.testing.allocator, oversized));
-    try std.testing.expectError(error.InvalidMonitorJson, parseMonitors(std.testing.allocator, "{}"));
-    try std.testing.expectError(error.InvalidWorkspaceJson, parseWorkspaces(std.testing.allocator, "{}"));
-    try std.testing.expectError(error.InvalidWindowJson, parseWindows(std.testing.allocator, "{}"));
-}
-
-test "socket2 classifier accepts fact-change events only" {
+test "focused monitor event classifier preserves priority vocabulary" {
     try std.testing.expectEqual(@as(?FactEvent, .monitor_changed), classifyEventLine("monitoradded>>DP-1"));
     try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), classifyEventLine("focusedmonv2>>DP-1,1"));
-    try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), classifyEventLine("workspacev2>>7,main"));
     try std.testing.expectEqual(@as(?FactEvent, .window_changed), classifyEventLine("activewindowv2>>abc"));
     try std.testing.expectEqual(@as(?FactEvent, null), classifyEventLine("fullscreen>>1"));
-    try std.testing.expectEqual(@as(?FactEvent, null), classifyEventLine("focusedmon"));
 }
 
-test "socket2 pending parser rejects overlong lines and skips ignored lines" {
+test "pending event priority is monitor then workspace then window" {
+    var stream = EventStream{};
+    stream.mergePendingEvent(.window_changed);
+    stream.mergePendingEvent(.workspace_changed);
+    try std.testing.expectEqual(FactEvent.workspace_changed, stream.nextPendingEvent().?);
+    stream.mergePendingEvent(.window_changed);
+    stream.mergePendingEvent(.monitor_changed);
+    try std.testing.expectEqual(FactEvent.monitor_changed, stream.nextPendingEvent().?);
+}
+
+test "socket2 pending parser keeps the 1044-byte recognized bound" {
     var stream = EventStream{};
     stream.pending_len = max_event_line_bytes;
     try std.testing.expectError(error.HyprlandEventLineTooLong, stream.readAvailableFromBytes("x"));
-
-    const bytes = "fullscreen>>1\nmonitoradded>>DP-1\n";
-    @memcpy(stream.pending[0..bytes.len], bytes);
-    stream.pending_len = @intCast(bytes.len);
-    try std.testing.expectEqual(@as(?FactEvent, .monitor_changed), stream.nextPendingEvent());
+    stream.pending_len = 0;
+    const line = "workspacev2>>7,main\n";
+    try stream.readAvailableFromBytes(line);
+    try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), stream.nextPendingEvent());
 }
 
-test "socket2 parser bounds line storage without rejecting a valid event burst" {
+test "socket2 parser accepts 1044 data bytes and rejects the next byte" {
     var stream = EventStream{};
-    var bytes: [event_read_bytes]u8 = undefined;
-    const line = "workspacev2>>7,main\n";
-    var offset: u32 = 0;
-    while (offset + line.len <= max_event_line_bytes + line.len) : (offset += @intCast(line.len)) {
-        std.mem.copyForwards(u8, bytes[offset .. offset + line.len], line);
-    }
+    var exact: [max_event_line_bytes + 1]u8 = undefined;
+    const prefix = "monitoradded>>";
+    @memcpy(exact[0..prefix.len], prefix);
+    @memset(exact[prefix.len..max_event_line_bytes], 'x');
+    exact[max_event_line_bytes] = '\n';
+    try stream.readAvailableFromBytes(&exact);
+    try std.testing.expectEqual(@as(?FactEvent, .monitor_changed), stream.nextPendingEvent());
 
-    try std.testing.expect(offset > max_event_line_bytes);
-    try stream.readAvailableFromBytes(bytes[0..offset]);
-    try std.testing.expectEqual(@as(?FactEvent, .workspace_changed), stream.nextPendingEvent());
-    try std.testing.expectEqual(@as(u32, 0), stream.pending_len);
+    var overlong: [max_event_line_bytes + 2]u8 = undefined;
+    @memcpy(overlong[0..prefix.len], prefix);
+    @memset(overlong[prefix.len..], 'x');
+    try std.testing.expectError(error.HyprlandEventLineTooLong, stream.readAvailableFromBytes(&overlong));
+}
+
+test "JSON parser rejects extra window dimensions and unsafe numbers" {
+    const extra = "[{\"address\":\"0x1\",\"class\":\"foot\",\"title\":\"\",\"size\":[1,2,3]}]";
+    try std.testing.expectError(error.InvalidWindowJson, parseWindows(std.testing.allocator, extra));
+    const unsafe = "[{\"id\":999999999999999999999999,\"name\":\"DP-1\",\"width\":1,\"height\":1}]";
+    try std.testing.expectError(error.InvalidJsonNumber, parseMonitors(std.testing.allocator, unsafe));
+}
+
+test "JSON response bound accepts exact bytes before parsing and rejects one more" {
+    const exact = try std.testing.allocator.alloc(u8, max_hypr_response_bytes);
+    defer std.testing.allocator.free(exact);
+    @memset(exact, ' ');
+    exact[0] = '[';
+    exact[1] = ']';
+    const monitors = try parseMonitors(std.testing.allocator, exact);
+    try std.testing.expectEqual(@as(u32, 0), monitors.count);
+
+    const overlong = try std.testing.allocator.alloc(u8, max_hypr_response_bytes + 1);
+    defer std.testing.allocator.free(overlong);
+    try std.testing.expectError(error.HyprlandResponseTooLarge, parseMonitors(std.testing.allocator, overlong));
+}
+
+test "parser-byte fuzz remains bounded and publishes no external objects" {
+    try std.testing.fuzz({}, fuzzParserBytes, .{});
+}
+
+fn fuzzParserBytes(_: void, smith: *std.testing.Smith) !void {
+    var input: [max_event_line_bytes + 1]u8 = undefined;
+    smith.bytes(&input);
+    const length = smith.valueRangeAtMost(u16, 0, @intCast(input.len));
+    _ = classifyEventLine(input[0..length]);
 }

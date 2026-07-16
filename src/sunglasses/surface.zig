@@ -1,7 +1,7 @@
 //! Sunglasses surface owns one pass-through overlay layer and state tint buffer.
 
 const std = @import("std");
-const monitor_facts = @import("wayspot_env").monitor;
+const monitor_facts = @import("wayspot_env_native").monitor;
 const sunglasses_state = @import("../sunglasses/state.zig");
 const sdl_io = @import("sdl_io");
 const sdl_native = @import("sdl_native");

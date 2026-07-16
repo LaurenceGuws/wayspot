@@ -1,7 +1,7 @@
 //! Sunglasses overlay owns overlay slots, apply wakes, and shutdown cleanup order.
 
 const std = @import("std");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 const sunglasses_state = @import("state.zig");
 const sunglasses_surface = @import("surface.zig");
 
@@ -35,7 +35,7 @@ pub const Overlay = struct {
     slot_count: u32 = 0,
     vendor_started: bool = false,
 
-    pub fn runOverlay(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
+    pub fn runOverlay(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !void {
         var overlay = Overlay{ .allocator = allocator };
         defer overlay.deinit();
         try overlay.startOverlay(monitor_source);
@@ -88,7 +88,7 @@ pub const Overlay = struct {
         };
     }
 
-    fn startOverlay(self: *Overlay, monitor_source: env.MonitorSource) !void {
+    fn startOverlay(self: *Overlay, monitor_source: *env.MonitorSource) !void {
         var state = try sunglasses_state.State.load(self.allocator);
         if (!state.needsOverlay()) return;
 
@@ -100,7 +100,9 @@ pub const Overlay = struct {
         defer pid_file.deinit(self.allocator);
 
         var monitor_watcher = try MonitorWatcher.init(self.allocator, monitor_source);
-        defer monitor_watcher.deinit();
+        defer monitor_watcher.deinit() catch |err| {
+            std.log.debug("sunglasses monitor close failed err={s}", .{@errorName(err)});
+        };
         try monitor_watcher.start();
 
         try self.rebuildSurfaceSlots(monitor_source, &state);
@@ -114,7 +116,7 @@ pub const Overlay = struct {
         self.vendor_started = true;
     }
 
-    fn runApplyLoop(self: *Overlay, monitor_source: env.MonitorSource, state: *sunglasses_state.State) !void {
+    fn runApplyLoop(self: *Overlay, monitor_source: *env.MonitorSource, state: *sunglasses_state.State) !void {
         while (true) {
             switch (try waitForWake()) {
                 .shutdown => return,
@@ -132,7 +134,11 @@ pub const Overlay = struct {
         }
     }
 
-    fn rebuildSurfaceSlots(self: *Overlay, monitor_source: env.MonitorSource, state: *const sunglasses_state.State) !void {
+    fn rebuildSurfaceSlots(
+        self: *Overlay,
+        monitor_source: *env.MonitorSource,
+        state: *const sunglasses_state.State,
+    ) !void {
         const monitors = try monitor_source.queryMonitors(self.allocator);
         if (monitors.count == 0) return error.NoEnvMonitors;
 
@@ -263,9 +269,9 @@ const MonitorWatcher = struct {
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !MonitorWatcher {
+    fn init(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !MonitorWatcher {
         var stream = try monitor_source.monitorStream(allocator);
-        errdefer stream.deinit();
+        errdefer stream.deinit() catch |err| std.log.debug("sunglasses event close failed err={s}", .{@errorName(err)});
         return .{
             .stream = stream,
             .stop_fd = try osEventFd(),
@@ -290,9 +296,9 @@ const MonitorWatcher = struct {
         }
     }
 
-    fn deinit(self: *MonitorWatcher) void {
+    fn deinit(self: *MonitorWatcher) !void {
         self.stop();
-        self.stream.deinit();
+        try self.stream.deinit();
     }
 };
 

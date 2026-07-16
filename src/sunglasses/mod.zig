@@ -6,14 +6,14 @@
 
 const std = @import("std");
 const candidate = @import("picker_candidate");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 const identity = @import("wayspot_identity");
 
 pub const Overlay = @import("overlay.zig").Overlay;
 pub const state = @import("state.zig");
 
 /// run owns one sunglasses resident overlay lifecycle.
-pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
+pub fn run(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !void {
     try identity.set(identity.sunglasses);
     Overlay.runOverlay(allocator, monitor_source) catch |err| {
         recordStartupFailure(allocator, monitor_source.runtimeDir(), err);

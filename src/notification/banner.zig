@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const config_defaults = @import("wayspot_config_defaults");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 const notification_preview = @import("wayspot_notification_preview");
 const appearance_owner = @import("wayspot_appearance");
 const scale_owner = @import("wayspot_scale");
@@ -216,13 +216,16 @@ fn monotonicMs() u64 {
 }
 
 fn placeOnFocusedMonitor() void {
-    const monitor_source = env.MonitorSource.fromProcessEnv() orelse return;
-    runPlacementAction(std.heap.c_allocator, monitor_source, window_title) catch |err| {
+    var monitor_source = env.MonitorSource.fromProcessEnv() orelse return;
+    defer monitor_source.deinit() catch |err| {
+        std.log.debug("notification source close failed err={s}", .{@errorName(err)});
+    };
+    runPlacementAction(std.heap.c_allocator, &monitor_source, window_title) catch |err| {
         log.debug("notification placement action failed err={s}", .{@errorName(err)});
     };
 }
 
-fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: env.MonitorSource, title: []const u8) !void {
+fn runPlacementAction(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource, title: []const u8) !void {
     const monitors = try monitor_source.queryMonitors(allocator);
     const monitor_name = focusedMonitorName(&monitors) orelse return error.NoFocusedEnvMonitor;
     const script = try placementActionScript(allocator, monitor_name, title);

@@ -89,9 +89,9 @@ bounds:
 test_coverage:
   aggregate_root: src/aggregate_test.zig
   accepted_minimum: 320
-  current_verified: 451
-  aggregate_root_tests: 204
-  direct_root_tests: 247
+  current_verified: 462
+  aggregate_root_tests: 182
+  direct_root_tests: 280
   proof_command: "zig build test --summary all"
 proof:
   required_before_acceptance:

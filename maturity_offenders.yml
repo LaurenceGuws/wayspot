@@ -5,7 +5,7 @@
 register:
   name: external_io_maturity
   status: open
-  implementation_status: partial_sdl_display_with_paired_window_layer_adapters
+  implementation_status: partial_sdl_wayland_and_hyprland_ipc
   source_changes: true
   implementation_order:
     - sdl_wayland_window_display_events
@@ -1262,13 +1262,17 @@ boundaries:
       - "Compile/link src/c/native_io_check.zig separately; its explicit table proves every implemented native display callback and SDL/Wayland setup entry point is analyzed and linked without invoking native code. Surface image, SHM, render, event, and wallpaper paths remain deferred."
   - order: 2
     name: hyprland_ipc_wire
-    status: open
-    design_status: pending_reviewer
-    implementation_status: not_started
+    status: implemented
+    design_status: approved
+    implementation_status: implemented
+    proof_observation:
+      tests: "zig build test --summary all => 462/462 tests passed; aggregate root 182, direct roots 280"
+      source_bytes_excluding_crlf: "1008438 current src/*.zig bytes versus 718917 at checkpoint 6ff94bc; final size gate remains failing"
     scope: >-
       Keep Hyprland request names, response JSON, socket2 event lines, and
-      reconnect timing under src/env. Move only socket syscalls into the
-      planned native file. Keep JSON-to-fact conversion in hyprland.zig and
+      reconnect timing under src/env. Keep socket syscalls in the native
+      adapter and typed transcripts in the pure boundary. Keep JSON-to-fact
+      conversion in hyprland.zig and
       keep product owners consuming MonitorSource and MonitorFactStream.
       This slice does not add compositor policy or a second fact vocabulary.
     references:
@@ -1483,8 +1487,8 @@ boundaries:
         assertion: "Product callers receive MonitorList, WorkspaceList, WindowList, and FactEvent values only; RequestName, SocketId, PollResult, native fd, and parser wire bytes do not cross src/env boundaries."
         gate: "Import and symbol scans prove product callers import src/env/native.zig as wayspot_env_native, pure simulation imports src/env/mod.zig, and neither imports SocketTranscript or hyprland_native directly; unit checks cover monitor/workspace/window fact publication."
     current_callers:
-      - "src/env/mod.zig:MonitorSource.queryMonitors/monitorStream"
-      - "src/env/mod.zig:MonitorFactStream.init/wait/deinit"
+      - "src/env/native.zig:MonitorSource.queryMonitors/monitorStream"
+      - "src/env/native.zig:MonitorFactStream.init/wait/deinit"
       - "src/main.zig:runWallpaper/runSunglasses -> MonitorSource.init and resident owner calls"
       - "src/wallpaper/mod.zig:run"
       - "src/wallpaper/loop.zig:Loop.run/startWallpaper/runRandomLoop/rebuildSurfaceSlots/MonitorWatcher.init"
@@ -1492,28 +1496,22 @@ boundaries:
       - "src/sunglasses/overlay.zig:Overlay.runOverlay/startOverlay/runApplyLoop/rebuildSurfaceSlots/MonitorWatcher.init"
       - "src/sunglasses/state.zig:State.loadForMonitors"
       - "src/notification/banner.zig:placeOnFocusedMonitor/runPlacementAction"
-      - "src/aggregate_test.zig:hyprland/Connection/fillState/MonitorSource/MonitorFactStream exports"
+      - "src/aggregate_test.zig:hyprland/Connection/fillState/MonitorSource/MonitorFactStream"
     current_owner_paths:
-      - "src/env/hyprland.zig:Connection/queryMonitors/fillState/request/connectRequestSocket/writeAll/readBounded/pollFdSet"
-      - "src/env/hyprland.zig:EventStream/init/wait/readAvailable/readAvailableFromBytes/nextPendingEvent/deinit"
+      - "src/env/hyprland.zig:Connection/queryMonitorsWith/fillStateWith/requestWith/writeRequest/readResponse/socketPath"
+      - "src/env/hyprland.zig:EventStream/initWith/waitWith/readAvailable/readAvailableFromBytes/nextPendingEvent/deinit"
       - "src/env/hyprland.zig:parseMonitors/parseWorkspaces/parseWindows/classifyEventLine"
       - "src/env/hyprland.zig:jsonString/jsonBool/jsonI32/jsonF64/parseAddress"
-      - "src/env/mod.zig:MonitorSource/queryMonitors/monitorStream"
-      - "src/env/mod.zig:MonitorFactStream/init/wait/deinit/eventStreamErrorRecoverable/waitForEventStreamReconnect"
-    planned_owner_paths:
-      - "src/env/mod.zig:MonitorSourceWith/MonitorFactStreamWith pure control composition; no hyprland_native import"
-      - "src/env/native.zig:MonitorSource/MonitorFactStream production wrappers; imports src/env/mod.zig and src/env/hyprland_native.zig"
+      - "src/env/mod.zig:MonitorSourceWith/MonitorFactStreamWith/eventStreamErrorRecoverable/waitForEventStreamReconnect"
+      - "src/env/native.zig:MonitorSource/MonitorFactStream/fillState"
+      - "src/env/hyprland_io.zig:SocketTranscript"
+      - "src/env/hyprland_native.zig:SocketSource/mapRevents"
+      - "src/env/hyprland_wire_simulation.zig"
+      - "src/env/hyprland_native_io_check.zig:check"
+    planned_owner_paths: []
     current_direct_calls:
       socket:
-        - "src/env/hyprland.zig:std.os.linux.socket"
-        - "src/env/hyprland.zig:std.os.linux.connect"
-        - "src/env/hyprland.zig:std.os.linux.write"
-        - "src/env/hyprland.zig:std.os.linux.read"
-        - "src/env/hyprland.zig:std.os.linux.close"
-        - "src/env/hyprland.zig:std.os.linux.errno"
-        - "src/env/hyprland.zig:std.os.linux.poll"
-        - "src/env/mod.zig:std.os.linux.poll"
-        - "src/env/mod.zig:std.os.linux.errno"
+        - "src/env/hyprland_native.zig:std.os.linux.socket/connect/write/read/poll/close/errno"
       wire_parse:
         - "src/env/hyprland.zig:std.json.parseFromSlice"
         - "src/env/hyprland.zig:parseMonitors"
@@ -1525,15 +1523,19 @@ boundaries:
     planned_mock_interfaces:
       - path: src/env/hyprland_io.zig
         module: hyprland_io
-        planned_design: true
-        operator_decision_required: true
-        implemented: false
+        planned_design: false
+        operator_decision_required: false
+        implemented: true
+        implemented_operations:
+          - SocketTranscript.socket/connect/write/readRequest/readEvent/poll/close
     planned_native_adapter:
       path: src/env/hyprland_native.zig
       module: hyprland_native
-      planned_design: true
-      operator_decision_required: true
-      implemented: false
+      planned_design: false
+      operator_decision_required: false
+      implemented: true
+      implemented_operations:
+        - SocketSource.init/deinit/socket/connect/write/readRequest/readEvent/poll/close
     planned_production_owner:
       path: src/env/native.zig
       module: wayspot_env_native
@@ -1541,15 +1543,20 @@ boundaries:
       imports:
         - src/env/mod.zig
         - src/env/hyprland_native.zig
-      planned_design: true
-      operator_decision_required: true
-      implemented: false
+      planned_design: false
+      operator_decision_required: false
+      implemented: true
+      implemented_operations:
+        - MonitorSource.init/deinit/queryMonitors/monitorStream
+        - MonitorFactStream.deinit/wait
     planned_native_check:
       path: src/env/hyprland_native_io_check.zig
       module: hyprland_native_io_check
-      planned_design: true
-      operator_decision_required: true
-      implemented: false
+      planned_design: false
+      operator_decision_required: false
+      implemented: true
+      implemented_operations:
+        - check
     mock_contract:
       native_calls: current_direct_calls
       source_injection:
@@ -1564,10 +1571,10 @@ boundaries:
           - "The pure target cannot import hyprland_native, while env/mod cannot import the pure transcript; a bounded compile-time concrete parameter shares control flow without a type table or erased context."
           - "The build check rejects every Source instantiation other than SocketTranscript and SocketSource."
         signatures:
-          - "SocketTranscript.init(allocator: std.mem.Allocator) SocketTranscript; initializes empty fixed records and stores the borrowed allocator handle without allocating"
-          - "SocketTranscript.deinit(self: *SocketTranscript) void; frees every copied configuration payload, permits retired socket records, and asserts that no socket record is open"
+          - "SocketTranscript.init(allocator: std.mem.Allocator) SocketTranscript; accepts the test allocator for one stable constructor shape and initializes fixed records without storing or allocating"
+          - "SocketTranscript.deinit(self: *SocketTranscript) void; checks that no socket record is open; all configuration is fixed inline data and no allocator-owned payload is retained"
           - "hyprland_native.SocketSource.init() SocketSource; initializes the fixed native mapping table empty, owns no allocator, and has no open socket"
-          - "hyprland_native.SocketSource.deinit(self: *SocketSource) SocketCleanupError!void; attempts each live native close once, retires every mapping after its attempt, and returns the first close error"
+          - "hyprland_native.SocketSource.deinit(self: *SocketSource) SocketCloseError!void; attempts each live native close once, retires every mapping after its attempt, and returns the first close error"
           - "SocketId.init(value: u32) SocketIdError!SocketId; zero is rejected and the value is local to one Source owner"
           - "StopId.fromFd(value: i32) StopIdError!StopId; accepts 0..maxInt(i32), rejects every negative value with StopIdNegative, maps the nonnegative i32 exactly to u32, borrows the token, and never closes it"
           - "SocketPath.init(bytes: []const u8) SocketPathError!SocketPath; copies 1..107 non-NUL bytes and stores the terminator in slot len"
@@ -1582,17 +1589,17 @@ boundaries:
           - "Source.close(self: *Source, id: SocketId) SocketCloseError!void"
           - "EventStream.initWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection) EventStreamInitError!EventStream"
           - "EventStream.waitWith(self: *EventStream, source: *Source, stop: StopId) EventWaitError!FactEvent"
-          - "EventStream.deinit(self: *EventStream, source: *Source) SocketCleanupError!void"
+          - "EventStream.deinit(self: *EventStream, source: *Source) SocketCloseError!void"
           - "MonitorSourceWith(comptime Source: type).init(source: *Source, connection: Connection) MonitorSourceWith(Source); stores only a borrowed, pointer-stable Source address and control state; it never owns or deinitializes Source"
           - "MonitorSourceWith(Source).deinit(self: *MonitorSourceWith(Source)) void; clears only control state, so the caller deinitializes its Source exactly once after this call"
           - "src/env/native.zig:MonitorSource.init(connection: Connection) MonitorSource; the production wrapper owns an in-place SocketSource field, then binds MonitorSourceWith(SocketSource) to that field; it has no open socket and cannot fail"
-          - "src/env/native.zig:MonitorSource.deinit(self: *MonitorSource) SocketCleanupError!void; clears the borrowed control state, then delegates one-shot native SocketSource cleanup and returns its first close error"
+          - "src/env/native.zig:MonitorSource.deinit(self: *MonitorSource) SocketCloseError!void; delegates one-shot native SocketSource cleanup and returns its first close error"
           - "MonitorSource.queryMonitors(self: *MonitorSource, allocator: std.mem.Allocator) MonitorQueryError!monitor.MonitorList"
           - "MonitorSource.monitorStream(self: *MonitorSource, allocator: std.mem.Allocator) MonitorFactStreamInitError!MonitorFactStream"
           - "MonitorFactStreamWith(comptime Source: type).init(allocator: std.mem.Allocator, source: *Source, connection: Connection) MonitorFactStreamInitError!MonitorFactStreamWith(Source); borrows the pointer-stable Source and publishes no stream until event setup succeeds"
-          - "MonitorFactStreamWith(Source).deinit(self: *MonitorFactStreamWith(Source)) void; clears only event control state; the caller deinitializes its Source exactly once"
+          - "MonitorFactStreamWith(Source).deinit(self: *MonitorFactStreamWith(Source)) SocketCloseError!void; closes the event socket once and leaves Source cleanup to the caller"
           - "src/env/native.zig:MonitorFactStream.init(allocator: std.mem.Allocator, connection: Connection) MonitorFactStreamInitError!MonitorFactStream; the production wrapper owns an in-place SocketSource field, binds MonitorFactStreamWith(SocketSource), and publishes no stream until source and event setup succeed"
-          - "src/env/native.zig:MonitorFactStream.deinit(self: *MonitorFactStream) SocketCleanupError!void; clears the control state, then performs one-shot SocketSource cleanup and returns the cleanup error"
+          - "src/env/native.zig:MonitorFactStream.deinit(self: *MonitorFactStream) SocketCloseError!void; closes the event socket once and returns the exact cleanup error"
           - "MonitorFactStream.wait(self: *MonitorFactStream, stop: StopId) MonitorFactWaitError!MonitorFactWake"
         named_error_sets:
           SocketError:
@@ -1613,7 +1620,7 @@ boundaries:
             - StopIdNegative
           PollTimeoutError:
             - PollTimeoutOutOfRange
-          SocketCleanupError:
+          SocketCloseError:
             - HyprlandSocketCloseFailed
           RequestError:
             - HyprlandSocketPathInvalid
@@ -1729,13 +1736,13 @@ boundaries:
           Source.close: SocketCloseError
           EventStream.initWith: EventStreamInitError
           EventStream.waitWith: EventWaitError
-          EventStream.deinit: SocketCleanupError
+          EventStream.deinit: SocketCloseError
           queryMonitorsWith: MonitorQueryError
           fillStateWith: FillStateError
-          MonitorSource.deinit: SocketCleanupError
+          MonitorSource.deinit: SocketCloseError
           MonitorFactStream.init: MonitorFactStreamInitError
           MonitorFactStream.wait: MonitorFactWaitError
-          MonitorFactStream.deinit: SocketCleanupError
+          MonitorFactStream.deinit: SocketCloseError
         ownership_model:
           - "src/env/native.zig:MonitorSource and MonitorFactStream are native wrappers around src/env/mod.zig:MonitorSourceWith(Source) and MonitorFactStreamWith(Source). Each production wrapper owns one pointer-stable hyprland_native.SocketSource field; the borrowed control composition never copies its Source."
           - "The same bounded compile-time owner composition is instantiated exactly twice: SocketTranscript for C-free simulation and SocketSource for production. The production wrapper owns its SocketSource field; the simulation test owns its SocketTranscript local, passes its pointer to the borrowed control composition, clears control state, then deinitializes the transcript exactly once."
@@ -1746,7 +1753,7 @@ boundaries:
           - "Replace request(allocator, Connection, request_text) with requestWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection, name: RequestName) RequestError![]u8; the helper builds the native-bound SocketPath and RequestWrite and drives source operations."
           - "If requestWith returns HyprlandSocketCloseFailed, the Source has retired the local mapping after one close attempt; the caller reports the cleanup error and does not retry or reuse that SocketId."
           - "Replace queryMonitors and fillState internals with queryMonitorsWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection) MonitorQueryError!monitor_facts.MonitorList and fillStateWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection, env_state: *state_facts.EnvState) FillStateError!void."
-          - "Change EventStream.init to initWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection) EventStreamInitError!EventStream; change wait to waitWith(self: *EventStream, source: *Source, stop: StopId) EventWaitError!FactEvent; change deinit to deinit(self: *EventStream, source: *Source) SocketCleanupError!void."
+          - "Change EventStream.init to initWith(comptime Source: type, allocator: std.mem.Allocator, source: *Source, connection: Connection) EventStreamInitError!EventStream; change wait to waitWith(self: *EventStream, source: *Source, stop: StopId) EventWaitError!FactEvent; change deinit to deinit(self: *EventStream, source: *Source) SocketCloseError!void."
           - "Keep parseMonitors, parseWorkspaces, parseWindows, and classifyEventLine in hyprland.zig; they consume owned response bytes or bounded event lines after the source boundary."
         env_mod:
           - "Keep src/env/mod.zig pure: add MonitorSourceWith(comptime Source: type) and MonitorFactStreamWith(comptime Source: type) with exact two instantiations. MonitorSourceWith.init(source: *Source, connection: Connection) stores borrowed control state only; MonitorSourceWith.deinit clears that state and never deinitializes Source."
@@ -1767,9 +1774,9 @@ boundaries:
           - "All resident callers import src/env/native.zig and use pointer ownership for MonitorSource and MonitorFactStream; no function stores or copies either production wrapper by value after initialization."
           - "MonitorSource.fromProcessEnv continues to borrow HOME/XDG/Hyprland environment facts; environment acquisition remains order 8 and does not create or own StopId."
       ownership:
-        - "SocketTranscript.init receives an allocator and copies every configured path, response chunk, event chunk, and injected typed error into its owned fixed-capacity records; deinit frees those copies and requires no live socket records."
+        - "SocketTranscript.init receives an allocator handle and initializes fixed inline path, request, read, poll, and operation records; append copies values into those records without retaining caller slices, and deinit requires no live socket records."
         - "hyprland_native.SocketSource owns its open SocketId table and the native fd mapping. SocketId is a nonzero local id; a native fd is never published to the parser or transcript."
-        - "SocketTranscript has no fallible init allocation; configuration appends copy caller bytes into the fixed request, event, path, and error records. If a copy or capacity check fails, it frees only the bytes copied for that append, restores the prior counts, and leaves the prior transcript unchanged."
+        - "SocketTranscript has no fallible init allocation or heap-owned transcript payload; configuration copies bounded plain values into fixed records, and a capacity failure leaves prior counts and records unchanged."
         - "SocketSource.init has no allocator and starts with all eight native mapping slots empty. SocketSource.deinit attempts each live close once, retires each slot after that attempt, continues cleanup for the remaining live slots, and returns the first close error; after a failure all slots are retired and a later deinit is a no-op."
         - "The Source owner owns every socket from successful socket() until one attempted close(). A close success retires the mapping; a close failure also retires the mapping because the raw fd may already be released or reused. No native close is retried."
         - "StopId is passed by the lifecycle caller as a borrowed plain token. Hyprland IO never creates, duplicates, reads, closes, or stores ownership of the stop fd."
@@ -1787,7 +1794,7 @@ boundaries:
         hyprland_native, libc, compositor, or DE module. It does not parse
         JSON, perform socket calls, or own a native fd.
       native_module: >-
-        src/env/hyprland_native.zig is the only planned owner of the listed
+        src/env/hyprland_native.zig is the only owner of the listed
         std.os.linux socket, connect, read, write, poll, close, and errno
         calls. Raw fd n maps to local SocketId.value n+1 with a checked
         overflow path; the inverse mapping stays native-only and no raw fd or
@@ -1799,13 +1806,15 @@ boundaries:
         hyprland_io mock contract.
       targets:
         - path: src/env/hyprland_io.zig
+          implemented_operations:
+            - SocketTranscript.socket/connect/write/readRequest/readEvent/poll/close
           public_types:
             - "SocketId: struct{ value: u32 }; value is nonzero, local to one Source owner, and is not a native fd"
             - "StopId: struct{ value: u32 }; value is a borrowed lifecycle token; native fd 0 is valid and no ownership is retained"
             - "SocketKind: request or event"
             - "RequestName: monitors, workspaces, or clients; exact bytes are j/monitors, j/workspaces, or j/clients"
-            - "SocketPath: struct{ bytes: [108]u8, len: u16 }; native pathname bytes, 1..107, with one NUL terminator at bytes[len]"
-            - "RequestWrite: struct{ bytes: [12]u8, len: u8 }; exact RequestName bytes, no arbitrary request"
+            - "SocketPath: struct{ bytes: [108]u8, len: u8 }; native pathname bytes, 1..107, with one NUL terminator at bytes[len]"
+            - "RequestWrite: struct{ bytes: [13]u8, len: u8 }; exact RequestName bytes, no arbitrary request"
             - "RequestChunk: struct{ bytes: [4096]u8, len: u16 }; one bounded request read chunk"
             - "RequestRead: union(enum){ chunk: RequestChunk, eof }; bytes and eof cannot coexist"
             - "EventChunk: struct{ bytes: [1024]u8, len: u16 }; one bounded socket2 read chunk"
@@ -2034,14 +2043,7 @@ boundaries:
       - "src/env/monitor.zig:MonitorList"
       - "src/env/workspace.zig:WorkspaceList"
       - "src/env/window.zig:WindowList"
-    current_shape_offenders:
-      - "src/env/hyprland.zig:request accepts arbitrary request_text instead of RequestName."
-      - "src/env/hyprland.zig:jsonI32 uses unchecked @intCast and @intFromFloat on external JSON."
-      - "src/env/hyprland.zig:parseWindows ignores size-array entries after the first two."
-      - "src/env/hyprland.zig:closeFd logs and discards close failure."
-      - "src/env/hyprland.zig:connectRequestSocket accepts the old 160-byte check but copies into sockaddr.un.path[108], so native-bound path validation is incomplete."
-      - "src/env/mod.zig:eventStreamErrorRecoverable uses anyerror and waitForEventStreamReconnect ignores poll HUP/ERR/NVAL."
-      - "src/env/hyprland.zig and src/env/mod.zig call std.os.linux directly, preventing a C-free wire simulation target."
+    current_shape_offenders: []
     build_separation:
       pure_target:
         path: src/env/hyprland_io.zig
@@ -2067,7 +2069,7 @@ boundaries:
         separation_rule: "This root runs the same hyprland.zig and pure src/env/mod.zig control flow against SocketTranscript and imports no src/env/native.zig, hyprland_native, C module, libc, compositor, DE, fixture, or live socket."
       native_target:
         path: src/env/hyprland_native.zig
-        imports: std.os.linux only for the planned socket/poll adapter
+        imports: std.os.linux only for the implemented socket/poll adapter
         links: "production native system libraries only"
         artifact: "module consumed by wayspot_env_native and hyprland_native_io_check; no standalone step"
       production_owner_target:
@@ -2978,7 +2980,7 @@ final_gate:
     - "ruby -e 'require \"yaml\"; YAML.load_stream(File.read(\"maturity_offenders.yml\"))'"
     - "Run rg -l '\\bSDL_[A-Za-z0-9_]+' src --glob '*.zig' and require exactly the twelve listed Zig owner paths; compare every c.SDL_* call to the file-keyed SDL current_direct_calls; parse every current_owner_paths entry and verify each slash- or semicolon-delimited symbol exists in its exact file, then validate every file path."
     - "Require planned_mock_interfaces and mock_contract targets to be exactly src/c/sdl_io.zig, src/c/wayland_io.zig, src/env/hyprland_io.zig, src/notification/dbus_io.zig, src/io/file_io.zig, src/io/terminal_io.zig, src/process/process_io.zig, src/os/lifecycle_io.zig, src/time/random_io.zig, src/env/environment_io.zig, src/config/lua_io.zig, and src/c/text_io.zig; every target has a typed mock_call_transcript and cleanup_record, implemented targets declare implemented_operations, and every target still marked planned_design is absent until an operator creates its planned module."
-    - "Require order 2 planned_native_adapter to name src/env/hyprland_native.zig, planned_production_owner to name src/env/native.zig, and planned_native_check to name src/env/hyprland_native_io_check.zig; keep all three absent while implementation_status is not_started, keep src/env/native.zig out of pure simulation imports, and keep the native paths out of planned_mock_interfaces and mock_contract.targets."
+    - "Require order 2 planned_native_adapter to name src/env/hyprland_native.zig, planned_production_owner to name src/env/native.zig, and planned_native_check to name src/env/hyprland_native_io_check.zig; when order 2 is implemented, require all three paths and their implemented flags, keep src/env/native.zig out of pure simulation imports, and keep the native paths out of planned_mock_interfaces and mock_contract.targets. For later not-started orders, planned targets remain absent until their order begins."
     - "Run bounded owner scans for std.Io/std.fs file, terminal, and std.log calls, std.c fork/exec/wait, std.os.linux signal/eventfd/poll/kill/getrandom/clock calls, std.c.getenv and Init.environ.getPosix, c.lua*/luaL_*, FT_*, and hb_*; compare every direct call to exactly one current_direct_calls entry or the explicitly recorded order-1 SDL/order-2 Hyprland/order-3 D-Bus entry. Validate every current_diagnostic_callers path. std.fs.path and abstract std.Io.Writer formatting are pure-only exceptions and must appear in pure_internal_paths or a unit/fuzz gate."
     - "Require std.Io.Dir.iterate and std.Io.Dir.Iterator.next for the current directory owners, std.Io.AtomicFile.deinit for notification history, std.posix.errno for current fsync owners, src/main.zig:init.minimal.args.toSlice for process input, src/identity.zig:std.posix.prctl, and every current std.process.exit call site in the Linux/process-control inventory."
     - "Run rg for build.zig freetype2/harfbuzz link/include calls and re-run.sh mkdir/cp/chmod/mv/rm/head/setsid/systemctl/pgrep/kill/sleep and /proc reads; compare every match to tooling_only and require none in runtime current_owner_paths, runtime current_direct_calls, or simulation gates."

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const config_owner = @import("config.zig");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 const library_owner = @import("library.zig");
 const wallpaper_surface = @import("surface.zig");
 
@@ -28,7 +28,7 @@ pub const Loop = struct {
     slot_count: u32 = 0,
     vendor_started: bool = false,
 
-    pub fn run(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !void {
+    pub fn run(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !void {
         var config = try config_owner.Config.load(allocator);
         defer config.deinit(allocator);
 
@@ -52,7 +52,12 @@ pub const Loop = struct {
         try sendSignal(pid, .USR1);
     }
 
-    fn startWallpaper(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, interval_seconds: u32) !void {
+    fn startWallpaper(
+        self: *Loop,
+        monitor_source: *env.MonitorSource,
+        library: *const library_owner.Library,
+        interval_seconds: u32,
+    ) !void {
         try self.startVendor();
         var signals = try LoopSignals.init();
         defer signals.deinit();
@@ -61,7 +66,9 @@ pub const Loop = struct {
         defer pid_file.deinit(self.allocator);
 
         var monitor_watcher = try MonitorWatcher.init(self.allocator, monitor_source);
-        defer monitor_watcher.deinit();
+        defer monitor_watcher.deinit() catch |err| {
+            std.log.debug("wallpaper monitor close failed err={s}", .{@errorName(err)});
+        };
         try monitor_watcher.start();
 
         var prng = std.Random.DefaultPrng.init(try randomSeed());
@@ -78,7 +85,13 @@ pub const Loop = struct {
         self.vendor_started = true;
     }
 
-    fn runRandomLoop(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, random: std.Random, interval_seconds: u32) !void {
+    fn runRandomLoop(
+        self: *Loop,
+        monitor_source: *env.MonitorSource,
+        library: *const library_owner.Library,
+        random: std.Random,
+        interval_seconds: u32,
+    ) !void {
         const interval_ms = @as(u64, interval_seconds) * 1000;
         var next_deadline = c.SDL_GetTicks() + interval_ms;
         while (true) {
@@ -100,7 +113,12 @@ pub const Loop = struct {
         }
     }
 
-    fn rebuildSurfaceSlots(self: *Loop, monitor_source: env.MonitorSource, library: *const library_owner.Library, random: std.Random) !void {
+    fn rebuildSurfaceSlots(
+        self: *Loop,
+        monitor_source: *env.MonitorSource,
+        library: *const library_owner.Library,
+        random: std.Random,
+    ) !void {
         const monitors = try monitor_source.queryMonitors(self.allocator);
         if (monitors.count == 0) return error.NoEnvMonitors;
 
@@ -197,9 +215,11 @@ const MonitorWatcher = struct {
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    fn init(allocator: std.mem.Allocator, monitor_source: env.MonitorSource) !MonitorWatcher {
+    fn init(allocator: std.mem.Allocator, monitor_source: *env.MonitorSource) !MonitorWatcher {
         var stream = try monitor_source.monitorStream(allocator);
-        errdefer stream.deinit();
+        errdefer stream.deinit() catch |err| {
+            std.log.debug("wallpaper event close failed err={s}", .{@errorName(err)});
+        };
         return .{
             .stream = stream,
             .stop_fd = try osEventFd(),
@@ -224,9 +244,9 @@ const MonitorWatcher = struct {
         }
     }
 
-    fn deinit(self: *MonitorWatcher) void {
+    fn deinit(self: *MonitorWatcher) !void {
         self.stop();
-        self.stream.deinit();
+        try self.stream.deinit();
     }
 };
 

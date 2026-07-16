@@ -7,7 +7,7 @@
 const std = @import("std");
 
 pub const identity_source = @import("identity.zig");
-pub const env_source = @import("env/mod.zig");
+pub const env_source = @import("wayspot_env");
 pub const config_source = @import("config/defaults.zig");
 pub const notification_source = @import("notification/dbus.zig");
 pub const notification_history_list_source = @import("notification/history_list.zig");
@@ -35,17 +35,17 @@ pub const wallpaper_source = @import("wallpaper/loop.zig");
 pub const sunglasses_source = @import("sunglasses/overlay.zig");
 
 // wayspot_env
-pub const env = env_source;
+pub const env = @import("wayspot_env_native");
 pub const monitor = env_source.monitor;
 pub const workspace = env_source.workspace;
 pub const window = env_source.window;
 pub const state = env_source.state;
 pub const hyprland = env_source.hyprland;
 pub const Connection = env_source.Connection;
-pub const fillState = env_source.fillState;
+pub const fillState = env.fillState;
 pub const MonitorFactWake = env_source.MonitorFactWake;
-pub const MonitorSource = env_source.MonitorSource;
-pub const MonitorFactStream = env_source.MonitorFactStream;
+pub const MonitorSource = env.MonitorSource;
+pub const MonitorFactStream = env.MonitorFactStream;
 
 // wayspot_appearance
 pub const appearance = appearance_source;

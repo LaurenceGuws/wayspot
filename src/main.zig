@@ -198,10 +198,14 @@ fn runWallpaper(allocator: std.mem.Allocator, init: *const std.process.Init, val
     switch (value) {
         .restart => {
             const signature = try instanceSignature(init);
-            try wayspot.wallpaper.run(allocator, wayspot.env.MonitorSource.init(.{
+            var monitor_source = wayspot.env.MonitorSource.init(.{
                 .runtime_dir = runtime_dir,
                 .signature = signature,
-            }));
+            });
+            defer monitor_source.deinit() catch |err| {
+                std.log.debug("wallpaper source close failed err={s}", .{@errorName(err)});
+            };
+            try wayspot.wallpaper.run(allocator, &monitor_source);
         },
         .rotate => try wayspot.wallpaper.rotateNow(allocator, runtime_dir),
     }
@@ -212,10 +216,14 @@ fn runSunglasses(allocator: std.mem.Allocator, init: *const std.process.Init, va
         .restart => {
             const runtime_dir = try runtimeDir(init);
             const signature = try instanceSignature(init);
-            try wayspot.sunglasses.run(allocator, wayspot.env.MonitorSource.init(.{
+            var monitor_source = wayspot.env.MonitorSource.init(.{
                 .runtime_dir = runtime_dir,
                 .signature = signature,
-            }));
+            });
+            defer monitor_source.deinit() catch |err| {
+                std.log.debug("sunglasses source close failed err={s}", .{@errorName(err)});
+            };
+            try wayspot.sunglasses.run(allocator, &monitor_source);
         },
         .apply => try wayspot.sunglasses.applyNow(allocator, try runtimeDir(init)),
         .reconcile => try wayspot.sunglasses.reconcileSavedState(allocator, try runtimeDir(init)),

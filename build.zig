@@ -159,14 +159,57 @@ pub fn build(b: *std.Build) void {
     history_list_mod.addImport("wayspot_notification_preview", notification_preview_mod);
     history_list_mod.addImport("picker_candidate", picker_candidate_mod);
 
+    const hyprland_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/hyprland_io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const hyprland_native_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/hyprland_native.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hyprland_native_mod.addImport("hyprland_io", hyprland_io_mod);
+
     const env_mod = b.createModule(.{
         .root_source_file = b.path("src/env/mod.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
+    env_mod.addImport("hyprland_io", hyprland_io_mod);
     env_mod.addImport("sdl_io", sdl_io_mod);
-    env_mod.addImport("sdl_native", sdl_native_mod);
+    const env_native_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/native.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    env_native_mod.addImport("wayspot_env", env_mod);
+    env_native_mod.addImport("hyprland_native", hyprland_native_mod);
+    env_native_mod.addImport("hyprland_io", hyprland_io_mod);
+
+    const hyprland_simulation_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/hyprland_wire_simulation.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hyprland_simulation_mod.addImport("hyprland_io", hyprland_io_mod);
+    hyprland_simulation_mod.addImport("wayspot_env", env_mod);
+
+    const hyprland_native_check_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/hyprland_native_io_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hyprland_native_check_mod.addImport("hyprland_native", hyprland_native_mod);
+    hyprland_native_check_mod.addImport("wayspot_env_native", env_native_mod);
+
+    const env_aggregate_mod = b.createModule(.{
+        .root_source_file = b.path("src/env/aggregate_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    env_aggregate_mod.addImport("hyprland_io", hyprland_io_mod);
+    env_aggregate_mod.addImport("sdl_io", sdl_io_mod);
 
     const scale_mod = b.createModule(.{
         .root_source_file = b.path("src/picker/scale.zig"),
@@ -321,7 +364,7 @@ pub fn build(b: *std.Build) void {
     notification_mod.addImport("picker_candidate", picker_candidate_mod);
     notification_mod.addImport("wayspot_identity", identity_mod);
     notification_mod.addImport("wayspot_config_defaults", config_defaults_mod);
-    notification_mod.addImport("wayspot_env", env_mod);
+    notification_mod.addImport("wayspot_env_native", env_native_mod);
     notification_mod.addImport("wayspot_appearance", appearance_mod);
     notification_mod.addImport("wayspot_scale", scale_mod);
     notification_mod.addImport("wayspot_text", text_mod);
@@ -344,7 +387,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    wallpaper_mod.addImport("wayspot_env", env_mod);
+    wallpaper_mod.addImport("wayspot_env_native", env_native_mod);
     wallpaper_mod.addImport("wayspot_identity", identity_mod);
     wallpaper_mod.addImport("sdl_c", sdl_c_mod);
     wallpaper_mod.addImport("wayland_c", wayland_c_mod);
@@ -360,7 +403,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     sunglasses_mod.addImport("picker_candidate", picker_candidate_mod);
-    sunglasses_mod.addImport("wayspot_env", env_mod);
+    sunglasses_mod.addImport("wayspot_env_native", env_native_mod);
     sunglasses_mod.addImport("wayspot_identity", identity_mod);
     sunglasses_mod.addImport("sdl_io", sdl_io_mod);
     sunglasses_mod.addImport("sdl_native", sdl_native_mod);
@@ -385,7 +428,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "howl_lua", .module = lua_mod },
         },
     });
-    aggregate_test_mod.addImport("wayspot_env", aggregate_test_mod);
+    aggregate_test_mod.addImport("wayspot_env", env_mod);
+    aggregate_test_mod.addImport("wayspot_env_native", env_native_mod);
+    aggregate_test_mod.addImport("hyprland_io", hyprland_io_mod);
     aggregate_test_mod.addImport("wayspot_appearance", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_config_defaults", aggregate_test_mod);
     aggregate_test_mod.addImport("wayspot_query", aggregate_test_mod);
@@ -438,7 +483,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("wayspot_cli", cli_mod);
     mod.addImport("wayspot_config", config_mod);
     mod.addImport("wayspot_config_defaults", config_defaults_mod);
-    mod.addImport("wayspot_env", env_mod);
+    mod.addImport("wayspot_env_native", env_native_mod);
     mod.addImport("wayspot_gui", gui_mod);
     mod.addImport("wayspot_identity", identity_mod);
     mod.addImport("wayspot_notification", notification_mod);
@@ -497,6 +542,16 @@ pub fn build(b: *std.Build) void {
     );
     native_io_check_step.dependOn(&native_io_check.step);
 
+    const hyprland_native_io_check = b.addExecutable(.{
+        .name = "hyprland_native_io_check",
+        .root_module = hyprland_native_check_mod,
+    });
+    const hyprland_native_io_check_step = b.step(
+        "hyprland_native_io_check",
+        "Compile and link every Hyprland native adapter entry point without running it",
+    );
+    hyprland_native_io_check_step.dependOn(&hyprland_native_io_check.step);
+
     b.installArtifact(exe);
     b.installFile("packaging/bash/wayspot.bash", "share/bash-completion/completions/wayspot");
 
@@ -529,6 +584,18 @@ pub fn build(b: *std.Build) void {
 
     const wayland_io_tests = b.addTest(.{ .root_module = wayland_io_mod });
     const run_wayland_io_tests = b.addRunArtifact(wayland_io_tests);
+
+    const hyprland_io_tests = b.addTest(.{ .root_module = hyprland_io_mod });
+    const run_hyprland_io_tests = b.addRunArtifact(hyprland_io_tests);
+
+    const hyprland_native_tests = b.addTest(.{ .root_module = hyprland_native_mod });
+    const run_hyprland_native_tests = b.addRunArtifact(hyprland_native_tests);
+
+    const hyprland_simulation_tests = b.addTest(.{ .root_module = hyprland_simulation_mod });
+    const run_hyprland_simulation_tests = b.addRunArtifact(hyprland_simulation_tests);
+
+    const env_aggregate_tests = b.addTest(.{ .root_module = env_aggregate_mod });
+    const run_env_aggregate_tests = b.addRunArtifact(env_aggregate_tests);
 
     const io_simulation_tests = b.addTest(.{ .root_module = io_simulation_mod });
     const run_io_simulation_tests = b.addRunArtifact(io_simulation_tests);
@@ -564,6 +631,17 @@ pub fn build(b: *std.Build) void {
         "Run the pure paired SDL and Wayland simulation",
     );
     sdl_wayland_simulation_step.dependOn(&run_io_simulation_tests.step);
+
+    const hyprland_io_unit_fuzz_step = b.step(
+        "hyprland_io_unit_fuzz",
+        "Run pure Hyprland socket contract tests",
+    );
+    hyprland_io_unit_fuzz_step.dependOn(&run_hyprland_io_tests.step);
+    const hyprland_wire_simulation_step = b.step(
+        "hyprland_wire_simulation",
+        "Run the C-free Hyprland parser and owner simulation",
+    );
+    hyprland_wire_simulation_step.dependOn(&run_hyprland_simulation_tests.step);
 
     const aggregate_tests = b.addTest(.{ .root_module = aggregate_test_mod });
     aggregate_tests.use_llvm = true;
@@ -651,6 +729,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_sdl_io_tests.step);
     test_step.dependOn(&run_wayland_io_tests.step);
+    test_step.dependOn(&run_hyprland_io_tests.step);
+    test_step.dependOn(&run_hyprland_native_tests.step);
+    test_step.dependOn(&run_hyprland_simulation_tests.step);
+    test_step.dependOn(&run_env_aggregate_tests.step);
     test_step.dependOn(&run_io_simulation_tests.step);
     test_step.dependOn(&run_sdl_native_tests.step);
     test_step.dependOn(&run_wayland_native_tests.step);

@@ -1,7 +1,7 @@
 //! Sunglasses state owns bounded per-monitor red/blue and dim filter values.
 
 const std = @import("std");
-const env = @import("wayspot_env");
+const env = @import("wayspot_env_native");
 
 /// max_monitors bounds retained sunglasses monitor states.
 pub const max_monitors: u32 = 8;
@@ -165,7 +165,10 @@ pub const State = struct {
     /// loadForMonitors loads saved values and maps them onto current monitor facts.
     pub fn loadForMonitors(allocator: std.mem.Allocator) !State {
         const loaded = try State.load(allocator);
-        const monitor_source = env.MonitorSource.fromProcessEnv() orelse return loaded;
+        var monitor_source = env.MonitorSource.fromProcessEnv() orelse return loaded;
+        defer monitor_source.deinit() catch |err| {
+            std.log.debug("sunglasses state source close failed err={s}", .{@errorName(err)});
+        };
         const monitors = monitor_source.queryMonitors(allocator) catch |err| {
             std.log.warn("sunglasses monitor state seed skipped err={s}", .{@errorName(err)});
             return loaded;

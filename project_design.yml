@@ -67,23 +67,19 @@ ownership:
     role: compositor facts and Hyprland wire ownership; product modes consume facts only
     current_source: src/env/
     hyprland_wire:
-      status: design_only
+      status: implemented
       parser_owner: src/env/hyprland.zig
       current_consumers:
-        - src/env/mod.zig:MonitorSource
-        - src/env/mod.zig:MonitorFactStream
+        - src/env/native.zig:MonitorSource
+        - src/env/native.zig:MonitorFactStream
         - src/wallpaper/loop.zig:Loop.rebuildSurfaceSlots/MonitorWatcher
         - src/sunglasses/overlay.zig:Overlay.rebuildSurfaceSlots/MonitorWatcher
         - src/sunglasses/state.zig:State.loadForMonitors
-      planned_consumers:
-        - "src/main.zig:runWallpaper/runSunglasses import src/env/native.zig"
-        - "src/wallpaper/mod.zig and src/wallpaper/loop.zig import src/env/native.zig"
-        - "src/sunglasses/mod.zig, src/sunglasses/overlay.zig, and src/sunglasses/state.zig import src/env/native.zig"
-        - "src/notification/banner.zig imports src/env/native.zig"
-      planned_plain_io: src/env/hyprland_io.zig
-      planned_native_io: src/env/hyprland_native.zig
-      planned_pure_owner: src/env/mod.zig
-      planned_production_owner: src/env/native.zig
+      planned_consumers: []
+      plain_io: src/env/hyprland_io.zig
+      native_io: src/env/hyprland_native.zig
+      pure_owner: src/env/mod.zig
+      production_owner: src/env/native.zig
       boundary: "src/env/mod.zig owns pure MonitorSourceWith/MonitorFactStreamWith control composition and imports no hyprland_native; src/env/native.zig owns production MonitorSource/MonitorFactStream wrappers and imports mod.zig plus hyprland_native; hyprland_io owns SocketTranscript and hyprland_native owns Linux socket/poll calls"
       caller_boundary: "Product callers import src/env/native.zig for MonitorSource and MonitorFactStream. The C-free simulation imports src/env/mod.zig only, so no native import is transitive."
       stop_owner: "MonitorFactStream receives a borrowed StopId from the lifecycle caller; no Hyprland source creates or closes it"
@@ -698,12 +694,12 @@ build_graph:
   test_coverage:
     command: "zig build test --summary all"
     accepted_minimum: 320
-    current_verified: 451
-    aggregate_root_tests: 204
-    direct_root_tests: 247
+    current_verified: 462
+    aggregate_root_tests: 182
+    direct_root_tests: 280
     note: aggregate source imports run together; direct module roots remain additional checks; the accepted 320 count is a total baseline, not an aggregate-only count
   planned_environment_io:
-    status: design_only
+    status: implemented
     pure_root:
       path: src/env/hyprland_io.zig
       links: []
@@ -739,7 +735,7 @@ build_graph:
         links: "production owner module; no additional external library"
       check_root: src/env/hyprland_native_io_check.zig
       check_step: hyprland_native_io_check
-    rule: "The unit/fuzz root and hyprland_wire_simulation root import pure src/env/mod.zig and never link or invoke src/env/native.zig or hyprland_native; src/env/native.zig is the only production wrapper owner; hyprland_native_io_check is a distinct no-runtime reference table, not src/c/native_io_check.zig; all use the same compile-time concrete Source method contract when implementation begins."
+      rule: "The unit/fuzz root and hyprland_wire_simulation root import pure src/env/mod.zig and never link or invoke src/env/native.zig or hyprland_native; src/env/native.zig is the only production wrapper owner; hyprland_native_io_check is a distinct no-runtime reference table, not src/c/native_io_check.zig; all use the same implemented compile-time concrete Source method contract."
   packaging:
     systemd_exec_start: "wayspot notifications"
     completion: packaging/bash/wayspot.bash

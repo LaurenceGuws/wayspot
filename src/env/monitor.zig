@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const sdl_io = @import("sdl_io");
-const sdl_native = @import("sdl_native");
 
 pub const max_monitors: u32 = sdl_io.max_displays;
 pub const max_monitor_name_bytes: u32 = sdl_io.max_display_name_bytes;
@@ -134,12 +133,6 @@ pub const MonitorList = struct {
         return &self.items[index];
     }
 };
-
-/// queryMonitors loads monitor facts through the production SDL display source.
-pub fn queryMonitors() !MonitorList {
-    var io = sdl_io.SdlDisplayIo.native(sdl_native.displaySource());
-    return queryMonitorsWith(&io);
-}
 
 /// queryMonitorsWith consumes one bounded display source and publishes no partial list.
 pub fn queryMonitorsWith(io: *sdl_io.SdlDisplayIo) !MonitorList {
