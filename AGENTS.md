@@ -24,6 +24,8 @@
 - Zig 0.16 standard library source: `/home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/`
 - SDL3 source clone: `/home/home/personal/projects/dev_references/backends/sdl/`
 - SDL3 documentation reference: `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/`
+- Hyprland v0.55.4 source clone: `/home/home/personal/projects/dev_references/backends/hyprland/` (commit `a0136d8c04687bb36eb8a28eb9d1ff92aea99704`)
+- Hyprland IPC reference: `/home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md` (wiki commit `8657d27f63aa9b6964078b7ef0c742fa0806f145`)
 - Local implementation references: `/home/home/personal/projects/dev_references/`
 
 `DOMAIN.yml` is the exhaustive Wayspot product shape. `project_design.yml`
