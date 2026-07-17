@@ -30,6 +30,9 @@ readonly max_pid_argv=4
 readonly max_pid_value=4194304
 readonly max_wait_cycles=40
 
+rerun_notifications_pid=""
+rerun_wallpaper_pid=""
+
 read -r -a build_flags <<<"$RERUN_BUILD_FLAGS"
 
 sync_binary() {
@@ -375,29 +378,24 @@ wait_for_canonical_wallpaper() {
 
 restart_notifications() {
     local bin_path="$1"
-    local pid
     local log_dir
-    local service_active=0
 
     # Exact legacy argv is a one-way cleanup bridge; it is never started.
     stop_matching_mode_pids notifications legacy
     if command -v systemctl >/dev/null 2>&1 && systemctl --user --quiet is-active wayspot.service; then
-        service_active=1
         systemctl --user stop wayspot.service
     fi
     stop_matching_mode_pids notifications canonical
 
     log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wayspot"
     mkdir -p "$log_dir"
-    if ((service_active == 1)); then
-        echo "[re-run] starting notification DBus interface: systemctl --user start wayspot.service"
-        systemctl --user start wayspot.service
-    else
-        echo "[re-run] starting notification DBus interface: $bin_path notifications"
-        setsid "$bin_path" notifications >>"$log_dir/notifications.log" 2>&1 &
+    echo "[re-run] starting notification DBus interface: $bin_path notifications"
+    setsid "$bin_path" notifications >>"$log_dir/notifications.log" 2>&1 &
+    if ! rerun_notifications_pid="$(wait_for_canonical_mode notifications)"; then
+        stop_matching_mode_pids notifications canonical || true
+        return 1
     fi
-    pid="$(wait_for_canonical_mode notifications)"
-    echo "[re-run] notification DBus interface pid=$pid"
+    echo "[re-run] notification DBus interface pid=$rerun_notifications_pid"
 }
 
 restart_wallpaper() {
@@ -419,8 +417,32 @@ restart_wallpaper() {
     mkdir -p "$log_dir"
     echo "[re-run] starting wallpaper loop: $bin_path wallpaper"
     setsid "$bin_path" wallpaper >>"$log_dir/wallpaper.log" 2>&1 &
-    echo "[re-run] wallpaper loop pid=$(wait_for_canonical_wallpaper "$pid_file")"
+    if ! rerun_wallpaper_pid="$(wait_for_canonical_wallpaper "$pid_file")"; then
+        stop_matching_wallpaper_pids "$pid_file" canonical || true
+        return 1
+    fi
+    echo "[re-run] wallpaper loop pid=$rerun_wallpaper_pid"
 }
+
+cleanup_started_residents() {
+    local status=$?
+    local -a pids=()
+
+    trap - EXIT
+    if ((status != 0)) && [[ -n "$rerun_notifications_pid" ]]; then
+        pids=("$rerun_notifications_pid")
+        stop_pid_list notifications canonical pids || true
+        wait_for_pid_list notifications canonical pids || true
+    fi
+    if ((status != 0)) && [[ -n "$rerun_wallpaper_pid" ]]; then
+        pids=("$rerun_wallpaper_pid")
+        stop_pid_list wallpaper canonical pids || true
+        wait_for_pid_list wallpaper canonical pids || true
+    fi
+    exit "$status"
+}
+
+trap cleanup_started_residents EXIT
 
 echo "[re-run] building: zig build ${build_flags[*]}"
 zigup run 0.16.0 build "${build_flags[@]}"
