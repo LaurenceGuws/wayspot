@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const apps = @import("apps.zig");
 const picker = @import("picker.zig");
 
 const step_capacity = 16;
@@ -15,6 +16,8 @@ const Wait = union(enum) {
 
 const Draw = struct {
     query: []const u8,
+    rows: []const []const u8 = &.{},
+    selected_row: usize = 0,
     result: Result = .ok,
 };
 
@@ -68,12 +71,19 @@ const Transcript = struct {
         };
     }
 
-    pub fn draw(transcript: *Transcript, query: [:0]const u8) !void {
+    pub fn draw(transcript: *Transcript, frame: *const picker.Frame) !void {
         const expected = switch (transcript.next() orelse return error.TranscriptMismatch) {
             .draw => |expected_draw| expected_draw,
             else => return error.TranscriptMismatch,
         };
-        if (!std.mem.eql(u8, expected.query, query)) return error.TranscriptMismatch;
+        if (!std.mem.eql(u8, expected.query, frame.query)) return error.TranscriptMismatch;
+        if (expected.rows.len != frame.row_count) return error.TranscriptMismatch;
+        for (expected.rows, frame.rowSlice()) |expected_name, row| {
+            if (!std.mem.eql(u8, expected_name, row.name)) return error.TranscriptMismatch;
+        }
+        if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
+            return error.TranscriptMismatch;
+        }
         if (expected.result == .fail) return error.SdlDrawFailed;
     }
 
@@ -115,9 +125,14 @@ const Transcript = struct {
 };
 
 fn simulate(steps: []const Step) !void {
+    const selected = try simulateApps(steps, &.{});
+    if (selected != null) return error.UnexpectedSelection;
+}
+
+fn simulateApps(steps: []const Step, applications: []const apps.App) !?usize {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
     var transcript = Transcript{ .steps = steps };
-    const result = picker.run(&transcript);
+    const result = picker.run(&transcript, applications);
     try transcript.done();
     return result;
 }
@@ -219,6 +234,45 @@ test "ignored input does not draw and backspace removes one codepoint" {
         .destroy,
         .quit,
     });
+}
+
+test "filtering resets selection and enter returns the displayed app" {
+    const applications = [_]apps.App{
+        testApp("Firefox"),
+        testApp("Kitty"),
+    };
+    const selected = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "", .rows = &.{ "Firefox", "Kitty" } } },
+        .{ .wait = .{ .event = .down } },
+        .{ .draw = .{ .query = "", .rows = &.{ "Firefox", "Kitty" }, .selected_row = 1 } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("fire") } } },
+        .{ .draw = .{ .query = "fire", .rows = &.{"Firefox"} } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+    try std.testing.expectEqual(@as(?usize, 0), selected);
+}
+
+fn testApp(name: []const u8) apps.App {
+    return .{
+        .storage = @constCast(""),
+        .id = "test.desktop",
+        .name = name,
+        .generic_name = null,
+        .keywords = null,
+        .icon = null,
+        .exec = "test",
+        .try_exec = null,
+        .only_show_in = null,
+        .not_show_in = null,
+        .path = null,
+        .issues = .initEmpty(),
+    };
 }
 
 test "text stop failure still destroys the window and quits SDL" {

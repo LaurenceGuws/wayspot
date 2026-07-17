@@ -17,7 +17,7 @@ path:
 
 slices:
   - beta_binary_and_input:
-      status: implemented_uncommitted
+      status: committed_f69708d
       source:
         - src/main.zig
         - src/picker.zig
@@ -37,8 +37,105 @@ slices:
         - text events own their bytes after SDL_WaitEvent returns
         - strict transcripts enforce order, replies, failures, and complete consumption
         - Smith generates bounded structured startup, event, draw, wait, and cleanup histories
-  - desktop_application_discovery
-  - filtering_rendering_and_selection
+  - desktop_application_discovery:
+      status: implementation_review
+      measured_input:
+        desktop_files: 244
+        application_entries: 242
+        entries_with_name: 242
+        entries_with_exec: 237
+        entries_with_icon: 233
+        largest_file_bytes: 34439
+        largest_name_bytes: 66
+        largest_exec_bytes: 206
+        largest_icon_bytes: 70
+      bounds:
+        desktop_files: 512
+        desktop_file_bytes: 65536
+        desktop_id_bytes: 256
+        name_bytes: 256
+        generic_name_bytes: 256
+        keywords_bytes: 1024
+        icon_bytes: 256
+        exec_bytes: 4096
+        try_exec_bytes: 1024
+        working_directory_bytes: 4096
+        data_directories: 16
+      fields:
+        Type:
+          presence: required
+          effect: accept only Application
+        Name:
+          presence: required
+          effect: retain the unlocalized name
+        localized_Name:
+          presence: optional
+          effect: recognize and defer locale selection explicitly
+        GenericName:
+          presence: optional
+          effect: retain when present
+        Keywords:
+          presence: optional
+          effect: retain when present
+        Icon:
+          presence: optional
+          effect: retain when present; absence never rejects the app
+        Exec:
+          presence: required_without_supported_DBus_activation
+          effect: retain for the structured-launch slice
+        TryExec:
+          presence: optional
+          effect: retain for the availability decision
+        Hidden:
+          presence: optional
+          effect: suppress this desktop id and all lower-precedence copies
+        NoDisplay:
+          presence: optional
+          effect: retain identity but do not publish a picker row
+        OnlyShowIn:
+          presence: optional
+          effect: apply against XDG_CURRENT_DESKTOP
+        NotShowIn:
+          presence: optional
+          effect: apply against XDG_CURRENT_DESKTOP
+        DBusActivatable:
+          presence: optional
+          effect: recognize; DBus launch remains unsupported in this slice
+        Terminal:
+          presence: optional
+          effect: retain; terminal launch remains deferred
+        Path:
+          presence: optional
+          effect: retain for the structured-launch slice
+      failure_meaning:
+        absent_optional: retain the app without that value
+        malformed_optional: retain the app, mark the field issue, and report it
+        missing_required: reject and report the entry
+        malformed_required: reject and report the entry
+        over_bound_field: apply the same required or optional policy before copying
+        hidden: retain only the desktop id tombstone
+        no_display: retain the app without publishing it
+        unavailable_try_exec: retain the parsed record without publishing it
+        capacity_exhausted: publish no application list
+      parser_shape:
+        - classify one key into one closed Field enum
+        - route each recognized field through one exhaustive switch
+        - distinguish unknown extension keys from recognized deferred keys
+        - publish one borrowed parsed entry or one exact rejection
+        - copy accepted values only when the complete application list commits
+      implemented_proof:
+        - XDG roots and desktop files are bounded before publication
+        - root precedence and final application ordering are deterministic
+        - duplicate desktop ids preserve the first root decision
+        - optional icon absence keeps the application
+        - malformed optional data is counted without rejecting the application
+        - required-data failure is counted and publishes no application
+        - desktop string escapes are validated before publication and decoded into owned storage
+        - TryExec checks absolute paths or bounded PATH and remove unavailable apps only after every check succeeds
+        - every decision and issue count is visible at native startup
+        - filtering, scrolling, and selection run only on the committed application list
+  - filtering_rendering_and_selection:
+      status: implementation_review
   - structured_application_launch
   - Hyprland_beta_binding_and_live_receipt
 
@@ -84,7 +181,7 @@ proof:
 excluded:
   - daemon
   - retained cache or history
-  - icons
+  - icon rendering
   - CLI
   - other product modes
   - generic command, candidate, input, widget, or I/O layers

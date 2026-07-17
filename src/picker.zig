@@ -1,8 +1,10 @@
 //! Owns deterministic picker state and control flow.
 
 const std = @import("std");
+const apps = @import("apps.zig");
 
 pub const query_capacity = 256;
+pub const visible_row_capacity = 32;
 
 /// Text owns one bounded SDL text event after the native event returns.
 pub const Text = struct {
@@ -26,8 +28,27 @@ pub const Event = union(enum) {
     quit,
     escape,
     backspace,
+    up,
+    down,
+    enter,
     text: Text,
     ignored,
+};
+
+pub const Row = struct {
+    app_index: usize,
+    name: []const u8,
+};
+
+pub const Frame = struct {
+    query: [:0]const u8,
+    rows: [visible_row_capacity]Row = undefined,
+    row_count: usize = 0,
+    selected_row: usize = 0,
+
+    pub fn rowSlice(frame: *const Frame) []const Row {
+        return frame.rows[0..frame.row_count];
+    }
 };
 
 const Query = struct {
@@ -65,7 +86,7 @@ fn textContinuation(byte: u8) bool {
 /// wait, draw, stopText, destroy, and quit. A text-stop failure takes
 /// precedence over the event-loop result because incomplete cleanup is the
 /// final process state; window destruction and SDL quit still run.
-pub fn run(operations: anytype) !void {
+pub fn run(operations: anytype, applications: []const apps.App) !?usize {
     try operations.init();
     defer operations.quit();
 
@@ -74,24 +95,100 @@ pub fn run(operations: anytype) !void {
 
     try operations.startText();
 
-    var query: Query = .{};
-    const result = events(operations, &query);
+    var state: State = .{};
+    const result = events(operations, applications, &state);
     try operations.stopText();
     return result;
 }
 
-fn events(operations: anytype, query: *Query) !void {
-    try operations.draw(query.text());
+const State = struct {
+    query: Query = .{},
+    selected: usize = 0,
+};
+
+fn events(operations: anytype, applications: []const apps.App, state: *State) !?usize {
+    var frame = makeFrame(state, applications);
+    try operations.draw(&frame);
 
     while (true) {
         switch (try operations.wait()) {
-            .quit, .escape => return,
-            .backspace => query.delete(),
-            .text => |text| try query.append(text.slice()),
+            .quit, .escape => return null,
+            .backspace => {
+                state.query.delete();
+                state.selected = 0;
+            },
+            .up => state.selected -|= 1,
+            .down => {
+                const matched_count = matchCount(applications, state.query.text());
+                if (state.selected + 1 < matched_count) state.selected += 1;
+            },
+            .enter => return selectedApp(applications, state.query.text(), state.selected),
+            .text => |text| {
+                try state.query.append(text.slice());
+                state.selected = 0;
+            },
             .ignored => continue,
         }
-        try operations.draw(query.text());
+        frame = makeFrame(state, applications);
+        try operations.draw(&frame);
     }
+}
+
+fn makeFrame(state: *const State, applications: []const apps.App) Frame {
+    var frame = Frame{ .query = state.query.text() };
+    const first = if (state.selected < visible_row_capacity)
+        0
+    else
+        state.selected - visible_row_capacity + 1;
+    var matched: usize = 0;
+    for (applications, 0..) |app, app_index| {
+        if (!matches(app, state.query.text())) continue;
+        if (matched >= first and frame.row_count < visible_row_capacity) {
+            frame.rows[frame.row_count] = .{ .app_index = app_index, .name = app.name };
+            frame.row_count += 1;
+        }
+        matched += 1;
+    }
+    if (frame.row_count > 0) {
+        std.debug.assert(state.selected >= first);
+        std.debug.assert(state.selected < matched);
+        frame.selected_row = state.selected - first;
+    }
+    return frame;
+}
+
+fn selectedApp(applications: []const apps.App, query: []const u8, selected: usize) ?usize {
+    var matched: usize = 0;
+    for (applications, 0..) |app, index| {
+        if (!matches(app, query)) continue;
+        if (matched == selected) return index;
+        matched += 1;
+    }
+    return null;
+}
+
+fn matchCount(applications: []const apps.App, query: []const u8) usize {
+    var count: usize = 0;
+    for (applications) |app| {
+        if (matches(app, query)) count += 1;
+    }
+    return count;
+}
+
+fn matches(app: apps.App, query: []const u8) bool {
+    if (query.len == 0) return true;
+    if (containsIgnoreCase(app.name, query)) return true;
+    if (app.generic_name) |value| if (containsIgnoreCase(value, query)) return true;
+    if (app.keywords) |value| if (containsIgnoreCase(value, query)) return true;
+    return false;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |index| {
+        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+    }
+    return false;
 }
 
 test "query accepts its exact bound and rejects the next byte without mutation" {
@@ -124,4 +221,29 @@ test "backspace removes one UTF-8 codepoint and maintains termination" {
     query.delete();
     query.delete();
     try std.testing.expectEqualStrings("", query.text());
+}
+
+test "application matching uses name generic name and keywords" {
+    const app = testApp("Kitty", "Terminal", "shell;console;");
+    try std.testing.expect(matches(app, "kit"));
+    try std.testing.expect(matches(app, "TERM"));
+    try std.testing.expect(matches(app, "console"));
+    try std.testing.expect(!matches(app, "browser"));
+}
+
+fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {
+    return .{
+        .storage = @constCast(""),
+        .id = "test.desktop",
+        .name = name,
+        .generic_name = generic_name,
+        .keywords = keywords,
+        .icon = null,
+        .exec = "test",
+        .try_exec = null,
+        .only_show_in = null,
+        .not_show_in = null,
+        .path = null,
+        .issues = .initEmpty(),
+    };
 }

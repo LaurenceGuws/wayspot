@@ -1,6 +1,7 @@
 //! Owns native SDL startup, input, drawing, and reverse-order cleanup.
 
 const std = @import("std");
+const apps = @import("apps.zig");
 const picker = @import("picker.zig");
 const sdl = @cImport({
     @cInclude("SDL3/SDL.h");
@@ -53,6 +54,9 @@ pub const Native = struct {
             sdl.SDL_EVENT_KEY_DOWN => switch (event.key.key) {
                 sdl.SDLK_ESCAPE => .escape,
                 sdl.SDLK_BACKSPACE => .backspace,
+                sdl.SDLK_UP => .up,
+                sdl.SDLK_DOWN => .down,
+                sdl.SDLK_RETURN => .enter,
                 else => .ignored,
             },
             sdl.SDL_EVENT_TEXT_INPUT => .{ .text = try picker.Text.init(std.mem.span(event.text.text)) },
@@ -61,12 +65,26 @@ pub const Native = struct {
     }
 
     /// Replaces the beta frame with the current terminated query.
-    pub fn draw(native: *Native, query: [:0]const u8) !void {
+    pub fn draw(native: *Native, frame: *const picker.Frame) !void {
         const renderer = native.renderer orelse unreachable;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
-        if (!sdl.SDL_RenderDebugText(renderer, 24, 24, query.ptr)) return error.SdlDrawFailed;
+        if (!sdl.SDL_RenderDebugText(renderer, 24, 24, frame.query.ptr)) return error.SdlDrawFailed;
+        for (frame.rowSlice(), 0..) |row, index| {
+            const color: [3]u8 = if (index == frame.selected_row)
+                .{ 130, 190, 255 }
+            else
+                .{ 210, 210, 215 };
+            if (!sdl.SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], 255)) {
+                return error.SdlDrawFailed;
+            }
+            var name: [apps.name_capacity:0]u8 = @splat(0);
+            @memcpy(name[0..row.name.len], row.name);
+            if (!sdl.SDL_RenderDebugText(renderer, 24, @floatFromInt(52 + index * 12), &name)) {
+                return error.SdlDrawFailed;
+            }
+        }
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
     }
 
