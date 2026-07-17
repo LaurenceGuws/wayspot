@@ -26,12 +26,25 @@ pub fn build(b: *std.Build) void {
     executable.use_lld = true;
     b.installArtifact(executable);
 
-    const tests = b.addTest(.{ .root_module = wayspot_beta });
-    tests.use_llvm = true;
-    tests.use_lld = true;
-    const run_tests = b.addRunArtifact(tests);
+    const picker_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/picker.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_picker_tests = b.addRunArtifact(picker_tests);
+    const transcript_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sdl_transcript.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_transcript_tests = b.addRunArtifact(transcript_tests);
     const test_step = b.step("test", "Run Wayspot beta tests");
-    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_picker_tests.step);
+    test_step.dependOn(&run_transcript_tests.step);
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);

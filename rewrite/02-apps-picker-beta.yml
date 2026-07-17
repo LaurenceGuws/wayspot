@@ -16,7 +16,27 @@ path:
   - clean up and exit
 
 slices:
-  - beta_binary_and_input
+  - beta_binary_and_input:
+      status: implemented_uncommitted
+      source:
+        - src/main.zig
+        - src/picker.zig
+        - src/sdl.zig
+        - src/sdl_transcript.zig
+      operations:
+        - init
+        - create
+        - start_text
+        - draw
+        - wait
+        - stop_text
+        - destroy
+        - quit
+      proof:
+        - native SDL is absent from plain picker and transcript test roots
+        - text events own their bytes after SDL_WaitEvent returns
+        - strict transcripts enforce order, replies, failures, and complete consumption
+        - Smith generates bounded structured startup, event, draw, wait, and cleanup histories
   - desktop_application_discovery
   - filtering_rendering_and_selection
   - structured_application_launch

@@ -14,3 +14,4 @@ packaging/arch/src/
 packaging/arch/wayspot-git/
 packaging/arch/*.pkg.tar.zst
 packaging/arch/*.pkg.tar.zst.sig
+/zig-0.16-release-notes.txt
