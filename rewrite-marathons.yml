@@ -117,7 +117,7 @@ marathons:
   - order: 2
     id: apps_picker_beta
     name: Apps picker beta
-    scratchpad: rewrite/02-apps-picker-beta.yml
+    scratchpad: deleted_after_acceptance
     depends_on:
       - accepted_source_contract
     outcome: >
@@ -144,6 +144,15 @@ marathons:
     closes_when:
       - wayspot-beta opens, captures immediate input, filters, and launches one app
       - the live wayspot installation remains untouched
+    accepted:
+      commit: c161330
+      source_non_whitespace_characters: 62352
+      receipts:
+        - immediate and continuous input remains responsive
+        - filtering and structured GUI launch work for graphical and terminal applications
+        - absent desktop Path launches from HOME instead of the invoking directory
+        - sustained input grows private memory by no meaningful amount
+        - the beta binary and window class do not replace the live wayspot binary or resident processes
 
   - order: 3
     id: apps_interfaces
