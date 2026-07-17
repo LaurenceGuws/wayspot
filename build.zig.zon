@@ -5,13 +5,13 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .sdl = .{
-            .url = "git+https://github.com/LaurenceGuws/howl-sdl#release-3.4.x",
-            .hash = "sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6",
+            .path = "vendor/sdl",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor/sdl",
     },
 }

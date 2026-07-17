@@ -45,10 +45,14 @@ not define Wayspot product scope.
   `/home/home/personal/projects/official_docs/ziglang.org/download/0.16.0/`
 - Zig 0.16 source:
   `/home/home/personal/projects/dev_references/zig_maturity/zig/`
-- SDL source:
+- SDL built source:
+  `vendor/sdl/` (official `release-3.4.12`, commit
+  `f87239e71e42da91ca317a12eefb82cfbf3393eb`)
+- SDL shared source clone:
   `/home/home/personal/projects/dev_references/backends/sdl/`
 - SDL documentation:
-  `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/`
+  `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/` (wiki commit
+  `a9d781e8c978681e5c8119c2accc11fc7c155028`)
 - Hyprland source:
   `/home/home/personal/projects/dev_references/backends/hyprland/`
 - Hyprland IPC:
