@@ -1,0 +1,140 @@
+# Temporary diagram for Marathon 1. Delete after the first proof is accepted.
+# This file is not project law and authorizes no implementation.
+
+marathon:
+  id: accepted_source_contract
+  status: proposed_for_operator_review
+  implementation_gate: closed
+
+useful_product_path:
+  invocation: wayspot-beta
+  sequence:
+    - the Hyprland beta binding starts a new process
+    - SDL initializes the picker
+    - keyboard input is accepted immediately
+    - installed applications are shown
+    - typed text filters applications
+    - selecting an application launches it
+    - the picker exits and cleans up
+  success: >
+    The first keypress is captured correctly, an application can be selected
+    and launched, and the picker exits without affecting the live Wayspot.
+
+minimum_file_tree:
+  build.zig: build and test wayspot-beta without installing over wayspot
+  src/main.zig: own the complete first proof
+  note: >
+    One source file is preferred until a real owner, independently testable
+    parser, or external boundary becomes clearer by being separated.
+
+one_owner_sentence_per_file:
+  build.zig: Build the isolated beta executable and its tests.
+  src/main.zig: Start, run, and clean up one apps picker process.
+
+dependency_direction:
+  - main calls Zig standard library and SDL directly
+  - application meaning does not belong to SDL rendering or input state
+  - no deleted source architecture is restored
+
+data_shapes:
+  required:
+    - one bounded installed application value
+    - one bounded application list
+    - one bounded query
+    - one selected application
+  design_rule: >
+    Begin with direct local declarations. Name and move a type only when doing
+    so makes product meaning, ownership, a bound, or failure clearer.
+
+named_bounds:
+  rule: >
+    Marathon 2 measures the real desktop files, application count, query,
+    rendered rows, and launch arguments before choosing each exact bound.
+  required:
+    - desktop entry bytes
+    - installed application count
+    - application name bytes
+    - query bytes
+    - visible rows
+    - launch argument count and bytes
+
+invariants:
+  - wayspot-beta never replaces, stops, or changes the live wayspot binary
+  - the input listener exists before a keypress can be lost
+  - discovery publishes either one complete bounded application list or none
+  - filtering is deterministic
+  - launch uses structured arguments, never a shell command string
+  - every allocation and SDL object is cleaned exactly once
+  - no daemon, cache, notification, wallpaper, or sunglasses behavior exists
+
+errors_and_failure_meaning:
+  - SDL startup failure exits without a partial picker
+  - malformed or over-bound application data has an explicit Marathon 2 policy
+  - allocation failure publishes no partial application list
+  - launch failure leaves the picker in one explicitly designed state
+
+cleanup:
+  - src/main.zig owns every allocation, SDL object, and launched-process handoff
+  - Marathon 2 lists each acquisition and its matching cleanup before coding
+
+negative_space:
+  - no daemon
+  - no resident service
+  - no command framework
+  - no generic picker framework
+  - no generic candidate or input hierarchy
+  - no CLI
+  - no Bash completion
+  - no notification, wallpaper, or sunglasses code
+  - no installation over the live wayspot
+  - no source split merely to imitate a preferred architecture
+  - no clever Zig syntax whose purpose is reducing lines or characters
+
+unit_tests:
+  - application filtering
+  - selection bounds
+  - query bounds
+  - exact failure decisions
+
+fuzz_tests:
+  - desktop entry parsing
+  - query filtering
+
+deterministic_simulations:
+  - SDL startup and cleanup failure paths
+  - keyboard input arriving at the earliest accepted point
+  - application discovery failure without partial publication
+  - launch success and failure ownership
+
+real_product_receipts:
+  - live wayspot remains installed and running as before
+  - a separate Hyprland binding starts wayspot-beta
+  - immediate typing loses no prefix
+  - filtering and launching work
+  - repeated open and close leaves no beta process or SDL resource behind
+
+reincarnated_code_audit:
+  rule: >
+    After Marathon 2 design approval, recover only proven mechanics that are
+    smaller and clearer than rewriting them directly. Never restore a file or
+    its old ownership wholesale.
+
+character_budget:
+  rule: >
+    Record non-whitespace characters as maintenance evidence. There is no
+    character target or file-size target for the first proof. Simplicity means
+    the smallest direct control flow for the real task, not compressed syntax.
+
+explicit_exclusions:
+  - CLI and GUI shared command design
+  - source decomposition
+  - retained application metadata
+  - icons and selection history
+  - resident process architecture
+  - notification, wallpaper, and sunglasses design
+  - production replacement or migration
+
+next_gate:
+  - operator approves this first-proof boundary
+  - Marathon 2 chooses exact behavior, bounds, assertions, and beta installation paths
+  - implementation begins only after Marathon 2 review

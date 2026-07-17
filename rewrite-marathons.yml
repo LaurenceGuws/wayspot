@@ -1,0 +1,444 @@
+# Durable rewrite index. Each marathon gets one temporary planning scratchpad.
+# DOMAIN.yml owns product scope. AGENTS.md owns the source-shape bars and workflow.
+
+rewrite:
+  goal: >
+    Rebuild and integrate the proven Wayspot product scope as a deterministic,
+    idiomatic, small, and hardened Zig program without restoring the rejected
+    source architecture.
+  authority:
+    product_scope: DOMAIN.yml
+    source_rules: AGENTS.md
+    sequence_and_closure: rewrite-marathons.yml
+  source_state:
+    rejected_source_is_not_precedent: true
+    wholesale_restore_forbidden: true
+    hardened_code_may_be_reincarnated_after_design_approval: true
+
+scratchpads:
+  directory: rewrite/
+  role: temporary design and review record for one active marathon
+  active_limit: 1
+  authority: none outside the indexed marathon
+  required_sections:
+    - useful_product_path
+    - minimum_file_tree
+    - one_owner_sentence_per_file
+    - dependency_direction
+    - data_shapes
+    - named_bounds
+    - invariants
+    - errors_and_failure_meaning
+    - cleanup
+    - negative_space
+    - unit_tests
+    - fuzz_tests
+    - deterministic_simulations
+    - real_product_receipts
+    - reincarnated_code_audit
+    - character_budget
+    - explicit_exclusions
+  lifecycle:
+    - create only when its marathon becomes active
+    - obtain operator approval before source implementation
+    - keep decisions synchronized with current source comments and assertions
+    - delete after the marathon is accepted
+    - never let a scratchpad add product scope
+  commit_policy: scratchpads are uncommitted unless the operator explicitly approves a planning checkpoint
+
+rewrite_rules:
+  sequence:
+    - complete marathons in order
+    - only one marathon may be active
+    - a known debt or failed invariant blocks the next marathon
+    - a marathon closes only when its complete useful path works
+  source:
+    - name real product things and tasks
+    - create no generic shared layer
+    - add no source file without one exclusive owner
+    - add no type unless it reduces ambiguity, bounds ownership, or states failure meaning
+    - keep direct control flow visible
+    - record source size in non-whitespace characters as maintenance evidence
+    - keep source lines within 120 columns
+    - record source characters before and after every reincarnation
+  reincarnation:
+    - inspect deleted code only after the new design is approved
+    - recover algorithms and proven mechanics, not former ownership or dependency direction
+    - copy no file wholesale
+    - re-review every recovered branch, bound, allocation, cleanup path, comment, and error
+    - delete recovered code that does not serve the active product path
+  proof:
+    - assertions cover expected and forbidden states
+    - unit tests prove local data and control invariants
+    - fuzzing proves parsers, bounds, and state transitions
+    - deterministic simulations prove external I/O histories and cleanup
+    - fixtures are forbidden
+    - a live desktop receipt follows deterministic proof and does not replace it
+    - zig build test --summary all passes
+    - zig build passes
+    - git diff --check passes
+  acceptance:
+    - all comments describe current behavior
+    - all resources have one owner and exactly one cleanup path
+    - all loops, waits, retries, buffers, lists, queues, and external records are bounded
+    - idle processes sleep
+    - the product path is usable through its real interface
+    - no known debt is carried into the next marathon
+    - no commit is made without operator authority
+
+marathons:
+  - order: 1
+    id: accepted_source_contract
+    name: Accepted source contract
+    scratchpad: rewrite/01-accepted-source-contract.yml
+    depends_on: []
+    outcome: >
+      Approve the smallest source vocabulary, file tree, dependency direction,
+      bounds, and proof plan needed to begin the rewrite.
+    includes:
+      - map every DOMAIN.yml product path to one future runtime owner
+      - define interface boundaries without naming speculative abstractions
+      - define global capacities and process-lifecycle invariants
+      - define the build and test roots required by the first useful path
+      - define how source characters are measured without treating size as a syntax target
+    excludes:
+      - source implementation
+      - restoration of deleted files
+      - implementation detail not required by an indexed marathon
+    proof:
+      - every proposed file has one exclusive owner
+      - every dependency points toward product meaning or external I/O
+      - every product path is covered by exactly one later marathon
+      - operator approves the contract before source exists
+    closes_when:
+      - the complete rewrite has no unnamed owner or uncovered product path
+      - the first implementation marathon has an approved minimum tree
+
+  - order: 2
+    id: apps_picker_beta
+    name: Apps picker beta
+    scratchpad: rewrite/02-apps-picker-beta.yml
+    depends_on:
+      - accepted_source_contract
+    outcome: >
+      Build one isolated wayspot-beta picker that finds, filters, and opens
+      installed applications without changing the live Wayspot installation.
+    includes:
+      - exact beta invocation and Hyprland binding behavior
+      - bounded desktop-entry discovery and parsing
+      - deterministic filtering and selection
+      - direct application launch ownership and cleanup
+      - missing, malformed, inaccessible, and over-bound filesystem behavior
+    excludes:
+      - replacement of the live wayspot binary or mappings
+      - CLI interface
+      - icons
+      - selection history
+      - Bash completion
+      - resident processes
+    proof:
+      - filesystem unit, fuzz, and strict simulated I/O tests
+      - failure-atomic application discovery
+      - exact picker input, filtering, and launch receipts
+      - no lost first keypress
+    closes_when:
+      - wayspot-beta opens, captures immediate input, filters, and launches one app
+      - the live wayspot installation remains untouched
+
+  - order: 3
+    id: apps_interfaces
+    name: Apps GUI and CLI interfaces
+    scratchpad: rewrite/03-apps-interfaces.yml
+    depends_on:
+      - apps_picker_beta
+    outcome: >
+      Decide whether one direct product command shape improves both GUI and CLI
+      use without obscuring the proven picker.
+    includes:
+      - retain the proven GUI picker behavior
+      - add a first-class CLI application path
+      - test the smallest shared product command shape
+      - keep interface-specific input and presentation separate
+    excludes:
+      - assuming a service or command layer before the experiment
+      - resident IPC
+      - generic command or interface frameworks
+      - notification, wallpaper, and sunglasses behavior
+    proof:
+      - GUI behavior remains as fast and direct as the accepted beta
+      - GUI and CLI observe equal product results where their actions overlap
+      - the shared shape is smaller and clearer than duplicated product meaning
+      - real GUI and CLI application receipts
+    closes_when:
+      - the operator accepts or rejects the command-shape experiment
+      - no interface owns a second application model
+
+  - order: 4
+    id: apps_files_icons_history
+    name: App files, icons, and selection history
+    scratchpad: rewrite/04-app-files-icons-history.yml
+    depends_on:
+      - apps_interfaces
+    outcome: >
+      Add bounded application metadata reuse, icons, and preference history
+      without hiding filesystem ownership or startup failure.
+    includes:
+      - exact retained app metadata and invalidation rules
+      - bounded icon discovery, decoding, and native texture lifetime
+      - bounded selection history and deterministic ranking influence
+      - atomic persistence and stale-data deletion
+      - startup memory, disk, and latency budgets
+    excludes:
+      - generic cache vocabulary or framework
+      - notification history
+      - unbounded filesystem scans
+      - silent fallback after unexpected I/O errors
+    proof:
+      - filesystem and image failure simulations
+      - corrupt, stale, partial, over-bound, and interrupted persistence tests
+      - repeated load and cleanup tests
+      - measured source characters, startup memory, and startup latency
+    closes_when:
+      - icons and history improve the real apps path without changing its meaning
+      - retained data is bounded, disposable, and failure-atomic
+
+  - order: 5
+    id: notification_dbus
+    name: Notification DBus process
+    scratchpad: rewrite/05-notification-dbus.yml
+    depends_on:
+      - apps_files_icons_history
+    outcome: >
+      Own the Freedesktop notification name and receive, replace, and close
+      notifications in one durable resident process.
+    includes:
+      - exact supported Freedesktop DBus calls and signals
+      - name ownership and replacement behavior
+      - bounded notification records
+      - process startup, stop, cancellation, and cleanup
+      - strict DBus mock I/O and native parity
+    excludes:
+      - banner rendering
+      - retained notification history
+      - a generic DBus layer
+      - a fallback process supervisor
+    proof:
+      - unit tests for notification identity and replacement
+      - fuzzing of bounded DBus values
+      - deterministic connection, loss, cancellation, and cleanup simulations
+      - real DBus ownership and clean-shutdown receipt
+    closes_when:
+      - applications can send and close notifications through Wayspot
+      - every DBus and process lifecycle state has explicit failure meaning
+
+  - order: 6
+    id: notification_banner_history
+    name: Notification banner and history
+    scratchpad: rewrite/06-notification-banner-history.yml
+    depends_on:
+      - notification_dbus
+    outcome: >
+      Show notifications and retain a bounded, private, thirty-day history that
+      the user can inspect and close.
+    includes:
+      - banner surface, timing, replacement, and dismissal
+      - thirty-day expiry plus hard record and byte bounds
+      - atomic history persistence and pruning
+      - notification history through CLI and GUI
+      - explicit treatment of sensitive summary and body text
+    excludes:
+      - indefinite retention
+      - notification-driven application tracing features
+      - fixtures or live DBus as deterministic proof
+      - generic storage layer
+    proof:
+      - simulated time, DBus, SDL, Wayland, and filesystem histories
+      - expiry boundary and hard-cap tests
+      - crash, corruption, and partial-write tests
+      - real banner, history, close, restart, and expiry receipts
+    closes_when:
+      - notifications remain usable across restart without exceeding retention
+      - banner and history cleanup are exact under success and failure
+
+  - order: 7
+    id: wallpaper_monitor_surfaces
+    name: Wallpaper monitor surfaces
+    scratchpad: rewrite/07-wallpaper-monitor-surfaces.yml
+    depends_on:
+      - notification_banner_history
+    outcome: >
+      Keep one correct wallpaper surface and image on every current Hyprland
+      monitor.
+    includes:
+      - pinned Hyprland request and event forms used by Wayspot
+      - bounded monitor facts
+      - SDL and Wayland wallpaper surfaces
+      - image discovery, validation, decoding, and ownership
+      - monitor add, remove, resize, and reconnect behavior
+    excludes:
+      - wallpaper rotation policy
+      - monitor-focus influence
+      - other compositors
+      - generic compositor interface
+    proof:
+      - Hyprland, SDL, Wayland, filesystem, and image simulations
+      - wire-byte and operational-history fuzzing
+      - no partial monitor or surface publication after failure
+      - real multi-monitor startup and clean-shutdown receipt
+    closes_when:
+      - every monitor has exactly one owned surface and valid image
+      - socket, image, and native surface cleanup is exact
+
+  - order: 8
+    id: wallpaper_rotation_lifecycle
+    name: Wallpaper rotation and lifecycle
+    scratchpad: rewrite/08-wallpaper-rotation-lifecycle.yml
+    depends_on:
+      - wallpaper_monitor_surfaces
+    outcome: >
+      Rotate wallpapers predictably for the full desktop session without focus
+      events changing a round or process restarts repeating a sequence.
+    includes:
+      - fresh process-start randomness
+      - bounded per-monitor and per-round selection
+      - scheduled rotation and direct rotate action
+      - focus-event rejection
+      - reconnect, cancellation, stop, and overnight process behavior
+    excludes:
+      - flock
+      - fallback process manager
+      - unbounded retry or sleep
+      - focus-driven refresh
+    proof:
+      - deterministic random-source and time simulations
+      - focus, workspace, monitor, socket-loss, and stop event histories
+      - non-repetition and exact-round assertions
+      - idle CPU and memory measurements
+      - direct rotate and overnight receipts
+    closes_when:
+      - focus movement cannot alter the current wallpaper round
+      - restart sequences differ and the process survives an overnight session
+
+  - order: 9
+    id: sunglasses_cli_overlay
+    name: Sunglasses CLI and overlay
+    scratchpad: rewrite/09-sunglasses-cli-overlay.yml
+    depends_on:
+      - wallpaper_rotation_lifecycle
+    outcome: >
+      Apply useful per-monitor dimming, color filtering, and image overlays
+      through direct CLI actions and one resident overlay process.
+    includes:
+      - monitor selection
+      - bounded dim, filter, image path, and opacity values
+      - explicit on, off, set, clear, apply, and reconcile actions
+      - persisted per-monitor state
+      - overlay creation, reconciliation, stop, and cleanup
+    excludes:
+      - GUI controls
+      - a parallel input type hierarchy
+      - generic effect or widget systems
+      - silent no-op actions
+    proof:
+      - unit tests for every accepted and rejected value
+      - state, Hyprland, SDL, Wayland, and filesystem simulations
+      - exhaustive action-to-state assertions
+      - real per-monitor CLI and overlay receipts
+    closes_when:
+      - every documented CLI action visibly changes the selected monitor
+      - restart and monitor changes preserve or reject state exactly as designed
+
+  - order: 10
+    id: sunglasses_gui_controls
+    name: Sunglasses GUI controls
+    scratchpad: rewrite/10-sunglasses-gui-controls.yml
+    depends_on:
+      - sunglasses_cli_overlay
+    outcome: >
+      Make sunglasses configuration interactive with direct monitor selection,
+      sliders, toggles, and image-path entry.
+    includes:
+      - monitor list and selection
+      - reusable bounded slider mechanics
+      - direct on and off controls
+      - bounded image-path entry
+      - commit, cancel, keyboard, pointer, and rendering behavior
+      - equality with accepted CLI actions and values
+    excludes:
+      - GUI-owned resident state
+      - generic form or widget framework
+      - speculative controls
+      - a second action or value representation
+    proof:
+      - unit tests for control geometry and value mapping
+      - deterministic SDL input and rendering simulations
+      - equal GUI and CLI state transitions
+      - real monitor, slider, toggle, path, cancel, and commit receipts
+    closes_when:
+      - every sunglasses capability is operable and visible in the GUI
+      - the GUI retains only temporary editing state
+
+  - order: 11
+    id: bash_hyprland_session
+    name: Bash and Hyprland session integration
+    scratchpad: rewrite/11-bash-hyprland-session.yml
+    depends_on:
+      - sunglasses_gui_controls
+    outcome: >
+      Integrate Wayspot with Bash and the Hyprland session using standard user
+      interfaces and exact resident lifecycle commands.
+    includes:
+      - source <(wayspot completion bash)
+      - mode, prefix, and selected-mode completion
+      - completion generated from current product actions
+      - rerun build, install, startup, stop, and stale-data deletion
+      - Hyprland startup and key bindings
+      - canonical resident process invocation
+    excludes:
+      - custom Bash completion protocol
+      - exposed completion internals
+      - Nushell completion
+      - flock or fallback process manager
+      - legacy flags or compatibility code
+    proof:
+      - isolated Bash syntax and completion assertions
+      - exact argv and environment bounds
+      - rerun and Hyprland configuration tests
+      - real shell completion, startup, picker, rotate, and shutdown receipts
+    closes_when:
+      - standard Bash completion behaves correctly at every accepted position
+      - login and rerun leave exactly the intended resident processes alive
+
+  - order: 12
+    id: full_product_proof
+    name: Full product proof and reduction
+    scratchpad: rewrite/12-full-product-proof.yml
+    depends_on:
+      - bash_hyprland_session
+    outcome: >
+      Prove the integrated product, remove duplication and excess vocabulary,
+      and establish the smallest hardened release candidate.
+    includes:
+      - complete dependency-direction audit
+      - complete noun and verb audit
+      - source-character and retained-data budgets
+      - allocation, cleanup, cancellation, and process-lifecycle audit
+      - combined external-I/O simulations and fuzzing
+      - idle CPU, startup latency, memory, disk, and overnight checks
+      - complete CLI, GUI, notification, wallpaper, sunglasses, and session receipts
+    excludes:
+      - new product features
+      - deferred known debt
+      - broad refactoring without measured reduction
+      - acceptance based only on test count
+    proof:
+      - every earlier marathon gate remains green together
+      - no forbidden dependency or duplicate product representation exists
+      - all source comments, bounds, assertions, and errors match runtime behavior
+      - source characters and runtime resources meet approved budgets
+      - clean-machine build, deterministic proof, integration, and overnight receipts pass
+    closes_when:
+      - all DOMAIN.yml scope is working and integrated
+      - all AGENTS.md style bars are met
+      - no known debt remains
+      - the operator approves the release candidate

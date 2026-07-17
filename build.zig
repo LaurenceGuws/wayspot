@@ -332,13 +332,6 @@ pub fn build(b: *std.Build) void {
     cli_mod.addImport("sdl_c", sdl_c_mod);
     cli_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
-    const bash_completion_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/bash_completion.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bash_completion_mod.addImport("wayspot_cmd", cmd_mod);
-
     const gui_mod = b.createModule(.{
         .root_source_file = b.path("src/gui/surface.zig"),
         .target = target,
@@ -553,7 +546,6 @@ pub fn build(b: *std.Build) void {
     hyprland_native_io_check_step.dependOn(&hyprland_native_io_check.step);
 
     b.installArtifact(exe);
-    b.installFile("packaging/bash/wayspot.bash", "share/bash-completion/completions/wayspot");
 
     const run_step = b.step("run", "Run the app");
 
@@ -677,11 +669,6 @@ pub fn build(b: *std.Build) void {
     cli_tests.root_module.linkLibrary(sdl_dep.artifact("SDL3"));
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
-    const bash_completion_tests = b.addTest(.{ .root_module = bash_completion_mod });
-    bash_completion_tests.use_llvm = true;
-    bash_completion_tests.use_lld = true;
-    const run_bash_completion_tests = b.addRunArtifact(bash_completion_tests);
-
     const gui_tests = b.addTest(.{ .root_module = gui_mod });
     gui_tests.use_llvm = true;
     gui_tests.use_lld = true;
@@ -747,7 +734,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_picker_cmd_tests.step);
     test_step.dependOn(&run_picker_sunglasses_mode_tests.step);
     test_step.dependOn(&run_cli_tests.step);
-    test_step.dependOn(&run_bash_completion_tests.step);
     test_step.dependOn(&run_gui_tests.step);
     test_step.dependOn(&run_process_tests.step);
     test_step.dependOn(&run_notification_tests.step);
