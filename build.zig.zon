@@ -4,9 +4,6 @@
     .fingerprint = 0x1bbfcaf57fa6a14e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .howl_lua = .{
-            .path = "vendor/howl-lua",
-        },
         .sdl = .{
             .url = "git+https://github.com/LaurenceGuws/howl-sdl#release-3.4.x",
             .hash = "sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6",
@@ -15,8 +12,6 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "assets",
         "src",
-        "vendor/howl-lua",
     },
 }

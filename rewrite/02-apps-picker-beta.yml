@@ -1,0 +1,74 @@
+# Temporary diagram for the active implementation marathon.
+
+marathon:
+  id: apps_picker_beta
+  status: active
+
+path:
+  - build and install only zig-out/bin/wayspot-beta
+  - initialize SDL video
+  - create one window and renderer
+  - start text input before entering the event loop
+  - accept and render a bounded query
+  - discover and render bounded installed applications
+  - filter on each query change
+  - launch one selected app with structured arguments
+  - clean up and exit
+
+slices:
+  - beta_binary_and_input
+  - desktop_application_discovery
+  - filtering_rendering_and_selection
+  - structured_application_launch
+  - Hyprland_beta_binding_and_live_receipt
+
+first_tree:
+  build.zig: build, test, and install wayspot-beta
+  build.zig.zon: retain only dependencies used by the beta
+  src/main.zig: own the complete one-shot picker
+
+bounds_to_measure_before_their_slice:
+  - query bytes
+  - desktop entry bytes
+  - installed application count
+  - application name bytes
+  - launch argument count and bytes
+  - visible rows
+
+assertions:
+  - no build or install artifact is named wayspot
+  - text input starts before the event loop
+  - query overflow changes no query bytes
+  - discovery failure publishes no partial app list
+  - selection is absent or indexes one published app
+  - launch never reconstructs a shell command
+  - every SDL and allocated resource is released exactly once
+
+proof:
+  unit:
+    - query append and delete boundaries
+    - filtering and selection boundaries
+    - desktop entry parsing
+  fuzz:
+    - query edits
+    - desktop entry bytes
+  simulation:
+    - SDL startup and cleanup operations
+    - filesystem discovery failures
+    - process launch branches
+  live:
+    - wayspot remains untouched
+    - wayspot-beta captures immediate typing
+    - wayspot-beta filters and launches one application
+
+excluded:
+  - daemon
+  - retained cache or history
+  - icons
+  - CLI
+  - other product modes
+  - generic command, candidate, input, widget, or I/O layers
+  - production Hyprland mapping changes
+
+source_measurement:
+  rule: record non-whitespace characters after each slice; optimize meaning and control flow, not syntax
