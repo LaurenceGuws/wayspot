@@ -157,7 +157,7 @@ marathons:
   - order: 3
     id: apps_interfaces
     name: Apps GUI and CLI interfaces
-    scratchpad: rewrite/03-apps-interfaces.yml
+    scratchpad: deleted_after_acceptance
     depends_on:
       - apps_picker_beta
     outcome: >
@@ -181,6 +181,16 @@ marathons:
     closes_when:
       - the operator accepts or rejects the command-shape experiment
       - no interface owns a second application model
+    accepted:
+      commit: 7fc0e67
+      source_non_whitespace_characters: 75478
+      receipts:
+        - GUI and CLI consume one ordered application lookup
+        - exact prefix substring subsequence and bounded typo classes are deterministic
+        - ghsot and ghsotty list Ghostty without making typo input executable
+        - DBus-capable entries with valid Exec remain useful before DBus activation exists
+        - GUI and CLI close Wayspot before starting an independent application
+        - 143 test executions and the complete build pass
 
   - order: 4
     id: apps_files_icons_history
@@ -197,15 +207,21 @@ marathons:
       - bounded selection history and deterministic ranking influence
       - atomic persistence and stale-data deletion
       - startup memory, disk, and latency budgets
+      - stale desktop-entry detection without executing the advertised application
+      - exact executable availability checks for direct Exec and PATH forms
+      - explicit limits for launcher-backed entries that cannot be proven from Exec alone
     excludes:
       - generic cache vocabulary or framework
       - notification history
       - unbounded filesystem scans
       - silent fallback after unexpected I/O errors
+      - deleting package-owned desktop files
+      - treating a successful parse as proof that an application is installed
     proof:
       - filesystem and image failure simulations
       - corrupt, stale, partial, over-bound, and interrupted persistence tests
       - repeated load and cleanup tests
+      - missing executable, stale PATH, removed launcher target, and permission simulations
       - measured source characters, startup memory, and startup latency
     closes_when:
       - icons and history improve the real apps path without changing its meaning
