@@ -74,6 +74,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_cli_tests = b.addRunArtifact(cli_tests);
+    const icon_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/icon.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_icon_tests = b.addRunArtifact(icon_tests);
     const test_step = b.step("test", "Run Wayspot beta tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
@@ -81,6 +89,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_transcript_tests.step);
     test_step.dependOn(&run_launch_tests.step);
     test_step.dependOn(&run_cli_tests.step);
+    test_step.dependOn(&run_icon_tests.step);
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);

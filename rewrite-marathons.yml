@@ -194,38 +194,31 @@ marathons:
 
   - order: 4
     id: apps_files_icons_history
-    name: App files, icons, and selection history
+    name: App files and icons
     scratchpad: rewrite/04-app-files-icons-history.yml
     depends_on:
       - apps_interfaces
     outcome: >
-      Add bounded application metadata reuse, icons, and preference history
-      without hiding filesystem ownership or startup failure.
+      Add bounded application icons without hiding filesystem ownership or
+      startup failure.
     includes:
-      - exact retained app metadata and invalidation rules
       - bounded icon discovery, decoding, and native texture lifetime
-      - bounded selection history and deterministic ranking influence
-      - atomic persistence and stale-data deletion
-      - startup memory, disk, and latency budgets
-      - stale desktop-entry detection without executing the advertised application
-      - exact executable availability checks for direct Exec and PATH forms
-      - explicit limits for launcher-backed entries that cannot be proven from Exec alone
+      - startup memory and latency budgets
     excludes:
       - generic cache vocabulary or framework
       - notification history
       - unbounded filesystem scans
       - silent fallback after unexpected I/O errors
-      - deleting package-owned desktop files
-      - treating a successful parse as proof that an application is installed
     proof:
       - filesystem and image failure simulations
-      - corrupt, stale, partial, over-bound, and interrupted persistence tests
       - repeated load and cleanup tests
-      - missing executable, stale PATH, removed launcher target, and permission simulations
       - measured source characters, startup memory, and startup latency
     closes_when:
-      - icons and history improve the real apps path without changing its meaning
-      - retained data is bounded, disposable, and failure-atomic
+      - icons improve the real apps path without changing its meaning
+      - icon memory and cleanup remain bounded
+    deferred:
+      - retained app metadata
+      - selection history
 
   - order: 5
     id: notification_dbus

@@ -4,7 +4,9 @@ const std = @import("std");
 const apps = @import("apps.zig");
 
 pub const query_capacity = apps.query_capacity;
-pub const visible_row_capacity = 32;
+pub const visible_row_capacity = 18;
+pub const query_height: f32 = 48;
+pub const row_height: f32 = 24;
 
 /// Text owns one bounded SDL text event after the native event returns.
 pub const Text = struct {
@@ -32,6 +34,11 @@ pub const Event = union(enum) {
     down,
     enter,
     text: Text,
+    hover: usize,
+    click: usize,
+    scroll_up,
+    scroll_down,
+    idle,
     ignored,
 };
 
@@ -45,6 +52,8 @@ pub const Frame = struct {
     rows: [visible_row_capacity]Row = undefined,
     row_count: usize = 0,
     selected_row: usize = 0,
+    first: usize = 0,
+    total_count: usize = 0,
 
     pub fn rowSlice(frame: *const Frame) []const Row {
         return frame.rows[0..frame.row_count];
@@ -104,6 +113,7 @@ pub fn run(operations: anytype, applications: []const apps.App) !?usize {
 const State = struct {
     query: Query = .{},
     selected: usize = 0,
+    first: usize = 0,
 };
 
 fn events(operations: anytype, applications: []const apps.App, state: *State) !?usize {
@@ -116,18 +126,40 @@ fn events(operations: anytype, applications: []const apps.App, state: *State) !?
             .backspace => {
                 state.query.delete();
                 state.selected = 0;
+                state.first = 0;
             },
-            .up => state.selected -|= 1,
+            .up => {
+                state.selected -|= 1;
+                keepSelectedVisible(state);
+            },
             .down => {
                 const matched_count = matchCount(applications, state.query.text());
                 if (state.selected + 1 < matched_count) state.selected += 1;
+                keepSelectedVisible(state);
             },
             .enter => return selectedApp(applications, state.query.text(), state.selected),
             .text => |text| {
                 try state.query.append(text.slice());
                 state.selected = 0;
+                state.first = 0;
             },
+            .hover => |row| {
+                if (visibleSelection(state, row, matchCount(applications, state.query.text()))) |selected| {
+                    state.selected = selected;
+                }
+            },
+            .click => |row| {
+                state.selected = visibleSelection(
+                    state,
+                    row,
+                    matchCount(applications, state.query.text()),
+                ) orelse continue;
+                return selectedApp(applications, state.query.text(), state.selected);
+            },
+            .scroll_up => scroll(state, matchCount(applications, state.query.text()), false),
+            .scroll_down => scroll(state, matchCount(applications, state.query.text()), true),
             .ignored => continue,
+            .idle => {},
         }
         frame = makeFrame(state, applications);
         try operations.draw(&frame);
@@ -135,23 +167,45 @@ fn events(operations: anytype, applications: []const apps.App, state: *State) !?
 }
 
 fn makeFrame(state: *const State, applications: []const apps.App) Frame {
-    var frame = Frame{ .query = state.query.text() };
     const found = apps.Matches.init(applications, state.query.text());
-    const first = if (state.selected < visible_row_capacity)
-        0
-    else
-        state.selected - visible_row_capacity + 1;
-    for (found.slice()[@min(first, found.count)..]) |app_index| {
+    var frame = Frame{
+        .query = state.query.text(),
+        .first = @min(state.first, found.count),
+        .total_count = found.count,
+    };
+    for (found.slice()[frame.first..]) |app_index| {
         if (frame.row_count == visible_row_capacity) break;
         frame.rows[frame.row_count] = .{ .app_index = app_index, .name = applications[app_index].name };
         frame.row_count += 1;
     }
     if (frame.row_count > 0) {
-        std.debug.assert(state.selected >= first);
+        std.debug.assert(state.selected >= frame.first);
         std.debug.assert(state.selected < found.count);
-        frame.selected_row = state.selected - first;
+        frame.selected_row = state.selected - frame.first;
     }
     return frame;
+}
+
+fn keepSelectedVisible(state: *State) void {
+    if (state.selected < state.first) state.first = state.selected;
+    if (state.selected >= state.first + visible_row_capacity) {
+        state.first = state.selected - visible_row_capacity + 1;
+    }
+}
+
+fn visibleSelection(state: *const State, row: usize, total: usize) ?usize {
+    if (row >= visible_row_capacity or state.first + row >= total) return null;
+    return state.first + row;
+}
+
+fn scroll(state: *State, total: usize, down: bool) void {
+    const max_first = total -| visible_row_capacity;
+    state.first = if (down) @min(max_first, state.first +| 3) else state.first -| 3;
+    if (total == 0) {
+        state.selected = 0;
+    } else {
+        state.selected = std.math.clamp(state.selected, state.first, @min(total - 1, state.first + visible_row_capacity - 1));
+    }
 }
 
 fn selectedApp(applications: []const apps.App, query: []const u8, selected: usize) ?usize {
@@ -193,6 +247,19 @@ test "backspace removes one UTF-8 codepoint and maintains termination" {
     query.delete();
     query.delete();
     try std.testing.expectEqualStrings("", query.text());
+}
+
+test "viewport follows keys and wheel without exceeding results" {
+    var state: State = .{};
+    state.selected = visible_row_capacity;
+    keepSelectedVisible(&state);
+    try std.testing.expectEqual(@as(usize, 1), state.first);
+    scroll(&state, 40, true);
+    try std.testing.expectEqual(@as(usize, 4), state.first);
+    try std.testing.expectEqual(@as(usize, visible_row_capacity), state.selected);
+    scroll(&state, 2, true);
+    try std.testing.expectEqual(@as(usize, 0), state.first);
+    try std.testing.expectEqual(@as(usize, 1), state.selected);
 }
 
 fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {
