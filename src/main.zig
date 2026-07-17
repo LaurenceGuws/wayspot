@@ -3,6 +3,7 @@
 const std = @import("std");
 const apps = @import("apps.zig");
 const desktop_files = @import("desktop_files.zig");
+const launch = @import("launch.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
 
@@ -21,6 +22,14 @@ pub fn main(init: std.process.Init) !void {
     );
     defer applications.deinit();
     try desktop_files.applyTryExec(init.io, init.environ_map.get("PATH"), &applications);
+    const terminal = try desktop_files.applyTerminal(
+        init.io,
+        init.environ_map.get("PATH"),
+        init.environ_map.get("TERMINAL"),
+        &applications,
+    );
+    const home = init.environ_map.get("HOME") orelse return error.HomeMissing;
+    try launch.apply(&applications, terminal, home);
 
     std.log.info(
         "desktop files={d} apps={d} malformed={d} duplicates={d} unavailable_roots={d} unreadable={d} oversized={d}",
@@ -45,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
 
     var native: sdl.Native = .{};
     if (try picker.run(&native, applications.slice())) |index| {
-        std.log.info("selected app={s}", .{applications.slice()[index].name});
+        var process = launch.Native{ .io = init.io };
+        try launch.run(&process, &applications.slice()[index], terminal, home);
     }
 }

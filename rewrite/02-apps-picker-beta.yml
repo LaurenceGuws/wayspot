@@ -136,7 +136,44 @@ slices:
         - filtering, scrolling, and selection run only on the committed application list
   - filtering_rendering_and_selection:
       status: implementation_review
-  - structured_application_launch
+  - structured_application_launch:
+      status: implementation_review
+      source:
+        - src/launch.zig
+        - src/apps.zig
+        - src/desktop_files.zig
+        - src/main.zig
+      bounds:
+        arguments: 64
+        argument_storage_bytes: 8192
+        terminal_bytes: 256
+      exec:
+        - parse whole quoted or unquoted arguments directly into bounded argv
+        - undo desktop Exec quoting without shell interpretation
+        - remove f F u U because the picker supplies no files or URLs
+        - remove deprecated d D n N v m codes
+        - expand c to one application-name value
+        - expand percent percent to one literal percent
+        - reject quoted, malformed, repeated file, unknown, i, and k field-code forms
+      terminal:
+        - TERMINAL is read anew on every picker process start
+        - absent TERMINAL excludes terminal applications explicitly
+        - this beta accepts only bounded executable kitty because its separator is known
+        - terminal argv is kitty then double dash then application argv
+      process:
+        - SDL cleanup completes before launch
+        - Path changes the replacing process working directory
+        - absent Path uses one bounded absolute HOME and never inherits the picker cwd
+        - std.process.replace turns wayspot-beta into the selected application
+        - no child process, shell, detached owner, or zombie exists
+      proof:
+        - exact quote escape field-code argument and byte bounds
+        - failure publishes no partial argv
+        - transcript observes exact cwd and argv
+        - Smith generates bounded Exec bytes
+        - transcript replacement and failing native cwd errors remain visible after SDL cleanup
+        - the live list gains exactly ten terminal applications when TERMINAL is kitty
+        - the one rejected live Exec begins with an invalid environment assignment instead of an executable
   - Hyprland_beta_binding_and_live_receipt
 
 first_tree:

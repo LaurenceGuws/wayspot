@@ -96,7 +96,8 @@ pub const Decision = enum {
     other_desktop,
     unavailable_try_exec,
     dbus_launch_unsupported,
-    terminal_launch_unsupported,
+    unavailable_terminal,
+    invalid_exec,
 };
 
 pub const DesktopFile = struct {
@@ -132,7 +133,6 @@ pub const Entry = struct {
         if (entry.exec == null) return .missing_exec;
         if (!entry.visibleOn(current_desktop)) return .other_desktop;
         if (entry.dbus_activatable) return .dbus_launch_unsupported;
-        if (entry.terminal) return .terminal_launch_unsupported;
         return .publish;
     }
 
@@ -159,6 +159,7 @@ pub const App = struct {
     only_show_in: ?[]const u8,
     not_show_in: ?[]const u8,
     path: ?[]const u8,
+    terminal: bool,
     issues: std.EnumSet(Issue),
 };
 
@@ -191,11 +192,29 @@ pub const List = struct {
     pub fn rejectTryExec(list: *List, index: usize) void {
         std.debug.assert(index < list.count);
         std.debug.assert(list.items[index].try_exec != null);
+        list.reject(index, .unavailable_try_exec);
+    }
+
+    /// Removes one terminal app when no supported terminal executable exists.
+    pub fn rejectTerminal(list: *List, index: usize) void {
+        std.debug.assert(index < list.count);
+        std.debug.assert(list.items[index].terminal);
+        list.reject(index, .unavailable_terminal);
+    }
+
+    /// Removes one app whose Exec cannot produce a complete bounded argv.
+    pub fn rejectExec(list: *List, index: usize) void {
+        std.debug.assert(index < list.count);
+        list.reject(index, .invalid_exec);
+    }
+
+    fn reject(list: *List, index: usize, decision: Decision) void {
+        std.debug.assert(decision != .publish);
         list.allocator.free(list.items[index].storage);
         list.count -= 1;
         std.mem.copyForwards(App, list.items[index..list.count], list.items[index + 1 ..][0 .. list.count - index]);
         list.report.decisions[@intFromEnum(Decision.publish)] -= 1;
-        list.report.decisions[@intFromEnum(Decision.unavailable_try_exec)] += 1;
+        list.report.decisions[@intFromEnum(decision)] += 1;
     }
 };
 
@@ -277,6 +296,7 @@ fn copyApp(allocator: std.mem.Allocator, id: []const u8, entry: Entry) !App {
         .only_show_in = decodeOptional(storage, &cursor, entry.only_show_in, true),
         .not_show_in = decodeOptional(storage, &cursor, entry.not_show_in, true),
         .path = decodeOptional(storage, &cursor, entry.path, false),
+        .terminal = entry.terminal,
         .issues = entry.issues,
     };
     std.debug.assert(cursor <= storage.len);
@@ -584,7 +604,7 @@ test "visibility and unsupported launch forms are explicit" {
         \\Exec=terminal-app
         \\Terminal=true
     );
-    try std.testing.expectEqual(Decision.terminal_launch_unsupported, terminal.decide("Hyprland"));
+    try std.testing.expectEqual(Decision.publish, terminal.decide("Hyprland"));
 }
 
 test "localized and recognized deferred fields cannot disappear silently" {
@@ -618,10 +638,6 @@ test "every non-publish decision has one explicit reason" {
         .{
             "[Desktop Entry]\nType=Application\nName=DBus\nExec=app\nDBusActivatable=true",
             Decision.dbus_launch_unsupported,
-        },
-        .{
-            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=app\nTerminal=true",
-            Decision.terminal_launch_unsupported,
         },
     };
     inline for (cases) |case| {

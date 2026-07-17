@@ -271,6 +271,7 @@ fn testApp(name: []const u8) apps.App {
         .only_show_in = null,
         .not_show_in = null,
         .path = null,
+        .terminal = false,
         .issues = .initEmpty(),
     };
 }

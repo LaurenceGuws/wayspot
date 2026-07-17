@@ -8,6 +8,7 @@ pub const id_capacity = 256;
 pub const root_capacity = 16;
 pub const data_directories_capacity = root_capacity * std.Io.Dir.max_path_bytes;
 pub const path_environment_capacity = 64 * 1024;
+pub const terminal_capacity = 256;
 
 pub const Environment = struct {
     home: ?[]const u8,
@@ -74,6 +75,36 @@ pub fn applyTryExec(io: std.Io, path_environment: ?[]const u8, list: *apps.List)
     while (index > 0) {
         index -= 1;
         if (unavailable[index]) list.rejectTryExec(index);
+    }
+}
+
+/// Keeps terminal apps only when this beta can execute the configured terminal.
+pub fn applyTerminal(
+    io: std.Io,
+    path_environment: ?[]const u8,
+    terminal: ?[]const u8,
+    list: *apps.List,
+) !?[]const u8 {
+    const name = terminal orelse {
+        rejectTerminalApps(list);
+        return null;
+    };
+    if (name.len == 0 or name.len > terminal_capacity) return error.TerminalInvalid;
+    if (!std.mem.eql(u8, name, "kitty")) return error.TerminalUnsupported;
+    const path = path_environment orelse "";
+    if (path.len > path_environment_capacity) return error.PathEnvironmentTooLong;
+    if (!try executable(io, path, name)) {
+        rejectTerminalApps(list);
+        return null;
+    }
+    return name;
+}
+
+fn rejectTerminalApps(list: *apps.List) void {
+    var index = list.count;
+    while (index > 0) {
+        index -= 1;
+        if (list.items[index].terminal) list.rejectTerminal(index);
     }
 }
 
@@ -267,5 +298,24 @@ test "TryExec removal commits only after bounded availability checks" {
     try std.testing.expectEqual(
         @as(usize, 1),
         list.report.decisions[@intFromEnum(apps.Decision.unavailable_try_exec)],
+    );
+}
+
+test "terminal applications require the supported executable" {
+    const source = [_]apps.DesktopFile{.{
+        .root = 0,
+        .id = @constCast("terminal.desktop"),
+        .bytes = @constCast(
+            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=btop\nTerminal=true",
+        ),
+    }};
+    var list = try apps.load(std.testing.allocator, &source, "Hyprland");
+    defer list.deinit();
+    try std.testing.expectEqual(@as(usize, 1), list.count);
+    try std.testing.expectEqual(null, try applyTerminal(std.Io.failing, "/bin", null, &list));
+    try std.testing.expectEqual(@as(usize, 0), list.count);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        list.report.decisions[@intFromEnum(apps.Decision.unavailable_terminal)],
     );
 }

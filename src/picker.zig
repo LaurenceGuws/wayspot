@@ -177,6 +177,7 @@ fn matchCount(applications: []const apps.App, query: []const u8) usize {
 
 fn matches(app: apps.App, query: []const u8) bool {
     if (query.len == 0) return true;
+    if (containsIgnoreCase(app.id, query)) return true;
     if (containsIgnoreCase(app.name, query)) return true;
     if (app.generic_name) |value| if (containsIgnoreCase(value, query)) return true;
     if (app.keywords) |value| if (containsIgnoreCase(value, query)) return true;
@@ -223,8 +224,9 @@ test "backspace removes one UTF-8 codepoint and maintains termination" {
     try std.testing.expectEqualStrings("", query.text());
 }
 
-test "application matching uses name generic name and keywords" {
+test "application matching uses desktop id name generic name and keywords" {
     const app = testApp("Kitty", "Terminal", "shell;console;");
+    try std.testing.expect(matches(app, "test"));
     try std.testing.expect(matches(app, "kit"));
     try std.testing.expect(matches(app, "TERM"));
     try std.testing.expect(matches(app, "console"));
@@ -244,6 +246,7 @@ fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) a
         .only_show_in = null,
         .not_show_in = null,
         .path = null,
+        .terminal = false,
         .issues = .initEmpty(),
     };
 }
