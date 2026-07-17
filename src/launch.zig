@@ -1,4 +1,4 @@
-//! Turns one desktop application into bounded argv and replaces the picker process.
+//! Turns one desktop application into bounded argv and starts it independently.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -171,14 +171,24 @@ fn reserved(byte: u8) bool {
 pub const Native = struct {
     io: std.Io,
 
-    pub fn replace(native: *Native, argv: []const []const u8, cwd: ?[]const u8) !void {
-        if (cwd) |path| try std.process.setCurrentPath(native.io, path);
-        return std.process.replace(native.io, .{ .argv = argv });
+    /// Starts one new process group with closed standard streams.
+    ///
+    /// Wayspot exits immediately after success; the system process owner then
+    /// adopts and reaps the application.
+    pub fn spawn(native: *Native, argv: []const []const u8, cwd: ?[]const u8) !void {
+        _ = try std.process.spawn(native.io, .{
+            .argv = argv,
+            .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .pgid = 0,
+        });
     }
 };
 
-/// Resolves one complete plan before presenting it to the process boundary.
-pub fn run(
+/// Starts one complete plan without keeping Wayspot attached to the application.
+pub fn spawn(
     operations: anytype,
     app: *const apps.App,
     terminal: ?[]const u8,
@@ -186,7 +196,7 @@ pub fn run(
 ) !void {
     var plan: Plan = .{};
     try plan.init(app, terminal, home);
-    try operations.replace(plan.arguments(), plan.cwd);
+    try operations.spawn(plan.arguments(), plan.cwd);
 }
 
 /// Removes every app whose complete launch plan is invalid.
@@ -212,14 +222,14 @@ const Transcript = struct {
     cwd: ?[]const u8,
     called: bool = false,
 
-    fn replace(transcript: *Transcript, argv: []const []const u8, cwd: ?[]const u8) !void {
+    fn spawn(transcript: *Transcript, argv: []const []const u8, cwd: ?[]const u8) !void {
         if (transcript.called or argv.len != transcript.argv.len) return error.TranscriptMismatch;
         for (argv, transcript.argv) |actual, expected| {
             if (!std.mem.eql(u8, actual, expected)) return error.TranscriptMismatch;
         }
         if (!optionalEqual(cwd, transcript.cwd)) return error.TranscriptMismatch;
         transcript.called = true;
-        return error.ReplaceStopped;
+        return error.SpawnStopped;
     }
 };
 
@@ -234,7 +244,7 @@ test "plain and terminal plans preserve exact argv and working directory" {
         .argv = &.{ "editor path", "--name=Editor", "%" },
         .cwd = "/work",
     };
-    try std.testing.expectError(error.ReplaceStopped, run(&plain_transcript, &plain, null, "/home/user"));
+    try std.testing.expectError(error.SpawnStopped, spawn(&plain_transcript, &plain, null, "/home/user"));
     try std.testing.expect(plain_transcript.called);
 
     const terminal = testApp("Monitor", "btop", null, true);
@@ -242,8 +252,21 @@ test "plain and terminal plans preserve exact argv and working directory" {
         .argv = &.{ "kitty", "--", "btop" },
         .cwd = "/home/user",
     };
-    try std.testing.expectError(error.ReplaceStopped, run(&terminal_transcript, &terminal, "kitty", "/home/user"));
+    try std.testing.expectError(error.SpawnStopped, spawn(&terminal_transcript, &terminal, "kitty", "/home/user"));
     try std.testing.expect(terminal_transcript.called);
+}
+
+test "detached start presents the same bounded plan without replacing the CLI" {
+    const app = testApp("Browser", "browser --new-window", null, false);
+    var transcript = Transcript{
+        .argv = &.{ "browser", "--new-window" },
+        .cwd = "/home/user",
+    };
+    try std.testing.expectError(error.SpawnStopped, spawn(&transcript, &app, null, "/home/user"));
+    try std.testing.expect(transcript.called);
+
+    var native = Native{ .io = std.Io.failing };
+    try std.testing.expectError(error.OperationUnsupported, spawn(&native, &app, null, "/home/user"));
 }
 
 test "malformed input publishes no process operation" {
@@ -265,7 +288,7 @@ test "malformed input publishes no process operation" {
     inline for (cases) |case| {
         const app = testApp("App", case[0], null, false);
         var transcript = Transcript{ .argv = &.{"never"}, .cwd = null };
-        try std.testing.expectError(case[1], run(&transcript, &app, null, "/home/user"));
+        try std.testing.expectError(case[1], spawn(&transcript, &app, null, "/home/user"));
         try std.testing.expect(!transcript.called);
     }
 }
@@ -304,16 +327,16 @@ test "argument and byte bounds are exact and failure atomic" {
     try std.testing.expectEqual(@as(usize, 0), plan.used);
 }
 
-test "terminal policy is explicit and native replacement failure is visible" {
+test "terminal policy is explicit and native spawn failure is visible" {
     const terminal = testApp("Monitor", "btop", null, true);
     var transcript = Transcript{ .argv = &.{"never"}, .cwd = null };
-    try std.testing.expectError(error.TerminalUnavailable, run(&transcript, &terminal, null, "/home/user"));
-    try std.testing.expectError(error.TerminalUnsupported, run(&transcript, &terminal, "foot", "/home/user"));
-    try std.testing.expectError(error.HomeInvalid, run(&transcript, &terminal, "kitty", "relative"));
+    try std.testing.expectError(error.TerminalUnavailable, spawn(&transcript, &terminal, null, "/home/user"));
+    try std.testing.expectError(error.TerminalUnsupported, spawn(&transcript, &terminal, "foot", "/home/user"));
+    try std.testing.expectError(error.HomeInvalid, spawn(&transcript, &terminal, "kitty", "relative"));
 
     const plain = testApp("App", "app", null, false);
     var native = Native{ .io = std.Io.failing };
-    try std.testing.expectError(error.FileNotFound, run(&native, &plain, null, "/home/user"));
+    try std.testing.expectError(error.OperationUnsupported, spawn(&native, &plain, null, "/home/user"));
 }
 
 test "arbitrary Exec bytes remain bounded" {

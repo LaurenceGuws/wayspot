@@ -3,7 +3,7 @@
 const std = @import("std");
 const apps = @import("apps.zig");
 
-pub const query_capacity = 256;
+pub const query_capacity = apps.query_capacity;
 pub const visible_row_capacity = 32;
 
 /// Text owns one bounded SDL text event after the native event returns.
@@ -136,60 +136,31 @@ fn events(operations: anytype, applications: []const apps.App, state: *State) !?
 
 fn makeFrame(state: *const State, applications: []const apps.App) Frame {
     var frame = Frame{ .query = state.query.text() };
+    const found = apps.Matches.init(applications, state.query.text());
     const first = if (state.selected < visible_row_capacity)
         0
     else
         state.selected - visible_row_capacity + 1;
-    var matched: usize = 0;
-    for (applications, 0..) |app, app_index| {
-        if (!matches(app, state.query.text())) continue;
-        if (matched >= first and frame.row_count < visible_row_capacity) {
-            frame.rows[frame.row_count] = .{ .app_index = app_index, .name = app.name };
-            frame.row_count += 1;
-        }
-        matched += 1;
+    for (found.slice()[@min(first, found.count)..]) |app_index| {
+        if (frame.row_count == visible_row_capacity) break;
+        frame.rows[frame.row_count] = .{ .app_index = app_index, .name = applications[app_index].name };
+        frame.row_count += 1;
     }
     if (frame.row_count > 0) {
         std.debug.assert(state.selected >= first);
-        std.debug.assert(state.selected < matched);
+        std.debug.assert(state.selected < found.count);
         frame.selected_row = state.selected - first;
     }
     return frame;
 }
 
 fn selectedApp(applications: []const apps.App, query: []const u8, selected: usize) ?usize {
-    var matched: usize = 0;
-    for (applications, 0..) |app, index| {
-        if (!matches(app, query)) continue;
-        if (matched == selected) return index;
-        matched += 1;
-    }
-    return null;
+    const found = apps.Matches.init(applications, query);
+    return if (selected < found.count) found.indexes[selected] else null;
 }
 
 fn matchCount(applications: []const apps.App, query: []const u8) usize {
-    var count: usize = 0;
-    for (applications) |app| {
-        if (matches(app, query)) count += 1;
-    }
-    return count;
-}
-
-fn matches(app: apps.App, query: []const u8) bool {
-    if (query.len == 0) return true;
-    if (containsIgnoreCase(app.id, query)) return true;
-    if (containsIgnoreCase(app.name, query)) return true;
-    if (app.generic_name) |value| if (containsIgnoreCase(value, query)) return true;
-    if (app.keywords) |value| if (containsIgnoreCase(value, query)) return true;
-    return false;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    for (0..haystack.len - needle.len + 1) |index| {
-        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
-    }
-    return false;
+    return apps.Matches.init(applications, query).count;
 }
 
 test "query accepts its exact bound and rejects the next byte without mutation" {
@@ -222,15 +193,6 @@ test "backspace removes one UTF-8 codepoint and maintains termination" {
     query.delete();
     query.delete();
     try std.testing.expectEqualStrings("", query.text());
-}
-
-test "application matching uses desktop id name generic name and keywords" {
-    const app = testApp("Kitty", "Terminal", "shell;console;");
-    try std.testing.expect(matches(app, "test"));
-    try std.testing.expect(matches(app, "kit"));
-    try std.testing.expect(matches(app, "TERM"));
-    try std.testing.expect(matches(app, "console"));
-    try std.testing.expect(!matches(app, "browser"));
 }
 
 fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {

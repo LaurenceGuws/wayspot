@@ -13,6 +13,7 @@ pub const exec_capacity = 4096;
 pub const try_exec_capacity = 1024;
 pub const path_capacity = 4096;
 pub const desktop_list_capacity = 1024;
+pub const query_capacity = 256;
 
 const Effect = enum {
     type,
@@ -95,7 +96,6 @@ pub const Decision = enum {
     missing_exec,
     other_desktop,
     unavailable_try_exec,
-    dbus_launch_unsupported,
     unavailable_terminal,
     invalid_exec,
 };
@@ -132,7 +132,6 @@ pub const Entry = struct {
         if (entry.name == null) return .missing_name;
         if (entry.exec == null) return .missing_exec;
         if (!entry.visibleOn(current_desktop)) return .other_desktop;
-        if (entry.dbus_activatable) return .dbus_launch_unsupported;
         return .publish;
     }
 
@@ -165,12 +164,267 @@ pub const App = struct {
 
 pub const app_capacity = 512;
 
+/// Match states why one application is reachable from a bounded query.
+pub const Match = struct {
+    kind: Kind,
+    edits: u8 = 0,
+    start: u16 = 0,
+    span: u16 = 0,
+
+    pub const Kind = enum {
+        exact,
+        prefix,
+        substring,
+        subsequence,
+        typo,
+    };
+};
+
+/// Matches owns one deterministic ordered view of borrowed applications.
+pub const Matches = struct {
+    indexes: [app_capacity]usize = undefined,
+    ranks: [app_capacity]Match = undefined,
+    count: usize = 0,
+
+    pub fn init(applications: []const App, query: []const u8) Matches {
+        std.debug.assert(applications.len <= app_capacity);
+        var matches: Matches = .{};
+        for (applications, 0..) |app, index| {
+            const rank = find(app, query) orelse continue;
+            var at = matches.count;
+            while (at > 0 and before(app, rank, applications[matches.indexes[at - 1]], matches.ranks[at - 1])) {
+                matches.indexes[at] = matches.indexes[at - 1];
+                matches.ranks[at] = matches.ranks[at - 1];
+                at -= 1;
+            }
+            matches.indexes[at] = index;
+            matches.ranks[at] = rank;
+            matches.count += 1;
+        }
+        return matches;
+    }
+
+    pub fn slice(matches: *const Matches) []const usize {
+        return matches.indexes[0..matches.count];
+    }
+};
+
+/// Finds one bounded match for GUI, CLI, and future shell adapters.
+pub fn find(app: App, query: []const u8) ?Match {
+    std.debug.assert(query.len <= query_capacity);
+    if (query.len == 0) return .{ .kind = .exact };
+    var best = fieldMatch(app.name, query, true);
+    choose(&best, fieldMatch(app.id, query, false));
+    if (app.generic_name) |value| choose(&best, fieldMatch(value, query, false));
+    if (app.keywords) |value| choose(&best, fieldMatch(value, query, false));
+    return best;
+}
+
+/// Resolves one exact current desktop id or unique application name.
+pub fn exact(applications: []const App, value: []const u8) !usize {
+    var found: ?usize = null;
+    for (applications, 0..) |app, index| {
+        if (std.mem.eql(u8, app.id, value)) return index;
+        if (!std.mem.eql(u8, app.name, value)) continue;
+        if (found != null) return error.ApplicationAmbiguous;
+        found = index;
+    }
+    return found orelse error.ApplicationNotFound;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |index| {
+        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn fieldMatch(value: []const u8, query: []const u8, relaxed: bool) ?Match {
+    if (std.ascii.eqlIgnoreCase(value, query)) {
+        return .{ .kind = .exact, .span = @intCast(value.len) };
+    }
+    if (query.len <= value.len and std.ascii.eqlIgnoreCase(value[0..query.len], query)) {
+        return .{ .kind = .prefix, .span = @intCast(query.len) };
+    }
+    if (indexIgnoreCase(value, query)) |start| {
+        return .{ .kind = .substring, .start = @intCast(start), .span = @intCast(query.len) };
+    }
+    if (relaxed) {
+        if (subsequence(value, query)) |span| return span;
+        return typoMatch(value, query);
+    }
+    return null;
+}
+
+fn indexIgnoreCase(value: []const u8, query: []const u8) ?usize {
+    if (query.len > value.len) return null;
+    for (0..value.len - query.len + 1) |index| {
+        if (std.ascii.eqlIgnoreCase(value[index..][0..query.len], query)) return index;
+    }
+    return null;
+}
+
+fn subsequence(value: []const u8, query: []const u8) ?Match {
+    var query_index: usize = 0;
+    var start: usize = 0;
+    for (value, 0..) |byte, index| {
+        if (std.ascii.toLower(byte) != std.ascii.toLower(query[query_index])) continue;
+        if (query_index == 0) start = index;
+        query_index += 1;
+        if (query_index == query.len) {
+            return .{
+                .kind = .subsequence,
+                .start = @intCast(start),
+                .span = @intCast(index - start + 1),
+            };
+        }
+    }
+    return null;
+}
+
+fn typoMatch(name: []const u8, query: []const u8) ?Match {
+    if (query.len < 3 or !allAscii(query)) return null;
+    const limit: u8 = if (query.len < 8) 1 else 2;
+    var best: ?Match = null;
+    var start: usize = 0;
+    while (start < name.len) {
+        while (start < name.len and !std.ascii.isAlphanumeric(name[start])) start += 1;
+        if (start == name.len) break;
+        var end = start;
+        while (end < name.len and std.ascii.isAlphanumeric(name[end])) end += 1;
+        const word = name[start..end];
+        if (allAscii(word)) {
+            const shortest = query.len -| limit;
+            const longest = @min(word.len, query.len + limit);
+            var length = shortest;
+            while (length <= longest) : (length += 1) {
+                if (distance(word[0..length], query, limit)) |edits| {
+                    const found = Match{
+                        .kind = .typo,
+                        .edits = edits,
+                        .start = @intCast(start),
+                        .span = @intCast(length),
+                    };
+                    if (best == null or matchBefore(found, best.?)) best = found;
+                }
+            }
+        }
+        start = end;
+    }
+    return best;
+}
+
+fn allAscii(bytes: []const u8) bool {
+    for (bytes) |byte| if (!std.ascii.isAscii(byte)) return false;
+    return true;
+}
+
+fn distance(left: []const u8, right: []const u8, limit: u8) ?u8 {
+    if (left.len > right.len + limit or right.len > left.len + limit) return null;
+    var older: [name_capacity + 1]u16 = undefined;
+    var previous: [name_capacity + 1]u16 = undefined;
+    var current: [name_capacity + 1]u16 = undefined;
+    for (0..right.len + 1) |index| previous[index] = @intCast(index);
+
+    for (left, 0..) |left_byte, left_index| {
+        current[0] = @intCast(left_index + 1);
+        for (right, 0..) |right_byte, right_index| {
+            const substitution: u16 = @intFromBool(
+                std.ascii.toLower(left_byte) != std.ascii.toLower(right_byte),
+            );
+            current[right_index + 1] = @min(
+                previous[right_index + 1] + 1,
+                @min(current[right_index] + 1, previous[right_index] + substitution),
+            );
+            if (left_index > 0 and right_index > 0 and
+                std.ascii.toLower(left_byte) == std.ascii.toLower(right[right_index - 1]) and
+                std.ascii.toLower(left[left_index - 1]) == std.ascii.toLower(right_byte))
+            {
+                current[right_index + 1] = @min(current[right_index + 1], older[right_index - 1] + 1);
+            }
+        }
+        older = previous;
+        previous = current;
+    }
+    const edits = previous[right.len];
+    return if (edits <= limit) @intCast(edits) else null;
+}
+
+fn before(left: App, left_match: Match, right: App, right_match: Match) bool {
+    if (matchBefore(left_match, right_match)) return true;
+    if (matchBefore(right_match, left_match)) return false;
+    switch (std.ascii.orderIgnoreCase(left.name, right.name)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => return std.mem.order(u8, left.id, right.id) == .lt,
+    }
+}
+
+fn matchBefore(left: Match, right: Match) bool {
+    if (@intFromEnum(left.kind) != @intFromEnum(right.kind)) {
+        return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+    }
+    if (left.edits != right.edits) return left.edits < right.edits;
+    if (left.start != right.start) return left.start < right.start;
+    return left.span < right.span;
+}
+
+fn choose(best: *?Match, found: ?Match) void {
+    const candidate = found orelse return;
+    if (best.* == null or matchBefore(candidate, best.*.?)) best.* = candidate;
+}
+
 pub const LoadReport = struct {
     malformed: usize = 0,
     duplicates: usize = 0,
     decisions: [std.meta.fields(Decision).len]usize = @splat(0),
     issues: [std.meta.fields(Issue).len]usize = @splat(0),
 };
+
+test "shared lookup matches fields and resolves only exact identities" {
+    const applications = [_]App{
+        lookupApp("alpha.desktop", "Alpha", "Editor", "code;plain;"),
+        lookupApp("beta.desktop", "Beta", null, null),
+        lookupApp("other-beta.desktop", "Beta", null, null),
+        lookupApp("ghostty.desktop", "Ghostty", null, "terminal;"),
+    };
+    try std.testing.expect(find(applications[0], "alpha") != null);
+    try std.testing.expect(find(applications[0], "EDIT") != null);
+    try std.testing.expect(find(applications[0], "plain") != null);
+    try std.testing.expect(find(applications[0], "browser") == null);
+    try std.testing.expectEqual(Match.Kind.typo, find(applications[0], "Alhpa").?.kind);
+    try std.testing.expectEqual(Match.Kind.typo, find(applications[3], "ghsot").?.kind);
+    try std.testing.expectEqual(Match.Kind.typo, find(applications[3], "ghsotty").?.kind);
+    try std.testing.expect(find(applications[0], "cdoe") == null);
+    try std.testing.expectEqual(@as(usize, 0), try exact(&applications, "alpha.desktop"));
+    try std.testing.expectEqual(@as(usize, 0), try exact(&applications, "Alpha"));
+    try std.testing.expectError(error.ApplicationAmbiguous, exact(&applications, "Beta"));
+    try std.testing.expectError(error.ApplicationNotFound, exact(&applications, "Missing"));
+}
+
+fn lookupApp(
+    id: []const u8,
+    name: []const u8,
+    generic_name: ?[]const u8,
+    keywords: ?[]const u8,
+) App {
+    return .{
+        .storage = @constCast(""),
+        .id = id,
+        .name = name,
+        .generic_name = generic_name,
+        .keywords = keywords,
+        .icon = null,
+        .exec = "true",
+        .try_exec = null,
+        .only_show_in = null,
+        .not_show_in = null,
+        .path = null,
+        .terminal = false,
+        .issues = .initEmpty(),
+    };
+}
 
 /// List owns one allocation per published app and no rejected file bytes.
 pub const List = struct {
@@ -635,10 +889,7 @@ test "every non-publish decision has one explicit reason" {
         .{ "[Desktop Entry]\nType=Application\nName=\nExec=app", Decision.missing_name },
         .{ "[Desktop Entry]\nType=Application\nName=No Exec", Decision.missing_exec },
         .{ "[Desktop Entry]\nType=Application\nName=Empty Exec\nExec=", Decision.missing_exec },
-        .{
-            "[Desktop Entry]\nType=Application\nName=DBus\nExec=app\nDBusActivatable=true",
-            Decision.dbus_launch_unsupported,
-        },
+        .{ "[Desktop Entry]\nType=Application\nName=DBus\nExec=app\nDBusActivatable=true", Decision.publish },
     };
     inline for (cases) |case| {
         const entry = try parse(case[0]);
