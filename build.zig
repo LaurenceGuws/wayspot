@@ -106,6 +106,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_image_tests = b.addRunArtifact(image_tests);
+    const wallpaper_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wallpaper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wallpaper_tests = b.addRunArtifact(wallpaper_tests);
     const sdl_event_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_event.zig"),
@@ -228,6 +236,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cmd_tests.step);
     test_step.dependOn(&run_icon_tests.step);
     test_step.dependOn(&run_image_tests.step);
+    test_step.dependOn(&run_wallpaper_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);

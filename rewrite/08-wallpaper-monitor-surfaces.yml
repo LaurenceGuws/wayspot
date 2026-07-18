@@ -767,11 +767,21 @@ cleanup:
 phased_checkpoints:
   - order: 1
     id: monitor_and_event_theorem
+    state: implemented_uncommitted_for_review
     product_proof: parse exact j/monitors and classify exact socket2 lines without native sockets
     files:
       - src/wallpaper.zig
-      - src/wallpaper_transcript.zig
     character_budget: 9000
+    receipts:
+      production_nonwhitespace_characters: 6870
+      production_character_delta: 6870
+      source_file_count_delta: 1
+      tests: "14 local; 445 complete repository"
+      build_steps: "53/53"
+      json_unknown_fields: ignored after complete JSON validation
+      scale_accepted: ["0.01", "1.00", "1.25", "10.00"]
+      scale_rejected: ["1", "1.0", "01.00", "+1.00", "-1.00", "1.000", "1e0", "10.01"]
+      transcript_file: not_created_because_the_checkpoint_has_no_external_operations
     closes_when:
       - bounded snapshots sort and deduplicate by name
       - only monitor/config reload events request reconciliation
