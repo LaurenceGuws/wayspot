@@ -5,8 +5,12 @@ const apps = @import("apps.zig");
 const cli = @import("cli.zig");
 const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
+const notification_dbus = @import("notification_dbus.zig");
+const notification_dbus_native = @import("notification_dbus_native.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
+
+var notification_stop: std.atomic.Value(bool) = .init(false);
 
 pub fn main(init: std.process.Init) !u8 {
     var argument_iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -18,6 +22,11 @@ pub fn main(init: std.process.Init) !u8 {
         if (argument_count == arguments.len) return error.TooManyArguments;
         arguments[argument_count] = argument;
         argument_count += 1;
+    }
+
+    if (argument_count == 1 and std.mem.eql(u8, arguments[0], "notifications")) {
+        try runNotifications(init.gpa);
+        return 0;
     }
 
     var files = try desktop_files.collect(init.gpa, init.io, .{
@@ -79,6 +88,28 @@ pub fn main(init: std.process.Init) !u8 {
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }
     return 0;
+}
+
+fn runNotifications(allocator: std.mem.Allocator) !void {
+    notification_stop.store(false, .release);
+    const action: std.posix.Sigaction = .{
+        .handler = .{ .handler = stopNotification },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var old_interrupt: std.posix.Sigaction = undefined;
+    var old_terminate: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.INT, &action, &old_interrupt);
+    defer std.posix.sigaction(.INT, &old_interrupt, null);
+    std.posix.sigaction(.TERM, &action, &old_terminate);
+    defer std.posix.sigaction(.TERM, &old_terminate, null);
+
+    var native: notification_dbus_native.Native = .{ .stop = &notification_stop };
+    try notification_dbus.run(&native, allocator);
+}
+
+fn stopNotification(_: std.posix.SIG) callconv(.c) void {
+    notification_stop.store(true, .release);
 }
 
 fn logApplications(files: *const desktop_files.Files, applications: *const apps.List) void {

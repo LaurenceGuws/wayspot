@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     });
     wayspot_beta.linkLibrary(sdl.artifact("SDL3"));
     wayspot_beta.linkLibrary(text.library);
+    wayspot_beta.linkSystemLibrary("dbus-1", .{});
 
     const executable = b.addExecutable(.{
         .name = "wayspot-beta",
@@ -113,6 +114,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_sdl_pixels_tests = b.addRunArtifact(sdl_pixels_tests);
+    const notification_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_tests = b.addRunArtifact(notification_tests);
+    const notification_dbus_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_dbus.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_dbus_tests = b.addRunArtifact(notification_dbus_tests);
     const test_step = b.step("test", "Run Wayspot beta tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
@@ -124,6 +141,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_image_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
+    test_step.dependOn(&run_notification_tests.step);
+    test_step.dependOn(&run_notification_dbus_tests.step);
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);
