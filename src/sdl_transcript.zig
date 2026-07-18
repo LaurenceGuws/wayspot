@@ -22,12 +22,16 @@ const Wait = union(enum) {
 const Draw = struct {
     table: picker.Table = .apps,
     query: []const u8,
-    rows: []const []const u8 = &.{},
-    app_indexes: []const u16 = &.{},
-    tables: []const picker.Table = &.{},
-    notifications: []const NotificationRow = &.{},
+    rows: ExpectedRows = .none,
     selected_row: usize = 0,
     result: Result = .ok,
+};
+
+const ExpectedRows = union(enum) {
+    none,
+    root: []const picker.Table,
+    apps: []const u16,
+    notifications: []const NotificationRow,
 };
 
 const NotificationRow = struct {
@@ -119,41 +123,35 @@ const Transcript = struct {
         };
         if (expected.table != frame.table) return error.TranscriptMismatch;
         if (!std.mem.eql(u8, expected.query, frame.query)) return error.TranscriptMismatch;
-        for (frame.rowSlice(), 0..) |row, index| {
-            switch (row) {
-                .table => |table| {
-                    if (expected.tables.len != frame.row_count or expected.tables[index] != table) {
-                        return error.TranscriptMismatch;
-                    }
-                },
-                .app => |app_index| {
-                    if (expected.rows.len != frame.row_count or
-                        expected.app_indexes.len != frame.row_count or
-                        app_index != expected.app_indexes[index] or
-                        app_index >= transcript.applications.len or
-                        !std.mem.eql(u8, expected.rows[index], transcript.applications[app_index].name))
-                    {
-                        return error.TranscriptMismatch;
-                    }
-                },
-                .notification => |record| {
-                    if (expected.notifications.len != frame.row_count) {
-                        return error.TranscriptMismatch;
-                    }
-                    const wanted = expected.notifications[index];
-                    if (!std.mem.eql(u8, wanted.app_name, record.app_name) or
-                        !std.mem.eql(u8, wanted.summary, record.summary) or
-                        !std.mem.eql(u8, wanted.body, record.body))
-                    {
-                        return error.TranscriptMismatch;
-                    }
-                },
-            }
+        switch (expected.rows) {
+            .none => if (frame.row_count != 0) return error.TranscriptMismatch,
+            .root => |tables| try transcript.expectTables(frame, tables),
+            .apps => |indexes| try transcript.expectApps(frame, indexes),
+            .notifications => |records| try expectNotifications(frame, records),
         }
         if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
             return error.TranscriptMismatch;
         }
         if (expected.result == .fail) return error.SdlDrawFailed;
+    }
+
+    fn expectTables(_: *Transcript, frame: *const picker.Frame, tables: []const picker.Table) !void {
+        if (tables.len != frame.row_count) return error.TranscriptMismatch;
+        for (frame.rowSlice(), tables) |row, table| switch (row) {
+            .table => |actual| if (actual != table) return error.TranscriptMismatch,
+            else => return error.TranscriptMismatch,
+        };
+    }
+
+    fn expectApps(transcript: *Transcript, frame: *const picker.Frame, indexes: []const u16) !void {
+        if (indexes.len != frame.row_count) return error.TranscriptMismatch;
+        for (frame.rowSlice(), indexes) |row, expected| switch (row) {
+            .app => |actual| {
+                if (actual != expected) return error.TranscriptMismatch;
+                if (actual >= transcript.applications.len) return error.TranscriptMismatch;
+            },
+            else => return error.TranscriptMismatch,
+        };
     }
 
     pub fn readHistory(transcript: *Transcript) !notification_history.History {
@@ -215,6 +213,18 @@ const Transcript = struct {
         if (transcript.history_reads != expected_history_reads) return error.TranscriptMismatch;
     }
 };
+
+fn expectNotifications(frame: *const picker.Frame, records: []const NotificationRow) !void {
+    if (records.len != frame.row_count) return error.TranscriptMismatch;
+    for (frame.rowSlice(), records) |row, expected| switch (row) {
+        .notification => |actual| {
+            if (!std.mem.eql(u8, expected.app_name, actual.app_name)) return error.TranscriptMismatch;
+            if (!std.mem.eql(u8, expected.summary, actual.summary)) return error.TranscriptMismatch;
+            if (!std.mem.eql(u8, expected.body, actual.body)) return error.TranscriptMismatch;
+        },
+        else => return error.TranscriptMismatch,
+    };
+}
 
 fn simulate(steps: []const Step) !void {
     const selected = try simulateApps(steps, &.{});
@@ -374,21 +384,18 @@ test "filtering resets selection and enter returns the displayed app" {
         .{ .start_text = .ok },
         .{ .draw = .{
             .query = "",
-            .rows = &.{ "Firefox", "Kitty" },
-            .app_indexes = &.{ 0, 1 },
+            .rows = .{ .apps = &.{ 0, 1 } },
         } },
         .{ .wait = .{ .event = .down } },
         .{ .draw = .{
             .query = "",
-            .rows = &.{ "Firefox", "Kitty" },
-            .app_indexes = &.{ 0, 1 },
+            .rows = .{ .apps = &.{ 0, 1 } },
             .selected_row = 1,
         } },
         .{ .wait = .{ .event = .{ .text = try picker.Text.init("fire") } } },
         .{ .draw = .{
             .query = "fire",
-            .rows = &.{"Firefox"},
-            .app_indexes = &.{0},
+            .rows = .{ .apps = &.{0} },
         } },
         .{ .wait = .{ .event = .enter } },
         .{ .stop_text = .ok },
@@ -417,15 +424,7 @@ test "scroll hover and click preserve exact row and application identity" {
         testApp("App 14"),
         testApp("App 15"),
     };
-    const initial_names = [_][]const u8{
-        "App 00", "App 01", "App 02", "App 03", "App 04", "App 05", "App 06",
-        "App 07", "App 08", "App 09", "App 10", "App 11", "App 12", "App 13",
-    };
     const initial_indexes = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
-    const scrolled_names = [_][]const u8{
-        "App 02", "App 03", "App 04", "App 05", "App 06", "App 07", "App 08",
-        "App 09", "App 10", "App 11", "App 12", "App 13", "App 14", "App 15",
-    };
     const scrolled_indexes = [_]u16{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const selected = try simulateApps(&.{
         .{ .init = .ok },
@@ -433,20 +432,17 @@ test "scroll hover and click preserve exact row and application identity" {
         .{ .start_text = .ok },
         .{ .draw = .{
             .query = "",
-            .rows = &initial_names,
-            .app_indexes = &initial_indexes,
+            .rows = .{ .apps = &initial_indexes },
         } },
         .{ .wait = .{ .event = .{ .scroll = 2 } } },
         .{ .draw = .{
             .query = "",
-            .rows = &scrolled_names,
-            .app_indexes = &scrolled_indexes,
+            .rows = .{ .apps = &scrolled_indexes },
         } },
         .{ .wait = .{ .event = .{ .hover = 5 } } },
         .{ .draw = .{
             .query = "",
-            .rows = &scrolled_names,
-            .app_indexes = &scrolled_indexes,
+            .rows = .{ .apps = &scrolled_indexes },
             .selected_row = 5,
         } },
         .{ .wait = .{ .event = .{ .click = 5 } } },
@@ -465,20 +461,18 @@ test "slash root transitions to apps without reading history" {
         .{ .start_text = .ok },
         .{ .draw = .{
             .query = "",
-            .rows = &.{"Alpha"},
-            .app_indexes = &.{0},
+            .rows = .{ .apps = &.{0} },
         } },
         .{ .wait = .{ .event = .{ .text = try picker.Text.init("/") } } },
         .{ .draw = .{
             .table = .root,
             .query = "/",
-            .tables = &.{ .apps, .notifications },
+            .rows = .{ .root = &.{ .apps, .notifications } },
         } },
         .{ .wait = .{ .event = .{ .click = 0 } } },
         .{ .draw = .{
             .query = "/apps",
-            .rows = &.{"Alpha"},
-            .app_indexes = &.{0},
+            .rows = .{ .apps = &.{0} },
         } },
         .{ .wait = .{ .event = .enter } },
         .{ .stop_text = .ok },
@@ -486,6 +480,23 @@ test "slash root transitions to apps without reading history" {
         .quit,
     }, &applications);
     try std.testing.expectEqual(@as(?usize, 0), selected);
+}
+
+test "empty slash prefix remains open on Enter" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("/unknown") } } },
+        .{ .draw = .{ .table = .root, .query = "/unknown" } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .draw = .{ .table = .root, .query = "/unknown" } },
+        .{ .wait = .{ .event = .quit } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
 }
 
 test "notification rows are newest first and never close or launch" {
@@ -504,33 +515,33 @@ test "notification rows are newest first and never close or launch" {
         .{ .draw = .{
             .table = .notifications,
             .query = "/notifications",
-            .notifications = &expected,
+            .rows = .{ .notifications = &expected },
         } },
         .{ .wait = .{ .event = .down } },
         .{ .draw = .{
             .table = .notifications,
             .query = "/notifications",
-            .notifications = &expected,
+            .rows = .{ .notifications = &expected },
             .selected_row = 1,
         } },
         .{ .wait = .{ .event = .enter } },
         .{ .draw = .{
             .table = .notifications,
             .query = "/notifications",
-            .notifications = &expected,
+            .rows = .{ .notifications = &expected },
             .selected_row = 1,
         } },
         .{ .wait = .{ .event = .{ .click = 0 } } },
         .{ .draw = .{
             .table = .notifications,
             .query = "/notifications",
-            .notifications = &expected,
+            .rows = .{ .notifications = &expected },
         } },
         .{ .wait = .{ .event = .backspace } },
         .{ .draw = .{
             .table = .root,
             .query = "/notification",
-            .tables = &.{.notifications},
+            .rows = .{ .root = &.{.notifications} },
         } },
         .{ .wait = .{ .event = .quit } },
         .{ .stop_text = .ok },

@@ -1,7 +1,7 @@
 ---
 marathon: 7
 name: canonical_cmd_routes
-status: checkpoint_3_for_review
+status: closure_candidate
 temporary: true
 
 authority:
@@ -368,7 +368,7 @@ presentation_boundary:
 implementation_checkpoints:
   - order: 1
     name: cli_cmd_theorem
-    status: implemented_uncommitted
+    status: committed_9707462
     scope:
       - add cmd.zig with Cmd and bounded resolve
       - route existing apps and notifications argv through one exhaustive switch
@@ -400,7 +400,7 @@ implementation_checkpoints:
       - cmd adds 2838 production characters, cli removes 1893, and main adds 1075
   - order: 2
     name: apps_rows_theorem
-    status: implemented_uncommitted
+    status: committed_873cbeb
     scope:
       - add Table, Row, and Rows apps arm
       - replace picker-owned app-specific Row and selection helpers
@@ -432,7 +432,7 @@ implementation_checkpoints:
         nonvisual ownership change without disrupting the operator
   - order: 3
     name: root_and_notification_rows
-    status: implemented_uncommitted
+    status: committed_20206d3
     scope:
       - add the static root table and slash transition
       - lazily open existing retained notification History
@@ -472,6 +472,7 @@ implementation_checkpoints:
         deterministic presentation and lifecycle proof is complete
   - order: 4
     name: shape_reduction_and_hardening
+    status: implemented_uncommitted
     scope:
       - delete superseded picker/app routing branches
       - collapse duplicate row bounds and switches
@@ -483,6 +484,58 @@ implementation_checkpoints:
       stop_if: >
         the net cap cannot be met without hiding control flow or compressing
         readable Zig
+    implementation_receipts:
+      measurement_method: >
+        Count file bytes before the first top-level test declaration in the
+        five Marathon 7 runtime files changed from design commit 42971a3:
+        cmd.zig, cli.zig, main.zig, picker.zig, and sdl.zig. Test-only
+        sdl_transcript.zig is excluded from production totals.
+      baseline_42971a3:
+        src/cmd.zig: 0
+        src/cli.zig: 3555
+        src/main.zig: 7677
+        src/picker.zig: 8083
+        src/sdl.zig: 18198
+        total: 37513
+      closure_candidate:
+        src/cmd.zig: 2424
+        src/cli.zig: 1345
+        src/main.zig: 9405
+        src/picker.zig: 13097
+        src/sdl.zig: 21239
+        total: 47510
+        net_from_42971a3: 9997
+      reduction:
+        checkpoint_3_total: 50185
+        deleted_characters: 2675
+        deleted_percent_of_12672_introduced: 21.1
+      source_shape:
+        - argv joins once into local bounded bytes before one publication copy
+        - root filtering computes one two-bit membership value per accepted edit
+        - State owns allocator and applications instead of threading duplicates
+        - zero-argument startup constructs apps Rows directly
+        - one homogeneous ExpectedRows union replaces four transcript arrays
+        - one TTF text object per visible row is reused for immediate renderer draws
+        - main GUI composition and native row drawing are explicit sub-70-line tasks
+        - every changed function is at most 70 lines
+      hardening:
+        - compile-time assertions close Cmd, Table, Row, Rows, root order, and u16 app identity
+        - structured Smith histories cover argv count/content, slash edits,
+          table selection, query UTF-8, and failure-atomic bytes
+        - strict transcripts prove default zero history reads, exact transitions,
+          notification non-action, empty-route Enter, and cleanup
+        - bounded scans prove no duplicate picker matcher, history formatter,
+          Cmd conversion, deprecated vocabulary, or forbidden dependency
+      proof:
+        - 431 tests pass across 51 build steps
+        - cmd and picker each complete an eight-second instrumented fuzz
+          campaign without a crash or counterexample
+        - linked zig build passes
+        - isolated missing-history CLI returns status 0 and zero bytes
+        - real apps query returns status 0 and eight terminal matches
+        - unknown app returns status 2 with exact usage framing
+        - formatting, YAML, diff, and source-shape scans pass
+        - no GUI was launched
 
 migration_and_deletion:
   delete_after_checkpoint_1:
@@ -601,7 +654,14 @@ open_product_decisions:
 
 review_gate:
   approved: false
-  source_implementation_blocked: checkpoint_2_and_later
-  questions:
-    - approve or reject checkpoint 1 implementation
-    - keep checkpoint 2 blocked until this diff is committed
+  status: closure_candidate_requires_harsh_review
+  commit_blocked: true
+  intentional_remaining_debt:
+    coordinated_live_gui_receipt:
+      reason: launching distracts the operator
+      checks:
+        - zero arguments retain immediate apps startup, text, icons, and launch
+        - slash shows apps then notifications and prefix filtering edits correctly
+        - notifications shows isolated newest-first retained rows
+        - Enter and click on retained rows keep the picker open
+        - editing notifications back to a prefix returns to root rows

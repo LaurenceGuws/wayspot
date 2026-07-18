@@ -3,8 +3,6 @@
 const std = @import("std");
 const apps = @import("apps.zig");
 
-pub const output_capacity = apps.app_capacity * (apps.name_capacity + 1);
-
 pub const help =
     \\usage:
     \\  wayspot-beta
@@ -13,21 +11,12 @@ pub const help =
     \\
 ;
 
-pub fn writeHelp(output: anytype) !void {
-    try output.writeAll(help);
-}
-
 pub fn writeApps(output: anytype, applications: []const apps.App, query: []const u8) !void {
     const found = apps.Matches.init(applications, query);
-    var bytes: usize = 0;
     for (found.slice()) |index| {
-        const app = applications[index];
-        if (app.name.len + 1 > output_capacity - bytes) return error.OutputTooLong;
-        bytes += app.name.len + 1;
-    }
-    for (found.slice()) |index| {
-        const app = applications[index];
-        try output.writeAll(app.name);
+        const name = applications[index].name;
+        std.debug.assert(name.len <= apps.name_capacity);
+        try output.writeAll(name);
         try output.writeAll("\n");
     }
 }
@@ -80,7 +69,7 @@ test "help and output failures are exact" {
     try std.testing.expectError(error.WriteFailed, writeApps(&failed, &.{app}, ""));
 
     var usage = Transcript{ .expected = help };
-    try writeHelp(&usage);
+    try usage.writeAll(help);
     try std.testing.expect(usage.done());
 }
 

@@ -16,8 +16,7 @@ const font_bytes = @embedFile("NotoSans-Regular.ttf");
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
     const font_size = 16;
-    const row_text_capacity = 3;
-    const text_capacity = picker.visible_row_capacity * row_text_capacity + 1;
+    const text_capacity = picker.visible_row_capacity + 1;
 
     const Icon = struct {
         const Rejection = enum {
@@ -208,65 +207,7 @@ pub const Native = struct {
         } else frame.query;
         try native.drawText(0, query, .{ 235, 235, 240 }, 20, 14);
         for (frame.rowSlice(), 0..) |row, index| {
-            const row_pixels = pixels.row(index);
-            const row_rect = nativeRect(row_pixels);
-            const selected = index == frame.selected_row;
-            const color: [3]u8 = if (index == frame.selected_row)
-                .{ 130, 190, 255 }
-            else
-                .{ 210, 210, 215 };
-            if (!sdl.SDL_SetRenderDrawColor(renderer, if (selected) 48 else 24, if (selected) 55 else 24, if (selected) 72 else 30, 255)) {
-                return error.SdlDrawFailed;
-            }
-            if (!sdl.SDL_RenderFillRect(renderer, &row_rect)) return error.SdlDrawFailed;
-            if (!sdl.SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], 255)) {
-                return error.SdlDrawFailed;
-            }
-            switch (row) {
-                .table => |table| try native.drawText(
-                    textIndex(index, 0),
-                    picker.tableName(table),
-                    color,
-                    20,
-                    pixels.textY(index),
-                ),
-                .app => |app_index| {
-                    const app = try native.application(app_index);
-                    if (native.icon(app_index)) |item| switch (item.texture) {
-                        .missing, .rejected => {},
-                        .loaded => |texture| {
-                            const target = nativeRect(pixels.icon(index));
-                            if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) {
-                                return error.SdlDrawFailed;
-                            }
-                        },
-                    };
-                    try native.drawText(
-                        textIndex(index, 0),
-                        app.name,
-                        color,
-                        44,
-                        pixels.textY(index),
-                    );
-                },
-                .notification => |record| {
-                    const secondary: [3]u8 = if (selected)
-                        .{ 180, 190, 205 }
-                    else
-                        .{ 135, 140, 150 };
-                    const fields = [_][]const u8{ record.app_name, record.summary, record.body };
-                    const x = [_]f32{ 14, 170, 430 };
-                    const width = [_]f32{ 150, 250, 270 };
-                    for (fields, x, width, 0..) |text, left, field_width, field| {
-                        try native.drawClippedText(
-                            textIndex(index, field),
-                            displayText(text),
-                            if (field == 1) color else secondary,
-                            .{ .x = left, .y = row_pixels.y, .w = field_width, .h = row_pixels.h },
-                        );
-                    }
-                },
-            }
+            try native.drawRow(row, index, index == frame.selected_row);
         }
         try drawScrollbar(renderer, frame);
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
@@ -275,6 +216,62 @@ pub const Native = struct {
             try native.load(app_index);
         } else {
             native.pending_icons = false;
+        }
+    }
+
+    fn drawRow(native: *Native, row: picker.Row, index: usize, selected: bool) !void {
+        const renderer = native.renderer orelse unreachable;
+        const row_pixels = pixels.row(index);
+        const row_rect = nativeRect(row_pixels);
+        const color: [3]u8 = if (selected) .{ 130, 190, 255 } else .{ 210, 210, 215 };
+        if (!sdl.SDL_SetRenderDrawColor(renderer, if (selected) 48 else 24, if (selected) 55 else 24, if (selected) 72 else 30, 255)) {
+            return error.SdlDrawFailed;
+        }
+        if (!sdl.SDL_RenderFillRect(renderer, &row_rect)) return error.SdlDrawFailed;
+        if (!sdl.SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], 255)) {
+            return error.SdlDrawFailed;
+        }
+        const text_index = textIndex(index);
+        switch (row) {
+            .table => |table| try native.drawText(
+                text_index,
+                picker.tableName(table),
+                color,
+                20,
+                pixels.textY(index),
+            ),
+            .app => |app_index| {
+                const app = try native.application(app_index);
+                if (native.icon(app_index)) |item| switch (item.texture) {
+                    .missing, .rejected => {},
+                    .loaded => |texture| {
+                        const target = nativeRect(pixels.icon(index));
+                        if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) {
+                            return error.SdlDrawFailed;
+                        }
+                    },
+                };
+                try native.drawText(text_index, app.name, color, 44, pixels.textY(index));
+            },
+            .notification => |record| {
+                const secondary: [3]u8 = if (selected) .{ 180, 190, 205 } else .{ 135, 140, 150 };
+                const fields = [_][]const u8{ record.app_name, record.summary, record.body };
+                const x = [_]c_int{ 14, 170, 430 };
+                const width = [_]c_int{ 150, 250, 270 };
+                for (fields, x, width, 0..) |text, left, field_width, field| {
+                    try native.drawClippedText(
+                        text_index,
+                        displayText(text),
+                        if (field == 1) color else secondary,
+                        .{
+                            .x = left,
+                            .y = @intFromFloat(row_pixels.y),
+                            .w = field_width,
+                            .h = @intFromFloat(row_pixels.h),
+                        },
+                    );
+                }
+            },
         }
     }
 
@@ -388,27 +385,24 @@ pub const Native = struct {
         index: usize,
         text: []const u8,
         color: [3]u8,
-        clip: pixels.Rect,
+        clip: sdl.SDL_Rect,
     ) !void {
         const renderer = native.renderer orelse unreachable;
-        const native_clip = sdl.SDL_Rect{
-            .x = @intFromFloat(clip.x),
-            .y = @intFromFloat(clip.y),
-            .w = @intFromFloat(clip.w),
-            .h = @intFromFloat(clip.h),
-        };
-        if (!sdl.SDL_SetRenderClipRect(renderer, &native_clip)) return error.SdlDrawFailed;
-        const result = native.drawText(index, text, color, clip.x, clip.y + 5);
+        if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.SdlDrawFailed;
+        const result = native.drawText(
+            index,
+            text,
+            color,
+            @floatFromInt(clip.x),
+            @floatFromInt(clip.y + 5),
+        );
         if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
         try result;
     }
 
     fn firstMissing(native: *const Native, frame: *const picker.Frame) !?u16 {
         for (frame.rowSlice()) |row| {
-            const app_index = switch (row) {
-                .app => |value| value,
-                .table, .notification => continue,
-            };
+            const app_index = rowApp(row) orelse continue;
             const name = (try native.application(app_index)).icon orelse continue;
             if (name.len > 0 and native.icon(app_index) == null) return app_index;
         }
@@ -420,10 +414,7 @@ pub const Native = struct {
         while (index < native.icon_count) {
             var visible = false;
             for (frame.rowSlice()) |row| {
-                const app_index = switch (row) {
-                    .app => |value| value,
-                    .table, .notification => continue,
-                };
+                const app_index = rowApp(row) orelse continue;
                 if (app_index == native.icons[index].app_index) visible = true;
             }
             if (visible) {
@@ -526,14 +517,19 @@ fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
-fn textIndex(row: usize, field: usize) usize {
+fn rowApp(row: picker.Row) ?u16 {
+    return switch (row) {
+        .app => |index| index,
+        .table, .notification => null,
+    };
+}
+
+fn textIndex(row: usize) usize {
     std.debug.assert(row < picker.visible_row_capacity);
-    std.debug.assert(field < Native.row_text_capacity);
-    return 1 + row * Native.row_text_capacity + field;
+    return row + 1;
 }
 
 fn displayText(text: []const u8) []const u8 {
-    // Fixed rows show one complete UTF-8 line without shaping an entire retained body.
     const line_end = std.mem.indexOfAny(u8, text, "\r\n") orelse text.len;
     var end = @min(line_end, 256);
     while (end < text.len and end > 0 and text[end] & 0b1100_0000 == 0b1000_0000) end -= 1;

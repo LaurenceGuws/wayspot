@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !u8 {
                 => {
                     var stdout_buffer: [4096]u8 = undefined;
                     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-                    try cli.writeHelp(&stdout_writer.interface);
+                    try stdout_writer.interface.writeAll(cli.help);
                     try stdout_writer.interface.flush();
                     return 2;
                 },
@@ -80,44 +80,45 @@ pub fn main(init: std.process.Init) !u8 {
         return perform(init, meaning, applications.slice(), terminal, home);
     }
 
-    logApplications(&files, &applications);
+    try runPicker(init, &files, &applications, terminal, home);
+    return 0;
+}
+
+fn runPicker(
+    init: std.process.Init,
+    files: *const desktop_files.Files,
+    applications: *const apps.List,
+    terminal: ?[]const u8,
+    home: []const u8,
+) !void {
+    logApplications(files, applications);
     var native: sdl.Native = .{
         .applications = applications.slice(),
         .allocator = init.gpa,
         .io = init.io,
         .home = home,
     };
-    var history_reader = HistoryReader{
-        .allocator = init.gpa,
-        .io = init.io,
-        .state_home = init.environ_map.get("XDG_STATE_HOME"),
-        .home = home,
-    };
+    var history_reader = HistoryReader{ .process = &init, .home = home };
     if (try picker.run(&native, &history_reader, init.gpa, applications.slice())) |index| {
         var process = launch.Native{ .io = init.io };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }
-    return 0;
 }
 
-/// HistoryReader performs the picker's one lazy retained-history read.
 const HistoryReader = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    state_home: ?[]const u8,
+    process: *const std.process.Init,
     home: []const u8,
 
     pub fn readHistory(reader: *HistoryReader) !notification_history.History {
         return notification_history.inspect(
-            reader.allocator,
-            reader.io,
-            reader.state_home,
+            reader.process.gpa,
+            reader.process.io,
+            reader.process.environ_map.get("XDG_STATE_HOME"),
             reader.home,
         );
     }
 };
 
-/// Performs every Cmd arm exactly once; notification calls need no app state.
 fn perform(
     init: std.process.Init,
     meaning: cmd.Cmd,

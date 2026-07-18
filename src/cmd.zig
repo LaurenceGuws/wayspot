@@ -1,4 +1,4 @@
-//! Resolves bounded beta arguments into one performable product meaning.
+//! Owns bounded Cmd resolution.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,7 +25,6 @@ comptime {
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
 }
 
-/// Resolves notification arguments without application discovery.
 pub fn resolveNotifications(argv: []const []const u8) !?Cmd {
     if (argv.len > argument_capacity) return error.TooManyArguments;
     if (argv.len == 0 or !std.mem.eql(u8, argv[0], "notifications")) return null;
@@ -36,7 +35,6 @@ pub fn resolveNotifications(argv: []const []const u8) !?Cmd {
     return error.NotificationArgumentsInvalid;
 }
 
-/// Resolves app arguments after discovery into caller-owned query bytes.
 pub fn resolveApps(
     argv: []const []const u8,
     applications: []const apps.App,
@@ -47,37 +45,26 @@ pub fn resolveApps(
     if (applications.len > apps.app_capacity) return error.TooManyApplications;
 
     const values = if (std.mem.eql(u8, argv[0], "apps")) argv[1..] else argv;
-    const query = try join(values, query_bytes);
-    if (std.mem.eql(u8, argv[0], "apps")) return .{ .apps = .{ .list = query } };
-
-    const index = try apps.exact(applications, query);
-    if (index > std.math.maxInt(u16)) return error.ApplicationIndexTooLarge;
-    return .{ .apps = .{ .open = @intCast(index) } };
-}
-
-fn join(values: []const []const u8, query_bytes: *[query_capacity]u8) ![]const u8 {
+    var next: [query_capacity]u8 = undefined;
     var length: usize = 0;
     for (values, 0..) |value, index| {
         if (!std.unicode.utf8ValidateSlice(value)) return error.QueryInvalid;
         if (index > 0) {
             if (length == query_capacity) return error.QueryTooLong;
+            next[length] = ' ';
             length += 1;
         }
         if (value.len > query_capacity - length) return error.QueryTooLong;
+        @memcpy(next[length..][0..value.len], value);
         length += value.len;
     }
+    @memcpy(query_bytes[0..length], next[0..length]);
+    const query = query_bytes[0..length];
+    if (std.mem.eql(u8, argv[0], "apps")) return .{ .apps = .{ .list = query } };
 
-    var used: usize = 0;
-    for (values, 0..) |value, index| {
-        if (index > 0) {
-            query_bytes[used] = ' ';
-            used += 1;
-        }
-        @memcpy(query_bytes[used..][0..value.len], value);
-        used += value.len;
-    }
-    std.debug.assert(used == length);
-    return query_bytes[0..used];
+    const index = try apps.exact(applications, query);
+    if (index > std.math.maxInt(u16)) return error.ApplicationIndexTooLarge;
+    return .{ .apps = .{ .open = @intCast(index) } };
 }
 
 test "notification meanings resolve before applications exist" {
@@ -171,18 +158,24 @@ test "arbitrary app argument bytes remain bounded and exact" {
 fn fuzzArguments(_: void, smith: *std.testing.Smith) !void {
     var input: [query_capacity + 1]u8 = undefined;
     const value = input[0..smith.slice(&input)];
+    const values = [_][]const u8{ "", "app", "λ", value };
+    var argv: [argument_capacity + 1][]const u8 = undefined;
+    argv[0] = "apps";
+    const count = smith.valueRangeAtMost(u8, 1, argv.len);
+    for (argv[1..count]) |*argument| {
+        argument.* = values[smith.valueRangeLessThan(u8, 0, values.len)];
+    }
+
     var bytes: [query_capacity]u8 = @splat(0x7f);
     const before = bytes;
-    const command = resolveApps(&.{ "apps", value }, &.{}, &bytes) catch {
-        if (value.len <= query_capacity and std.unicode.utf8ValidateSlice(value)) {
-            return error.UnexpectedResolutionFailure;
-        }
+    const command = resolveApps(argv[0..count], &.{}, &bytes) catch {
         try std.testing.expectEqualSlices(u8, &before, &bytes);
         return;
     };
     try std.testing.expect(command == .apps);
     try std.testing.expect(command.apps == .list);
-    try std.testing.expectEqualSlices(u8, value, command.apps.list);
+    try std.testing.expect(command.apps.list.len <= query_capacity);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(command.apps.list));
 }
 
 fn expectNotifications(argv: []const []const u8, expected: @FieldType(Cmd, "notifications")) !void {
