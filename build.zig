@@ -130,6 +130,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_notification_dbus_tests = b.addRunArtifact(notification_dbus_tests);
+    const notification_history_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_history.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_history_tests = b.addRunArtifact(notification_history_tests);
     const notification_banner_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/notification_banner.zig"),
@@ -197,6 +205,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     test_step.dependOn(&run_notification_dbus_tests.step);
+    test_step.dependOn(&run_notification_history_tests.step);
     test_step.dependOn(&run_notification_banner_tests.step);
     test_step.dependOn(&run_notification_banner_run_tests.step);
     test_step.dependOn(&run_notification_bridge_tests.step);

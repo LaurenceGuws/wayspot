@@ -2,7 +2,7 @@
 # It narrows DOMAIN.yml; it does not add product scope.
 
 marathon: notification_banner_history
-state: one_visible_banner_ready_for_review
+state: retained_history_core_ready_for_review
 
 outcome: >
   Show accepted notifications immediately, then retain only bounded private
@@ -38,6 +38,8 @@ live_banner:
         - closed: notification id and expired or dismissed reason
         - failed
     rules:
+      - DBus open and successful notification-name ownership precede every history filesystem operation
+      - a process that loses name ownership performs zero history reads or writes
       - fixed queues are created before the worker
       - producers sleep when a queue is full
       - closing either queue wakes the other owner
@@ -134,13 +136,19 @@ retained_history:
     - when bytes exceed 33554432, remove oldest first
     - replacement of a currently active notification retains its history_id
     - startup allocates history_id from the greatest retained value plus one
+    - maxInt u64 is reserved exhaustion and is never assigned or persisted
+    - maxInt u64 minus one is the last assignable history_id
+    - history_id never wraps or becomes zero
+    - greatest retained history_id equal to maxInt u64 is a visible startup failure
     - Freedesktop notification ids are never persisted
   write:
     - serialize the complete bounded history to a sibling temporary file
+    - PID-qualified temporary names prevent sibling-name collision but do not grant canonical ownership
     - sync the file
     - atomically replace the prior file
     - sync the parent directory
-    - failed persistence never changes the last complete file
+    - failure before atomic replacement leaves the prior file byte-for-byte unchanged
+    - parent-sync failure leaves a complete adopted file whose crash durability is unconfirmed
     - persistence failure is visible but does not reject an already accepted DBus notification
   corruption:
     - parse complete newline-terminated records only
@@ -191,6 +199,12 @@ proof:
     - existing notification D-Bus receipt remains green
     - one real banner receives replacement, sender close, timeout, and pointer dismissal
     - restart reads only retained records within every hard bound
+  retained_history_core_receipts:
+    - 271 tests pass including startup ownership ordering and exact id exhaustion
+    - DBus replies before a visible persistence failure can stop the resident process
+    - strict filesystem transcripts preserve the prior bytes before replacement
+    - parent-sync failure retains the complete newly adopted bytes
+    - CLI and GUI history interfaces remain unimplemented
   live_banner_receipts:
     - 245 tests pass with generated banner histories and strict window transcripts
     - app id wayspot-notification and logical geometry 420 by 120

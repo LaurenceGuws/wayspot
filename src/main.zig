@@ -7,6 +7,7 @@ const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
 const notification_dbus = @import("notification_dbus.zig");
 const notification_dbus_native = @import("notification_dbus_native.zig");
+const notification_history = @import("notification_history.zig");
 const notification_banner_sdl = @import("notification_banner_sdl.zig");
 const notification_bridge = @import("notification_bridge.zig");
 const picker = @import("picker.zig");
@@ -110,7 +111,14 @@ fn runNotifications(init: std.process.Init) !void {
     bridge.init(init.io);
     defer bridge.deinit(init.gpa);
     var native: notification_dbus_native.Native = .{ .stop = &notification_stop };
-    var worker = try init.io.concurrent(notificationWorker, .{ &native, &bridge, init.gpa });
+    var worker = try init.io.concurrent(notificationWorker, .{
+        &native,
+        &bridge,
+        init.gpa,
+        init.io,
+        init.environ_map.get("XDG_STATE_HOME"),
+        init.environ_map.get("HOME"),
+    });
 
     const banner_result = notification_banner_sdl.run(&bridge, init.gpa);
     if (banner_result) {
@@ -128,8 +136,26 @@ fn notificationWorker(
     native: *notification_dbus_native.Native,
     bridge: *notification_bridge.Bridge,
     allocator: std.mem.Allocator,
+    io: std.Io,
+    state_home: ?[]const u8,
+    home: ?[]const u8,
 ) !void {
-    notification_dbus.runWithBanner(native, bridge, allocator) catch |err| {
+    notification_dbus.openAndOwn(native) catch |err| {
+        bridge.workerFailed();
+        return err;
+    };
+    defer native.close();
+    var history = notification_history.Owner.init(allocator, io, state_home, home) catch |err| {
+        bridge.workerFailed();
+        return err;
+    };
+    defer history.deinit();
+    notification_dbus.serveOwnedWithBannerAndHistory(
+        native,
+        bridge,
+        &history,
+        allocator,
+    ) catch |err| {
         bridge.workerFailed();
         return err;
     };
