@@ -114,6 +114,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wallpaper_tests = b.addRunArtifact(wallpaper_tests);
+    const wallpaper_native_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wallpaper_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    wallpaper_native_tests.root_module.addIncludePath(sdl.path("include"));
+    wallpaper_native_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    wallpaper_native_tests.use_llvm = true;
+    wallpaper_native_tests.use_lld = true;
+    const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
     const sdl_event_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_event.zig"),
@@ -237,6 +250,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_icon_tests.step);
     test_step.dependOn(&run_image_tests.step);
     test_step.dependOn(&run_wallpaper_tests.step);
+    test_step.dependOn(&run_wallpaper_native_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);

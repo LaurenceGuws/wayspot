@@ -788,11 +788,32 @@ phased_checkpoints:
       - fragmented, coalesced, malformed, and overlong lines are exact
   - order: 2
     id: image_theorem
+    state: implemented_uncommitted_for_review
     product_proof: one bounded PNG becomes exact cover-cropped XRGB8888 monitor pixels
     files:
       - src/wallpaper.zig
       - src/wallpaper_native.zig
     character_budget: 6500
+    receipts:
+      production_nonwhitespace_characters: 6490
+      wallpaper_zig_delta: 3302
+      wallpaper_native_zig: 3188
+      source_image_lifetime: process_lifetime_until_explicit_deinit
+      path_policy: relative_or_absolute_nonempty_utf8_without_nul_at_most_4095_bytes
+      png_constraints:
+        encoded_bytes_maximum: 67108864
+        side_maximum: 16384
+        pixels_maximum: 67108864
+        decoded_bytes_maximum: 268435456
+        output_format: XRGB8888
+        alpha: composited_over_opaque_black
+      crop: >
+        Compare source_width*target_height with source_height*target_width.
+        Crop the excessive source axis by integer division, clamp a discrete
+        crop to one pixel, and place odd excess on the right or bottom.
+      deterministic_tests: "19 pure wallpaper; 4 native image; 473 repository"
+      build_steps: "55/55"
+      native_receipt: isolated_generated_one_pixel_rgba_png_decoded_and_scaled
     closes_when:
       - file and SDL histories are failure-atomic
       - crop/scaling endpoints and pixel bounds are proven

@@ -11,6 +11,10 @@ pub const round_pixel_capacity = 67_108_864;
 pub const event_line_capacity = 4096;
 pub const event_read_capacity = 8192;
 pub const event_batch_capacity = 64;
+pub const image_path_capacity = 4095;
+pub const image_file_capacity = 64 * 1024 * 1024;
+pub const image_side_capacity = 16_384;
+pub const image_pixel_capacity = 67_108_864;
 
 pub const Transform = enum(u3) {
     normal,
@@ -226,6 +230,114 @@ pub const EventLines = struct {
         return result;
     }
 };
+
+pub const Image = struct {
+    width: u32,
+    height: u32,
+    pitch: u32,
+    pixels: []u32,
+
+    pub fn deinit(image: *Image, allocator: std.mem.Allocator) void {
+        allocator.free(image.pixels);
+        image.* = undefined;
+    }
+};
+
+pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
+
+pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
+    try validateImagePath(path);
+    const bytes = bytes: {
+        try source.open(path);
+        defer source.close();
+        const stat = try source.stat();
+        if (stat.kind != .file) return error.ImageNotRegularFile;
+        if (stat.size > image_file_capacity) return error.ImageFileTooLarge;
+        const bytes = try allocator.alloc(u8, @intCast(stat.size));
+        errdefer allocator.free(bytes);
+        if (try source.read(bytes) != bytes.len) return error.ImageReadIncomplete;
+        break :bytes bytes;
+    };
+    defer allocator.free(bytes);
+    const dimensions = try inspectPng(bytes);
+    var image = try source.decode(allocator, bytes);
+    errdefer image.deinit(allocator);
+    try validateImage(&image);
+    if (image.width != dimensions.width or image.height != dimensions.height) {
+        return error.ImageDimensionsChanged;
+    }
+    return image;
+}
+
+pub fn coverImage(
+    source: anytype,
+    allocator: std.mem.Allocator,
+    image: *const Image,
+    width: u32,
+    height: u32,
+) !Image {
+    try validateImage(image);
+    const crop = try coverCrop(image.width, image.height, width, height);
+    const count = try pixelCount(width, height);
+    const pixels = try allocator.alloc(u32, count);
+    errdefer allocator.free(pixels);
+    try source.scale(image, crop, width, height, pixels);
+    return .{ .width = width, .height = height, .pitch = width * 4, .pixels = pixels };
+}
+
+pub fn coverCrop(source_width: u32, source_height: u32, width: u32, height: u32) !Crop {
+    _ = try pixelCount(source_width, source_height);
+    _ = try pixelCount(width, height);
+    var crop_width = source_width;
+    var crop_height = source_height;
+    const source_ratio = @as(u64, source_width) * height;
+    const target_ratio = @as(u64, source_height) * width;
+    if (source_ratio > target_ratio) {
+        crop_width = @intCast(@max(1, @as(u64, source_height) * width / height));
+    } else if (source_ratio < target_ratio) {
+        crop_height = @intCast(@max(1, @as(u64, source_width) * height / width));
+    }
+    return .{
+        .x = (source_width - crop_width) / 2,
+        .y = (source_height - crop_height) / 2,
+        .width = crop_width,
+        .height = crop_height,
+    };
+}
+
+fn validateImagePath(path: []const u8) !void {
+    if (path.len == 0) return error.ImagePathEmpty;
+    if (path.len > image_path_capacity) return error.ImagePathTooLong;
+    if (!std.unicode.utf8ValidateSlice(path) or std.mem.indexOfScalar(u8, path, 0) != null) {
+        return error.ImagePathInvalid;
+    }
+}
+
+fn validateImage(image: *const Image) !void {
+    const count = try pixelCount(image.width, image.height);
+    if (image.pitch != image.width * 4) return error.ImagePitchInvalid;
+    if (image.pixels.len != count) return error.ImagePixelsInvalid;
+}
+
+fn pixelCount(width: u32, height: u32) !usize {
+    if (width == 0 or height == 0) return error.ImageDimensionsZero;
+    if (width > image_side_capacity or height > image_side_capacity) return error.ImageDimensionsTooLarge;
+    const count = @as(u64, width) * height;
+    if (count > image_pixel_capacity) return error.ImagePixelsTooMany;
+    return @intCast(count);
+}
+
+fn inspectPng(bytes: []const u8) !struct { width: u32, height: u32 } {
+    if (bytes.len < 24 or !std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") or
+        !std.mem.eql(u8, bytes[12..16], "IHDR"))
+    {
+        return error.ImagePngInvalid;
+    }
+    const width = std.mem.readInt(u32, bytes[16..20], .big);
+    const height = std.mem.readInt(u32, bytes[20..24], .big);
+    _ = try pixelCount(width, height);
+    return .{ .width = width, .height = height };
+}
 
 fn classify(line: []const u8) Event {
     if (std.mem.indexOfScalar(u8, line, 0) != null) return .malformed;
@@ -477,8 +589,343 @@ test "generated event histories remain bounded" {
     try fuzzEvents({}, &empty);
 }
 
+const FileStat = struct { kind: std.Io.File.Kind, size: u64 };
+
+const ImageStep = union(enum) {
+    open: bool,
+    stat: ?FileStat,
+    read: enum { complete, short, fail },
+    close,
+    decode: union(enum) {
+        image: struct { width: u32, height: u32 },
+        failed,
+        dimensions_failed,
+        format_failed,
+        convert_failed,
+    },
+    scale: bool,
+};
+
+const ImageTranscript = struct {
+    steps: []const ImageStep,
+    index: usize = 0,
+    opened: bool = false,
+
+    fn open(transcript: *ImageTranscript, _: []const u8) !void {
+        const success = switch (try transcript.next()) {
+            .open => |value| value,
+            else => return error.ImageTranscriptMismatch,
+        };
+        if (!success) return error.ImageOpenFailed;
+        transcript.opened = true;
+    }
+
+    fn stat(transcript: *ImageTranscript) !FileStat {
+        std.debug.assert(transcript.opened);
+        return switch (try transcript.next()) {
+            .stat => |value| value orelse error.ImageStatFailed,
+            else => error.ImageTranscriptMismatch,
+        };
+    }
+
+    fn read(transcript: *ImageTranscript, bytes: []u8) !usize {
+        std.debug.assert(transcript.opened);
+        return switch (try transcript.next()) {
+            .read => |result| switch (result) {
+                .complete => blk: {
+                    pngHeader(bytes, 4, 3);
+                    break :blk bytes.len;
+                },
+                .short => bytes.len - 1,
+                .fail => error.ImageReadFailed,
+            },
+            else => error.ImageTranscriptMismatch,
+        };
+    }
+
+    fn close(transcript: *ImageTranscript) void {
+        std.debug.assert(transcript.opened);
+        std.debug.assert((transcript.next() catch unreachable) == .close);
+        transcript.opened = false;
+    }
+
+    fn decode(transcript: *ImageTranscript, allocator: std.mem.Allocator, _: []const u8) !Image {
+        std.debug.assert(!transcript.opened);
+        const dimensions = switch (try transcript.next()) {
+            .decode => |result| switch (result) {
+                .image => |value| value,
+                .failed => return error.ImageDecodeFailed,
+                .dimensions_failed => return error.ImageDimensionsTooLarge,
+                .format_failed => return error.ImageFormatInvalid,
+                .convert_failed => return error.ImageConvertFailed,
+            },
+            else => return error.ImageTranscriptMismatch,
+        };
+        const pixels = try allocator.alloc(u32, try pixelCount(dimensions.width, dimensions.height));
+        @memset(pixels, 0xff102030);
+        return .{
+            .width = dimensions.width,
+            .height = dimensions.height,
+            .pitch = dimensions.width * 4,
+            .pixels = pixels,
+        };
+    }
+
+    fn scale(
+        transcript: *ImageTranscript,
+        _: *const Image,
+        crop: Crop,
+        width: u32,
+        height: u32,
+        output: []u32,
+    ) !void {
+        const success = switch (try transcript.next()) {
+            .scale => |value| value,
+            else => return error.ImageTranscriptMismatch,
+        };
+        if (!success) return error.ImageScaleFailed;
+        try std.testing.expectEqual(Crop{ .x = 0, .y = 0, .width = 4, .height = 3 }, crop);
+        try std.testing.expectEqual(@as(u32, 8), width);
+        try std.testing.expectEqual(@as(u32, 6), height);
+        @memset(output, 0xff102030);
+    }
+
+    fn done(transcript: *const ImageTranscript) !void {
+        try std.testing.expectEqual(transcript.steps.len, transcript.index);
+        try std.testing.expect(!transcript.opened);
+    }
+
+    fn next(transcript: *ImageTranscript) !ImageStep {
+        if (transcript.index == transcript.steps.len) return error.ImageTranscriptMismatch;
+        defer transcript.index += 1;
+        return transcript.steps[transcript.index];
+    }
+};
+
+test "image task owns exact file decode and scale history" {
+    const steps = [_]ImageStep{
+        .{ .open = true },
+        .{ .stat = .{ .kind = .file, .size = 24 } },
+        .{ .read = .complete },
+        .close,
+        .{ .decode = .{ .image = .{ .width = 4, .height = 3 } } },
+        .{ .scale = true },
+    };
+    var transcript = ImageTranscript{ .steps = &steps };
+    var image = try loadImage(&transcript, std.testing.allocator, "wallpaper.png");
+    defer image.deinit(std.testing.allocator);
+    var pixels = try coverImage(&transcript, std.testing.allocator, &image, 8, 6);
+    defer pixels.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 32), pixels.pitch);
+    try std.testing.expectEqual(@as(u32, 0xff102030), pixels.pixels[47]);
+    try transcript.done();
+}
+
+test "image file failures close exactly once before decode" {
+    const histories = [_]struct { expected: anyerror, steps: []const ImageStep }{
+        .{ .expected = error.ImageOpenFailed, .steps = &.{.{ .open = false }} },
+        .{ .expected = error.ImageStatFailed, .steps = &.{ .{ .open = true }, .{ .stat = null }, .close } },
+        .{
+            .expected = error.ImageNotRegularFile,
+            .steps = &.{ .{ .open = true }, .{ .stat = .{ .kind = .directory, .size = 24 } }, .close },
+        },
+        .{
+            .expected = error.ImageFileTooLarge,
+            .steps = &.{
+                .{ .open = true },
+                .{ .stat = .{ .kind = .file, .size = image_file_capacity + 1 } },
+                .close,
+            },
+        },
+        .{
+            .expected = error.ImageReadIncomplete,
+            .steps = &.{
+                .{ .open = true },
+                .{ .stat = .{ .kind = .file, .size = 24 } },
+                .{ .read = .short },
+                .close,
+            },
+        },
+        .{
+            .expected = error.ImageReadFailed,
+            .steps = &.{
+                .{ .open = true },
+                .{ .stat = .{ .kind = .file, .size = 24 } },
+                .{ .read = .fail },
+                .close,
+            },
+        },
+        .{
+            .expected = error.ImageDecodeFailed,
+            .steps = &.{
+                .{ .open = true },
+                .{ .stat = .{ .kind = .file, .size = 24 } },
+                .{ .read = .complete },
+                .close,
+                .{ .decode = .failed },
+            },
+        },
+    };
+    for (histories) |history| {
+        var transcript = ImageTranscript{ .steps = history.steps };
+        try std.testing.expectError(
+            history.expected,
+            loadImage(&transcript, std.testing.allocator, "wallpaper.png"),
+        );
+        try transcript.done();
+    }
+}
+
+test "image path dimensions crop and allocation endpoints are exact" {
+    var transcript = ImageTranscript{ .steps = &.{} };
+    try std.testing.expectError(error.ImagePathEmpty, loadImage(&transcript, std.testing.allocator, ""));
+    var path: [image_path_capacity + 1]u8 = @splat('a');
+    try std.testing.expectError(error.ImagePathTooLong, loadImage(&transcript, std.testing.allocator, &path));
+    const valid_path_steps = [_]ImageStep{.{ .open = false }};
+    transcript = .{ .steps = &valid_path_steps };
+    try std.testing.expectError(
+        error.ImageOpenFailed,
+        loadImage(&transcript, std.testing.allocator, path[0..image_path_capacity]),
+    );
+    try transcript.done();
+    transcript = .{ .steps = &.{} };
+    path[0] = 0;
+    try std.testing.expectError(error.ImagePathInvalid, loadImage(&transcript, std.testing.allocator, path[0..1]));
+    path[0] = 0xff;
+    try std.testing.expectError(error.ImagePathInvalid, loadImage(&transcript, std.testing.allocator, path[0..1]));
+    try std.testing.expectError(error.ImageDimensionsZero, coverCrop(0, 1, 1, 1));
+    try std.testing.expectError(error.ImageDimensionsTooLarge, coverCrop(image_side_capacity + 1, 1, 1, 1));
+    try std.testing.expectError(error.ImagePixelsTooMany, coverCrop(8192, 8193, 1, 1));
+
+    try std.testing.expectEqual(Crop{ .x = 2, .y = 0, .width = 5, .height = 5 }, try coverCrop(9, 5, 1, 1));
+    try std.testing.expectEqual(Crop{ .x = 2, .y = 0, .width = 5, .height = 5 }, try coverCrop(10, 5, 1, 1));
+    try std.testing.expectEqual(Crop{ .x = 0, .y = 2, .width = 5, .height = 5 }, try coverCrop(5, 9, 1, 1));
+    try std.testing.expectEqual(Crop{ .x = 0, .y = 0, .width = 7, .height = 3 }, try coverCrop(7, 3, 14, 6));
+    try std.testing.expectEqual(Crop{ .x = 0, .y = 0, .width = 1, .height = 1 }, try coverCrop(1, 1, 3, 2));
+    try std.testing.expectEqual(
+        Crop{ .x = 0, .y = 0, .width = 8192, .height = 8192 },
+        try coverCrop(8192, 8192, 1, 1),
+    );
+
+    const steps = [_]ImageStep{
+        .{ .open = true },
+        .{ .stat = .{ .kind = .file, .size = image_file_capacity } },
+        .close,
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    transcript = .{ .steps = &steps };
+    try std.testing.expectError(error.OutOfMemory, loadImage(&transcript, failing.allocator(), "wallpaper.png"));
+    try transcript.done();
+}
+
+test "decode dimension format convert and scale failures publish no pixels" {
+    const failures = [_]struct { expected: anyerror, result: ImageStep }{
+        .{ .expected = error.ImageDecodeFailed, .result = .{ .decode = .failed } },
+        .{ .expected = error.ImageDimensionsTooLarge, .result = .{ .decode = .dimensions_failed } },
+        .{ .expected = error.ImageFormatInvalid, .result = .{ .decode = .format_failed } },
+        .{ .expected = error.ImageConvertFailed, .result = .{ .decode = .convert_failed } },
+    };
+    for (failures) |failure| {
+        const steps = [_]ImageStep{
+            .{ .open = true },
+            .{ .stat = .{ .kind = .file, .size = 24 } },
+            .{ .read = .complete },
+            .close,
+            failure.result,
+        };
+        var failed = ImageTranscript{ .steps = &steps };
+        try std.testing.expectError(
+            failure.expected,
+            loadImage(&failed, std.testing.allocator, "wallpaper.png"),
+        );
+        try failed.done();
+    }
+
+    const decode_steps = [_]ImageStep{
+        .{ .open = true },
+        .{ .stat = .{ .kind = .file, .size = 24 } },
+        .{ .read = .complete },
+        .close,
+        .{ .decode = .{ .image = .{ .width = 3, .height = 3 } } },
+    };
+    var transcript = ImageTranscript{ .steps = &decode_steps };
+    try std.testing.expectError(
+        error.ImageDimensionsChanged,
+        loadImage(&transcript, std.testing.allocator, "wallpaper.png"),
+    );
+    try transcript.done();
+
+    var source_pixels = [_]u32{0xff000000} ** 12;
+    const image = Image{ .width = 4, .height = 3, .pitch = 16, .pixels = &source_pixels };
+    const scale_steps = [_]ImageStep{.{ .scale = false }};
+    transcript = .{ .steps = &scale_steps };
+    try std.testing.expectError(
+        error.ImageScaleFailed,
+        coverImage(&transcript, std.testing.allocator, &image, 8, 6),
+    );
+    try transcript.done();
+
+    const allocation_steps = [_]ImageStep{
+        .{ .open = true },
+        .{ .stat = .{ .kind = .file, .size = 24 } },
+        .{ .read = .complete },
+        .close,
+        .{ .decode = .{ .image = .{ .width = 4, .height = 3 } } },
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    transcript = .{ .steps = &allocation_steps };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        loadImage(&transcript, failing.allocator(), "wallpaper.png"),
+    );
+    try transcript.done();
+
+    failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    transcript = .{ .steps = &.{} };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        coverImage(&transcript, failing.allocator(), &image, 8, 6),
+    );
+    try transcript.done();
+}
+
+test "Smith crop arithmetic and PNG headers remain bounded" {
+    if (@import("builtin").fuzz) {
+        try std.testing.fuzz({}, fuzzImage, .{});
+        return;
+    }
+    var empty = std.testing.Smith{ .in = "" };
+    try fuzzImage({}, &empty);
+}
+
 fn expectMonitorError(expected: anyerror, json: []const u8) !void {
     try std.testing.expectError(expected, parseMonitors(std.testing.allocator, json));
+}
+
+fn pngHeader(bytes: []u8, width: u32, height: u32) void {
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], "\x89PNG\r\n\x1a\n");
+    @memcpy(bytes[12..16], "IHDR");
+    std.mem.writeInt(u32, bytes[16..20], width, .big);
+    std.mem.writeInt(u32, bytes[20..24], height, .big);
+}
+
+fn fuzzImage(_: void, smith: *std.testing.Smith) !void {
+    const source_width = smith.value(u32);
+    const source_height = smith.value(u32);
+    const width = smith.value(u32);
+    const height = smith.value(u32);
+    if (coverCrop(source_width, source_height, width, height)) |crop| {
+        try std.testing.expect(crop.width > 0 and crop.height > 0);
+        try std.testing.expect(crop.x + crop.width <= source_width);
+        try std.testing.expect(crop.y + crop.height <= source_height);
+    } else |_| {}
+    var bytes: [64]u8 = undefined;
+    const slice = bytes[0..smith.slice(&bytes)];
+    if (inspectPng(slice)) |dimensions| {
+        try std.testing.expect(dimensions.width <= image_side_capacity);
+        try std.testing.expect(dimensions.height <= image_side_capacity);
+    } else |_| {}
 }
 
 fn fuzzMonitors(_: void, smith: *std.testing.Smith) !void {
