@@ -27,9 +27,16 @@ pub fn main(init: std.process.Init) !u8 {
         argument_count += 1;
     }
 
-    if (argument_count == 1 and std.mem.eql(u8, arguments[0], "notifications")) {
-        try runNotifications(init);
-        return 0;
+    if (argument_count > 0 and std.mem.eql(u8, arguments[0], "notifications")) {
+        if (argument_count == 1) {
+            try runNotifications(init);
+            return 0;
+        }
+        if (argument_count == 2 and std.mem.eql(u8, arguments[1], "history")) {
+            try printNotificationHistory(init);
+            return 0;
+        }
+        return 2;
     }
 
     var files = try desktop_files.collect(init.gpa, init.io, .{
@@ -130,6 +137,22 @@ fn runNotifications(init: std.process.Init) !void {
     const worker_result = worker.await(init.io);
     try banner_result;
     try worker_result;
+}
+
+fn printNotificationHistory(init: std.process.Init) !void {
+    var history = try notification_history.inspect(
+        init.gpa,
+        init.io,
+        init.environ_map.get("XDG_STATE_HOME"),
+        init.environ_map.get("HOME"),
+    );
+    defer history.deinit(init.gpa);
+    const bytes = try notification_history.format(init.gpa, &history);
+    defer init.gpa.free(bytes);
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    try stdout_writer.interface.writeAll(bytes);
+    try stdout_writer.interface.flush();
 }
 
 fn notificationWorker(

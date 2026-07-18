@@ -250,6 +250,12 @@ const Wire = struct {
     body: []const u8,
 };
 
+const PublicRecord = struct {
+    app_name: []const u8,
+    summary: []const u8,
+    body: []const u8,
+};
+
 /// Parses only a complete bounded JSONL file and publishes no partial history.
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, now: i64) Error!History {
     if (bytes.len > file_capacity) return error.HistoryTooLarge;
@@ -293,6 +299,13 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, now: i64) Error!Hi
     return history;
 }
 
+/// Reads one complete byte snapshot, then publishes only a complete parsed history.
+pub fn load(source: anytype, allocator: std.mem.Allocator, now: i64) Error!History {
+    const bytes = try source.read();
+    defer allocator.free(bytes);
+    return parse(allocator, bytes, now);
+}
+
 pub fn encode(allocator: std.mem.Allocator, history: *const History) Error![]u8 {
     history.assertValid();
     const bytes = allocator.alloc(u8, history.file_bytes) catch return error.OutOfMemory;
@@ -301,6 +314,31 @@ pub fn encode(allocator: std.mem.Allocator, history: *const History) Error![]u8 
     for (history.records[0..history.count]) |slot| writeLine(&writer, slot.?) catch {
         return error.HistoryCorrupt;
     };
+    std.debug.assert(writer.buffered().len == bytes.len);
+    return bytes;
+}
+
+/// Formats one complete newest-first public view before any caller writes it.
+pub fn format(allocator: std.mem.Allocator, history: *const History) Error![]u8 {
+    history.assertValid();
+    var length: usize = 0;
+    var line: [line_capacity]u8 = undefined;
+    for (history.records[0..history.count]) |slot| {
+        var writer: std.Io.Writer = .fixed(&line);
+        writePublicLine(&writer, slot.?) catch return error.LineTooLong;
+        length = std.math.add(usize, length, writer.buffered().len) catch {
+            return error.HistoryTooLarge;
+        };
+        if (length > file_capacity) return error.HistoryTooLarge;
+    }
+    const bytes = allocator.alloc(u8, length) catch return error.OutOfMemory;
+    errdefer allocator.free(bytes);
+    var writer: std.Io.Writer = .fixed(bytes);
+    var index = history.count;
+    while (index > 0) {
+        index -= 1;
+        writePublicLine(&writer, history.records[index].?) catch return error.HistoryCorrupt;
+    }
     std.debug.assert(writer.buffered().len == bytes.len);
     return bytes;
 }
@@ -316,6 +354,15 @@ fn writeLine(writer: *std.Io.Writer, record: Record) !void {
     try std.json.Stringify.value(Wire{
         .received_unix_seconds = record.received_unix_seconds,
         .history_id = record.history_id,
+        .app_name = record.app_name,
+        .summary = record.summary,
+        .body = record.body,
+    }, .{}, writer);
+    try writer.writeByte('\n');
+}
+
+fn writePublicLine(writer: *std.Io.Writer, record: Record) !void {
+    try std.json.Stringify.value(PublicRecord{
         .app_name = record.app_name,
         .summary = record.summary,
         .body = record.body,
@@ -484,6 +531,44 @@ fn directoryPath(
     return std.fs.path.join(allocator, &.{ path, ".local", "state", "wayspot" }) catch error.OutOfMemory;
 }
 
+/// Reads and prunes retained records without creating or changing filesystem state.
+pub fn inspect(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    state_home: ?[]const u8,
+    home: ?[]const u8,
+) Error!History {
+    const path = try directoryPath(allocator, state_home, home);
+    defer allocator.free(path);
+    const directory = std.Io.Dir.cwd().openDir(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return error.HistoryOpenFailed,
+    };
+    defer directory.close(io);
+    const directory_stat = directory.stat(io) catch return error.HistoryOpenFailed;
+    if (directory_stat.kind != .directory or
+        directory_stat.permissions.toMode() & 0o777 != 0o700)
+    {
+        return error.HistoryOpenFailed;
+    }
+    const file = directory.openFile(io, "notifications.jsonl", .{}) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return error.HistoryOpenFailed,
+    };
+    defer file.close(io);
+    const file_stat = file.stat(io) catch return error.HistoryReadFailed;
+    if (file_stat.kind != .file or file_stat.permissions.toMode() & 0o777 != 0o600) {
+        return error.HistoryOpenFailed;
+    }
+    const size = file_stat.size;
+    if (size > file_capacity) return error.HistoryTooLarge;
+    const bytes = allocator.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
+    defer allocator.free(bytes);
+    const count = file.readPositionalAll(io, bytes, 0) catch return error.HistoryReadFailed;
+    if (count != bytes.len) return error.HistoryReadFailed;
+    return parse(allocator, bytes, try unixSeconds(io));
+}
+
 /// Owner keeps retained memory and its canonical file synchronized in the DBus worker.
 pub const Owner = struct {
     allocator: std.mem.Allocator,
@@ -499,9 +584,7 @@ pub const Owner = struct {
     ) Error!Owner {
         var native = try Native.init(allocator, io, state_home, home);
         errdefer native.deinit();
-        const bytes = try native.read();
-        defer allocator.free(bytes);
-        var history = try parse(allocator, bytes, try unixSeconds(io));
+        var history = try load(&native, allocator, try unixSeconds(io));
         errdefer history.deinit(allocator);
         const encoded = try encode(allocator, &history);
         defer allocator.free(encoded);
@@ -591,6 +674,72 @@ test "age is strict and JSONL round trips escaped private text" {
     var pruned = try parse(std.testing.allocator, bytes, 11 + retention_seconds);
     defer pruned.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), pruned.count);
+}
+
+test "public JSONL is complete newest first and excludes retained identity" {
+    var history: History = .{};
+    defer history.deinit(std.testing.allocator);
+    var first = try sampleStore(std.testing.allocator, 1, "first\nline");
+    defer first.deinit(std.testing.allocator);
+    try history.accepted(std.testing.allocator, 10, first.get(1).?, false);
+    var second = try sampleStore(std.testing.allocator, 2, "quote \" and $HOME");
+    defer second.deinit(std.testing.allocator);
+    try history.accepted(std.testing.allocator, 20, second.get(2).?, false);
+    const bytes = try format(std.testing.allocator, &history);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings(
+        "{\"app_name\":\"app\",\"summary\":\"quote \\\" and $HOME\",\"body\":\"body\"}\n" ++
+            "{\"app_name\":\"app\",\"summary\":\"first\\nline\",\"body\":\"body\"}\n",
+        bytes,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "history_id") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "received_unix_seconds") == null);
+}
+
+test "empty public history is empty output" {
+    const history: History = .{};
+    const bytes = try format(std.testing.allocator, &history);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), bytes.len);
+}
+
+const ReadTranscript = struct {
+    bytes: []const u8,
+    failure: ?Error = null,
+    reads: usize = 0,
+
+    fn read(transcript: *ReadTranscript) Error![]u8 {
+        std.debug.assert(transcript.reads == 0);
+        transcript.reads += 1;
+        if (transcript.failure) |failure| return failure;
+        return std.testing.allocator.dupe(u8, transcript.bytes) catch error.OutOfMemory;
+    }
+};
+
+test "read transcript publishes one complete history or an exact error" {
+    const line =
+        \\{"received_unix_seconds":1,"history_id":1,"app_name":"app","summary":"summary","body":"body"}
+        \\
+    ;
+    var success = ReadTranscript{ .bytes = line };
+    var history = try load(&success, std.testing.allocator, 1);
+    defer history.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), success.reads);
+    try std.testing.expectEqual(@as(usize, 1), history.count);
+
+    var corrupt = ReadTranscript{ .bytes = "{}" };
+    try std.testing.expectError(
+        error.HistoryCorrupt,
+        load(&corrupt, std.testing.allocator, 1),
+    );
+    try std.testing.expectEqual(@as(usize, 1), corrupt.reads);
+
+    var failed = ReadTranscript{ .bytes = "", .failure = error.HistoryReadFailed };
+    try std.testing.expectError(
+        error.HistoryReadFailed,
+        load(&failed, std.testing.allocator, 1),
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed.reads);
 }
 
 test "corrupt incomplete oversized and duplicate input publishes no history" {
@@ -911,6 +1060,10 @@ fn fuzzHistory(_: void, smith: *std.testing.Smith) !void {
     }
     const encoded = try encode(std.testing.allocator, &history);
     defer std.testing.allocator.free(encoded);
+    const public = try format(std.testing.allocator, &history);
+    defer std.testing.allocator.free(public);
+    try std.testing.expect(public.len <= file_capacity);
+    if (public.len > 0) try std.testing.expectEqual(@as(u8, '\n'), public[public.len - 1]);
     var parsed = try parse(std.testing.allocator, encoded, 0);
     defer parsed.deinit(std.testing.allocator);
 }

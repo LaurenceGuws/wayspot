@@ -2,7 +2,7 @@
 # It narrows DOMAIN.yml; it does not add product scope.
 
 marathon: notification_banner_history
-state: retained_history_core_ready_for_review
+state: retained_history_cli_ready_for_review
 
 outcome: >
   Show accepted notifications immediately, then retain only bounded private
@@ -164,7 +164,25 @@ retained_history:
 history_interfaces:
   cli:
     entry: wayspot-beta notifications history
-    output: bounded newest-first records
+    output:
+      order: newest first
+      framing: newline-terminated JSON objects
+      fields:
+        - app_name
+        - summary
+        - body
+      excludes:
+        - received_unix_seconds
+        - history_id
+      bound_bytes: 33554432
+      rules:
+        - format the complete output before the first stdout write
+        - JSON escaping preserves embedded newlines and shell-significant text
+        - missing history is empty successful output
+        - inspection never creates, changes permissions, or rewrites retained data
+        - an existing directory or file with non-private permissions is rejected, not repaired
+        - read, clock, parse, prune, and format failure publish zero output bytes
+        - stdout failure is visible but cannot retract bytes already accepted by the operating system
   gui:
     entry: notifications mode in the shared picker
     rows: bounded newest-first records
@@ -180,6 +198,7 @@ files_proposed:
   src/notification_banner_run.zig: deterministic window sessions and strict transcript
   src/notification_banner_sdl.zig: one SDL window, text, pointer input, and cleanup
   src/notification_history.zig: retention, pruning, JSONL, and atomic persistence
+  src/main.zig: exact notification resident and history CLI argv dispatch
   existing_notification_files: retain DBus and active-record ownership
 
 proof:
@@ -204,7 +223,13 @@ proof:
     - DBus replies before a visible persistence failure can stop the resident process
     - strict filesystem transcripts preserve the prior bytes before replacement
     - parent-sync failure retains the complete newly adopted bytes
-    - CLI and GUI history interfaces remain unimplemented
+    - GUI history interface remains unimplemented
+  retained_history_cli_receipts:
+    - 274 tests pass including public framing, strict read transcript, and generated formatting
+    - isolated native output is newest first and canonical bytes remain unchanged
+    - missing isolated state returns empty success without creating a wayspot directory
+    - corrupt isolated state returns visible failure with zero stdout bytes
+    - no DBus notification name is opened or owned
   live_banner_receipts:
     - 245 tests pass with generated banner histories and strict window transcripts
     - app id wayspot-notification and logical geometry 420 by 120
