@@ -1,7 +1,7 @@
 ---
 marathon: 7
 name: canonical_cmd_routes
-status: design_for_review
+status: checkpoint_1_for_review
 temporary: true
 
 authority:
@@ -368,6 +368,7 @@ presentation_boundary:
 implementation_checkpoints:
   - order: 1
     name: cli_cmd_theorem
+    status: implemented_uncommitted
     scope:
       - add cmd.zig with Cmd and bounded resolve
       - route existing apps and notifications argv through one exhaustive switch
@@ -380,6 +381,23 @@ implementation_checkpoints:
       production_added: 3500..6000
       tests_added: 4000..7000
       deletion_target: direct duplicate argv decisions in main and cli
+    implementation_receipts:
+      - Cmd contains exactly apps.list, apps.open, notifications.run, and
+        notifications.history
+      - notification arguments resolve before desktop discovery
+      - zero arguments bypass Cmd resolution and retain direct apps picker startup
+      - query UTF-8 and total bytes are checked before the caller buffer is written
+      - exact desktop id or unique exact app name is the only launch fallback
+      - fuzzy and typo app matches remain list-only
+      - main contains one exhaustive performer for every Cmd
+      - cmd.zig imports no notification, history, picker, SDL, CLI, launch, or main
+      - cli.zig owns only bounded help and app-list presentation
+      - isolated missing notification history succeeds without app discovery
+      - isolated malformed notification arguments return status 2 without output
+      - isolated app list, typo rejection, and exact structured launch pass
+      - 302 tests pass with the complete build
+      - production source is 2020 characters larger than checkpoint start
+      - cmd adds 2838 production characters, cli removes 1893, and main adds 1075
   - order: 2
     name: apps_rows_theorem
     scope:
@@ -539,8 +557,7 @@ open_product_decisions:
 
 review_gate:
   approved: false
-  source_implementation_blocked: true
+  source_implementation_blocked: checkpoint_2_and_later
   questions:
-    - approve the revised declarations and non-actionable record control flow
-    - approve Cmd, Table, Row, and Rows as the complete new vocabulary
-    - approve the four checkpoint order and final production net character cap
+    - approve or reject checkpoint 1 implementation
+    - keep checkpoint 2 blocked until this diff is committed
