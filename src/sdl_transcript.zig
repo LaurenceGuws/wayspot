@@ -21,6 +21,7 @@ const Wait = union(enum) {
 const Draw = struct {
     query: []const u8,
     rows: []const []const u8 = &.{},
+    app_indexes: []const u16 = &.{},
     selected_row: usize = 0,
     result: Result = .ok,
 };
@@ -38,6 +39,7 @@ const Step = union(enum) {
 
 const Transcript = struct {
     steps: []const Step,
+    applications: []const apps.App,
     index: usize = 0,
     mismatch: bool = false,
 
@@ -96,8 +98,17 @@ const Transcript = struct {
         };
         if (!std.mem.eql(u8, expected.query, frame.query)) return error.TranscriptMismatch;
         if (expected.rows.len != frame.row_count) return error.TranscriptMismatch;
-        for (expected.rows, frame.rowSlice()) |expected_name, row| {
-            if (!std.mem.eql(u8, expected_name, row.name)) return error.TranscriptMismatch;
+        if (expected.app_indexes.len != frame.row_count) return error.TranscriptMismatch;
+        for (expected.rows, expected.app_indexes, frame.rowSlice()) |expected_name, expected_index, row| {
+            const app_index = switch (row) {
+                .app => |index| index,
+            };
+            if (app_index != expected_index or app_index >= transcript.applications.len) {
+                return error.TranscriptMismatch;
+            }
+            if (!std.mem.eql(u8, expected_name, transcript.applications[app_index].name)) {
+                return error.TranscriptMismatch;
+            }
         }
         if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
             return error.TranscriptMismatch;
@@ -149,7 +160,7 @@ fn simulate(steps: []const Step) !void {
 
 fn simulateApps(steps: []const Step, applications: []const apps.App) !?usize {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
-    var transcript = Transcript{ .steps = steps };
+    var transcript = Transcript{ .steps = steps, .applications = applications };
     const result = picker.run(&transcript, applications);
     try transcript.done();
     return result;
@@ -280,17 +291,89 @@ test "filtering resets selection and enter returns the displayed app" {
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
-        .{ .draw = .{ .query = "", .rows = &.{ "Firefox", "Kitty" } } },
+        .{ .draw = .{
+            .query = "",
+            .rows = &.{ "Firefox", "Kitty" },
+            .app_indexes = &.{ 0, 1 },
+        } },
         .{ .wait = .{ .event = .down } },
-        .{ .draw = .{ .query = "", .rows = &.{ "Firefox", "Kitty" }, .selected_row = 1 } },
+        .{ .draw = .{
+            .query = "",
+            .rows = &.{ "Firefox", "Kitty" },
+            .app_indexes = &.{ 0, 1 },
+            .selected_row = 1,
+        } },
         .{ .wait = .{ .event = .{ .text = try picker.Text.init("fire") } } },
-        .{ .draw = .{ .query = "fire", .rows = &.{"Firefox"} } },
+        .{ .draw = .{
+            .query = "fire",
+            .rows = &.{"Firefox"},
+            .app_indexes = &.{0},
+        } },
         .{ .wait = .{ .event = .enter } },
         .{ .stop_text = .ok },
         .destroy,
         .quit,
     }, &applications);
     try std.testing.expectEqual(@as(?usize, 0), selected);
+}
+
+test "scroll hover and click preserve exact row and application identity" {
+    const applications = [_]apps.App{
+        testApp("App 00"),
+        testApp("App 01"),
+        testApp("App 02"),
+        testApp("App 03"),
+        testApp("App 04"),
+        testApp("App 05"),
+        testApp("App 06"),
+        testApp("App 07"),
+        testApp("App 08"),
+        testApp("App 09"),
+        testApp("App 10"),
+        testApp("App 11"),
+        testApp("App 12"),
+        testApp("App 13"),
+        testApp("App 14"),
+        testApp("App 15"),
+    };
+    const initial_names = [_][]const u8{
+        "App 00", "App 01", "App 02", "App 03", "App 04", "App 05", "App 06",
+        "App 07", "App 08", "App 09", "App 10", "App 11", "App 12", "App 13",
+    };
+    const initial_indexes = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+    const scrolled_names = [_][]const u8{
+        "App 02", "App 03", "App 04", "App 05", "App 06", "App 07", "App 08",
+        "App 09", "App 10", "App 11", "App 12", "App 13", "App 14", "App 15",
+    };
+    const scrolled_indexes = [_]u16{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const selected = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{
+            .query = "",
+            .rows = &initial_names,
+            .app_indexes = &initial_indexes,
+        } },
+        .{ .wait = .{ .event = .{ .scroll = 2 } } },
+        .{ .draw = .{
+            .query = "",
+            .rows = &scrolled_names,
+            .app_indexes = &scrolled_indexes,
+        } },
+        .{ .wait = .{ .event = .{ .hover = 5 } } },
+        .{ .draw = .{
+            .query = "",
+            .rows = &scrolled_names,
+            .app_indexes = &scrolled_indexes,
+            .selected_row = 5,
+        } },
+        .{ .wait = .{ .event = .{ .click = 5 } } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+    try std.testing.expectEqual(@as(?usize, 7), selected);
 }
 
 fn testApp(name: []const u8) apps.App {

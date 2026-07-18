@@ -32,7 +32,7 @@ pub const Native = struct {
             loaded: *sdl.SDL_Texture,
         };
 
-        app_index: usize,
+        app_index: u16,
         texture: Texture,
     };
 
@@ -203,6 +203,10 @@ pub const Native = struct {
         const query = if (frame.query.len == 0) "Search applications" else frame.query.ptr;
         try native.drawText(0, query, .{ 235, 235, 240 }, 20, 14);
         for (frame.rowSlice(), 0..) |row, index| {
+            const app_index = switch (row) {
+                .app => |value| value,
+            };
+            const app = try native.application(app_index);
             const row_rect = nativeRect(pixels.row(index));
             const selected = index == frame.selected_row;
             const color: [3]u8 = if (index == frame.selected_row)
@@ -217,8 +221,8 @@ pub const Native = struct {
                 return error.SdlDrawFailed;
             }
             var name: [apps.name_capacity:0]u8 = @splat(0);
-            @memcpy(name[0..row.name.len], row.name);
-            if (native.icon(row.app_index)) |item| switch (item.texture) {
+            @memcpy(name[0..app.name.len], app.name);
+            if (native.icon(app_index)) |item| switch (item.texture) {
                 .missing, .rejected => {},
                 .loaded => |texture| {
                     const target = nativeRect(pixels.icon(index));
@@ -229,7 +233,7 @@ pub const Native = struct {
         }
         try drawScrollbar(renderer, frame);
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
-        if (native.firstMissing(frame)) |app_index| {
+        if (try native.firstMissing(frame)) |app_index| {
             native.pending_icons = true;
             try native.load(app_index);
         } else {
@@ -270,7 +274,12 @@ pub const Native = struct {
         native.initialized = false;
     }
 
-    fn icon(native: *const Native, app_index: usize) ?Icon {
+    fn application(native: *const Native, app_index: u16) !*const apps.App {
+        if (app_index >= native.applications.len) return error.ApplicationIndexInvalid;
+        return &native.applications[app_index];
+    }
+
+    fn icon(native: *const Native, app_index: u16) ?Icon {
         for (native.icons[0..native.icon_count]) |item| {
             if (item.app_index == app_index) return item;
         }
@@ -337,10 +346,13 @@ pub const Native = struct {
         if (!sdl.TTF_DrawRendererText(item, x, y)) return error.TtfTextDrawFailed;
     }
 
-    fn firstMissing(native: *const Native, frame: *const picker.Frame) ?usize {
+    fn firstMissing(native: *const Native, frame: *const picker.Frame) !?u16 {
         for (frame.rowSlice()) |row| {
-            const name = native.applications[row.app_index].icon orelse continue;
-            if (name.len > 0 and native.icon(row.app_index) == null) return row.app_index;
+            const app_index = switch (row) {
+                .app => |value| value,
+            };
+            const name = (try native.application(app_index)).icon orelse continue;
+            if (name.len > 0 and native.icon(app_index) == null) return app_index;
         }
         return null;
     }
@@ -350,7 +362,10 @@ pub const Native = struct {
         while (index < native.icon_count) {
             var visible = false;
             for (frame.rowSlice()) |row| {
-                if (row.app_index == native.icons[index].app_index) visible = true;
+                const app_index = switch (row) {
+                    .app => |value| value,
+                };
+                if (app_index == native.icons[index].app_index) visible = true;
             }
             if (visible) {
                 index += 1;
@@ -362,9 +377,9 @@ pub const Native = struct {
         }
     }
 
-    fn load(native: *Native, app_index: usize) !void {
+    fn load(native: *Native, app_index: u16) !void {
         std.debug.assert(native.icon_count < native.icons.len);
-        const name = native.applications[app_index].icon orelse return;
+        const name = (try native.application(app_index)).icon orelse return;
         var paths: icon_path.Paths = .{ .home = native.home, .icon = name };
         var rejected: ?Icon.Rejection = null;
         while (paths.next() catch {
@@ -416,7 +431,7 @@ pub const Native = struct {
         native.remember(app_index, if (rejected) |reason| .{ .rejected = reason } else .missing);
     }
 
-    fn remember(native: *Native, app_index: usize, texture: Icon.Texture) void {
+    fn remember(native: *Native, app_index: u16, texture: Icon.Texture) void {
         std.debug.assert(native.icon_count < native.icons.len);
         native.icons[native.icon_count] = .{ .app_index = app_index, .texture = texture };
         native.icon_count += 1;
@@ -450,4 +465,44 @@ fn drawScrollbar(renderer: *sdl.SDL_Renderer, frame: *const picker.Frame) !void 
 
 fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+}
+
+test "native app and icon lookup preserve the exact checked row index" {
+    const applications = [_]apps.App{
+        testApp("Zero"),
+        testApp("One"),
+    };
+    var native: Native = undefined;
+    native.applications = &applications;
+    native.icon_count = 0;
+    try std.testing.expect((try native.application(1)) == &applications[1]);
+    try std.testing.expectError(error.ApplicationIndexInvalid, native.application(2));
+
+    var with_icon = applications;
+    with_icon[1].icon = "one";
+    native.applications = &with_icon;
+    var frame = picker.Frame{ .query = "" };
+    frame.rows[0] = .{ .app = 1 };
+    frame.row_count = 1;
+    try std.testing.expectEqual(@as(?u16, 1), try native.firstMissing(&frame));
+    frame.rows[0] = .{ .app = 2 };
+    try std.testing.expectError(error.ApplicationIndexInvalid, native.firstMissing(&frame));
+}
+
+fn testApp(name: []const u8) apps.App {
+    return .{
+        .storage = @constCast(""),
+        .id = "test.desktop",
+        .name = name,
+        .generic_name = null,
+        .keywords = null,
+        .icon = null,
+        .exec = "test",
+        .try_exec = null,
+        .only_show_in = null,
+        .not_show_in = null,
+        .path = null,
+        .terminal = false,
+        .issues = .initEmpty(),
+    };
 }

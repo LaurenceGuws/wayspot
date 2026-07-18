@@ -400,6 +400,7 @@ implementation_checkpoints:
       - cmd adds 2838 production characters, cli removes 1893, and main adds 1075
   - order: 2
     name: apps_rows_theorem
+    status: implemented_uncommitted
     scope:
       - add Table, Row, and Rows apps arm
       - replace picker-owned app-specific Row and selection helpers
@@ -412,6 +413,23 @@ implementation_checkpoints:
       production_net: -1000..2500
       tests_added: 3000..5000
       stop_if: picker or SDL gains a second retained app representation
+    implementation_receipts:
+      - Table, Row, and Rows contain only the production-reachable apps arm
+      - Rows.apps borrows the immutable application slice and owns one Matches value
+      - Frame carries only Row.app with one checked u16 application index
+      - SDL resolves every name and icon from its authoritative application slice
+      - query changes construct complete Query and Rows values before publication
+      - app matching occurs once at startup and once per accepted query change
+      - old app_index plus name projection, selectedApp, and matchCount are deleted
+      - strict transcripts preserve query, order, indexes, selection, scroll,
+        hover, click, Enter, cleanup, and launch result
+      - picker and SDL import no notification history and perform no history access
+      - checkpoint production source is 2225 characters larger than its start
+      - 1830 picker characters from the superseded shape are deleted
+      - one apps.Matches.init remains in the complete production picker path
+      - 333 tests pass, including the linked SDL native index test
+      - no live GUI receipt was run because strict transcripts prove this
+        nonvisual ownership change without disrupting the operator
   - order: 3
     name: root_and_notification_rows
     scope:

@@ -8,6 +8,60 @@ pub const visible_row_capacity = 14;
 pub const event_capacity = 64;
 const events_before_draw_capacity = 1024;
 
+pub const Table = enum {
+    apps,
+};
+
+pub const Row = union(enum) {
+    app: u16,
+};
+
+pub const Rows = union(Table) {
+    apps: struct {
+        applications: []const apps.App,
+        matches: apps.Matches,
+    },
+
+    pub fn initApps(applications: []const apps.App, query: []const u8) !Rows {
+        if (applications.len > apps.app_capacity) return error.TooManyApplications;
+        if (query.len > query_capacity) return error.QueryTooLong;
+        if (!std.unicode.utf8ValidateSlice(query)) return error.InvalidText;
+        const matches = apps.Matches.init(applications, query);
+        for (matches.slice()) |index| {
+            if (index >= applications.len or index > std.math.maxInt(u16)) {
+                return error.ApplicationIndexInvalid;
+            }
+        }
+        return .{ .apps = .{ .applications = applications, .matches = matches } };
+    }
+
+    pub fn count(rows: *const Rows) usize {
+        return switch (rows.*) {
+            .apps => |app_rows| app_rows.matches.count,
+        };
+    }
+
+    pub fn row(rows: *const Rows, index: usize) ?Row {
+        return switch (rows.*) {
+            .apps => |app_rows| {
+                if (index >= app_rows.matches.count) return null;
+                const app_index = app_rows.matches.indexes[index];
+                if (app_index >= app_rows.applications.len or app_index > std.math.maxInt(u16)) {
+                    return null;
+                }
+                return .{ .app = @intCast(app_index) };
+            },
+        };
+    }
+};
+
+comptime {
+    std.debug.assert(std.meta.fields(Table).len == 1);
+    std.debug.assert(std.meta.fields(Row).len == 1);
+    std.debug.assert(std.meta.fields(Rows).len == 1);
+    std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
+}
+
 /// Text owns one bounded SDL text event after the native event returns.
 pub const Text = struct {
     bytes: [query_capacity]u8 = undefined,
@@ -50,11 +104,6 @@ pub const Events = struct {
     pub fn slice(events: *const Events) []const Event {
         return events.items[0..events.count];
     }
-};
-
-pub const Row = struct {
-    app_index: usize,
-    name: []const u8,
 };
 
 pub const Frame = struct {
@@ -122,12 +171,29 @@ pub fn run(operations: anytype, applications: []const apps.App) !?usize {
 
 const State = struct {
     query: Query = .{},
+    rows: Rows = .{ .apps = .{ .applications = &.{}, .matches = .{} } },
     selected: usize = 0,
     first: usize = 0,
+
+    fn setQuery(state: *State, applications: []const apps.App, query: Query) !void {
+        const rows = try Rows.initApps(applications, query.text());
+        state.query = query;
+        state.rows = rows;
+        state.selected = 0;
+        state.first = 0;
+    }
+
+    fn selection(state: *const State) ?usize {
+        const row = state.rows.row(state.selected) orelse return null;
+        return switch (row) {
+            .app => |index| @intCast(index),
+        };
+    }
 };
 
 fn eventLoop(operations: anytype, applications: []const apps.App, state: *State) !?usize {
-    var frame = makeFrame(state, applications);
+    state.rows = try Rows.initApps(applications, state.query.text());
+    var frame = makeFrame(state);
     try operations.draw(&frame);
 
     var events_since_draw: usize = 0;
@@ -139,27 +205,26 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
             switch (event) {
                 .quit, .escape => return null,
                 .backspace => {
-                    state.query.delete();
-                    state.selected = 0;
-                    state.first = 0;
+                    var query = state.query;
+                    query.delete();
+                    try state.setQuery(applications, query);
                 },
                 .up => {
                     state.selected -|= 1;
                     keepSelectedVisible(state);
                 },
                 .down => {
-                    const matched_count = matchCount(applications, state.query.text());
-                    if (state.selected + 1 < matched_count) state.selected += 1;
+                    if (state.selected + 1 < state.rows.count()) state.selected += 1;
                     keepSelectedVisible(state);
                 },
-                .enter => return selectedApp(applications, state.query.text(), state.selected),
+                .enter => return state.selection(),
                 .text => |text| {
-                    try state.query.append(text.slice());
-                    state.selected = 0;
-                    state.first = 0;
+                    var query = state.query;
+                    try query.append(text.slice());
+                    try state.setQuery(applications, query);
                 },
                 .hover => |row| {
-                    if (visibleSelection(state, row, matchCount(applications, state.query.text()))) |selected| {
+                    if (visibleSelection(state, row, state.rows.count())) |selected| {
                         state.selected = selected;
                     }
                 },
@@ -167,11 +232,11 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
                     state.selected = visibleSelection(
                         state,
                         row,
-                        matchCount(applications, state.query.text()),
+                        state.rows.count(),
                     ) orelse continue;
-                    return selectedApp(applications, state.query.text(), state.selected);
+                    return state.selection();
                 },
-                .scroll => |rows| scroll(state, matchCount(applications, state.query.text()), rows),
+                .scroll => |rows| scroll(state, state.rows.count(), rows),
                 .redraw => {},
                 .ignored => continue,
                 .idle => {},
@@ -186,26 +251,25 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
         }
         events_since_draw = 0;
         changed_since_draw = false;
-        frame = makeFrame(state, applications);
+        frame = makeFrame(state);
         try operations.draw(&frame);
     }
 }
 
-fn makeFrame(state: *const State, applications: []const apps.App) Frame {
-    const found = apps.Matches.init(applications, state.query.text());
+fn makeFrame(state: *const State) Frame {
     var frame = Frame{
         .query = state.query.text(),
-        .first = @min(state.first, found.count),
-        .total_count = found.count,
+        .first = @min(state.first, state.rows.count()),
+        .total_count = state.rows.count(),
     };
-    for (found.slice()[frame.first..]) |app_index| {
+    while (frame.first + frame.row_count < frame.total_count) {
         if (frame.row_count == visible_row_capacity) break;
-        frame.rows[frame.row_count] = .{ .app_index = app_index, .name = applications[app_index].name };
+        frame.rows[frame.row_count] = state.rows.row(frame.first + frame.row_count) orelse unreachable;
         frame.row_count += 1;
     }
     if (frame.row_count > 0) {
         std.debug.assert(state.selected >= frame.first);
-        std.debug.assert(state.selected < found.count);
+        std.debug.assert(state.selected < frame.total_count);
         frame.selected_row = state.selected - frame.first;
     }
     return frame;
@@ -234,15 +298,6 @@ fn scroll(state: *State, total: usize, rows: i8) void {
     } else {
         state.selected = std.math.clamp(state.selected, state.first, @min(total - 1, state.first + visible_row_capacity - 1));
     }
-}
-
-fn selectedApp(applications: []const apps.App, query: []const u8, selected: usize) ?usize {
-    const found = apps.Matches.init(applications, query);
-    return if (selected < found.count) found.indexes[selected] else null;
-}
-
-fn matchCount(applications: []const apps.App, query: []const u8) usize {
-    return apps.Matches.init(applications, query).count;
 }
 
 test "query accepts its exact bound and rejects the next byte without mutation" {
@@ -288,6 +343,40 @@ test "viewport follows keys and wheel without exceeding results" {
     scroll(&state, 2, 3);
     try std.testing.expectEqual(@as(usize, 0), state.first);
     try std.testing.expectEqual(@as(usize, 1), state.selected);
+}
+
+test "apps rows borrow one app slice and return only checked indexes" {
+    const applications = [_]apps.App{
+        testApp("Zulu", null, null),
+        testApp("Alpha", null, null),
+    };
+    const rows = try Rows.initApps(&applications, "");
+    try std.testing.expect(rows == .apps);
+    try std.testing.expect(rows.apps.applications.ptr == &applications);
+    try std.testing.expectEqual(@as(usize, 2), rows.count());
+    try std.testing.expectEqual(Row{ .app = 1 }, rows.row(0).?);
+    try std.testing.expectEqual(Row{ .app = 0 }, rows.row(1).?);
+    try std.testing.expectEqual(@as(?Row, null), rows.row(2));
+    try std.testing.expect(@sizeOf(Row) <= @sizeOf(u16) * 2);
+}
+
+test "failed rows transition preserves query rows and selection" {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{
+        .rows = try Rows.initApps(&applications, ""),
+        .selected = 0,
+        .first = 0,
+    };
+    const before_rows = state.rows;
+    var invalid: Query = .{};
+    invalid.bytes[0] = 0xff;
+    invalid.len = 1;
+    try std.testing.expectError(error.InvalidText, state.setQuery(&applications, invalid));
+    try std.testing.expectEqualStrings("", state.query.text());
+    try std.testing.expectEqual(before_rows.apps.applications.ptr, state.rows.apps.applications.ptr);
+    try std.testing.expectEqual(before_rows.apps.matches.count, state.rows.apps.matches.count);
+    try std.testing.expectEqual(@as(usize, 0), state.selected);
+    try std.testing.expectEqual(@as(usize, 0), state.first);
 }
 
 fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {

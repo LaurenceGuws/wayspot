@@ -114,6 +114,24 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_sdl_event_tests = b.addRunArtifact(sdl_event_tests);
+    const sdl_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sdl.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    sdl_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
+        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
+    });
+    sdl_tests.root_module.addIncludePath(sdl.path("include"));
+    sdl_tests.root_module.addIncludePath(text.include);
+    sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    sdl_tests.root_module.linkLibrary(text.library);
+    sdl_tests.use_llvm = true;
+    sdl_tests.use_lld = true;
+    const run_sdl_tests = b.addRunArtifact(sdl_tests);
     const sdl_pixels_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_pixels.zig"),
@@ -211,6 +229,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_icon_tests.step);
     test_step.dependOn(&run_image_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
+    test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     test_step.dependOn(&run_notification_dbus_tests.step);
