@@ -1,0 +1,1000 @@
+# Temporary design scratchpad. DOMAIN.yml owns product scope.
+
+marathon:
+  order: 8
+  id: wallpaper_monitor_surfaces
+  status: design_for_review
+  source_commit_read: 8be7428
+  useful_product_path: >
+    wayspot-beta wallpaper IMAGE.png starts one sleeping Hyprland-only process
+    that shows the same validated image on exactly one background surface for
+    every current monitor and reconciles those surfaces when monitors change.
+  theorem: >
+    Given one valid bounded PNG and one complete bounded Hyprland monitor
+    snapshot, prepare a complete replacement set of background surfaces, then
+    publish it as one round; monitor events may replace that set but unrelated
+    desktop events can never replace the image round.
+
+current_source:
+  implemented:
+    - wayspot-beta has accepted apps and notifications product paths
+    - SDL 3.4.12 is statically linked and already decodes bounded PNG icons
+    - strict compile-time concrete transcripts are an accepted test shape
+    - resident notification stop and cleanup behavior provides lifecycle evidence
+  absent:
+    - wallpaper source files
+    - wallpaper argv meaning or performer
+    - Hyprland request and socket2 clients
+    - Wayland layer-shell bindings
+    - wallpaper image ownership
+    - wallpaper monitor reconciliation
+  consequence: >
+    This marathon is new work. No deleted wallpaper owner, event vocabulary,
+    process loop, or surface architecture is precedent.
+
+authoritative_references:
+  hyprland:
+    source_tag: v0.55.4
+    source_commit: a0136d8c04687bb36eb8a28eb9d1ff92aea99704
+    request_socket: "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock"
+    event_socket: "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+    monitor_request_bytes: "j/monitors"
+    monitor_response_fields_used:
+      - name
+      - width
+      - height
+      - x
+      - y
+      - scale
+      - transform
+      - disabled
+    event_record: "EVENT>>DATA\\n"
+    refresh_events:
+      - monitoradded
+      - monitoraddedv2
+      - monitorremoved
+      - monitorremovedv2
+      - configreloaded
+    ignored_events:
+      - focusedmon
+      - focusedmonv2
+      - workspace
+      - workspacev2
+      - activewindow
+      - activewindowv2
+      - openwindow
+      - closewindow
+    source_proof:
+      - HyprCtl.cpp emits the listed JSON monitor fields
+      - Monitor.cpp emits both legacy and v2 add/remove records
+      - ConfigManager.cpp emits configreloaded after configuration reload
+      - request connections are synchronous and must close immediately
+  layer_shell:
+    xml: protocols/wlr-layer-shell-unstable-v1.xml
+    source: pinned Hyprland v0.55.4 protocol XML
+    hyprland_version: 5
+    chosen_version: 3
+    minimum_versions:
+      get_layer_surface: 1
+      layer_surface_set_size: 1
+      layer_surface_set_anchor: 1
+      layer_surface_set_exclusive_zone: 1
+      layer_surface_set_keyboard_interactivity: 1
+      layer_surface_ack_configure: 1
+      layer_surface_destroy: 1
+      layer_shell_destroy: 3
+    values:
+      layer: background
+      anchors: [top, bottom, left, right]
+      exclusive_zone: -1
+      keyboard_interactivity: none
+      input_region: empty
+      namespace: wayspot-beta-wallpaper
+    required_sequence:
+      - assign the role before any buffer is attached or committed
+      - set layer state
+      - commit once without a buffer
+      - wait for configure
+      - acknowledge the latest configure serial
+      - attach the prepared buffer and commit
+    reason_for_version_3: >
+      Version 3 contains every request this theorem uses, including explicit
+      layer-shell destruction, and avoids claiming later protocol capability.
+    exclusive_zone_proof: >
+      The pinned version-1 request text defines -1 as extending to every
+      anchored edge and names wallpaper as an intended use. Hyprland v0.55.4
+      advertises layer-shell v5, accepts the signed zone, and implements
+      background-layer surfaces.
+  viewporter:
+    xml: protocols/viewporter.xml
+    source: SDL release-3.4.12 pinned Wayland protocol input
+    chosen_version: 1
+    use: >
+      Set each surface destination to the layer configure's logical dimensions
+      while its buffer uses the monitor's exact Hyprland pixel dimensions.
+  core_wayland:
+    xml: vendor/sdl/wayland-protocols/wayland.xml
+    empty_input_region: >
+      wl_compositor.create_region creates an empty region because no rectangles
+      are added. wl_surface.set_input_region copies that state into pending
+      surface state, so wl_region.destroy is valid before the surface commit.
+    input_region_minimum_versions:
+      wl_compositor_create_region: 1
+      wl_surface_set_input_region: 1
+      wl_region_destroy: 1
+    wl_output:
+      advertised_minimum: 4
+      bound_version: 4
+      required_initial_events:
+        - one geometry
+        - at least one mode, with exactly one final current mode
+        - one positive scale
+        - one bounded non-empty name
+        - one done after the preceding state
+      release_request_minimum: 3
+      name_event_minimum: 4
+      identity_proof: >
+        Core Wayland v4 defines name as unique among current wl_output globals,
+        immutable for that global, and shared across clients. Hyprland's
+        Output.cpp sends m_monitor->m_name as wl_output.name, while Monitor.cpp
+        assigns m_name from the Aquamarine output name also emitted by
+        j/monitors and monitor add/remove events.
+    required_globals:
+      wl_compositor: { advertised_minimum: 4, bound_version: 4 }
+      wl_shm: { advertised_minimum: 1, bound_version: 1 }
+      wp_viewporter: { advertised_minimum: 1, bound_version: 1 }
+      zwlr_layer_shell_v1: { advertised_minimum: 3, bound_version: 3 }
+    discovery: >
+      Install the registry listener, perform one roundtrip to receive globals
+      and issue bounded binds, then perform a second roundtrip to receive each
+      bound output's initial events through done. Matching is forbidden before
+      the second roundtrip and complete output validation.
+  sdl:
+    source_release: release-3.4.12
+    source_commit: f87239e71e42da91ca317a12eefb82cfbf3393eb
+    capability:
+      ordinary_window: creates an XDG toplevel and is not a wallpaper
+      custom_role: explicitly supports application-owned protocols such as wlr_layer_shell
+      png: SDL_LoadPNG_IO returns an owned SDL_Surface
+      scale: SDL_BlitSurfaceScaled performs bounded linear scaling
+    decision: >
+      Do not create SDL windows. Decode and scale with SDL_Surface, then publish
+      owned pixels through direct Wayland wl_shm layer surfaces.
+    reason: >
+      SDL custom-role windows are valid, but still require layer-shell bindings
+      and hide buffer release and commit batching behind a renderer. Direct
+      wl_shm makes static wallpaper ownership, publication, and cleanup smaller
+      and exact; no GPU or frame loop is needed.
+  zig:
+    version: 0.16.0
+    use:
+      - std.Io bounded file reads for encoded image intake
+      - std.Io network operations where their Unix-socket semantics are sufficient
+      - explicit native calls only where Wayland or poll has no direct std.Io product shape
+      - std.testing.Smith for bounded structured histories and malformed bytes
+    rule: >
+      std.Io is an injected external capability, not proof by itself. Product
+      code consumes the same concrete operation set implemented by Native and
+      the strict Transcript.
+
+nouns:
+  Monitor: one enabled Hyprland output identified by its exact Wayland output name
+  Image: one owned decoded PNG used by the complete process lifetime
+  SurfaceHandle: one checked u8 slot owned concretely by Native or Transcript
+  Surface: native resources behind one live SurfaceHandle
+  Round: one complete published monitor-to-SurfaceHandle set for the process Image
+  Event: one complete Hyprland socket2 line classified as refresh or ignore
+  Native: production implementation of the exact filesystem, socket, poll, SDL, and Wayland tasks
+  Transcript: strict deterministic implementation of those same tasks
+verbs:
+  readMonitors: request and parse one complete monitor snapshot
+  readImage: read, inspect, decode, and normalize one PNG
+  prepare: create an unpublished complete surface set
+  publish: commit every prepared surface and flush one Wayland batch
+  reconcile: replace the current surface set after a relevant monitor change
+  wait: sleep for stop, Hyprland event bytes, or Wayland events
+  deinit: release one owner in reverse acquisition order
+forbidden_vocabulary:
+  - provider
+  - service
+  - controller
+  - registry as a Wayspot product abstraction
+  - environment framework
+  - cache
+  - config
+  - history
+  - manager
+  - daemon supervisor
+  - backend plugin
+  - wallpaper candidate
+  - wallpaper command queue
+
+minimum_file_tree:
+  - path: src/wallpaper.zig
+    owner: >
+      Owns Monitor, Image bounds, Round state, JSON/event parsing, startup,
+      reconciliation, publication rules, and the compile-time concrete task contract.
+  - path: src/wallpaper_native.zig
+    owner: >
+      Owns native Hyprland sockets, stop polling, SDL PNG surfaces, the Wayland
+      connection, generated layer-shell objects, shared-memory files, mappings,
+      buffers, and exact OS error translation.
+  - path: src/wallpaper_transcript.zig
+    owner: >
+      Owns strict bounded external histories and cross-boundary lifecycle simulations.
+  - path: protocols/wlr-layer-shell-unstable-v1.xml
+    owner: >
+      Pins the exact protocol input copied byte-for-byte from Hyprland v0.55.4
+      for build-time wayland-scanner generation.
+  - path: protocols/viewporter.xml
+    owner: >
+      Pins the exact stable viewporter input already carried by SDL 3.4.12 for
+      build-time wayland-scanner generation.
+  - path: src/cmd.zig
+    change_only: adds the real wallpaper run meaning carrying one borrowed checked path
+  - path: src/main.zig
+    change_only: exhaustively performs wallpaper run with Native
+  - path: build.zig
+    change_only: generates and compiles layer-shell bindings and wires native/parity tests
+
+dependency_direction:
+  production:
+    - main -> cmd
+    - main -> wallpaper
+    - main -> wallpaper_native
+    - wallpaper -> std only
+    - wallpaper_native -> wallpaper
+    - wallpaper_native -> SDL
+    - wallpaper_native -> wayland-client
+    - wallpaper_native -> generated layer-shell bindings
+  tests:
+    - wallpaper_transcript -> wallpaper
+  forbidden:
+    - wallpaper -> main
+    - wallpaper -> cmd
+    - wallpaper -> picker
+    - wallpaper -> notification files
+    - wallpaper -> wallpaper_native
+    - transcript -> native
+    - SDL or Wayland types in Monitor, Image, Event, or Round meaning
+
+data_shapes:
+  Monitor:
+    fields:
+      name: "owned [monitor_name_capacity]u8 plus u8 length"
+      x: i32
+      y: i32
+      width_pixels: u32
+      height_pixels: u32
+      scale_100: u16
+      transform: "enum { normal, rotate_90, rotate_180, rotate_270, flipped, flipped_90, flipped_180, flipped_270 }"
+    stable_identity: name
+    identity_reason: >
+      Hyprland add/remove events and Wayland wl_output version 4 expose the same
+      connector name. Numeric Hyprland monitor IDs are not Wayland identities
+      and are not retained.
+    scale_conversion: >
+      Hyprland v0.55.4 emits scale with two decimal places. Parse that wire
+      value exactly into scale_100; reject noncanonical or excessive values.
+    geometry_use:
+      - width_pixels and height_pixels bound decoded output work
+      - x and y prove snapshot identity/equality but never place layer surfaces
+      - scale participates in snapshot equality
+      - viewporter maps exact monitor pixels to layer configure dimensions
+      - transform is retained for equality; Hyprland/Wayland apply output transform
+    rejected:
+      - empty or duplicate name
+      - disabled monitor
+      - zero dimensions
+      - coordinate overflow
+      - unknown transform
+      - non-finite, zero, negative, or unrepresentable scale
+  Image:
+    fields:
+      path: borrowed process argv bytes for startup only
+      width: u32
+      height: u32
+      pixels: owned normalized XRGB8888 bytes
+    format: PNG only
+    alpha_policy: composite transparent pixels over opaque black before publication
+    reason_for_png_only: >
+      SDL 3.4.12 already provides the pinned hardened PNG decoder. SDL_image
+      source is not vendored. Adding formats or a decoder dependency does not
+      strengthen the one-surface theorem and belongs to a later approved need.
+  SurfaceHandle:
+    declaration: "packed struct { index: u8 }"
+    rule: >
+      Native and Transcript each own a fixed surface_slot_capacity slot array,
+      large enough for one current and one completely prepared set.
+      prepare returns the index of one occupied slot; every operation checks the
+      index, occupied state, and exact monitor name. It is not a pointer,
+      erased handle, runtime interface, or transferable native integer.
+  RoundSurface:
+    fields:
+      monitor_index: u8
+      handle: SurfaceHandle
+    rule: >
+      wallpaper.zig owns only this monitor-to-slot identity. Native owns its
+      checked output-table index, wl_surface, viewport, layer surface, file,
+      mapping, pool, buffer, configure state, and release state inside the
+      occupied slot. Native's output table alone owns each wl_output proxy.
+      Transcript owns only the corresponding strict simulated slot state.
+  Round:
+    fields:
+      monitors: bounded sorted array
+      surfaces: "equal-length bounded array of RoundSurface"
+    equality: >
+      Monitor snapshots compare sorted name, geometry, scale, and transform.
+      Event payload text does not define a Round.
+  pseudocode: |
+    const SurfaceHandle = packed struct { index: u8 };
+    const RoundSurface = struct {
+        monitor_index: u8,
+        handle: SurfaceHandle,
+    };
+    const Round = struct {
+        monitors: [monitor_capacity]Monitor,
+        monitor_count: u8,
+        surfaces: [surface_capacity]RoundSurface,
+        surface_count: u8,
+    };
+
+    fn prepare(source: anytype, monitor: Monitor, image: *const Image) !SurfaceHandle;
+    fn publish(source: anytype, handles: []const SurfaceHandle) !void;
+    fn unmapAndRelease(source: anytype, handle: SurfaceHandle) !void;
+    fn discardAfterDisconnect(source: anytype, handle: SurfaceHandle) void;
+  Event:
+    union:
+      refresh: "monitoradded, monitoraddedv2, monitorremoved, monitorremovedv2, configreloaded"
+      ignore: every other syntactically valid bounded event name
+    malformed: >
+      Missing separator, empty name, embedded NUL, invalid newline framing, or
+      overlong line is discarded without changing the current Round and without reconnecting.
+
+named_bounds:
+  monitor_capacity: 16
+  monitor_name_capacity: 128
+  monitor_response_capacity: 65536
+  unix_socket_path_capacity: 107
+  event_line_capacity: 4096
+  event_read_capacity: 8192
+  event_batch_capacity: 64
+  reconcile_attempt_capacity: 8
+  reconcile_wait_milliseconds: 250
+  reconcile_total_milliseconds: 2000
+  image_path_capacity: 4095
+  image_encoded_capacity: 67108864
+  image_side_capacity: 16384
+  image_pixel_capacity: 67108864
+  image_decoded_byte_capacity: 268435456
+  monitor_pixel_capacity: 33177600
+  round_pixel_capacity: 67108864
+  round_byte_capacity: 268435456
+  reconcile_byte_capacity: 536870912
+  wayland_global_capacity: 128
+  wayland_output_event_capacity: 32
+  wayland_configure_capacity_per_surface: 16
+  wayland_dispatch_capacity_per_wait: 128
+  buffer_release_callback_capacity: 128
+  buffer_release_wait_milliseconds: 1000
+  registry_roundtrip_capacity: 2
+  surface_capacity: 16
+  surface_slot_capacity: 32
+  poll_source_capacity: 3
+  notes:
+    - all capacities include exact endpoint tests
+    - monitor and round pixel products use checked u64 arithmetic before allocation
+    - image path capacity excludes the required terminating NUL
+    - one infinite resident event loop is explicit and asserts each iteration blocks or makes bounded progress
+
+scaling_and_crop:
+  policy: cover_center
+  steps:
+    - orient source dimensions in normal image orientation
+    - calculate the smallest rational scale that covers target pixel dimensions
+    - crop equal excess from opposite edges, with the final odd pixel on right or bottom
+    - use SDL_BlitSurfaceScaled with SDL_SCALEMODE_LINEAR into normalized XRGB8888 pixels
+  target_dimensions: >
+    Use the Hyprland monitor pixel dimensions for the buffer and the layer
+    configure dimensions for the viewporter destination. Both must be nonzero
+    and bounded before mapping.
+  transform: >
+    Do not rotate image bytes. The output transform belongs to the compositor;
+    swapping or rotating here would apply it twice.
+  invariants:
+    - crop is inside source dimensions
+    - every target pixel is initialized before buffer creation
+    - source and destination multiplication cannot overflow
+    - no upscaled or downscaled intermediate exceeds round_pixel_capacity
+
+ownership:
+  - resource: Hyprland request socket
+    owner: one readMonitors call
+    cleanup: close exactly once after EOF, error, or response bound
+    failure: snapshot is unpublished and the current Round remains unchanged
+  - resource: Hyprland socket2 stream
+    owner: Native event connection
+    cleanup: close exactly once before reconnect or process exit
+    failure: current Round remains visible while bounded reconnect runs
+  - resource: poll and stop
+    owner: Native blocks SIGINT and SIGTERM and owns one signalfd
+    cleanup: close signalfd and restore the prior signal mask exactly once
+    priority: stop wins over readable sockets and reconnect
+  - resource: monitor snapshot
+    owner: one local reconciliation attempt
+    cleanup: stack value; published only with a complete prepared surface set
+    failure: no current state mutation
+  - resource: Wayland display
+    owner: Native process lifetime
+    cleanup: destroy children, dispatch releases within bound, disconnect once
+    failure: process exits visibly because surfaces cannot remain correct
+  - resource: Wayland registry and required globals
+    owner: Native process lifetime
+    cleanup: destroy each bound global and registry exactly once before display disconnect
+    failure: >
+      Missing, duplicate, removed, or under-version required globals reject
+      startup; removal while running is fatal after exact display-loss cleanup.
+  - resource: Wayland output handles
+    owner: Native bounded output table
+    cleanup: wl_output.release exactly once because every output is bound at v4
+    failure: >
+      A valid snapshot without an exact complete output match is transient for
+      the bounded reconciliation attempts; it never reaches preparation.
+    global_remove: >
+      Mark the matching registry name removed immediately and request monitor
+      reconciliation. Do not match it again. If no Surface uses it, release it
+      immediately; otherwise release it only after that Surface is replaced.
+      A removed output still present in a snapshot is transient until the
+      bounded reconciliation attempts converge or expire.
+  - resource: empty input region
+    owner: one Surface preparation call until set_input_region returns
+    cleanup: destroy wl_region immediately after wl_surface.set_input_region
+    failure: destroy the complete unpublished surface set
+    sequence:
+      - wl_compositor.create_region
+      - add no rectangles
+      - wl_surface.set_input_region
+      - wl_region.destroy
+      - commit the pending empty input region with initial layer state
+  - resource: native surface
+    owner: one prepared Surface
+    cleanup: >
+      Orderly unmap and bounded release, then destroy viewport, layer surface,
+      and wl_surface. Display-loss cleanup occurs only after disconnect.
+    failure: destroy the complete unpublished surface set
+  - resource: encoded image bytes
+    owner: readImage until SDL decode returns
+    cleanup: free immediately after decode success or failure
+    failure: no Wayland objects are created
+  - resource: process Image
+    owner: wallpaper run loop, separate from Round
+    cleanup: destroy once after every SurfaceHandle is released or discarded
+    failure: startup publishes no Round
+  - resource: SDL decoded/scaled surfaces
+    owner: readImage or one Surface preparation
+    cleanup: SDL_DestroySurface exactly once
+    failure: no surface publication
+  - resource: shared-memory file and mapping
+    owner: one Surface
+    cleanup: wl_buffer release precedes unmap and close; forced disconnect makes release unnecessary
+    failure: destroy the complete unpublished surface set
+  - resource: current Round
+    owner: wallpaper run loop
+    cleanup: replaced only after new publication; deinit once on stop or fatal failure
+    failure: no partly prepared Round enters current state
+
+startup_sequence:
+  - validate exact argv count and bounded non-empty PNG path
+  - read and validate encoded PNG before opening compositor sockets
+  - decode one normalized owned Image
+  - open Wayland and install one registry listener
+  - perform registry roundtrip one; record bounded globals and bind exact chosen versions
+  - reject every advertised wl_output below v4; bind each accepted output at v4
+  - >
+    Perform registry roundtrip two; consume bounded geometry, current mode,
+    scale, name, and done events for every bound output.
+  - reject any output missing done or required facts, and reject duplicate output names
+  - validate compositor v4, shm v1, viewporter v1, and layer-shell v3 before surface work
+  - connect socket2 before requesting monitors so an add/remove cannot be lost
+  - >
+    Run the bounded reconciliation attempts with no current Round: drain both
+    event sources, request and validate j/monitors, and require an exact match
+    against complete nonretired named outputs.
+  - reject an empty matched snapshot
+  - prepare every roleless wl_surface and viewport
+  - >
+    For each surface create an empty wl_region, set it as the input region,
+    destroy the region, assign the background layer role and state, then make
+    the initial bufferless commit.
+  - prepare every pixel buffer
+  - receive and acknowledge every latest bounded layer configure
+  - attach all prepared buffers without publishing product state
+  - commit all surfaces and flush one bounded Wayland batch
+  - publish the complete Round in memory
+  - drain socket2 lines received during startup and reconcile once if any refresh event occurred
+  - enter the sleeping wait loop
+
+failure_atomic_publication:
+  rules:
+    - >
+      All fallible file, parse, decode, scale, allocation, output-match, role,
+      and configure work completes before buffer commits.
+    - one publish queues every surface commit before one explicit Wayland flush
+    - no prepared monitor is inserted into current state individually
+    - a preparation failure destroys every new resource and leaves the old Round untouched
+    - a flush or Wayland protocol failure is fatal and destroys both sets; it never claims a successful partial Round
+    - after successful flush, swap complete Round values, then destroy the old set
+  protocol_limit: >
+    Wayland has no cross-output transaction object. Atomic here means one
+    failure-atomic client publication batch: queue every prepared commit, issue
+    one flush, and only then replace Round in memory. It is not cross-output
+    display atomicity and does not promise simultaneous physical scanout.
+
+reconciliation:
+  trigger:
+    - any refresh Event marks one snapshot refresh pending
+    - all refresh Events in one drained batch collapse to one j/monitors request
+    - a layer configure with changed logical dimensions marks one refresh pending
+    - wl_registry.global_remove for a bound output marks one refresh pending
+  attempts:
+    bound: >
+      At most 8 attempts, at most 7 stop-aware waits capped at 250 ms each,
+      and one hard 2 s monotonic deadline covering drains, request-socket I/O,
+      matching, and waits.
+    algorithm:
+      - retain the exact current Round; startup has no Round yet
+      - read one monotonic deadline before the first attempt
+      - check stop before draining, requesting, waiting, or preparing
+      - drain bounded pending Wayland registry/output callbacks
+      - drain bounded socket2 lines; only refresh Events retain refresh pending
+      - request and parse one complete sorted j/monitors snapshot
+      - >
+        Drain both sources once more after the request. If output facts changed
+        or another refresh Event arrived, restart the attempt without matching
+        or preparing.
+      - compare only with complete, done, named, nonretired outputs
+      - >
+        If a monitor has no complete output, or a retired output name remains
+        in the snapshot, publish nothing, wait with stop priority, and retry
+        after draining both sources again.
+      - >
+        If monitor names match exactly and snapshot plus output facts are
+        unchanged, clear refresh pending and perform no image or surface work.
+      - prepare a complete new surface set only after an exact match
+      - publish the new set, then destroy removed and replaced old surfaces
+      - exhaust attempt count or deadline as visible fatal cleanup
+    no_generic_retry: >
+      This is a direct bounded loop inside reconciliation. It introduces no
+      retry type, scheduler, callback, framework, or reusable policy.
+    stop: >
+      Stop returns immediately to cleanup. It performs no further drain,
+      request, wait, output match, preparation, or publication.
+  event_rules:
+    monitor_add_remove: refresh from authoritative j/monitors; never trust event payload as a snapshot
+    geometry_scale: configreloaded or layer configure causes authoritative refresh
+    output_global_remove: retire the output name and refresh from authoritative j/monitors
+    focus_mouse_workspace_window: >
+      Classify and discard without setting refresh pending; these events cannot
+      enter reconciliation attempts or cause request, decode, prepare, or publication.
+    malformed_wire: discard one line; retain connection and Round
+  invariant: >
+    The Image identity never changes in Marathon 8. Therefore no event,
+    reconnect, focus change, or monitor refresh can begin a new image round.
+
+event_stream:
+  fragmentation: retain a bounded incomplete suffix across reads
+  coalescing: classify every complete newline-terminated line in order
+  overlong_line: discard bytes through the next newline without publishing an Event
+  eof_or_socket_failure: close once and enter bounded reconnect
+  reconnect:
+    - stop is checked before each attempt and wait
+    - retain the current visible Round
+    - connect socket2
+    - enter the same bounded reconciliation attempts
+    - resume event reads
+    - exhaust the shared attempts after two seconds with a visible fatal error
+  malformed_data: never reconnect solely because an event line is malformed
+  stop_priority: >
+    If stop and any socket are ready together, stop wins; no request, reconnect,
+    surface creation, or publication occurs afterward.
+
+cpu_and_waiting:
+  idle: one blocking poll over stop, socket2, and Wayland display readiness
+  wayland_read:
+    - dispatch already pending callbacks within the bound
+    - prepare one display read; dispatch pending callbacks and retry if required
+    - flush requests; include writable readiness only after EAGAIN
+    - poll signalfd, socket2, and the Wayland display fd
+    - cancel the prepared read if stop wins or the display was not readable
+    - otherwise read display events and dispatch pending callbacks within the bound
+  forbidden:
+    - timer-driven monitor polling
+    - SDL render loop
+    - busy retry
+    - focus-triggered work
+    - periodic image decode
+  wake_work: >
+    Drain at most event_batch_capacity lines and
+    wayland_dispatch_capacity_per_wait callbacks before polling again.
+  reconcile_wait: >
+    Each inter-attempt wait is the smaller of 250 ms and the remaining
+    monotonic deadline, polling stop, socket2, and Wayland together. Stop wins;
+    readable protocol sources are drained before the next snapshot.
+
+external_io_contract:
+  shape: >
+    wallpaper.run takes one compile-time concrete source. Native and Transcript
+    expose the same named tasks; there is no runtime vtable, generic storage,
+    compositor interface, or plugin registration.
+  exact_tasks:
+    filesystem:
+      - open image
+      - stat regular file
+      - read complete bounded bytes
+      - close image
+    hyprland:
+      - connect request socket
+      - write complete j/monitors bytes with partial/EINTR handling
+      - read bounded response fragments through EOF
+      - close request socket
+      - bound request connect, write, and read by the reconciliation deadline
+      - connect event socket
+      - read event fragments
+      - close event socket
+    wait:
+      - block SIGINT and SIGTERM and open signalfd
+      - read and close signalfd and restore the prior signal mask
+      - read monotonic time for one reconciliation deadline
+      - poll stop, event socket, and Wayland display
+      - bounded reconciliation-attempt wait
+    image:
+      - decode PNG
+      - convert XRGB8888
+      - scale cover crop
+      - destroy SDL surface
+    wayland:
+      - connect display
+      - get registry and install listener
+      - receive bounded global and global_remove records
+      - perform exactly two startup roundtrips
+      - bind compositor v4, shm v1, viewporter v1, and layer-shell v3
+      - bind every advertised wl_output v4
+      - receive output geometry, mode, scale, name, and done
+      - release removed or retired wl_output v4
+      - create roleless surface
+      - create empty region
+      - set surface input region
+      - destroy region
+      - create background layer role
+      - create viewport and set its destination
+      - initial empty commit
+      - receive configure or closed
+      - acknowledge configure
+      - create bounded shm file, mapping, pool, and buffer
+      - attach and damage buffer
+      - commit
+      - flush
+      - prepare, cancel, and complete display reads
+      - dispatch pending callbacks
+      - receive buffer release
+      - destroy in exact order
+  transcript_rules:
+    - every expected task is consumed exactly once and in order
+    - supplied bytes and returned fragments are exact
+    - handles are small bounded typed indexes, never native integers
+    - every opened handle must receive exactly one matching close/destroy
+    - every SurfaceHandle operation names the expected occupied slot and monitor
+    - region creation must be followed by set_input_region and region destruction
+    - no output may be matched before its first done
+    - every reconciliation attempt drains Wayland then socket2 before and after requesting monitors
+    - transient name mismatch consumes no SurfaceHandle task
+    - attempt and wait counts may not exceed their exact shared bounds
+    - transcript exhaustion and unexpected tasks fail tests
+    - histories are fixed-capacity and contain no heap allocation
+
+errors_and_failure_meaning:
+  startup_fatal:
+    - image path missing, empty, too long, inaccessible, wrong kind, or too large
+    - malformed PNG, unsupported format, excessive dimensions, or decode failure
+    - missing Hyprland environment needed to form the exact socket path
+    - socket path too long
+    - request connect, write, read, close, JSON, or monitor-bound failure
+    - no enabled monitor
+    - missing, duplicate, removed, or under-version required Wayland global
+    - missing output name/done/current mode/geometry/scale or duplicate output name
+    - SDL or Wayland preparation/configure/publication failure
+  running_recoverable:
+    - malformed bounded event line
+    - irrelevant event
+    - socket2 loss within the bounded reconnect window
+    - snapshot names temporarily differ from complete nonretired output names
+  running_fatal:
+    - request refresh failure
+    - reconciliation or socket2 reconnect exhaustion after the shared two-second bound
+    - Wayland display loss or protocol error
+    - inability to prepare the complete changed monitor set
+  meaning: >
+    Startup mismatch publishes nothing while bounded attempts converge.
+    Running mismatch retains the previous complete Round. Exhaustion reports
+    the mismatch and performs fatal cleanup rather than claiming current
+    monitors or outputs are matched.
+
+buffer_release:
+  orderly_replacement_or_stop:
+    - attach a null buffer to every retiring wl_surface
+    - commit every unmap and flush once
+    - >
+      Until all retiring buffers report wl_buffer.release, dispatch at most
+      buffer_release_callback_capacity callbacks and poll only until the shared
+      buffer_release_wait_milliseconds deadline.
+    - destroy each released buffer, pool, mapping, and file exactly once
+    - destroy its viewport, layer surface, and wl_surface
+  timeout_or_display_loss:
+    - cancel any prepared Wayland read
+    - disconnect the Wayland display before touching mapped pixel memory
+    - >
+      Mark every native Wayland object dead without sending destructor
+      requests, then unmap and close every local mapping and file exactly once.
+    - terminate the process visibly; replacement cannot retain new surfaces after disconnect
+  invariants:
+    - no callback wait is indefinite
+    - no connected compositor can reference memory when it is unmapped
+    - orderly cleanup and display-loss cleanup are disjoint exhaustive paths
+    - a handle slot becomes free only after its complete cleanup path
+
+cleanup:
+  order:
+    - mark stop; perform no new external task
+    - use orderly unmap and bounded release while the display remains healthy
+    - on timeout or display loss, disconnect before local mapping cleanup
+    - >
+      Destroy or discard every wl_buffer, pool, mapping, shared-memory file,
+      viewport, layer surface, and wl_surface once.
+    - >
+      On healthy cleanup release each output-table wl_output after no Surface
+      slot refers to it; after disconnect mark each proxy dead without a request.
+    - destroy layer-shell, viewporter, shm, compositor, and registry bindings
+    - disconnect Wayland once
+    - close socket2 and stop handle once
+    - destroy the Image once
+    - quit the SDL image subsystem once
+  assertions:
+    - prepared_surface_count is zero or equals monitor_count before publish
+    - current surface count always equals current monitor count
+    - no busy buffer is unmapped while the Wayland connection can still release it
+    - every error path ends with zero owned unpublished resources
+
+phased_checkpoints:
+  - order: 1
+    id: monitor_and_event_theorem
+    product_proof: parse exact j/monitors and classify exact socket2 lines without native sockets
+    files:
+      - src/wallpaper.zig
+      - src/wallpaper_transcript.zig
+    character_budget: 9000
+    closes_when:
+      - bounded snapshots sort and deduplicate by name
+      - only monitor/config reload events request reconciliation
+      - fragmented, coalesced, malformed, and overlong lines are exact
+  - order: 2
+    id: image_theorem
+    product_proof: one bounded PNG becomes exact cover-cropped XRGB8888 monitor pixels
+    files:
+      - src/wallpaper.zig
+      - src/wallpaper_native.zig
+    character_budget: 6500
+    closes_when:
+      - file and SDL histories are failure-atomic
+      - crop/scaling endpoints and pixel bounds are proven
+  - order: 3
+    id: one_surface_theorem
+    product_proof: one monitor receives one correctly configured background layer and released buffer
+    files:
+      - src/wallpaper.zig
+      - src/wallpaper_native.zig
+      - src/wallpaper_transcript.zig
+      - protocols/wlr-layer-shell-unstable-v1.xml
+      - build.zig
+    character_budget: 11000
+    closes_when:
+      - role/configure/attach/commit/release/destroy order is exact
+      - ordinary SDL XDG windows are absent
+  - order: 4
+    id: complete_round_theorem
+    product_proof: every bounded current monitor receives one surface in one publication batch
+    character_budget: 7500
+    closes_when:
+      - failure before publish leaves zero mapped surfaces
+      - duplicate/missing output and mid-preparation failure publish nothing
+      - >
+        Every complete monitor commit is queued before one flush and Round
+        changes only after that flush succeeds.
+  - order: 5
+    id: reconcile_and_sleep
+    product_proof: add/remove/configure/socket-loss histories converge while unrelated events do no work
+    character_budget: 8500
+    closes_when:
+      - stop wins
+      - reconnect is bounded
+      - independent Hyprland and Wayland hotplug orders converge within one shared bound
+      - idle blocks
+      - old Round survives until complete replacement
+  - order: 6
+    id: product_entry_and_reduction
+    product_proof: wayspot-beta wallpaper IMAGE.png runs the complete native theorem
+    files:
+      - src/cmd.zig
+      - src/main.zig
+      - build.zig
+    character_budget: 3500
+    reduction_gate: delete at least 15 percent of characters introduced in checkpoints 1 through 5
+    closes_when:
+      - one isolated native process passes coordinated single- and multi-monitor receipts
+      - all comments and branches have a current product owner
+
+character_budget:
+  production_maximum_before_reduction: 45500
+  production_target_after_reduction: 38500
+  generated_protocol_code: measured_separately
+  protocol_xml: measured_separately_as_pinned_external_input
+  rule: >
+    Budgets are review tripwires, not permission to obscure control flow.
+    Checkpoint source is measured in non-whitespace characters with the same
+    command used by prior marathons.
+
+unit_tests:
+  - exact required-global versions and every under-version rejection
+  - output initial facts publish only on done
+  - missing and duplicate output names and global_remove state
+  - exact and maximum valid Monitor
+  - every rejected Monitor field and exact two-decimal scale conversion
+  - sorted snapshot equality and duplicate rejection
+  - exact event classification with all refresh and ignored event names
+  - fragmented, coalesced, empty, malformed, and overlong event records
+  - cover-center crop arithmetic for landscape, portrait, equal ratio, and odd excess
+  - exact image, monitor, round pixel and byte endpoints
+  - exhaustive transform mapping
+  - stop, reconnect, and refresh state transitions
+  - exact transient mismatch classification and attempt endpoints
+  - compile-time monitor_capacity equals surface_capacity
+  - compile-time surface_slot_capacity equals two times surface_capacity
+  - all capacities fit their checked index types
+  - SurfaceHandle rejects vacant, excessive, wrong-monitor, and double-release slots
+
+fuzz_tests:
+  data:
+    - >
+      Smith generates bounded JSON monitor arrays, unknown fields, number
+      endpoints, escapes, truncation, and malformed bytes.
+    - Smith generates socket2 fragments, separators, newlines, overlong records, and irrelevant event bursts
+    - Smith generates PNG header dimensions and crop arithmetic inputs before native decoding
+  operational:
+    - >
+      Smith generates partial writes, EINTR, response fragments, EOF, close
+      failure, event loss, poll readiness, reconnect outcome, configure bursts,
+      closed surfaces, and buffer releases.
+    - every history is capped by the exact operation and event capacities
+    - Smith interleaves snapshot changes with output global, name, done, and removal histories
+  assertions:
+    - no malformed data publishes a snapshot, image, surface, or Event
+    - stop causes no later task
+    - all acquired handles are released exactly once
+    - focus/workspace/window histories perform zero snapshot and surface tasks
+    - transient cross-protocol mismatch never mutates Round or allocates a SurfaceHandle
+
+deterministic_simulations:
+  - first roundtrip advertises globals and issues binds; matching remains forbidden
+  - >
+    Second roundtrip supplies output geometry, modes, scale, name, and done;
+    only then may exact Hyprland names match.
+  - output v3, missing name, missing done, duplicate name, and excessive output events reject discovery
+  - global_remove retires one output and cannot reuse its match before reconciliation
+  - socket2 add arrives first; a later output global/name/done converges
+  - output global/name/done arrives first; a later socket2 add and snapshot converge
+  - global_remove arrives first; the old snapshot remains transient until monitor removal
+  - socket2 remove arrives first; the old output remains usable until snapshot/output convergence
+  - all four hotplug orders retain the current Round before exact matching
+  - a refresh or output change arriving during j/monitors restarts without preparation
+  - mismatch exhaustion after eight attempts performs visible fatal cleanup
+  - a blocked request reaches the shared monotonic deadline and closes its socket once
+  - stop during the attempt wait performs no later drain, request, prepare, or publication
+  - removal of compositor, shm, viewporter, or layer-shell is fatal with exact cleanup
+  - request connect -> partial write -> EINTR -> write -> fragmented response -> EOF -> close
+  - request response reaches exact capacity and capacity plus one
+  - socket2 connect before snapshot prevents an add/remove gap
+  - fragments form one line; one read forms many lines; suffix survives to next read
+  - overlong line is discarded through newline and the following valid line is retained
+  - focus, pointer-derived focus, workspace, and window bursts perform no refresh
+  - monitor add/remove bursts collapse to one snapshot and one Round
+  - config reload with geometry/scale change replaces the complete Round
+  - unchanged snapshot performs no surface or image work
+  - missing output, duplicate output, allocation failure, configure close, and scale failure publish nothing
+  - every initial surface configures before any buffer commit
+  - every surface creates an empty region, sets it once, and destroys it before initial commit
+  - every buffer commit precedes one batch flush
+  - old surfaces remain owned until the replacement batch succeeds
+  - orderly unmap waits for every release within the shared callback/deadline bounds
+  - release timeout disconnects before unmapping and exits without a live replacement Round
+  - socket loss retains current surfaces during bounded reconnect
+  - malformed wire data does not reconnect
+  - reconnect exhaustion exits and cleans every owner
+  - stop plus socket readiness performs only stop cleanup
+  - plain tests import no Linux, SDL, Wayland, or compositor runtime
+  - native parity reaches every production task without requiring a live compositor
+
+negative_assertions:
+  - no focusedmon, workspace, activewindow, openwindow, closewindow, pointer, or mouse record can call readMonitors
+  - no unrelated event can set refresh pending or enter reconciliation attempts
+  - no event can replace Image in Marathon 8
+  - no Monitor numeric ID is retained
+  - no null-output layer surface is created
+  - no output below v4 is bound and no output is matched before done
+  - no surface initial commit occurs before its empty input region is set
+  - no ordinary SDL_Window is created
+  - no surface exists without one checked Monitor and one exact named Wayland output
+  - no partial monitor snapshot or prepared surface set enters current Round
+  - no transient monitor/output mismatch mutates current Round or prepares a surface
+  - no image bytes, SDL surface, shm mapping, socket, or Wayland object lacks one cleanup path
+  - no timer wakes an idle healthy process
+  - no buffer mapping is unmapped before release while Wayland remains connected
+  - no wallpaper code imports picker, notifications, app discovery, config, cache, or history
+  - no rotation, randomness, schedule, direct rotate action, or process supervisor exists
+
+real_product_receipts:
+  isolated_before_live:
+    - build wayspot-beta without installing or replacing wayspot
+    - run all native parser/image checks under an isolated temporary directory
+    - verify protocol generation is byte-stable from the pinned XML
+    - verify no live Hyprland or wallpaper process is needed by deterministic tests
+  coordinated_live_only:
+    - operator supplies one approved PNG path
+    - record the current wallpaper process and do not stop it without explicit approval
+    - stop or mask the current wallpaper only for the bounded receipt
+    - start wayspot-beta wallpaper IMAGE.png attached
+    - prove one background namespace and one surface per current monitor
+    - add/remove or disable/enable one monitor if the operator approves
+    - change focus repeatedly and prove zero image/surface publication
+    - send SIGTERM and prove clean shutdown with no remaining namespace or process
+    - restore the operator's prior wallpaper process and mappings exactly
+  pending_until_coordinated: true
+
+reincarnated_code_audit:
+  deleted_source_inspected: false
+  permitted_after_design_approval:
+    - bounded Unix socket write/read mechanics if every branch is re-reviewed
+    - event line assembly mechanics if vocabulary and ownership match this design
+    - image crop arithmetic if proven independently
+  forbidden:
+    - wholesale file restoration
+    - old owner names or process topology
+    - focus-driven refresh
+    - fallback process management
+    - rotation state in this marathon
+
+explicit_exclusions:
+  - rotation schedule
+  - direct rotate lifecycle action
+  - random image choice or sequence
+  - wallpaper directory discovery
+  - JPEG, WebP, AVIF, SVG, or SDL_image dependency
+  - different images per monitor
+  - configuration or retained wallpaper state
+  - cache or history
+  - other compositors
+  - generic compositor, display, image, or environment framework
+  - daemon supervisor, flock, watchdog, or fallback process
+  - XDG toplevel wallpaper windows
+  - GPU renderer, animation, transition, or render loop
+  - picker and GUI wallpaper routes
+  - live receipt without operator coordination
+
+closure_candidate:
+  - one PNG is visibly correct on every current Hyprland monitor
+  - monitor add/remove/geometry/scale histories converge to exactly one surface per monitor
+  - focus, workspace, window, and mouse histories leave the image Round unchanged
+  - request, event, image, Wayland, stop, reconnect, and cleanup histories pass strict simulation
+  - the healthy resident process blocks while idle
+  - source fits the approved character budget after reduction
+  - no known Marathon 8 debt remains for Marathon 9
+
+open_product_decisions: []
