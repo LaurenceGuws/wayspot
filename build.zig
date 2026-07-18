@@ -1,4 +1,5 @@
 const std = @import("std");
+const libs = @import("build_libs.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -8,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .preferred_linkage = .static,
     });
+    const text = libs.text(b, target, optimize, sdl.artifact("SDL3"), sdl.path("include"));
 
     const wayspot_beta = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -16,7 +18,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     wayspot_beta.addIncludePath(sdl.path("include"));
+    wayspot_beta.addIncludePath(text.include);
     wayspot_beta.linkLibrary(sdl.artifact("SDL3"));
+    wayspot_beta.linkLibrary(text.library);
 
     const executable = b.addExecutable(.{
         .name = "wayspot-beta",

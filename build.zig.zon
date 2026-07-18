@@ -7,11 +7,22 @@
         .sdl = .{
             .path = "vendor/sdl",
         },
+        .freetype_source = .{
+            .url = "https://github.com/freetype/freetype/archive/6d9fc45fc4bca8aef0b8f65592520673638c3334.tar.gz",
+            .hash = "N-V-__8AAD-TqwCmjJavuFHppHipenph8m0E4k1hO5mr2gM5",
+        },
+        .harfbuzz_source = .{
+            .url = "https://github.com/harfbuzz/harfbuzz/archive/ab6aa4f449457be45e8e0218f7a8de271fb19967.tar.gz",
+            .hash = "N-V-__8AAMph5gWWxtuHdlGvzHmC-oKTcgKxYFWkUbNQTtkb",
+        },
     },
     .paths = .{
         "build.zig",
+        "build_libs.zig",
         "build.zig.zon",
         "src",
+        "vendor/freetype",
         "vendor/sdl",
+        "vendor/sdl_ttf",
     },
 }

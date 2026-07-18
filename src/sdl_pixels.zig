@@ -41,7 +41,7 @@ pub fn icon(index: usize) Rect {
 }
 
 pub fn textY(index: usize) f32 {
-    return row(index).y + 8;
+    return row(index).y + 5;
 }
 
 pub fn rowAt(x: f32, y: f32) ?usize {

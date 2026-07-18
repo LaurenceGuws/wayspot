@@ -23,9 +23,10 @@ source:
 offenders:
   - order: 1
     name: debug_text_drops_product_text
+    state: closed
     current:
-      - src/sdl.zig:101-102
-      - src/sdl.zig:118-125
+      - src/sdl.zig
+      - build_libs.zig
     sdl_contract: >
       SDL_RenderDebugText is debugging-only, renders ASCII from UTF-8 input,
       and is explicitly not intended for production applications.
@@ -40,6 +41,11 @@ offenders:
       - UTF-8 application names and queries render byte-for-byte as glyph sequences
       - font acquisition, glyph storage, textures, and cleanup have exact bounds
       - missing font and unsupported glyph behavior is explicit
+    closed_by:
+      - pinned static SDL_ttf, FreeType, and HarfBuzz
+      - one explicit Noto Sans font path and size
+      - fifteen reusable renderer text objects
+      - reverse-order text, engine, font, renderer, and library cleanup
 
   - order: 2
     name: window_coordinates_are_assumed_to_be_render_coordinates

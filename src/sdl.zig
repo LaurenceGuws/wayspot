@@ -9,10 +9,15 @@ const sdl_event = @import("sdl_event.zig");
 const pixels = @import("sdl_pixels.zig");
 const sdl = @cImport({
     @cInclude("SDL3/SDL.h");
+    @cInclude("SDL3_ttf/SDL_ttf.h");
 });
 
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
+    const font_path = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
+    const font_size = 16;
+    const text_capacity = picker.visible_row_capacity + 1;
+
     const Icon = struct {
         const Rejection = enum {
             invalid_path,
@@ -37,11 +42,16 @@ pub const Native = struct {
     home: []const u8,
     window: ?*sdl.SDL_Window = null,
     renderer: ?*sdl.SDL_Renderer = null,
+    font: ?*sdl.TTF_Font = null,
+    text_engine: ?*sdl.TTF_TextEngine = null,
+    texts: [text_capacity]*sdl.TTF_Text = undefined,
+    text_count: usize = 0,
     icons: [picker.visible_row_capacity]Icon = undefined,
     icon_count: usize = 0,
     pending_icons: bool = false,
     events_pending: bool = false,
     initialized: bool = false,
+    ttf_initialized: bool = false,
     text_started: bool = false,
 
     /// Initializes exactly the SDL video subsystem.
@@ -49,6 +59,12 @@ pub const Native = struct {
         std.debug.assert(!native.initialized);
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         native.initialized = true;
+        errdefer {
+            sdl.SDL_Quit();
+            native.initialized = false;
+        }
+        if (!sdl.TTF_Init()) return error.TtfInitFailed;
+        native.ttf_initialized = true;
     }
 
     /// Creates the one beta window and its renderer together.
@@ -66,6 +82,7 @@ pub const Native = struct {
             &native.renderer,
         )) return error.SdlCreateFailed;
         errdefer {
+            native.clearText();
             sdl.SDL_DestroyRenderer(native.renderer);
             sdl.SDL_DestroyWindow(native.window);
             native.renderer = null;
@@ -77,6 +94,18 @@ pub const Native = struct {
             pixels.window_height,
             sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )) return error.SdlLogicalPresentationFailed;
+        native.font = sdl.TTF_OpenFont(font_path, font_size) orelse return error.TtfFontOpenFailed;
+        native.text_engine = sdl.TTF_CreateRendererTextEngine(native.renderer) orelse
+            return error.TtfTextEngineCreateFailed;
+        while (native.text_count < native.texts.len) {
+            native.texts[native.text_count] = sdl.TTF_CreateText(
+                native.text_engine,
+                native.font,
+                "",
+                0,
+            ) orelse return error.TtfTextCreateFailed;
+            native.text_count += 1;
+        }
     }
 
     /// Enables UTF-8 text events before the picker can wait for input.
@@ -131,6 +160,7 @@ pub const Native = struct {
             => .redraw,
             sdl.SDL_EVENT_RENDER_DEVICE_RESET => reset: {
                 native.clearIcons();
+                try native.resetText();
                 break :reset .redraw;
             },
             sdl.SDL_EVENT_RENDER_DEVICE_LOST => error.SdlRenderDeviceLost,
@@ -167,7 +197,7 @@ pub const Native = struct {
         if (!sdl.SDL_RenderFillRect(renderer, &query_pane)) return error.SdlDrawFailed;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
         const query = if (frame.query.len == 0) "Search applications" else frame.query.ptr;
-        try drawText(renderer, 20, 18, query);
+        try native.drawText(0, query, .{ 235, 235, 240 }, 20, 14);
         for (frame.rowSlice(), 0..) |row, index| {
             const row_rect = nativeRect(pixels.row(index));
             const selected = index == frame.selected_row;
@@ -191,7 +221,7 @@ pub const Native = struct {
                     if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) return error.SdlDrawFailed;
                 },
             };
-            try drawText(renderer, 44, pixels.textY(index), &name);
+            try native.drawText(index + 1, &name, color, 44, pixels.textY(index));
         }
         try drawScrollbar(renderer, frame);
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
@@ -216,6 +246,7 @@ pub const Native = struct {
         std.debug.assert(native.renderer != null);
         std.debug.assert(!native.text_started);
         native.clearIcons();
+        native.clearText();
         sdl.SDL_DestroyRenderer(native.renderer);
         sdl.SDL_DestroyWindow(native.window);
         native.renderer = null;
@@ -228,6 +259,9 @@ pub const Native = struct {
         std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         std.debug.assert(!native.text_started);
+        std.debug.assert(native.ttf_initialized);
+        sdl.TTF_Quit();
+        native.ttf_initialized = false;
         sdl.SDL_Quit();
         native.initialized = false;
     }
@@ -245,6 +279,54 @@ pub const Native = struct {
             destroyIcon(native.icons[native.icon_count]);
         }
         native.pending_icons = false;
+    }
+
+    fn resetText(native: *Native) !void {
+        native.clearTexts();
+        sdl.TTF_DestroyRendererTextEngine(native.text_engine);
+        native.text_engine = sdl.TTF_CreateRendererTextEngine(native.renderer) orelse
+            return error.TtfTextEngineCreateFailed;
+        while (native.text_count < native.texts.len) {
+            native.texts[native.text_count] = sdl.TTF_CreateText(
+                native.text_engine,
+                native.font,
+                "",
+                0,
+            ) orelse return error.TtfTextCreateFailed;
+            native.text_count += 1;
+        }
+    }
+
+    fn clearTexts(native: *Native) void {
+        while (native.text_count > 0) {
+            native.text_count -= 1;
+            sdl.TTF_DestroyText(native.texts[native.text_count]);
+        }
+    }
+
+    fn clearText(native: *Native) void {
+        native.clearTexts();
+        sdl.TTF_DestroyRendererTextEngine(native.text_engine);
+        sdl.TTF_CloseFont(native.font);
+        native.text_engine = null;
+        native.font = null;
+    }
+
+    fn drawText(
+        native: *Native,
+        index: usize,
+        text: [*c]const u8,
+        color: [3]u8,
+        x: f32,
+        y: f32,
+    ) !void {
+        std.debug.assert(index < native.text_count);
+        const item = native.texts[index];
+        if (!sdl.TTF_SetTextString(item, text, 0)) return error.TtfTextSetFailed;
+        if (!sdl.TTF_SetTextColor(item, color[0], color[1], color[2], 255)) {
+            return error.TtfTextColorFailed;
+        }
+        if (!sdl.TTF_DrawRendererText(item, x, y)) return error.TtfTextDrawFailed;
     }
 
     fn firstMissing(native: *const Native, frame: *const picker.Frame) ?usize {
@@ -360,12 +442,4 @@ fn drawScrollbar(renderer: *sdl.SDL_Renderer, frame: *const picker.Frame) !void 
 
 fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
-}
-
-fn drawText(renderer: *sdl.SDL_Renderer, x: f32, y: f32, text: [*c]const u8) !void {
-    const scale: f32 = 1.5;
-    if (!sdl.SDL_SetRenderScale(renderer, scale, scale)) return error.SdlDrawFailed;
-    const drawn = sdl.SDL_RenderDebugText(renderer, x / scale, y / scale, text);
-    if (!sdl.SDL_SetRenderScale(renderer, 1, 1)) return error.SdlDrawFailed;
-    if (!drawn) return error.SdlDrawFailed;
 }
