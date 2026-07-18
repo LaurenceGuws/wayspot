@@ -1,0 +1,258 @@
+# Temporary SDL 3.4.12 audit for the active picker rewrite.
+# This file ranks current behavior; it does not add product scope.
+
+source:
+  wiki: /home/home/personal/projects/dev_references/sdlwiki_md/SDL3
+  implementation: vendor/sdl
+  audited:
+    - SDL_RenderDebugText
+    - SDL_WaitEvent
+    - SDL_WaitEventTimeout
+    - SDL_PollEvent
+    - SDL_RenderPresent
+    - SDL_ConvertEventToRenderCoordinates
+    - SDL_SetRenderLogicalPresentation
+    - SDL_StartTextInput
+    - SDL_SetTextInputArea
+    - SDL_MouseWheelEvent
+    - SDL_CreateTextureFromSurface
+    - SDL_DestroyTexture
+    - README-highdpi.md
+    - README-wayland.md
+
+offenders:
+  - order: 1
+    name: debug_text_drops_product_text
+    current:
+      - src/sdl.zig:101-102
+      - src/sdl.zig:118-125
+    sdl_contract: >
+      SDL_RenderDebugText is debugging-only, renders ASCII from UTF-8 input,
+      and is explicitly not intended for production applications.
+    consequence: >
+      Non-ASCII application names and queries are accepted and ranked but are
+      not rendered faithfully; text measurement and caret placement cannot be
+      built on this renderer.
+    smallest_correction: >
+      Choose one bounded production font path and renderer, then preserve the
+      current query and row geometry until measured text earns a change.
+    closes_when:
+      - UTF-8 application names and queries render byte-for-byte as glyph sequences
+      - font acquisition, glyph storage, textures, and cleanup have exact bounds
+      - missing font and unsupported glyph behavior is explicit
+
+  - order: 2
+    name: window_coordinates_are_assumed_to_be_render_coordinates
+    state: closed
+    current:
+      - src/sdl.zig:76-78
+      - src/sdl.zig:225-233
+    sdl_contract: >
+      SDL mouse events use window coordinates. SDL provides
+      SDL_ConvertEventToRenderCoordinates because window size, logical
+      presentation, scale, and viewport can change their relation.
+    consequence: >
+      Pointer hit testing can select the wrong row under display scaling,
+      renderer scaling, or later window resizing.
+    smallest_correction: >
+      Make SDL convert every coordinate-bearing event before translating it
+      into a picker event; rendering and hit testing must consume one geometry.
+    closes_when:
+      - scaled pointer coordinates hit the same rectangles that are drawn
+      - conversion failure is visible and cleans up exactly
+      - deterministic boundary tests cover inside, edge, outside, and scaled points
+
+  - order: 3
+    name: pixel_geometry_is_split_between_picker_and_sdl
+    state: closed
+    current:
+      - src/picker.zig:7-9
+      - src/sdl.zig:97-128
+      - src/sdl.zig:225-253
+    sdl_contract: >
+      Render scale, viewport, output size, and event-coordinate conversion are
+      renderer state owned at the SDL boundary.
+    consequence: >
+      The deterministic picker owns pixel heights while SDL repeats x, width,
+      row, icon, and scrollbar geometry; drawing and input can drift.
+    smallest_correction: >
+      Move all pixel facts into one concrete SDL picker geometry value. Picker
+      retains only bounded visible-row capacity and result indexes.
+    closes_when:
+      - one row rectangle feeds fill, icon, text, pointer hit testing, and scrollbar
+      - picker.zig contains no pixel coordinates
+      - exact edge tests prove the geometry
+
+  - order: 4
+    name: pending_events_are_not_drained_before_redraw
+    state: closed
+    current:
+      - src/picker.zig:119-166
+      - src/sdl.zig:58-89
+    sdl_contract: >
+      SDL_PollEvent documentation recommends processing the complete pending
+      event queue before updating and drawing a frame.
+    consequence: >
+      A burst of text, motion, or wheel events causes repeated ranking and
+      presentation between stale intermediate states, increasing latency and
+      allowing icon work between queued user inputs.
+    smallest_correction: >
+      Wait for the first event, drain the bounded pending queue, apply all
+      input in order, then rank and draw once. User input must precede one icon
+      attempt.
+    closes_when:
+      - an exact event-burst bound exists
+      - queued input is applied in order before idle icon work
+      - one burst causes one final rank and present
+      - over-bound queues fail or continue with explicit meaning
+
+  - order: 5
+    name: window_and_renderer_events_are_ignored
+    state: closed
+    current:
+      - src/sdl.zig:65-88
+    sdl_contract: >
+      SDL defines close-requested, exposed, resized, pixel-size,
+      display-scale, render-target-reset, render-device-reset, and
+      render-device-lost events with distinct meanings.
+    consequence: >
+      A compositor close request may not exit, an exposed backbuffer may not be
+      redrawn, size or scale changes retain stale geometry, and device reset
+      leaves invalid icon textures.
+    smallest_correction: >
+      Classify only the events this fixed picker must honor: stop, redraw,
+      geometry refresh, texture recreation, or fatal renderer loss.
+    closes_when:
+      - close request stops cleanly before Wayspot destroys its owned window
+      - expose redraws the complete backbuffer
+      - size and scale changes refresh one geometry
+      - reset recreates visible textures and device loss fails explicitly
+
+  - order: 6
+    name: icon_decode_work_has_no_wayspot_pixel_or_byte_bound
+    state: closed
+    current:
+      - src/sdl.zig:202-219
+    sdl_contract: >
+      SDL_LoadSurface allocates the decoded source image. SDL's embedded
+      decoder rejects arithmetic overflow but permits dimensions far larger
+      than a 16 pixel picker icon.
+    consequence: >
+      One desktop icon can allocate and decode a very large image on the main
+      thread before Wayspot scales it to 16 by 16.
+    smallest_correction: >
+      Open a bounded file, inspect the supported image header before decode,
+      reject over-bound bytes or dimensions, then decode and scale.
+    closes_when:
+      - encoded bytes, width, height, and decoded bytes have named bounds
+      - over-bound images publish no texture and keep the app row
+      - malformed and allocation-failure simulations are failure-atomic
+
+  - order: 7
+    name: missing_icons_destroy_null_textures
+    state: closed
+    current:
+      - src/sdl.zig:13-16
+      - src/sdl.zig:150-153
+      - src/sdl.zig:185-198
+      - src/sdl.zig:220-221
+    sdl_contract: >
+      SDL_DestroyTexture explicitly reports an Invalid texture error when
+      passed NULL.
+    consequence: >
+      Normal missing-icon eviction and shutdown contaminate SDL's thread-local
+      error state and represent attempted and loaded icons with one ambiguous
+      nullable field.
+    smallest_correction: >
+      Use an exact attempted-without-texture or loaded-texture state and call
+      SDL_DestroyTexture only for the loaded arm.
+    closes_when:
+      - missing icons invoke no texture destruction
+      - every created texture is destroyed once
+      - repeated viewport eviction leaves no SDL error
+
+  - order: 8
+    name: icon_failures_are_collapsed_into_absence
+    state: closed
+    current:
+      - src/sdl.zig:205-220
+      - src/icon.zig:29-54
+    sdl_contract: >
+      SDL_LoadSurface signals failure and makes its reason available through
+      SDL_GetError; successful calls do not clear prior SDL errors.
+    consequence: >
+      File absence, malformed images, unsupported formats, permission errors,
+      allocation failures, and overlong generated paths all become one silent
+      no-icon result.
+    smallest_correction: >
+      Keep expected path absence local, but classify malformed, inaccessible,
+      over-bound, and resource failures without using stale SDL error text as
+      the primary signal.
+    closes_when:
+      - expected absence is quiet and bounded
+      - malformed, inaccessible, and resource failure have exact meanings
+      - no partial surface or texture survives any failed attempt
+
+  - order: 9
+    name: wheel_direction_and_magnitude_are_discarded
+    state: closed
+    current:
+      - src/sdl.zig:81-86
+      - src/picker.zig:159-160
+      - src/picker.zig:201-208
+    sdl_contract: >
+      SDL_MouseWheelEvent carries integer and precise movement plus NORMAL or
+      FLIPPED direction; FLIPPED values must be inverted for normal semantics.
+    consequence: >
+      Natural scrolling can move in the wrong direction, and every nonzero
+      event moves exactly three rows regardless of accumulated ticks.
+    smallest_correction: >
+      Normalize direction at the SDL boundary, retain one bounded signed row
+      delta, and clamp it once in picker state.
+    closes_when:
+      - normal and flipped events produce equal intended movement
+      - zero, exact-bound, and excessive deltas are tested
+      - integer overflow is impossible
+
+  - order: 10
+    name: text_input_is_started_without_ime_ownership
+    state: deliberately_deferred
+    current:
+      - src/sdl.zig:50-56
+      - src/sdl.zig:65-88
+      - src/picker.zig:63-85
+    sdl_contract: >
+      SDL_StartTextInput enables both committed text and text-editing
+      composition events. SDL_SetTextInputArea positions native candidates
+      near the current cursor.
+    consequence: >
+      Composition events are discarded, the IME candidate window has no
+      declared query/caret area, and users can see no in-progress text.
+    smallest_correction: >
+      Keep this deferred until the modest editor slice, but do not declare text
+      input mature before bounded composition state and input-area placement
+      exist.
+    closes_when:
+      - composition text, character indexes, and selection are bounded
+      - committed text remains distinct from composition
+      - the input area follows the visible caret
+
+implementation_order:
+  - missing_icons_destroy_null_textures
+  - wheel_direction_and_magnitude_are_discarded
+  - pixel_geometry_is_split_between_picker_and_sdl
+  - window_coordinates_are_assumed_to_be_render_coordinates
+  - pending_events_are_not_drained_before_redraw
+  - window_and_renderer_events_are_ignored
+  - icon_failures_are_collapsed_into_absence
+  - icon_decode_work_has_no_wayspot_pixel_or_byte_bound
+  - debug_text_drops_product_text
+  - text_input_is_started_without_ime_ownership
+
+acceptance:
+  - each correction is smaller or more direct than the behavior it replaces
+  - plain tests require no compositor or native SDL runtime
+  - SDL-native parity remains compile-linked
+  - unit, fuzz, and deterministic event or I/O simulations pass
+  - a live Wayland receipt follows deterministic proof
+  - source non-whitespace characters are measured before and after

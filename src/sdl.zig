@@ -3,7 +3,10 @@
 const std = @import("std");
 const apps = @import("apps.zig");
 const icon_path = @import("icon.zig");
+const image = @import("image.zig");
 const picker = @import("picker.zig");
+const sdl_event = @import("sdl_event.zig");
+const pixels = @import("sdl_pixels.zig");
 const sdl = @cImport({
     @cInclude("SDL3/SDL.h");
 });
@@ -11,17 +14,33 @@ const sdl = @cImport({
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
     const Icon = struct {
+        const Rejection = enum {
+            invalid_path,
+            malformed_png,
+            encoded_too_large,
+            dimensions_too_large,
+        };
+
+        const Texture = union(enum) {
+            missing,
+            rejected: Rejection,
+            loaded: *sdl.SDL_Texture,
+        };
+
         app_index: usize,
-        texture: ?*sdl.SDL_Texture,
+        texture: Texture,
     };
 
     applications: []const apps.App,
+    allocator: std.mem.Allocator,
+    io: std.Io,
     home: []const u8,
     window: ?*sdl.SDL_Window = null,
     renderer: ?*sdl.SDL_Renderer = null,
     icons: [picker.visible_row_capacity]Icon = undefined,
     icon_count: usize = 0,
     pending_icons: bool = false,
+    events_pending: bool = false,
     initialized: bool = false,
     text_started: bool = false,
 
@@ -37,14 +56,27 @@ pub const Native = struct {
         std.debug.assert(native.initialized);
         std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
+        comptime std.debug.assert(picker.visible_row_capacity == pixels.visible_rows);
         if (!sdl.SDL_CreateWindowAndRenderer(
             "wayspot-beta",
-            720,
-            480,
-            0,
+            pixels.window_width,
+            pixels.window_height,
+            sdl.SDL_WINDOW_HIGH_PIXEL_DENSITY,
             &native.window,
             &native.renderer,
         )) return error.SdlCreateFailed;
+        errdefer {
+            sdl.SDL_DestroyRenderer(native.renderer);
+            sdl.SDL_DestroyWindow(native.window);
+            native.renderer = null;
+            native.window = null;
+        }
+        if (!sdl.SDL_SetRenderLogicalPresentation(
+            native.renderer,
+            pixels.window_width,
+            pixels.window_height,
+            sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
+        )) return error.SdlLogicalPresentationFailed;
     }
 
     /// Enables UTF-8 text events before the picker can wait for input.
@@ -55,15 +87,53 @@ pub const Native = struct {
         native.text_started = true;
     }
 
-    /// Waits for one SDL event and copies all returned event data into Event.
-    pub fn wait(native: *Native) !picker.Event {
+    /// Waits for input, then drains one bounded portion of SDL's event queue.
+    pub fn read(native: *Native) !picker.Events {
         std.debug.assert(native.text_started);
-        var event: sdl.SDL_Event = undefined;
-        if (native.pending_icons) {
-            if (!sdl.SDL_WaitEventTimeout(&event, 1)) return .idle;
-        } else if (!sdl.SDL_WaitEvent(&event)) return error.SdlWaitFailed;
+        var events: picker.Events = .{};
+        while (events.count < picker.event_capacity) {
+            var native_event: sdl.SDL_Event = undefined;
+            if (events.count > 0 or native.events_pending) {
+                if (!sdl.SDL_PollEvent(&native_event)) {
+                    native.events_pending = false;
+                    break;
+                }
+            } else if (native.pending_icons) {
+                if (!sdl.SDL_WaitEventTimeout(&native_event, 1)) {
+                    events.items[0] = .idle;
+                    events.count = 1;
+                    return events;
+                }
+            } else if (!sdl.SDL_WaitEvent(&native_event)) {
+                return error.SdlWaitFailed;
+            }
+            if (!sdl.SDL_ConvertEventToRenderCoordinates(native.renderer, &native_event)) {
+                return error.SdlCoordinateConversionFailed;
+            }
+            events.items[events.count] = try native.translate(native_event);
+            events.count += 1;
+        }
+        events.more = sdl.SDL_PollEvent(null);
+        native.events_pending = events.more;
+        return events;
+    }
+
+    fn translate(native: *Native, event: sdl.SDL_Event) !picker.Event {
         return switch (event.type) {
             sdl.SDL_EVENT_QUIT => .quit,
+            sdl.SDL_EVENT_WINDOW_CLOSE_REQUESTED => .quit,
+            sdl.SDL_EVENT_WINDOW_EXPOSED,
+            sdl.SDL_EVENT_WINDOW_RESIZED,
+            sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+            sdl.SDL_EVENT_WINDOW_DISPLAY_CHANGED,
+            sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+            sdl.SDL_EVENT_RENDER_TARGETS_RESET,
+            => .redraw,
+            sdl.SDL_EVENT_RENDER_DEVICE_RESET => reset: {
+                native.clearIcons();
+                break :reset .redraw;
+            },
+            sdl.SDL_EVENT_RENDER_DEVICE_LOST => error.SdlRenderDeviceLost,
             sdl.SDL_EVENT_KEY_DOWN => switch (event.key.key) {
                 sdl.SDLK_ESCAPE => .escape,
                 sdl.SDLK_BACKSPACE => .backspace,
@@ -73,17 +143,15 @@ pub const Native = struct {
                 else => .ignored,
             },
             sdl.SDL_EVENT_TEXT_INPUT => .{ .text = try picker.Text.init(std.mem.span(event.text.text)) },
-            sdl.SDL_EVENT_MOUSE_MOTION => rowAt(event.motion.x, event.motion.y) orelse .ignored,
+            sdl.SDL_EVENT_MOUSE_MOTION => hoverAt(event.motion.x, event.motion.y) orelse .ignored,
             sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => if (event.button.button == sdl.SDL_BUTTON_LEFT)
                 clickAt(event.button.x, event.button.y) orelse .ignored
             else
                 .ignored,
-            sdl.SDL_EVENT_MOUSE_WHEEL => if (event.wheel.integer_y > 0)
-                .scroll_up
-            else if (event.wheel.integer_y < 0)
-                .scroll_down
-            else
-                .ignored,
+            sdl.SDL_EVENT_MOUSE_WHEEL => .{ .scroll = sdl_event.wheelRows(
+                event.wheel.integer_y,
+                event.wheel.direction == sdl.SDL_MOUSEWHEEL_FLIPPED,
+            ) },
             else => .ignored,
         };
     }
@@ -94,15 +162,14 @@ pub const Native = struct {
         native.evict(frame);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
-        const query_pane = sdl.SDL_FRect{ .x = 8, .y = 8, .w = 704, .h = 32 };
+        const query_pane = nativeRect(pixels.query);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 30, 31, 39, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderFillRect(renderer, &query_pane)) return error.SdlDrawFailed;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
         const query = if (frame.query.len == 0) "Search applications" else frame.query.ptr;
-        if (!sdl.SDL_RenderDebugText(renderer, 20, 20, query)) return error.SdlDrawFailed;
+        try drawText(renderer, 20, 18, query);
         for (frame.rowSlice(), 0..) |row, index| {
-            const y = picker.query_height + @as(f32, @floatFromInt(index)) * picker.row_height;
-            const row_rect = sdl.SDL_FRect{ .x = 8, .y = y, .w = 696, .h = picker.row_height - 2 };
+            const row_rect = nativeRect(pixels.row(index));
             const selected = index == frame.selected_row;
             const color: [3]u8 = if (index == frame.selected_row)
                 .{ 130, 190, 255 }
@@ -117,13 +184,14 @@ pub const Native = struct {
             }
             var name: [apps.name_capacity:0]u8 = @splat(0);
             @memcpy(name[0..row.name.len], row.name);
-            if (native.icon(row.app_index)) |item| if (item.texture) |texture| {
-                const target = sdl.SDL_FRect{ .x = 16, .y = y + 3, .w = 16, .h = 16 };
-                if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) return error.SdlDrawFailed;
+            if (native.icon(row.app_index)) |item| switch (item.texture) {
+                .missing, .rejected => {},
+                .loaded => |texture| {
+                    const target = nativeRect(pixels.icon(index));
+                    if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) return error.SdlDrawFailed;
+                },
             };
-            if (!sdl.SDL_RenderDebugText(renderer, 40, y + 7, &name)) {
-                return error.SdlDrawFailed;
-            }
+            try drawText(renderer, 44, pixels.textY(index), &name);
         }
         try drawScrollbar(renderer, frame);
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
@@ -147,10 +215,7 @@ pub const Native = struct {
         std.debug.assert(native.window != null);
         std.debug.assert(native.renderer != null);
         std.debug.assert(!native.text_started);
-        while (native.icon_count > 0) {
-            native.icon_count -= 1;
-            sdl.SDL_DestroyTexture(native.icons[native.icon_count].texture);
-        }
+        native.clearIcons();
         sdl.SDL_DestroyRenderer(native.renderer);
         sdl.SDL_DestroyWindow(native.window);
         native.renderer = null;
@@ -174,6 +239,14 @@ pub const Native = struct {
         return null;
     }
 
+    fn clearIcons(native: *Native) void {
+        while (native.icon_count > 0) {
+            native.icon_count -= 1;
+            destroyIcon(native.icons[native.icon_count]);
+        }
+        native.pending_icons = false;
+    }
+
     fn firstMissing(native: *const Native, frame: *const picker.Frame) ?usize {
         for (frame.rowSlice()) |row| {
             const name = native.applications[row.app_index].icon orelse continue;
@@ -192,7 +265,7 @@ pub const Native = struct {
             if (visible) {
                 index += 1;
             } else {
-                sdl.SDL_DestroyTexture(native.icons[index].texture);
+                destroyIcon(native.icons[index]);
                 native.icon_count -= 1;
                 native.icons[index] = native.icons[native.icon_count];
             }
@@ -203,62 +276,96 @@ pub const Native = struct {
         std.debug.assert(native.icon_count < native.icons.len);
         const name = native.applications[app_index].icon orelse return;
         var paths: icon_path.Paths = .{ .home = native.home, .icon = name };
-        while (paths.next() catch null) |path| {
-            const surface = sdl.SDL_LoadSurface(path.ptr) orelse continue;
+        var rejected: ?Icon.Rejection = null;
+        while (paths.next() catch {
+            native.remember(app_index, .{ .rejected = .invalid_path });
+            return;
+        }) |path| {
+            const bytes = std.Io.Dir.cwd().readFileAlloc(
+                native.io,
+                path,
+                native.allocator,
+                .limited(image.encoded_capacity + 1),
+            ) catch |failure| switch (failure) {
+                error.FileNotFound, error.NotDir => continue,
+                error.StreamTooLong => {
+                    rejected = .encoded_too_large;
+                    continue;
+                },
+                else => return failure,
+            };
+            defer native.allocator.free(bytes);
+            if (image.inspect(bytes)) |rejection| {
+                rejected = switch (rejection) {
+                    .malformed => .malformed_png,
+                    .dimensions_too_large => .dimensions_too_large,
+                };
+                continue;
+            }
+            const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse return error.SdlIconStreamFailed;
+            const surface = sdl.SDL_LoadPNG_IO(stream, true) orelse return error.SdlIconDecodeFailed;
             defer sdl.SDL_DestroySurface(surface);
-            const scaled = sdl.SDL_ScaleSurface(surface, 16, 16, sdl.SDL_SCALEMODE_LINEAR) orelse {
+            if (surface.*.w > image.side_capacity or surface.*.h > image.side_capacity) {
+                return error.SdlIconDimensionsChanged;
+            }
+            const scaled = sdl.SDL_ScaleSurface(
+                surface,
+                pixels.icon_size,
+                pixels.icon_size,
+                sdl.SDL_SCALEMODE_LINEAR,
+            ) orelse {
                 return error.SdlIconScaleFailed;
             };
             defer sdl.SDL_DestroySurface(scaled);
             const created = sdl.SDL_CreateTextureFromSurface(native.renderer, scaled) orelse {
                 return error.SdlIconTextureFailed;
             };
-            native.icons[native.icon_count] = .{ .app_index = app_index, .texture = created };
-            native.icon_count += 1;
+            native.remember(app_index, .{ .loaded = created });
             return;
         }
-        native.icons[native.icon_count] = .{ .app_index = app_index, .texture = null };
+        native.remember(app_index, if (rejected) |reason| .{ .rejected = reason } else .missing);
+    }
+
+    fn remember(native: *Native, app_index: usize, texture: Icon.Texture) void {
+        std.debug.assert(native.icon_count < native.icons.len);
+        native.icons[native.icon_count] = .{ .app_index = app_index, .texture = texture };
         native.icon_count += 1;
     }
 };
 
-fn rowAt(x: f32, y: f32) ?picker.Event {
-    if (x < 8 or x >= 704 or y < picker.query_height) return null;
-    const row: usize = @intFromFloat((y - picker.query_height) / picker.row_height);
-    return if (row < picker.visible_row_capacity) .{ .hover = row } else null;
+fn destroyIcon(icon: Native.Icon) void {
+    switch (icon.texture) {
+        .missing, .rejected => {},
+        .loaded => |texture| sdl.SDL_DestroyTexture(texture),
+    }
+}
+
+fn hoverAt(x: f32, y: f32) ?picker.Event {
+    return .{ .hover = pixels.rowAt(x, y) orelse return null };
 }
 
 fn clickAt(x: f32, y: f32) ?picker.Event {
-    const event = rowAt(x, y) orelse return null;
-    return .{ .click = event.hover };
+    return .{ .click = pixels.rowAt(x, y) orelse return null };
 }
 
 fn drawScrollbar(renderer: *sdl.SDL_Renderer, frame: *const picker.Frame) !void {
-    if (frame.total_count <= frame.row_count) return;
-    const track = sdl.SDL_FRect{
-        .x = 708,
-        .y = picker.query_height,
-        .w = 4,
-        .h = picker.row_height * @as(f32, @floatFromInt(picker.visible_row_capacity)),
-    };
-    const visible: f32 = @floatFromInt(frame.row_count);
-    const total: f32 = @floatFromInt(frame.total_count);
-    const height = @max(16, track.h * visible / total);
-    const max_first = frame.total_count - frame.row_count;
-    const offset = @as(f32, @floatFromInt(frame.first)) / @as(f32, @floatFromInt(max_first));
-    const thumb = sdl.SDL_FRect{ .x = track.x, .y = track.y + (track.h - height) * offset, .w = track.w, .h = height };
+    const thumb = pixels.scrollbar(frame.first, frame.row_count, frame.total_count) orelse return;
+    const track = nativeRect(pixels.scrollbar_track);
+    const native_thumb = nativeRect(thumb);
     if (!sdl.SDL_SetRenderDrawColor(renderer, 38, 44, 52, 255)) return error.SdlDrawFailed;
     if (!sdl.SDL_RenderFillRect(renderer, &track)) return error.SdlDrawFailed;
     if (!sdl.SDL_SetRenderDrawColor(renderer, 104, 118, 136, 255)) return error.SdlDrawFailed;
-    if (!sdl.SDL_RenderFillRect(renderer, &thumb)) return error.SdlDrawFailed;
+    if (!sdl.SDL_RenderFillRect(renderer, &native_thumb)) return error.SdlDrawFailed;
 }
 
-test "pointer row geometry respects panes and bounds" {
-    try std.testing.expectEqual(null, rowAt(20, picker.query_height - 1));
-    try std.testing.expectEqual(@as(usize, 0), rowAt(20, picker.query_height).?.hover);
-    try std.testing.expectEqual(
-        @as(usize, picker.visible_row_capacity - 1),
-        rowAt(20, picker.query_height + picker.row_height * (picker.visible_row_capacity - 1)).?.hover,
-    );
-    try std.testing.expectEqual(null, rowAt(20, picker.query_height + picker.row_height * picker.visible_row_capacity));
+fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
+    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+}
+
+fn drawText(renderer: *sdl.SDL_Renderer, x: f32, y: f32, text: [*c]const u8) !void {
+    const scale: f32 = 1.5;
+    if (!sdl.SDL_SetRenderScale(renderer, scale, scale)) return error.SdlDrawFailed;
+    const drawn = sdl.SDL_RenderDebugText(renderer, x / scale, y / scale, text);
+    if (!sdl.SDL_SetRenderScale(renderer, 1, 1)) return error.SdlDrawFailed;
+    if (!drawn) return error.SdlDrawFailed;
 }

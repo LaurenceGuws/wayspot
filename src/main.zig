@@ -68,7 +68,12 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     logApplications(&files, &applications);
-    var native: sdl.Native = .{ .applications = applications.slice(), .home = home };
+    var native: sdl.Native = .{
+        .applications = applications.slice(),
+        .allocator = init.gpa,
+        .io = init.io,
+        .home = home,
+    };
     if (try picker.run(&native, applications.slice())) |index| {
         var process = launch.Native{ .io = init.io };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);

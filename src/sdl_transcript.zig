@@ -11,6 +11,10 @@ const Result = enum { ok, fail };
 
 const Wait = union(enum) {
     event: picker.Event,
+    events: struct {
+        items: []const picker.Event,
+        more: bool = false,
+    },
     fail,
 };
 
@@ -61,14 +65,28 @@ const Transcript = struct {
         if (result == .fail) return error.SdlStartTextFailed;
     }
 
-    pub fn wait(transcript: *Transcript) !picker.Event {
-        return switch (transcript.next() orelse return error.TranscriptMismatch) {
+    pub fn read(transcript: *Transcript) !picker.Events {
+        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
             .wait => |wait_result| switch (wait_result) {
-                .event => |event| event,
-                .fail => error.SdlWaitFailed,
+                .event => |event| {
+                    var events: picker.Events = .{};
+                    events.items[0] = event;
+                    events.count = 1;
+                    return events;
+                },
+                .events => |events| events,
+                .fail => return error.SdlWaitFailed,
             },
-            else => error.TranscriptMismatch,
+            else => return error.TranscriptMismatch,
         };
+        if (result.items.len == 0 or result.items.len > picker.event_capacity) {
+            return error.TranscriptMismatch;
+        }
+        var events: picker.Events = .{};
+        @memcpy(events.items[0..result.items.len], result.items);
+        events.count = result.items.len;
+        events.more = result.more;
+        return events;
     }
 
     pub fn draw(transcript: *Transcript, frame: *const picker.Frame) !void {
@@ -145,6 +163,23 @@ test "text input starts before wait and cleanup is exact" {
         .{ .draw = .{ .query = "" } },
         .{ .wait = .{ .event = .{ .text = try picker.Text.init("abc") } } },
         .{ .draw = .{ .query = "abc" } },
+        .{ .wait = .{ .event = .quit } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+}
+
+test "one pending event burst produces one final draw" {
+    const first = picker.Event{ .text = try picker.Text.init("a") };
+    const second = picker.Event{ .text = try picker.Text.init("b") };
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .events = .{ .items = &.{ first, second } } } },
+        .{ .draw = .{ .query = "ab" } },
         .{ .wait = .{ .event = .quit } },
         .{ .stop_text = .ok },
         .destroy,

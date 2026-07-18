@@ -4,9 +4,9 @@ const std = @import("std");
 const apps = @import("apps.zig");
 
 pub const query_capacity = apps.query_capacity;
-pub const visible_row_capacity = 18;
-pub const query_height: f32 = 48;
-pub const row_height: f32 = 24;
+pub const visible_row_capacity = 14;
+pub const event_capacity = 64;
+const events_before_draw_capacity = 1024;
 
 /// Text owns one bounded SDL text event after the native event returns.
 pub const Text = struct {
@@ -36,10 +36,20 @@ pub const Event = union(enum) {
     text: Text,
     hover: usize,
     click: usize,
-    scroll_up,
-    scroll_down,
+    scroll: i8,
+    redraw,
     idle,
     ignored,
+};
+
+pub const Events = struct {
+    items: [event_capacity]Event = undefined,
+    count: usize = 0,
+    more: bool = false,
+
+    pub fn slice(events: *const Events) []const Event {
+        return events.items[0..events.count];
+    }
 };
 
 pub const Row = struct {
@@ -92,7 +102,7 @@ fn textContinuation(byte: u8) bool {
 ///
 /// The operation type is compile-time concrete so plain tests need neither an
 /// erased interface nor an SDL link. It must provide init, create, startText,
-/// wait, draw, stopText, destroy, and quit. A text-stop failure takes
+/// read, draw, stopText, destroy, and quit. A text-stop failure takes
 /// precedence over the event-loop result because incomplete cleanup is the
 /// final process state; window destruction and SDL quit still run.
 pub fn run(operations: anytype, applications: []const apps.App) !?usize {
@@ -105,7 +115,7 @@ pub fn run(operations: anytype, applications: []const apps.App) !?usize {
     try operations.startText();
 
     var state: State = .{};
-    const result = events(operations, applications, &state);
+    const result = eventLoop(operations, applications, &state);
     try operations.stopText();
     return result;
 }
@@ -116,51 +126,66 @@ const State = struct {
     first: usize = 0,
 };
 
-fn events(operations: anytype, applications: []const apps.App, state: *State) !?usize {
+fn eventLoop(operations: anytype, applications: []const apps.App, state: *State) !?usize {
     var frame = makeFrame(state, applications);
     try operations.draw(&frame);
 
+    var events_since_draw: usize = 0;
+    var changed_since_draw = false;
     while (true) {
-        switch (try operations.wait()) {
-            .quit, .escape => return null,
-            .backspace => {
-                state.query.delete();
-                state.selected = 0;
-                state.first = 0;
-            },
-            .up => {
-                state.selected -|= 1;
-                keepSelectedVisible(state);
-            },
-            .down => {
-                const matched_count = matchCount(applications, state.query.text());
-                if (state.selected + 1 < matched_count) state.selected += 1;
-                keepSelectedVisible(state);
-            },
-            .enter => return selectedApp(applications, state.query.text(), state.selected),
-            .text => |text| {
-                try state.query.append(text.slice());
-                state.selected = 0;
-                state.first = 0;
-            },
-            .hover => |row| {
-                if (visibleSelection(state, row, matchCount(applications, state.query.text()))) |selected| {
-                    state.selected = selected;
-                }
-            },
-            .click => |row| {
-                state.selected = visibleSelection(
-                    state,
-                    row,
-                    matchCount(applications, state.query.text()),
-                ) orelse continue;
-                return selectedApp(applications, state.query.text(), state.selected);
-            },
-            .scroll_up => scroll(state, matchCount(applications, state.query.text()), false),
-            .scroll_down => scroll(state, matchCount(applications, state.query.text()), true),
-            .ignored => continue,
-            .idle => {},
+        const events = try operations.read();
+        std.debug.assert(events.count > 0);
+        for (events.slice()) |event| {
+            switch (event) {
+                .quit, .escape => return null,
+                .backspace => {
+                    state.query.delete();
+                    state.selected = 0;
+                    state.first = 0;
+                },
+                .up => {
+                    state.selected -|= 1;
+                    keepSelectedVisible(state);
+                },
+                .down => {
+                    const matched_count = matchCount(applications, state.query.text());
+                    if (state.selected + 1 < matched_count) state.selected += 1;
+                    keepSelectedVisible(state);
+                },
+                .enter => return selectedApp(applications, state.query.text(), state.selected),
+                .text => |text| {
+                    try state.query.append(text.slice());
+                    state.selected = 0;
+                    state.first = 0;
+                },
+                .hover => |row| {
+                    if (visibleSelection(state, row, matchCount(applications, state.query.text()))) |selected| {
+                        state.selected = selected;
+                    }
+                },
+                .click => |row| {
+                    state.selected = visibleSelection(
+                        state,
+                        row,
+                        matchCount(applications, state.query.text()),
+                    ) orelse continue;
+                    return selectedApp(applications, state.query.text(), state.selected);
+                },
+                .scroll => |rows| scroll(state, matchCount(applications, state.query.text()), rows),
+                .redraw => {},
+                .ignored => continue,
+                .idle => {},
+            }
+            changed_since_draw = true;
         }
+        events_since_draw += events.count;
+        if (events.more and events_since_draw < events_before_draw_capacity) continue;
+        if (!changed_since_draw) {
+            events_since_draw = 0;
+            continue;
+        }
+        events_since_draw = 0;
+        changed_since_draw = false;
         frame = makeFrame(state, applications);
         try operations.draw(&frame);
     }
@@ -198,9 +223,12 @@ fn visibleSelection(state: *const State, row: usize, total: usize) ?usize {
     return state.first + row;
 }
 
-fn scroll(state: *State, total: usize, down: bool) void {
+fn scroll(state: *State, total: usize, rows: i8) void {
     const max_first = total -| visible_row_capacity;
-    state.first = if (down) @min(max_first, state.first +| 3) else state.first -| 3;
+    state.first = if (rows < 0)
+        state.first -| @as(usize, @intCast(-@as(i16, rows)))
+    else
+        @min(max_first, state.first +| @as(usize, @intCast(rows)));
     if (total == 0) {
         state.selected = 0;
     } else {
@@ -254,10 +282,10 @@ test "viewport follows keys and wheel without exceeding results" {
     state.selected = visible_row_capacity;
     keepSelectedVisible(&state);
     try std.testing.expectEqual(@as(usize, 1), state.first);
-    scroll(&state, 40, true);
+    scroll(&state, 40, 3);
     try std.testing.expectEqual(@as(usize, 4), state.first);
     try std.testing.expectEqual(@as(usize, visible_row_capacity), state.selected);
-    scroll(&state, 2, true);
+    scroll(&state, 2, 3);
     try std.testing.expectEqual(@as(usize, 0), state.first);
     try std.testing.expectEqual(@as(usize, 1), state.selected);
 }
