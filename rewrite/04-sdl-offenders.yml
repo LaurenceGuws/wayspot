@@ -43,7 +43,7 @@ offenders:
       - missing font and unsupported glyph behavior is explicit
     closed_by:
       - pinned static SDL_ttf, FreeType, and HarfBuzz
-      - one explicit Noto Sans font path and size
+      - one embedded Noto Sans font and explicit size
       - fifteen reusable renderer text objects
       - reverse-order text, engine, font, renderer, and library cleanup
 

@@ -1,0 +1,230 @@
+# Temporary Marathon 5 design. It may be deleted after acceptance.
+# It narrows DOMAIN.yml; it does not add product scope.
+
+marathon: notification_dbus
+state: approved
+
+references:
+  zig_io:
+    path: /home/home/personal/projects/qagent/zig-0.16-release-notes.txt
+    sections:
+      - I/O as an Interface
+      - Cancelation
+      - Fuzzer / Smith
+  dbus:
+    path: /home/home/personal/projects/dev_references/backends/dbus
+    commit: f64ae3cafdcf31606401171bb0e8fe3fccc761c2
+    specification: doc/dbus-specification.xml
+    native_example: tools/dbus-echo.c
+  notifications:
+    path: /home/home/personal/projects/dev_references/backends/xdg-specs
+    commit: d77a8e95d4a0ccf6f330a02b2a6e8e0085c39579
+    specification: notification/notification-spec.xml
+
+useful_product_path: >
+  wayspot-beta notifications owns org.freedesktop.Notifications on the session
+  bus; applications can create, replace, and close bounded notification
+  records until the process stops.
+
+protocol:
+  bus: session
+  name: org.freedesktop.Notifications
+  path: /org/freedesktop/Notifications
+  interface: org.freedesktop.Notifications
+  name_flags:
+    - do_not_queue
+  methods:
+    GetCapabilities:
+      input: none
+      output: empty string array
+    Notify:
+      input_signature: susssasa{sv}i
+      output_signature: u
+    CloseNotification:
+      input_signature: u
+      output: empty method return or unknown-notification error
+    GetServerInformation:
+      input: none
+      output_signature: ssss
+  signals:
+    NotificationClosed:
+      signature: uu
+      reasons:
+        expired: 1
+        dismissed: 2
+        requested: 3
+        reserved: 4
+  unsupported:
+    - ActionInvoked
+    - ActivationToken
+    - actions capability
+    - body markup capability
+    - icons, images, sound, and persistence capabilities
+
+records:
+  owner: notification process
+  identity:
+    new:
+      replaces_id: 0
+      result: next nonzero u32 id
+    replacement:
+      known_id: atomically replace the record and return the same id
+      unknown_id: >
+        Treat it as a new notification and return a new id. The notification
+        specification is ambiguous here; this matches mako and avoids reusing
+        a stale caller-supplied id.
+  fields:
+    - id
+    - app_name
+    - app_icon
+    - summary
+    - body
+    - expire_timeout
+  ignored_after_validation:
+    - actions
+    - hints
+  capacity: 256
+  text_bytes:
+    app_name: 256
+    app_icon: 1024
+    summary: 1024
+    body: 16384
+  action_strings: 64
+  action_string_bytes: 256
+  hints: 64
+  hint_key_bytes: 256
+  message_bytes: 65536
+  id_rule: >
+    Increment with wrap, skip zero, and inspect at most record capacity plus
+    one ids before reporting exhaustion.
+  insertion_rule: >
+    Validate and copy the complete request before changing the live record
+    set; every rejection leaves all records and the next id unchanged.
+
+files_proposed:
+  src/notification.zig: >
+    Own Notification, the bounded active records, id allocation, replacement,
+    close, and method results. No DBus or process types.
+  src/notification_dbus.zig: >
+    Translate the exact notification methods, run the bounded resident loop,
+    and contain its strict transcript tests. One compile-time concrete
+    connection is supplied by tests or main.
+  src/notification_dbus_native.zig: >
+    Own one private libdbus session connection, message iteration, replies,
+    signals, name ownership, waiting, disconnection, and cleanup.
+
+native_choice:
+  library: libdbus-1
+  reason: >
+    D-Bus authentication, framing, validation, and bus registration are a
+    mature external protocol implementation. Wayspot owns only its service
+    methods and lifecycle.
+  io_boundary: >
+    libdbus performs blocking C I/O outside std.Io. Tests therefore substitute
+    the typed connection immediately above libdbus; they do not pretend that
+    std.testing.io can intercept libdbus syscalls.
+  connection: private
+  exit_on_disconnect: false
+  cleanup:
+    - closing the private connection releases every owned name
+    - close the private connection exactly once
+    - unref every message exactly once
+    - unref the connection exactly once
+  excluded:
+    - raw D-Bus wire parser
+    - authentication implementation
+    - generic D-Bus value tree
+    - runtime interface erasure
+
+loop:
+  startup:
+    - connect and authenticate to the session bus
+    - disable libdbus exit-on-disconnect behavior
+    - request the name with do_not_queue
+    - accept only primary_owner or already_owner
+  turn:
+    - observe stop
+    - wait for one bounded interval
+    - dispatch at most 64 messages
+    - observe stop again
+  wait_milliseconds: 100
+  message_turn_capacity: 64
+  stop_latency_milliseconds_max: 200
+  bus_loss: return a visible process error after cleanup
+  name_loss: return a visible process error after cleanup
+  reconnect: excluded
+
+errors:
+  startup:
+    - session_bus_unavailable
+    - name_owned
+    - out_of_memory
+  request:
+    - unknown_method
+    - invalid_signature
+    - invalid_utf8
+    - field_too_long
+    - too_many_actions
+    - too_many_hints
+    - records_full
+    - id_exhausted
+    - unknown_notification
+    - out_of_memory
+  process:
+    - bus_lost
+    - name_lost
+    - reply_failed
+    - signal_failed
+
+asserts:
+  - no id is zero
+  - record count never exceeds 256
+  - ids are unique
+  - replacement changes exactly one known record
+  - failed Notify changes no record and consumes no id
+  - close invalidates the id before NotificationClosed is emitted
+  - every accepted method call receives exactly one reply
+  - every rejected method call receives exactly one DBus error
+  - every popped message is unrefed exactly once
+  - every accepted message is at most 65536 bytes
+  - the name is never queued
+  - bus or name loss never starts a fallback process
+
+proof_before_runtime:
+  unit:
+    - first id, replacement, unknown replacement, close, and wrap behavior
+    - exact field and collection bounds
+    - full-capacity insertion and replacement
+    - failure atomicity for every rejected field and allocation
+  fuzz:
+    - bounded notification values and replacement histories
+    - nested action and hint iterators
+    - malformed signatures and UTF-8
+  simulation:
+    - connect, own, receive, reply, stop, and close
+    - name already owned
+    - bus loss before and after name ownership
+    - stop before wait, during idle turns, and after one request
+    - malformed request followed by a valid request
+    - reply and signal allocation failure
+  native_parity:
+    - compile and link every native operation
+    - plain tests import no libdbus or live session bus
+
+runtime_receipt:
+  - start wayspot-beta notifications
+  - prove it is the sole org.freedesktop.Notifications owner
+  - call all four methods through the session bus
+  - prove replacement returns the original id
+  - prove close emits NotificationClosed with reason 3
+  - stop once and prove the name and process are gone
+
+deferred:
+  - banner rendering and user dismissal
+  - default and positive expiration scheduling
+  - retained history
+  - actions and activation tokens
+  - notification icons, images, markup, and sounds
+  - service activation files
+  - reconnect after bus loss
+  - static or vendored libdbus

@@ -20,6 +20,7 @@
         "build.zig",
         "build_libs.zig",
         "build.zig.zon",
+        "assets",
         "src",
         "vendor/freetype",
         "vendor/sdl",

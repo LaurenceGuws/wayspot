@@ -45,6 +45,8 @@ not define Wayspot product scope.
   `/home/home/personal/projects/official_docs/ziglang.org/download/0.16.0/`
 - Zig 0.16 source:
   `/home/home/personal/projects/dev_references/zig_maturity/zig/`
+- Zig 0.16 release notes:
+  `/home/home/personal/projects/qagent/zig-0.16-release-notes.txt`
 - SDL built source:
   `vendor/sdl/` (official `release-3.4.12`, commit
   `f87239e71e42da91ca317a12eefb82cfbf3393eb`)
@@ -57,6 +59,12 @@ not define Wayspot product scope.
   `/home/home/personal/projects/dev_references/backends/hyprland/`
 - Hyprland IPC:
   `/home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md`
+- D-Bus source and specification:
+  `/home/home/personal/projects/dev_references/backends/dbus/` (commit
+  `f64ae3cafdcf31606401171bb0e8fe3fccc761c2`)
+- Desktop notification specification:
+  `/home/home/personal/projects/dev_references/backends/xdg-specs/notification/notification-spec.xml`
+  (repository commit `d77a8e95d4a0ccf6f330a02b2a6e8e0085c39579`)
 
 ## Workflow
 
@@ -72,7 +80,7 @@ not define Wayspot product scope.
 - Every allocation, file, socket, process, thread, and native object has one
   visible owner and exactly one cleanup path.
 - External SDL, Hyprland, DBus, filesystem, and process behavior is tested with
-  unit tests, fuzzing, and deterministic simulations over strict mock I/O.
+  unit tests, fuzzing, and deterministic simulations over strict transcripts.
   Fixtures and a live desktop are not CI proof.
 - Exercise the real product path after deterministic proof exists.
 - Keep small reviewer checkpoints. Do not commit without operator authority.

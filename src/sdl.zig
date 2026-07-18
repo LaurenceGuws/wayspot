@@ -11,10 +11,10 @@ const sdl = @cImport({
     @cInclude("SDL3/SDL.h");
     @cInclude("SDL3_ttf/SDL_ttf.h");
 });
+const font_bytes = @embedFile("NotoSans-Regular.ttf");
 
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
-    const font_path = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
     const font_size = 16;
     const text_capacity = picker.visible_row_capacity + 1;
 
@@ -42,6 +42,7 @@ pub const Native = struct {
     home: []const u8,
     window: ?*sdl.SDL_Window = null,
     renderer: ?*sdl.SDL_Renderer = null,
+    font_stream: ?*sdl.SDL_IOStream = null,
     font: ?*sdl.TTF_Font = null,
     text_engine: ?*sdl.TTF_TextEngine = null,
     texts: [text_capacity]*sdl.TTF_Text = undefined,
@@ -94,7 +95,10 @@ pub const Native = struct {
             pixels.window_height,
             sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )) return error.SdlLogicalPresentationFailed;
-        native.font = sdl.TTF_OpenFont(font_path, font_size) orelse return error.TtfFontOpenFailed;
+        native.font_stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse
+            return error.TtfFontStreamCreateFailed;
+        native.font = sdl.TTF_OpenFontIO(native.font_stream, false, font_size) orelse
+            return error.TtfFontOpenFailed;
         native.text_engine = sdl.TTF_CreateRendererTextEngine(native.renderer) orelse
             return error.TtfTextEngineCreateFailed;
         while (native.text_count < native.texts.len) {
@@ -308,8 +312,12 @@ pub const Native = struct {
         native.clearTexts();
         sdl.TTF_DestroyRendererTextEngine(native.text_engine);
         sdl.TTF_CloseFont(native.font);
+        if (native.font_stream) |stream| {
+            std.debug.assert(sdl.SDL_CloseIO(stream));
+        }
         native.text_engine = null;
         native.font = null;
+        native.font_stream = null;
     }
 
     fn drawText(

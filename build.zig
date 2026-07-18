@@ -19,6 +19,9 @@ pub fn build(b: *std.Build) void {
     });
     wayspot_beta.addIncludePath(sdl.path("include"));
     wayspot_beta.addIncludePath(text.include);
+    wayspot_beta.addAnonymousImport("NotoSans-Regular.ttf", .{
+        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
+    });
     wayspot_beta.linkLibrary(sdl.artifact("SDL3"));
     wayspot_beta.linkLibrary(text.library);
 

@@ -1,95 +1,58 @@
+# Temporary acceptance record. Product law remains outside this file.
+
+marathon: apps_files_icons_history
+state: accepted
+
 useful_product_path: >
-  Show application names immediately, then add available icons to the current
-  picker rows without delaying input.
+  Present application names immediately, then load available PNG icons into
+  only the visible rows without delaying queued input.
 
-minimum_file_tree:
-  src/icon.zig: resolve one desktop icon name to one bounded PNG path
-  src/sdl.zig: own visible SDL textures and destroy each exactly once
+owners:
+  src/icon.zig: bounded candidate icon paths
+  src/image.zig: bounded PNG header validation
+  src/sdl.zig: visible textures, production text, drawing, and cleanup
+  src/sdl_pixels.zig: one fixed logical picker geometry
 
-dependency_direction:
-  - desktop App supplies an optional icon name
-  - picker Frame supplies visible App indexes
-  - SDL owns decoding, scaling, texture creation, drawing, and cleanup
-
-data_shapes:
-  icon_path: one terminated path
-  visible_texture: one App index and one SDL texture
-
-named_bounds:
-  visible_textures: 32
-  rendered_icon_pixels: 16x16
+bounds:
+  visible_rows: 14
+  visible_icon_records: 14
+  icon_pixels: 22x22
+  icon_encoded_bytes: 4194304
+  icon_source_side_pixels: 1024
+  icon_decoded_bytes: 4194304
   icon_path_bytes: 1024
-  work_per_idle_turn: 1 icon
+  icon_attempts_per_idle_turn: 1
+  text_objects: 15
+  logical_window_pixels: 720x480
 
-invariants:
-  - names are presented before icon work starts
-  - input is handled before the next icon is loaded
-  - only current visible rows own textures
-  - source surfaces are destroyed before another icon is attempted
-  - missing, unsupported, and malformed icons never remove an application
-  - no icon data is persisted
+accepted_behavior:
+  - names render before icon work
+  - queued input is drained before one icon attempt
+  - leaving the viewport destroys its loaded textures
+  - missing, invalid, malformed, and oversized icons retain the application row
+  - source surfaces and encoded bytes are released in the loading turn
+  - SDL_ttf, FreeType, HarfBuzz, and Noto Sans are pinned
+  - the font is embedded and opened from one read-only memory stream
+  - every text object, engine, font, stream, texture, renderer, window, and library has reverse-order cleanup
+  - high-DPI drawing and pointer input share one logical geometry
 
-errors_and_failure_meaning:
-  missing_or_unsupported_icon: keep the text row
-  texture_creation_failure: fail the picker after exact cleanup
+accepted_absence:
+  - SVG icons remain text-only
+  - no icon or application metadata is persisted
+  - no worker thread or generic cache exists
+  - selection history is deferred
+  - IME and editor behavior are deferred
 
-cleanup:
-  - destroy decoded and scaled surfaces in the loading turn
-  - destroy evicted textures once
-  - destroy all remaining textures before the renderer
-
-negative_space:
-  - no icon cache
-  - no worker thread
-  - no process invocation
-  - no SVG decoder in the first experiment
-  - no complete Freedesktop theme implementation
-
-unit_tests:
-  - absolute PNG path
-  - bounded generated path
-  - invalid icon name rejection
-
-deterministic_simulations:
-  - input interrupts idle turns
-  - idle work remains bounded
-
-real_product_receipts:
-  - initial names remain immediate
-  - PNG icons appear progressively
-  - scrolling and filtering retain bounded memory
-
-character_budget: measure before acceptance
-explicit_exclusions:
-  - selection history
-  - retained app metadata
-  - persistent icon data
-
-icon_slice:
-  state: accepted
-  behavior:
-    - names render before icon work
-    - one visible PNG is attempted per idle turn
-    - at most 32 visible icon attempts remain in memory
-    - leaving the viewport destroys its textures
-  accepted_miss:
-    - SVG icons remain text-only
-    - no generated PNG directory exists yet
-  proof:
-    - 146 test executions pass
-    - live icons stream in without delaying input
-    - Alacritty proves SVG absence does not remove or break an application row
-
-picker_chrome_slice:
-  state: active
-  scope:
-    - separate query and result panes
-    - 24 pixel result rows
-    - full-row selection
-    - pointer hover and click
-    - wheel scrolling
-    - proportional scrollbar
-  excludes:
-    - complete text editing
-    - fonts and themes
-    - generic layout or control types
+proof:
+  tests: 156
+  source_non_whitespace_characters: 95507
+  stripped_release_safe_binary_bytes: 8166936
+  shared_runtime_dependencies:
+    - libc
+    - libm
+    - ELF loader
+  live_receipts:
+    - application names appear immediately
+    - PNG icons stream into visible rows
+    - filtering, pointer selection, wheel scrolling, and scrollbar remain useful
+    - Noto Sans UTF-8 text renders through SDL_ttf
