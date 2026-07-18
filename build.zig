@@ -114,6 +114,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wallpaper_tests = b.addRunArtifact(wallpaper_tests);
+    const wallpaper_transcript_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wallpaper_transcript.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wallpaper_transcript_tests = b.addRunArtifact(wallpaper_transcript_tests);
     const wallpaper_native_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/wallpaper_native.zig"),
@@ -124,6 +132,19 @@ pub fn build(b: *std.Build) void {
     });
     wallpaper_native_tests.root_module.addIncludePath(sdl.path("include"));
     wallpaper_native_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    addWaylandProtocol(
+        b,
+        wallpaper_native_tests.root_module,
+        b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
+        "wlr-layer-shell-unstable-v1",
+    );
+    addWaylandProtocol(
+        b,
+        wallpaper_native_tests.root_module,
+        b.path("protocols/viewporter.xml"),
+        "viewporter",
+    );
+    wallpaper_native_tests.root_module.linkSystemLibrary("wayland-client", .{});
     wallpaper_native_tests.use_llvm = true;
     wallpaper_native_tests.use_lld = true;
     const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
@@ -250,6 +271,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_icon_tests.step);
     test_step.dependOn(&run_image_tests.step);
     test_step.dependOn(&run_wallpaper_tests.step);
+    test_step.dependOn(&run_wallpaper_transcript_tests.step);
     test_step.dependOn(&run_wallpaper_native_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
@@ -267,4 +289,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run Wayspot beta");
     run_step.dependOn(&run.step);
+}
+
+fn addWaylandProtocol(b: *std.Build, module: *std.Build.Module, xml: std.Build.LazyPath, name: []const u8) void {
+    const header_command = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+    header_command.addFileArg(xml);
+    const header = header_command.addOutputFileArg(b.fmt("{s}-client.h", .{name}));
+    const code_command = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+    code_command.addFileArg(xml);
+    const code = code_command.addOutputFileArg(b.fmt("{s}.c", .{name}));
+    module.addIncludePath(header.dirname());
+    module.addCSourceFile(.{ .file = code });
 }

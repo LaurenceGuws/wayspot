@@ -112,6 +112,12 @@ authoritative_references:
     use: >
       Set each surface destination to the layer configure's logical dimensions
       while its buffer uses the monitor's exact Hyprland pixel dimensions.
+  xdg_shell_generated_dependency:
+    xml: vendor/sdl/wayland-protocols/xdg-shell.xml
+    use: >
+      SDL's pinned static library already owns the xdg_popup interface symbol
+      referenced by the pinned layer-shell protocol. Wayspot creates no
+      xdg-shell object and generates no duplicate protocol code.
   core_wayland:
     xml: vendor/sdl/wayland-protocols/wayland.xml
     empty_input_region: >
@@ -126,11 +132,8 @@ authoritative_references:
       advertised_minimum: 4
       bound_version: 4
       required_initial_events:
-        - one geometry
-        - at least one mode, with exactly one final current mode
-        - one positive scale
         - one bounded non-empty name
-        - one done after the preceding state
+        - one done after name
       release_request_minimum: 3
       name_event_minimum: 4
       identity_proof: >
@@ -145,10 +148,10 @@ authoritative_references:
       wp_viewporter: { advertised_minimum: 1, bound_version: 1 }
       zwlr_layer_shell_v1: { advertised_minimum: 3, bound_version: 3 }
     discovery: >
-      Install the registry listener, perform one roundtrip to receive globals
-      and issue bounded binds, then perform a second roundtrip to receive each
-      bound output's initial events through done. Matching is forbidden before
-      the second roundtrip and complete output validation.
+      Install the registry listener and perform one roundtrip to collect at
+      most 16 wl_output global names. Bind each global v4 one at a time, reuse
+      one name/done probe, and roundtrip before deciding that proxy. Retain the
+      unique exact connector match and release every unmatched proxy.
   sdl:
     source_release: release-3.4.12
     source_commit: f87239e71e42da91ca317a12eefb82cfbf3393eb
@@ -180,7 +183,7 @@ authoritative_references:
 nouns:
   Monitor: one enabled Hyprland output identified by its exact Wayland output name
   Image: one owned decoded PNG used by the complete process lifetime
-  SurfaceHandle: one checked u8 slot owned concretely by Native or Transcript
+  SurfaceHandle: one checked u32 generation owned concretely by Native or Transcript
   Surface: native resources behind one live SurfaceHandle
   Round: one complete published monitor-to-SurfaceHandle set for the process Image
   Event: one complete Hyprland socket2 line classified as refresh or ignore
@@ -302,45 +305,30 @@ data_shapes:
       source is not vendored. Adding formats or a decoder dependency does not
       strengthen the one-surface theorem and belongs to a later approved need.
   SurfaceHandle:
-    declaration: "packed struct { index: u8 }"
+    declaration: "packed struct { generation: u32 }"
     rule: >
-      Native and Transcript each own a fixed surface_slot_capacity slot array,
-      large enough for one current and one completely prepared set.
-      prepare returns the index of one occupied slot; every operation checks the
-      index, occupied state, and exact monitor name. It is not a pointer,
-      erased handle, runtime interface, or transferable native integer.
+      Native and Transcript each own exactly one resource record.
+      prepare returns its nonzero generation; every operation checks occupied
+      state and exact generation. Absent, stale, and wrong handles fail. It is
+      not a pointer, slot index, erased handle, runtime interface, or
+      transferable native integer.
   RoundSurface:
     fields:
       monitor_index: u8
       handle: SurfaceHandle
     rule: >
-      wallpaper.zig owns only this monitor-to-slot identity. Native owns its
-      checked output-table index, wl_surface, viewport, layer surface, file,
-      mapping, pool, buffer, configure state, and release state inside the
-      occupied slot. Native's output table alone owns each wl_output proxy.
-      Transcript owns only the corresponding strict simulated slot state.
+      This type is deferred until the complete-round theorem. The one-surface
+      theorem owns one checked SurfaceHandle directly. Native owns one matched
+      wl_output and one surface resource record; Transcript owns the
+      corresponding strict simulated record.
   Round:
-    fields:
-      monitors: bounded sorted array
-      surfaces: "equal-length bounded array of RoundSurface"
-    equality: >
-      Monitor snapshots compare sorted name, geometry, scale, and transform.
-      Event payload text does not define a Round.
+    state: deferred_until_complete_round_theorem
+    rule: >
+      The one-surface theorem does not declare a collection shape. Checkpoint 4
+      must design it from the proven generation-checked resource record.
   pseudocode: |
-    const SurfaceHandle = packed struct { index: u8 };
-    const RoundSurface = struct {
-        monitor_index: u8,
-        handle: SurfaceHandle,
-    };
-    const Round = struct {
-        monitors: [monitor_capacity]Monitor,
-        monitor_count: u8,
-        surfaces: [surface_capacity]RoundSurface,
-        surface_count: u8,
-    };
-
+    const SurfaceHandle = packed struct { generation: u32 };
     fn prepare(source: anytype, monitor: Monitor, image: *const Image) !SurfaceHandle;
-    fn publish(source: anytype, handles: []const SurfaceHandle) !void;
     fn unmapAndRelease(source: anytype, handle: SurfaceHandle) !void;
     fn discardAfterDisconnect(source: anytype, handle: SurfaceHandle) void;
   Event:
@@ -372,14 +360,12 @@ named_bounds:
   round_byte_capacity: 268435456
   reconcile_byte_capacity: 536870912
   wayland_global_capacity: 128
-  wayland_output_event_capacity: 32
   wayland_configure_capacity_per_surface: 16
   wayland_dispatch_capacity_per_wait: 128
   buffer_release_callback_capacity: 128
   buffer_release_wait_milliseconds: 1000
-  registry_roundtrip_capacity: 2
-  surface_capacity: 16
-  surface_slot_capacity: 32
+  output_global_capacity: 16
+  output_probe_roundtrip_capacity: 16
   poll_source_capacity: 3
   notes:
     - all capacities include exact endpoint tests
@@ -435,17 +421,14 @@ ownership:
       Missing, duplicate, removed, or under-version required globals reject
       startup; removal while running is fatal after exact display-loss cleanup.
   - resource: Wayland output handles
-    owner: Native bounded output table
-    cleanup: wl_output.release exactly once because every output is bound at v4
+    owner: one reusable probe while discovering and one retained exact match
+    cleanup: release every unmatched proxy immediately and the match at shutdown
     failure: >
       A valid snapshot without an exact complete output match is transient for
       the bounded reconciliation attempts; it never reaches preparation.
     global_remove: >
-      Mark the matching registry name removed immediately and request monitor
-      reconciliation. Do not match it again. If no Surface uses it, release it
-      immediately; otherwise release it only after that Surface is replaced.
-      A removed output still present in a snapshot is transient until the
-      bounded reconciliation attempts converge or expire.
+      Current checkpoint treats any removal as fatal. Reconciliation ownership
+      remains deferred.
   - resource: empty input region
     owner: one Surface preparation call until set_input_region returns
     cleanup: destroy wl_region immediately after wl_surface.set_input_region
@@ -656,11 +639,11 @@ external_io_contract:
       - connect display
       - get registry and install listener
       - receive bounded global and global_remove records
-      - perform exactly two startup roundtrips
+      - perform one registry roundtrip and one roundtrip per bounded output probe
       - bind compositor v4, shm v1, viewporter v1, and layer-shell v3
-      - bind every advertised wl_output v4
-      - receive output geometry, mode, scale, name, and done
-      - release removed or retired wl_output v4
+      - bind each advertised wl_output v4 one at a time
+      - receive one bounded name and done
+      - release every unmatched wl_output v4
       - create roleless surface
       - create empty region
       - set surface input region
@@ -681,9 +664,9 @@ external_io_contract:
   transcript_rules:
     - every expected task is consumed exactly once and in order
     - supplied bytes and returned fragments are exact
-    - handles are small bounded typed indexes, never native integers
+    - handles are checked typed generations, never native integers
     - every opened handle must receive exactly one matching close/destroy
-    - every SurfaceHandle operation names the expected occupied slot and monitor
+    - every SurfaceHandle operation names the expected occupied generation
     - region creation must be followed by set_input_region and region destruction
     - no output may be matched before its first done
     - every reconciliation attempt drains Wayland then socket2 before and after requesting monitors
@@ -740,7 +723,7 @@ buffer_release:
     - no callback wait is indefinite
     - no connected compositor can reference memory when it is unmapped
     - orderly cleanup and display-loss cleanup are disjoint exhaustive paths
-    - a handle slot becomes free only after its complete cleanup path
+    - the resource record becomes vacant only after its complete cleanup path
 
 cleanup:
   order:
@@ -751,8 +734,8 @@ cleanup:
       Destroy or discard every wl_buffer, pool, mapping, shared-memory file,
       viewport, layer surface, and wl_surface once.
     - >
-      On healthy cleanup release each output-table wl_output after no Surface
-      slot refers to it; after disconnect mark each proxy dead without a request.
+      On healthy cleanup release the exact matched wl_output after the Surface;
+      after disconnect mark the proxy dead without a request.
     - destroy layer-shell, viewporter, shm, compositor, and registry bindings
     - disconnect Wayland once
     - close socket2 and stop handle once
@@ -819,6 +802,7 @@ phased_checkpoints:
       - crop/scaling endpoints and pixel bounds are proven
   - order: 3
     id: one_surface_theorem
+    state: ready_for_reviewer_gate
     product_proof: one monitor receives one correctly configured background layer and released buffer
     files:
       - src/wallpaper.zig
@@ -826,7 +810,27 @@ phased_checkpoints:
       - src/wallpaper_transcript.zig
       - protocols/wlr-layer-shell-unstable-v1.xml
       - build.zig
-    character_budget: 11000
+    character_budget: 16000
+    receipts:
+      original_character_tripwire: 11000
+      production_character_delta: 15640
+      rejected_shape_character_delta: 16772
+      catalog_and_slot_reduction: 1132
+      reviewer_ceiling_headroom: 360
+      wallpaper_zig_delta: 799
+      wallpaper_native_zig_delta: 14841
+      generated_protocol_code: measured_separately
+      protocol_xml: exact_pinned_copies_measured_separately
+      deterministic_tests: "24 strict transcript/pure wallpaper; 27 native; 501 repository"
+      build_steps: "61/61"
+      live_receipt: deliberately_not_run
+      budget_status: >
+        The original 11000-character tripwire remains red by 4640 characters.
+        Deleting the output catalog and multi-slot surface manager reduced the
+        rejected 16772-character shape by 1132 characters. The final 15640
+        result is 360 characters below the reviewer-approved 16000 ceiling.
+        Typed protocol callbacks, bounded dispatch, and exact resource cleanup
+        remain direct rather than hidden or weakened.
     closes_when:
       - role/configure/attach/commit/release/destroy order is exact
       - ordinary SDL XDG windows are absent
@@ -887,10 +891,8 @@ unit_tests:
   - exhaustive transform mapping
   - stop, reconnect, and refresh state transitions
   - exact transient mismatch classification and attempt endpoints
-  - compile-time monitor_capacity equals surface_capacity
-  - compile-time surface_slot_capacity equals two times surface_capacity
   - all capacities fit their checked index types
-  - SurfaceHandle rejects vacant, excessive, wrong-monitor, and double-release slots
+  - SurfaceHandle rejects absent, stale, wrong-generation, and double-release records
 
 fuzz_tests:
   data:

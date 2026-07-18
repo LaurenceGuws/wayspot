@@ -15,6 +15,10 @@ pub const image_path_capacity = 4095;
 pub const image_file_capacity = 64 * 1024 * 1024;
 pub const image_side_capacity = 16_384;
 pub const image_pixel_capacity = 67_108_864;
+pub const wayland_global_capacity = 128;
+pub const wayland_configure_capacity = 16;
+pub const wayland_release_capacity = 128;
+pub const wayland_wait_milliseconds = 1000;
 
 pub const Transform = enum(u3) {
     normal,
@@ -244,6 +248,23 @@ pub const Image = struct {
 };
 
 pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
+pub const SurfaceHandle = packed struct { generation: u32 };
+pub const Configure = struct { serial: u32, width: u32, height: u32 };
+
+pub fn openOutput(source: anytype, name: []const u8) !void {
+    if (name.len == 0 or name.len > monitor_name_capacity) return error.OutputNameInvalid;
+    try source.openOutput(name);
+}
+
+pub fn prepareSurface(source: anytype, monitor: *const Monitor, pixels: *const Image) !SurfaceHandle {
+    try validateImage(pixels);
+    if (pixels.width != monitor.width or pixels.height != monitor.height) return error.SurfacePixelsInvalid;
+    return source.prepare(monitor, pixels);
+}
+
+pub fn releaseSurface(source: anytype, handle: SurfaceHandle) !void {
+    try source.release(handle);
+}
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
     try validateImagePath(path);
@@ -278,7 +299,7 @@ pub fn coverImage(
 ) !Image {
     try validateImage(image);
     const crop = try coverCrop(image.width, image.height, width, height);
-    const count = try pixelCount(width, height);
+    const count = try surfacePixelCount(width, height);
     const pixels = try allocator.alloc(u32, count);
     errdefer allocator.free(pixels);
     try source.scale(image, crop, width, height, pixels);
@@ -286,8 +307,8 @@ pub fn coverImage(
 }
 
 pub fn coverCrop(source_width: u32, source_height: u32, width: u32, height: u32) !Crop {
-    _ = try pixelCount(source_width, source_height);
-    _ = try pixelCount(width, height);
+    _ = try surfacePixelCount(source_width, source_height);
+    _ = try surfacePixelCount(width, height);
     var crop_width = source_width;
     var crop_height = source_height;
     const source_ratio = @as(u64, source_width) * height;
@@ -314,12 +335,12 @@ fn validateImagePath(path: []const u8) !void {
 }
 
 fn validateImage(image: *const Image) !void {
-    const count = try pixelCount(image.width, image.height);
+    const count = try surfacePixelCount(image.width, image.height);
     if (image.pitch != image.width * 4) return error.ImagePitchInvalid;
     if (image.pixels.len != count) return error.ImagePixelsInvalid;
 }
 
-fn pixelCount(width: u32, height: u32) !usize {
+pub fn surfacePixelCount(width: u32, height: u32) !usize {
     if (width == 0 or height == 0) return error.ImageDimensionsZero;
     if (width > image_side_capacity or height > image_side_capacity) return error.ImageDimensionsTooLarge;
     const count = @as(u64, width) * height;
@@ -335,7 +356,7 @@ fn inspectPng(bytes: []const u8) !struct { width: u32, height: u32 } {
     }
     const width = std.mem.readInt(u32, bytes[16..20], .big);
     const height = std.mem.readInt(u32, bytes[20..24], .big);
-    _ = try pixelCount(width, height);
+    _ = try surfacePixelCount(width, height);
     return .{ .width = width, .height = height };
 }
 
@@ -661,7 +682,7 @@ const ImageTranscript = struct {
             },
             else => return error.ImageTranscriptMismatch,
         };
-        const pixels = try allocator.alloc(u32, try pixelCount(dimensions.width, dimensions.height));
+        const pixels = try allocator.alloc(u32, try surfacePixelCount(dimensions.width, dimensions.height));
         @memset(pixels, 0xff102030);
         return .{
             .width = dimensions.width,
