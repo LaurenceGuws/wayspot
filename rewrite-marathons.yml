@@ -262,13 +262,14 @@ marathons:
       - banner surface, timing, replacement, and dismissal
       - thirty-day expiry plus hard record and byte bounds
       - atomic history persistence and pruning
-      - notification history through CLI and GUI
+      - notification history through CLI
       - explicit treatment of sensitive summary and body text
     excludes:
       - indefinite retention
       - notification-driven application tracing features
       - fixtures or live DBus as deterministic proof
       - generic storage layer
+      - notification history GUI before canonical Cmd routes
     proof:
       - simulated time, DBus, SDL, Wayland, and filesystem histories
       - expiry boundary and hard-cap tests
@@ -276,14 +277,45 @@ marathons:
       - real banner, history, close, restart, and expiry receipts
     closes_when:
       - notifications remain usable across restart without exceeding retention
+      - retained notifications are inspectable through the direct CLI
       - banner and history cleanup are exact under success and failure
 
   - order: 7
-    id: wallpaper_monitor_surfaces
-    name: Wallpaper monitor surfaces
-    scratchpad: rewrite/07-wallpaper-monitor-surfaces.yml
+    id: canonical_cmd_routes
+    name: Canonical Cmd routes
+    scratchpad: rewrite/07-canonical-cmd-routes.yml
     depends_on:
       - notification_banner_history
+    outcome: >
+      Add the smallest closed Cmd route table that preserves apps as the
+      default picker path and admits notification history without a parallel
+      picker or second retained representation.
+    includes:
+      - apps as the default and primary GUI route
+      - one canonical Cmd family and bounded next-route tables
+      - notification history rows from existing retained Record values
+      - equal CLI and GUI product meaning without shared presentation code
+    excludes:
+      - temporary argv flags or a parallel notification picker
+      - generic command, widget, or plugin frameworks
+      - wallpaper and sunglasses behavior
+      - Bash completion before canonical routes are accepted
+    proof:
+      - apps startup, filtering, icons, and launch remain unchanged
+      - every accepted route reaches exactly one bounded next table or product action
+      - notification rows are display-only and retain no second history model
+      - deterministic CLI and GUI route simulations plus real apps and notification receipts
+    closes_when:
+      - apps remains the fastest default picker path
+      - notification history is reachable through the same picker runtime
+      - no interface owns duplicate route or product data
+
+  - order: 8
+    id: wallpaper_monitor_surfaces
+    name: Wallpaper monitor surfaces
+    scratchpad: rewrite/08-wallpaper-monitor-surfaces.yml
+    depends_on:
+      - canonical_cmd_routes
     outcome: >
       Keep one correct wallpaper surface and image on every current Hyprland
       monitor.
@@ -307,10 +339,10 @@ marathons:
       - every monitor has exactly one owned surface and valid image
       - socket, image, and native surface cleanup is exact
 
-  - order: 8
+  - order: 9
     id: wallpaper_rotation_lifecycle
     name: Wallpaper rotation and lifecycle
-    scratchpad: rewrite/08-wallpaper-rotation-lifecycle.yml
+    scratchpad: rewrite/09-wallpaper-rotation-lifecycle.yml
     depends_on:
       - wallpaper_monitor_surfaces
     outcome: >
@@ -337,10 +369,10 @@ marathons:
       - focus movement cannot alter the current wallpaper round
       - restart sequences differ and the process survives an overnight session
 
-  - order: 9
+  - order: 10
     id: sunglasses_cli_overlay
     name: Sunglasses CLI and overlay
-    scratchpad: rewrite/09-sunglasses-cli-overlay.yml
+    scratchpad: rewrite/10-sunglasses-cli-overlay.yml
     depends_on:
       - wallpaper_rotation_lifecycle
     outcome: >
@@ -366,10 +398,10 @@ marathons:
       - every documented CLI action visibly changes the selected monitor
       - restart and monitor changes preserve or reject state exactly as designed
 
-  - order: 10
+  - order: 11
     id: sunglasses_gui_controls
     name: Sunglasses GUI controls
-    scratchpad: rewrite/10-sunglasses-gui-controls.yml
+    scratchpad: rewrite/11-sunglasses-gui-controls.yml
     depends_on:
       - sunglasses_cli_overlay
     outcome: >
@@ -396,10 +428,10 @@ marathons:
       - every sunglasses capability is operable and visible in the GUI
       - the GUI retains only temporary editing state
 
-  - order: 11
+  - order: 12
     id: bash_hyprland_session
     name: Bash and Hyprland session integration
-    scratchpad: rewrite/11-bash-hyprland-session.yml
+    scratchpad: rewrite/12-bash-hyprland-session.yml
     depends_on:
       - sunglasses_gui_controls
     outcome: >
@@ -427,10 +459,10 @@ marathons:
       - standard Bash completion behaves correctly at every accepted position
       - login and rerun leave exactly the intended resident processes alive
 
-  - order: 12
+  - order: 13
     id: full_product_proof
     name: Full product proof and reduction
-    scratchpad: rewrite/12-full-product-proof.yml
+    scratchpad: rewrite/13-full-product-proof.yml
     depends_on:
       - bash_hyprland_session
     outcome: >

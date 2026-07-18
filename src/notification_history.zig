@@ -531,7 +531,106 @@ fn directoryPath(
     return std.fs.path.join(allocator, &.{ path, ".local", "state", "wayspot" }) catch error.OutOfMemory;
 }
 
+const ReadStat = struct {
+    kind: std.Io.File.Kind,
+    mode: u16,
+    size: u64,
+};
+
+/// Reads one complete retained byte snapshot and closes each opened handle once.
+fn readRetained(source: anytype, allocator: std.mem.Allocator) Error!?[]u8 {
+    if (!try source.openDirectory()) return null;
+    defer source.closeDirectory();
+    const directory = try source.statDirectory();
+    if (directory.kind != .directory or directory.mode != 0o700) return error.HistoryOpenFailed;
+
+    if (!try source.openFile()) return null;
+    defer source.closeFile();
+    const file = try source.statFile();
+    if (file.kind != .file or file.mode != 0o600) return error.HistoryOpenFailed;
+    if (file.size > file_capacity) return error.HistoryTooLarge;
+
+    const bytes = allocator.alloc(u8, @intCast(file.size)) catch return error.OutOfMemory;
+    errdefer allocator.free(bytes);
+    if (try source.read(bytes) != bytes.len) return error.HistoryReadFailed;
+    return bytes;
+}
+
+/// Owns read-only handles for the one retained notification file.
+const ReadNative = struct {
+    io: std.Io,
+    path: []const u8,
+    directory: ?std.Io.Dir = null,
+    file: ?std.Io.File = null,
+
+    fn openDirectory(native: *ReadNative) Error!bool {
+        std.debug.assert(native.directory == null);
+        native.directory = std.Io.Dir.cwd().openDir(native.io, native.path, .{
+            .follow_symlinks = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return error.HistoryOpenFailed,
+        };
+        return true;
+    }
+
+    fn statDirectory(native: *ReadNative) Error!ReadStat {
+        const stat = (native.directory orelse return error.HistoryOpenFailed).stat(native.io) catch {
+            return error.HistoryOpenFailed;
+        };
+        return statValue(stat);
+    }
+
+    fn openFile(native: *ReadNative) Error!bool {
+        std.debug.assert(native.file == null);
+        const directory = native.directory orelse return error.HistoryOpenFailed;
+        native.file = directory.openFile(native.io, "notifications.jsonl", .{
+            .follow_symlinks = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return error.HistoryOpenFailed,
+        };
+        return true;
+    }
+
+    fn statFile(native: *ReadNative) Error!ReadStat {
+        const stat = (native.file orelse return error.HistoryOpenFailed).stat(native.io) catch {
+            return error.HistoryReadFailed;
+        };
+        return statValue(stat);
+    }
+
+    fn read(native: *ReadNative, bytes: []u8) Error!usize {
+        const file = native.file orelse return error.HistoryReadFailed;
+        return file.readPositionalAll(native.io, bytes, 0) catch error.HistoryReadFailed;
+    }
+
+    fn closeFile(native: *ReadNative) void {
+        const file = native.file orelse unreachable;
+        file.close(native.io);
+        native.file = null;
+    }
+
+    fn closeDirectory(native: *ReadNative) void {
+        std.debug.assert(native.file == null);
+        const directory = native.directory orelse unreachable;
+        directory.close(native.io);
+        native.directory = null;
+    }
+};
+
+fn statValue(stat: std.Io.File.Stat) ReadStat {
+    return .{
+        .kind = stat.kind,
+        .mode = @intCast(stat.permissions.toMode() & 0o777),
+        .size = stat.size,
+    };
+}
+
 /// Reads and prunes retained records without creating or changing filesystem state.
+///
+/// std.Io follows path and file symlinks here. Privacy and regular-file checks
+/// apply to the opened targets, avoiding a separate path-stat race.
 pub fn inspect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -540,32 +639,11 @@ pub fn inspect(
 ) Error!History {
     const path = try directoryPath(allocator, state_home, home);
     defer allocator.free(path);
-    const directory = std.Io.Dir.cwd().openDir(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        else => return error.HistoryOpenFailed,
-    };
-    defer directory.close(io);
-    const directory_stat = directory.stat(io) catch return error.HistoryOpenFailed;
-    if (directory_stat.kind != .directory or
-        directory_stat.permissions.toMode() & 0o777 != 0o700)
-    {
-        return error.HistoryOpenFailed;
-    }
-    const file = directory.openFile(io, "notifications.jsonl", .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        else => return error.HistoryOpenFailed,
-    };
-    defer file.close(io);
-    const file_stat = file.stat(io) catch return error.HistoryReadFailed;
-    if (file_stat.kind != .file or file_stat.permissions.toMode() & 0o777 != 0o600) {
-        return error.HistoryOpenFailed;
-    }
-    const size = file_stat.size;
-    if (size > file_capacity) return error.HistoryTooLarge;
-    const bytes = allocator.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
+    var native = ReadNative{ .io = io, .path = path };
+    const bytes = try readRetained(&native, allocator) orelse return .{};
     defer allocator.free(bytes);
-    const count = file.readPositionalAll(io, bytes, 0) catch return error.HistoryReadFailed;
-    if (count != bytes.len) return error.HistoryReadFailed;
+    std.debug.assert(native.directory == null);
+    std.debug.assert(native.file == null);
     return parse(allocator, bytes, try unixSeconds(io));
 }
 
@@ -582,9 +660,19 @@ pub const Owner = struct {
         state_home: ?[]const u8,
         home: ?[]const u8,
     ) Error!Owner {
+        return initAt(allocator, io, state_home, home, try unixSeconds(io));
+    }
+
+    fn initAt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        state_home: ?[]const u8,
+        home: ?[]const u8,
+        now: i64,
+    ) Error!Owner {
         var native = try Native.init(allocator, io, state_home, home);
         errdefer native.deinit();
-        var history = try load(&native, allocator, try unixSeconds(io));
+        var history = try load(&native, allocator, now);
         errdefer history.deinit(allocator);
         const encoded = try encode(allocator, &history);
         defer allocator.free(encoded);
@@ -703,45 +791,6 @@ test "empty public history is empty output" {
     try std.testing.expectEqual(@as(usize, 0), bytes.len);
 }
 
-const ReadTranscript = struct {
-    bytes: []const u8,
-    failure: ?Error = null,
-    reads: usize = 0,
-
-    fn read(transcript: *ReadTranscript) Error![]u8 {
-        std.debug.assert(transcript.reads == 0);
-        transcript.reads += 1;
-        if (transcript.failure) |failure| return failure;
-        return std.testing.allocator.dupe(u8, transcript.bytes) catch error.OutOfMemory;
-    }
-};
-
-test "read transcript publishes one complete history or an exact error" {
-    const line =
-        \\{"received_unix_seconds":1,"history_id":1,"app_name":"app","summary":"summary","body":"body"}
-        \\
-    ;
-    var success = ReadTranscript{ .bytes = line };
-    var history = try load(&success, std.testing.allocator, 1);
-    defer history.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), success.reads);
-    try std.testing.expectEqual(@as(usize, 1), history.count);
-
-    var corrupt = ReadTranscript{ .bytes = "{}" };
-    try std.testing.expectError(
-        error.HistoryCorrupt,
-        load(&corrupt, std.testing.allocator, 1),
-    );
-    try std.testing.expectEqual(@as(usize, 1), corrupt.reads);
-
-    var failed = ReadTranscript{ .bytes = "", .failure = error.HistoryReadFailed };
-    try std.testing.expectError(
-        error.HistoryReadFailed,
-        load(&failed, std.testing.allocator, 1),
-    );
-    try std.testing.expectEqual(@as(usize, 1), failed.reads);
-}
-
 test "corrupt incomplete oversized and duplicate input publishes no history" {
     try std.testing.expectError(error.HistoryCorrupt, parse(std.testing.allocator, "{}", 0));
     var oversized: [line_capacity + 1]u8 = @splat('x');
@@ -817,6 +866,91 @@ test "state path uses absolute XDG state then absolute HOME fallback" {
     try std.testing.expectError(error.PathMissing, directoryPath(std.testing.allocator, null, null));
 }
 
+test "native owner restart prunes exact age and rewrites one private complete file" {
+    const now: i64 = 4_000_000;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var directory = try temporary.dir.createDirPathOpen(std.testing.io, "wayspot", .{
+        .open_options = .{ .iterate = true },
+        .permissions = .fromMode(0o700),
+    });
+    defer directory.close(std.testing.io);
+    try directory.setPermissions(std.testing.io, .fromMode(0o700));
+
+    var seeded: History = .{};
+    defer seeded.deinit(std.testing.allocator);
+    seeded.append(try Record.init(
+        std.testing.allocator,
+        now - retention_seconds - 1,
+        4,
+        "old",
+        "prune",
+        "old",
+    ));
+    seeded.append(try Record.init(
+        std.testing.allocator,
+        now - retention_seconds,
+        9,
+        "boundary",
+        "retain",
+        "boundary",
+    ));
+    seeded.append(try Record.init(
+        std.testing.allocator,
+        now,
+        12,
+        "new",
+        "retain",
+        "new",
+    ));
+    const seed_bytes = try encode(std.testing.allocator, &seeded);
+    defer std.testing.allocator.free(seed_bytes);
+    const seed_file = try directory.createFile(std.testing.io, "notifications.jsonl", .{
+        .permissions = .fromMode(0o600),
+    });
+    try seed_file.writeStreamingAll(std.testing.io, seed_bytes);
+    seed_file.close(std.testing.io);
+
+    var owner = try Owner.initAt(std.testing.allocator, std.testing.io, root, null, now);
+    try std.testing.expectEqual(@as(usize, 2), owner.history.count);
+    try std.testing.expectEqual(@as(u64, 9), owner.history.records[0].?.history_id);
+    try std.testing.expectEqual(@as(u64, 12), owner.history.records[1].?.history_id);
+    try std.testing.expectEqual(@as(u64, 13), owner.history.next_history_id);
+    const canonical = try encode(std.testing.allocator, &owner.history);
+    defer std.testing.allocator.free(canonical);
+    owner.deinit();
+
+    const directory_stat = try directory.stat(std.testing.io);
+    try std.testing.expectEqual(@as(u16, 0o700), @as(u16, @intCast(directory_stat.permissions.toMode() & 0o777)));
+    const retained = try directory.openFile(std.testing.io, "notifications.jsonl", .{});
+    defer retained.close(std.testing.io);
+    const retained_stat = try retained.stat(std.testing.io);
+    try std.testing.expectEqual(.file, retained_stat.kind);
+    try std.testing.expectEqual(@as(u16, 0o600), @as(u16, @intCast(retained_stat.permissions.toMode() & 0o777)));
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(retained_stat.size));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(bytes.len, try retained.readPositionalAll(std.testing.io, bytes, 0));
+    try std.testing.expectEqualSlices(u8, canonical, bytes);
+    try std.testing.expectEqual(@as(u8, '\n'), bytes[bytes.len - 1]);
+
+    var entries = directory.iterate();
+    var entry_count: usize = 0;
+    var exhausted = false;
+    for (0..2) |_| {
+        const entry = try entries.next(std.testing.io) orelse {
+            exhausted = true;
+            break;
+        };
+        entry_count += 1;
+        try std.testing.expectEqual(@as(usize, 1), entry_count);
+        try std.testing.expectEqualStrings("notifications.jsonl", entry.name);
+    }
+    try std.testing.expect(exhausted);
+    try std.testing.expectEqual(@as(usize, 1), entry_count);
+}
+
 test "count and byte bounds remove oldest complete records" {
     var count_history: History = .{};
     defer count_history.deinit(std.testing.allocator);
@@ -873,6 +1007,290 @@ fn replaceAllocationFailure(allocator: std.mem.Allocator) !void {
         try std.testing.expectEqual(@as(u64, 1), history.records[0].?.history_id);
         return err;
     };
+}
+
+const OpenRead = enum { opened, missing, failed };
+const StatRead = union(enum) { value: ReadStat, failed };
+const BytesRead = union(enum) {
+    complete: []const u8,
+    short: usize,
+    failed,
+};
+
+const ReadStep = union(enum) {
+    open_directory: OpenRead,
+    stat_directory: StatRead,
+    open_file: OpenRead,
+    stat_file: StatRead,
+    read: BytesRead,
+    close_file,
+    close_directory,
+};
+
+const HistoryReadTranscript = struct {
+    steps: []const ReadStep,
+    index: usize = 0,
+    directory_open: bool = false,
+    file_open: bool = false,
+
+    fn openDirectory(transcript: *HistoryReadTranscript) Error!bool {
+        const result = switch (try transcript.next()) {
+            .open_directory => |value| value,
+            else => return error.HistoryOpenFailed,
+        };
+        return switch (result) {
+            .opened => blk: {
+                transcript.directory_open = true;
+                break :blk true;
+            },
+            .missing => false,
+            .failed => error.HistoryOpenFailed,
+        };
+    }
+
+    fn statDirectory(transcript: *HistoryReadTranscript) Error!ReadStat {
+        std.debug.assert(transcript.directory_open);
+        return switch (try transcript.next()) {
+            .stat_directory => |result| switch (result) {
+                .value => |value| value,
+                .failed => error.HistoryOpenFailed,
+            },
+            else => error.HistoryOpenFailed,
+        };
+    }
+
+    fn openFile(transcript: *HistoryReadTranscript) Error!bool {
+        std.debug.assert(transcript.directory_open);
+        const result = switch (try transcript.next()) {
+            .open_file => |value| value,
+            else => return error.HistoryOpenFailed,
+        };
+        return switch (result) {
+            .opened => blk: {
+                transcript.file_open = true;
+                break :blk true;
+            },
+            .missing => false,
+            .failed => error.HistoryOpenFailed,
+        };
+    }
+
+    fn statFile(transcript: *HistoryReadTranscript) Error!ReadStat {
+        std.debug.assert(transcript.file_open);
+        return switch (try transcript.next()) {
+            .stat_file => |result| switch (result) {
+                .value => |value| value,
+                .failed => error.HistoryReadFailed,
+            },
+            else => error.HistoryReadFailed,
+        };
+    }
+
+    fn read(transcript: *HistoryReadTranscript, bytes: []u8) Error!usize {
+        std.debug.assert(transcript.file_open);
+        return switch (try transcript.next()) {
+            .read => |result| switch (result) {
+                .complete => |source| blk: {
+                    if (source.len != bytes.len) return error.HistoryReadFailed;
+                    @memcpy(bytes, source);
+                    break :blk bytes.len;
+                },
+                .short => |count| blk: {
+                    if (count >= bytes.len) return error.HistoryReadFailed;
+                    @memset(bytes[0..count], 0);
+                    break :blk count;
+                },
+                .failed => error.HistoryReadFailed,
+            },
+            else => error.HistoryReadFailed,
+        };
+    }
+
+    fn closeFile(transcript: *HistoryReadTranscript) void {
+        std.debug.assert(transcript.file_open);
+        const step = transcript.next() catch unreachable;
+        std.debug.assert(step == .close_file);
+        transcript.file_open = false;
+    }
+
+    fn closeDirectory(transcript: *HistoryReadTranscript) void {
+        std.debug.assert(transcript.directory_open);
+        std.debug.assert(!transcript.file_open);
+        const step = transcript.next() catch unreachable;
+        std.debug.assert(step == .close_directory);
+        transcript.directory_open = false;
+    }
+
+    fn done(transcript: *const HistoryReadTranscript) !void {
+        try std.testing.expectEqual(transcript.steps.len, transcript.index);
+        try std.testing.expect(!transcript.directory_open);
+        try std.testing.expect(!transcript.file_open);
+    }
+
+    fn next(transcript: *HistoryReadTranscript) Error!ReadStep {
+        if (transcript.index == transcript.steps.len) return error.HistoryReadFailed;
+        defer transcript.index += 1;
+        return transcript.steps[transcript.index];
+    }
+};
+
+const private_directory = ReadStat{ .kind = .directory, .mode = 0o700, .size = 0 };
+
+fn privateFile(size: u64) ReadStat {
+    return .{ .kind = .file, .mode = 0o600, .size = size };
+}
+
+fn expectReadFailure(expected: Error, steps: []const ReadStep) !void {
+    var transcript = HistoryReadTranscript{ .steps = steps };
+    try std.testing.expectError(expected, readRetained(&transcript, std.testing.allocator));
+    try transcript.done();
+}
+
+test "history read transcript opens stats reads and closes in exact order" {
+    const line =
+        \\{"received_unix_seconds":1,"history_id":1,"app_name":"app","summary":"summary","body":"body"}
+        \\
+    ;
+    var transcript = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(line.len) } },
+        .{ .read = .{ .complete = line } },
+        .close_file,
+        .close_directory,
+    } };
+    const bytes = (try readRetained(&transcript, std.testing.allocator)).?;
+    defer std.testing.allocator.free(bytes);
+    try transcript.done();
+    var history = try parse(std.testing.allocator, bytes, 1);
+    defer history.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), history.count);
+}
+
+test "missing history directory and file are empty success with exact cleanup" {
+    var no_directory = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .missing },
+    } };
+    try std.testing.expectEqual(null, try readRetained(&no_directory, std.testing.allocator));
+    try no_directory.done();
+
+    var no_file = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .missing },
+        .close_directory,
+    } };
+    try std.testing.expectEqual(null, try readRetained(&no_file, std.testing.allocator));
+    try no_file.done();
+}
+
+test "history open stat kind and private-mode failures close exact handles" {
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .failed },
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .failed },
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = .{ .kind = .file, .mode = 0o700, .size = 0 } } },
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = .{ .kind = .directory, .mode = 0o755, .size = 0 } } },
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .failed },
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryReadFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .failed },
+        .close_file,
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = .{ .kind = .directory, .mode = 0o600, .size = 0 } } },
+        .close_file,
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryOpenFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = .{ .kind = .file, .mode = 0o640, .size = 0 } } },
+        .close_file,
+        .close_directory,
+    });
+}
+
+test "history size read short-read and malformed failures publish nothing" {
+    try expectReadFailure(error.HistoryTooLarge, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(file_capacity + 1) } },
+        .close_file,
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryReadFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(4) } },
+        .{ .read = .failed },
+        .close_file,
+        .close_directory,
+    });
+    try expectReadFailure(error.HistoryReadFailed, &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(4) } },
+        .{ .read = .{ .short = 3 } },
+        .close_file,
+        .close_directory,
+    });
+
+    var malformed = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(2) } },
+        .{ .read = .{ .complete = "{}" } },
+        .close_file,
+        .close_directory,
+    } };
+    const bytes = (try readRetained(&malformed, std.testing.allocator)).?;
+    defer std.testing.allocator.free(bytes);
+    try malformed.done();
+    try std.testing.expectError(error.HistoryCorrupt, parse(std.testing.allocator, bytes, 1));
+}
+
+test "history read allocation failure closes file and directory" {
+    var transcript = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .{ .value = privateFile(4) } },
+        .close_file,
+        .close_directory,
+    } };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, readRetained(&transcript, failing.allocator()));
+    try transcript.done();
 }
 
 const Step = union(enum) {
