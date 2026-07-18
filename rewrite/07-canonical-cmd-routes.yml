@@ -1,7 +1,7 @@
 ---
 marathon: 7
 name: canonical_cmd_routes
-status: checkpoint_1_for_review
+status: checkpoint_3_for_review
 temporary: true
 
 authority:
@@ -432,6 +432,7 @@ implementation_checkpoints:
         nonvisual ownership change without disrupting the operator
   - order: 3
     name: root_and_notification_rows
+    status: implemented_uncommitted
     scope:
       - add the static root table and slash transition
       - lazily open existing retained notification History
@@ -444,6 +445,31 @@ implementation_checkpoints:
       production_added: 4000..8000
       tests_added: 5000..9000
       stop_if: history is copied, parsed from JSONL, or read during default startup
+    implementation_receipts:
+      - Table, Row, and Rows contain exactly root, apps, and notifications
+      - root_rows is one immutable apps-then-notifications array with derived labels
+      - ordinary and empty text still construct apps rows directly
+      - slash prefixes filter root rows and exact names transition immediately
+      - /apps text consumes the existing matcher without a second app representation
+      - /notifications performs exactly one lazy retained-history read per entry
+      - notification rows borrow newest-first Record pointers from one owned History
+      - table selection transitions, app selection launches, and notification
+        selection remains in the picker without an action or error
+      - next Query and Rows complete before old Rows deinitializes and publishes
+      - history failure keeps old Rows alive through stopText, destroy, and quit
+      - strict transcripts prove missing, corrupt, permission, and allocation results
+      - default apps transcripts contain and consume zero history operations
+      - SDL renders root labels without icons and apps through checked indexes
+      - notification rows show app_name, summary, and first bounded body line in
+        three clipped columns within the existing fixed row height
+      - the fixed-row presentation deliberately defers multiline chrome redesign
+      - one apps.Matches.init remains in the production picker
+      - Cmd and CLI source are unchanged
+      - 427 tests pass across all 51 build steps
+      - production source is 8429 characters larger than checkpoint start; the
+        429-character estimate miss remains explicit shape-reduction work
+      - no live GUI receipt was run because launching distracts the operator;
+        deterministic presentation and lifecycle proof is complete
   - order: 4
     name: shape_reduction_and_hardening
     scope:

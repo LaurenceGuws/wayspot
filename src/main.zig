@@ -87,12 +87,35 @@ pub fn main(init: std.process.Init) !u8 {
         .io = init.io,
         .home = home,
     };
-    if (try picker.run(&native, applications.slice())) |index| {
+    var history_reader = HistoryReader{
+        .allocator = init.gpa,
+        .io = init.io,
+        .state_home = init.environ_map.get("XDG_STATE_HOME"),
+        .home = home,
+    };
+    if (try picker.run(&native, &history_reader, init.gpa, applications.slice())) |index| {
         var process = launch.Native{ .io = init.io };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }
     return 0;
 }
+
+/// HistoryReader performs the picker's one lazy retained-history read.
+const HistoryReader = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    state_home: ?[]const u8,
+    home: []const u8,
+
+    pub fn readHistory(reader: *HistoryReader) !notification_history.History {
+        return notification_history.inspect(
+            reader.allocator,
+            reader.io,
+            reader.state_home,
+            reader.home,
+        );
+    }
+};
 
 /// Performs every Cmd arm exactly once; notification calls need no app state.
 fn perform(

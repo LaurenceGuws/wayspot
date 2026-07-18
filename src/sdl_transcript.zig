@@ -3,9 +3,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps.zig");
+const notification_history = @import("notification_history.zig");
 const picker = @import("picker.zig");
 
-const step_capacity = 16;
+const step_capacity = 32;
 
 const Result = enum { ok, fail };
 
@@ -19,11 +20,28 @@ const Wait = union(enum) {
 };
 
 const Draw = struct {
+    table: picker.Table = .apps,
     query: []const u8,
     rows: []const []const u8 = &.{},
     app_indexes: []const u16 = &.{},
+    tables: []const picker.Table = &.{},
+    notifications: []const NotificationRow = &.{},
     selected_row: usize = 0,
     result: Result = .ok,
+};
+
+const NotificationRow = struct {
+    app_name: []const u8,
+    summary: []const u8,
+    body: []const u8,
+};
+
+const HistoryRead = enum {
+    empty,
+    stored,
+    corrupt,
+    permission,
+    allocation,
 };
 
 const Step = union(enum) {
@@ -32,6 +50,7 @@ const Step = union(enum) {
     start_text: Result,
     wait: Wait,
     draw: Draw,
+    read_history: HistoryRead,
     stop_text: Result,
     destroy,
     quit,
@@ -40,6 +59,8 @@ const Step = union(enum) {
 const Transcript = struct {
     steps: []const Step,
     applications: []const apps.App,
+    retained: ?notification_history.History = null,
+    history_reads: usize = 0,
     index: usize = 0,
     mismatch: bool = false,
 
@@ -96,24 +117,61 @@ const Transcript = struct {
             .draw => |expected_draw| expected_draw,
             else => return error.TranscriptMismatch,
         };
+        if (expected.table != frame.table) return error.TranscriptMismatch;
         if (!std.mem.eql(u8, expected.query, frame.query)) return error.TranscriptMismatch;
-        if (expected.rows.len != frame.row_count) return error.TranscriptMismatch;
-        if (expected.app_indexes.len != frame.row_count) return error.TranscriptMismatch;
-        for (expected.rows, expected.app_indexes, frame.rowSlice()) |expected_name, expected_index, row| {
-            const app_index = switch (row) {
-                .app => |index| index,
-            };
-            if (app_index != expected_index or app_index >= transcript.applications.len) {
-                return error.TranscriptMismatch;
-            }
-            if (!std.mem.eql(u8, expected_name, transcript.applications[app_index].name)) {
-                return error.TranscriptMismatch;
+        for (frame.rowSlice(), 0..) |row, index| {
+            switch (row) {
+                .table => |table| {
+                    if (expected.tables.len != frame.row_count or expected.tables[index] != table) {
+                        return error.TranscriptMismatch;
+                    }
+                },
+                .app => |app_index| {
+                    if (expected.rows.len != frame.row_count or
+                        expected.app_indexes.len != frame.row_count or
+                        app_index != expected.app_indexes[index] or
+                        app_index >= transcript.applications.len or
+                        !std.mem.eql(u8, expected.rows[index], transcript.applications[app_index].name))
+                    {
+                        return error.TranscriptMismatch;
+                    }
+                },
+                .notification => |record| {
+                    if (expected.notifications.len != frame.row_count) {
+                        return error.TranscriptMismatch;
+                    }
+                    const wanted = expected.notifications[index];
+                    if (!std.mem.eql(u8, wanted.app_name, record.app_name) or
+                        !std.mem.eql(u8, wanted.summary, record.summary) or
+                        !std.mem.eql(u8, wanted.body, record.body))
+                    {
+                        return error.TranscriptMismatch;
+                    }
+                },
             }
         }
         if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
             return error.TranscriptMismatch;
         }
         if (expected.result == .fail) return error.SdlDrawFailed;
+    }
+
+    pub fn readHistory(transcript: *Transcript) !notification_history.History {
+        transcript.history_reads += 1;
+        return switch (transcript.next() orelse return error.TranscriptMismatch) {
+            .read_history => |result| switch (result) {
+                .empty => .{},
+                .stored => blk: {
+                    const retained = transcript.retained orelse return error.TranscriptMismatch;
+                    transcript.retained = null;
+                    break :blk retained;
+                },
+                .corrupt => error.HistoryCorrupt,
+                .permission => error.HistoryOpenFailed,
+                .allocation => error.OutOfMemory,
+            },
+            else => error.TranscriptMismatch,
+        };
     }
 
     pub fn stopText(transcript: *Transcript) !void {
@@ -147,9 +205,14 @@ const Transcript = struct {
     }
 
     fn done(transcript: *const Transcript) !void {
+        var expected_history_reads: usize = 0;
+        for (transcript.steps) |step| {
+            expected_history_reads += @intFromBool(step == .read_history);
+        }
         if (transcript.mismatch or transcript.index != transcript.steps.len) {
             return error.TranscriptMismatch;
         }
+        if (transcript.history_reads != expected_history_reads) return error.TranscriptMismatch;
     }
 };
 
@@ -159,9 +222,27 @@ fn simulate(steps: []const Step) !void {
 }
 
 fn simulateApps(steps: []const Step, applications: []const apps.App) !?usize {
+    return simulateHistory(steps, applications, null);
+}
+
+fn simulateHistory(
+    steps: []const Step,
+    applications: []const apps.App,
+    retained: ?notification_history.History,
+) !?usize {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
-    var transcript = Transcript{ .steps = steps, .applications = applications };
-    const result = picker.run(&transcript, applications);
+    var transcript = Transcript{
+        .steps = steps,
+        .applications = applications,
+        .retained = retained,
+    };
+    defer if (transcript.retained) |*history| history.deinit(std.testing.allocator);
+    const result = picker.run(
+        &transcript,
+        &transcript,
+        std.testing.allocator,
+        applications,
+    );
     try transcript.done();
     return result;
 }
@@ -374,6 +455,133 @@ test "scroll hover and click preserve exact row and application identity" {
         .quit,
     }, &applications);
     try std.testing.expectEqual(@as(?usize, 7), selected);
+}
+
+test "slash root transitions to apps without reading history" {
+    const applications = [_]apps.App{testApp("Alpha")};
+    const selected = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{
+            .query = "",
+            .rows = &.{"Alpha"},
+            .app_indexes = &.{0},
+        } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("/") } } },
+        .{ .draw = .{
+            .table = .root,
+            .query = "/",
+            .tables = &.{ .apps, .notifications },
+        } },
+        .{ .wait = .{ .event = .{ .click = 0 } } },
+        .{ .draw = .{
+            .query = "/apps",
+            .rows = &.{"Alpha"},
+            .app_indexes = &.{0},
+        } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+    try std.testing.expectEqual(@as(?usize, 0), selected);
+}
+
+test "notification rows are newest first and never close or launch" {
+    const retained = try retainedHistory();
+    const expected = [_]NotificationRow{
+        .{ .app_name = "new", .summary = "second", .body = "new body" },
+        .{ .app_name = "old", .summary = "first", .body = "old body" },
+    };
+    const selected = try simulateHistory(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("/notifications") } } },
+        .{ .read_history = .stored },
+        .{ .draw = .{
+            .table = .notifications,
+            .query = "/notifications",
+            .notifications = &expected,
+        } },
+        .{ .wait = .{ .event = .down } },
+        .{ .draw = .{
+            .table = .notifications,
+            .query = "/notifications",
+            .notifications = &expected,
+            .selected_row = 1,
+        } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .draw = .{
+            .table = .notifications,
+            .query = "/notifications",
+            .notifications = &expected,
+            .selected_row = 1,
+        } },
+        .{ .wait = .{ .event = .{ .click = 0 } } },
+        .{ .draw = .{
+            .table = .notifications,
+            .query = "/notifications",
+            .notifications = &expected,
+        } },
+        .{ .wait = .{ .event = .backspace } },
+        .{ .draw = .{
+            .table = .root,
+            .query = "/notification",
+            .tables = &.{.notifications},
+        } },
+        .{ .wait = .{ .event = .quit } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &.{}, retained);
+    try std.testing.expectEqual(@as(?usize, null), selected);
+}
+
+test "missing history is empty and read failures clean SDL exactly" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("/notifications") } } },
+        .{ .read_history = .empty },
+        .{ .draw = .{ .table = .notifications, .query = "/notifications" } },
+        .{ .wait = .{ .event = .quit } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+
+    const failures = [_]struct { HistoryRead, anyerror }{
+        .{ .corrupt, error.HistoryCorrupt },
+        .{ .permission, error.HistoryOpenFailed },
+        .{ .allocation, error.OutOfMemory },
+    };
+    for (failures) |failure| {
+        try std.testing.expectError(failure[1], simulate(&.{
+            .{ .init = .ok },
+            .{ .create = .ok },
+            .{ .start_text = .ok },
+            .{ .draw = .{ .query = "" } },
+            .{ .wait = .{ .event = .{ .text = try picker.Text.init("/notifications") } } },
+            .{ .read_history = failure[0] },
+            .{ .stop_text = .ok },
+            .destroy,
+            .quit,
+        }));
+    }
+}
+
+fn retainedHistory() !notification_history.History {
+    return notification_history.parse(
+        std.testing.allocator,
+        "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\",\"summary\":\"first\",\"body\":\"old body\"}\n" ++
+            "{\"received_unix_seconds\":2,\"history_id\":2,\"app_name\":\"new\",\"summary\":\"second\",\"body\":\"new body\"}\n",
+        2,
+    );
 }
 
 fn testApp(name: []const u8) apps.App {

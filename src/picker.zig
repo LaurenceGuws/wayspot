@@ -1,26 +1,37 @@
 //! Owns deterministic picker state and control flow.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const apps = @import("apps.zig");
+const notification_history = @import("notification_history.zig");
 
 pub const query_capacity = apps.query_capacity;
 pub const visible_row_capacity = 14;
 pub const event_capacity = 64;
 const events_before_draw_capacity = 1024;
 
+/// Table is the closed GUI navigation vocabulary; it is not a CLI meaning.
 pub const Table = enum {
+    root,
     apps,
+    notifications,
 };
 
+/// Row borrows its value from the current Rows owner and cannot outlive it.
 pub const Row = union(enum) {
+    table: Table,
     app: u16,
+    notification: *const notification_history.Record,
 };
 
+/// Rows owns one table: apps borrow, root is static, and notifications allocate.
 pub const Rows = union(Table) {
+    root,
     apps: struct {
         applications: []const apps.App,
         matches: apps.Matches,
     },
+    notifications: notification_history.History,
 
     pub fn initApps(applications: []const apps.App, query: []const u8) !Rows {
         if (applications.len > apps.app_capacity) return error.TooManyApplications;
@@ -35,14 +46,25 @@ pub const Rows = union(Table) {
         return .{ .apps = .{ .applications = applications, .matches = matches } };
     }
 
-    pub fn count(rows: *const Rows) usize {
+    pub fn deinit(rows: *Rows, allocator: std.mem.Allocator) void {
+        switch (rows.*) {
+            .root, .apps => {},
+            .notifications => |*history| history.deinit(allocator),
+        }
+        rows.* = .{ .apps = .{ .applications = &.{}, .matches = .{} } };
+    }
+
+    pub fn count(rows: *const Rows, query: []const u8) usize {
         return switch (rows.*) {
+            .root => rootCount(query),
             .apps => |app_rows| app_rows.matches.count,
+            .notifications => |history| history.count,
         };
     }
 
-    pub fn row(rows: *const Rows, index: usize) ?Row {
+    pub fn row(rows: *const Rows, query: []const u8, index: usize) ?Row {
         return switch (rows.*) {
+            .root => rootRow(query, index),
             .apps => |app_rows| {
                 if (index >= app_rows.matches.count) return null;
                 const app_index = app_rows.matches.indexes[index];
@@ -51,15 +73,58 @@ pub const Rows = union(Table) {
                 }
                 return .{ .app = @intCast(app_index) };
             },
+            .notifications => |*history| {
+                if (index >= history.count) return null;
+                return .{ .notification = &history.records[history.count - 1 - index].? };
+            },
         };
     }
 };
 
+const root_rows = [2]Row{
+    .{ .table = .apps },
+    .{ .table = .notifications },
+};
+
+pub fn tableName(table: Table) [:0]const u8 {
+    return switch (table) {
+        .root => "/",
+        .apps => "apps",
+        .notifications => "notifications",
+    };
+}
+
+fn rootCount(query: []const u8) usize {
+    if (query.len == 0 or query[0] != '/') return 0;
+    var count: usize = 0;
+    for (root_rows) |row| count += @intFromBool(rootMatches(row.table, query[1..]));
+    return count;
+}
+
+fn rootRow(query: []const u8, want: usize) ?Row {
+    if (query.len == 0 or query[0] != '/') return null;
+    var found: usize = 0;
+    for (root_rows) |row| {
+        if (!rootMatches(row.table, query[1..])) continue;
+        if (found == want) return row;
+        found += 1;
+    }
+    return null;
+}
+
+fn rootMatches(table: Table, prefix: []const u8) bool {
+    const name = tableName(table);
+    return prefix.len <= name.len and std.ascii.eqlIgnoreCase(name[0..prefix.len], prefix);
+}
+
 comptime {
-    std.debug.assert(std.meta.fields(Table).len == 1);
-    std.debug.assert(std.meta.fields(Row).len == 1);
-    std.debug.assert(std.meta.fields(Rows).len == 1);
-    std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
+    std.debug.assert(std.meta.fields(Table).len == 3 and
+        std.meta.fields(Row).len == 3 and
+        std.meta.fields(Rows).len == 3 and
+        apps.app_capacity <= std.math.maxInt(u16) + 1);
+    std.debug.assert(root_rows.len == 2 and
+        root_rows[0].table == .apps and
+        root_rows[1].table == .notifications);
 }
 
 /// Text owns one bounded SDL text event after the native event returns.
@@ -107,6 +172,7 @@ pub const Events = struct {
 };
 
 pub const Frame = struct {
+    table: Table = .apps,
     query: [:0]const u8,
     rows: [visible_row_capacity]Row = undefined,
     row_count: usize = 0,
@@ -141,6 +207,12 @@ const Query = struct {
     fn text(query: *const Query) [:0]const u8 {
         return query.bytes[0..query.len :0];
     }
+
+    fn set(query: *Query, input: []const u8) !void {
+        var next: Query = .{};
+        try next.append(input);
+        query.* = next;
+    }
 };
 
 fn textContinuation(byte: u8) bool {
@@ -153,8 +225,17 @@ fn textContinuation(byte: u8) bool {
 /// erased interface nor an SDL link. It must provide init, create, startText,
 /// read, draw, stopText, destroy, and quit. A text-stop failure takes
 /// precedence over the event-loop result because incomplete cleanup is the
-/// final process state; window destruction and SDL quit still run.
-pub fn run(operations: anytype, applications: []const apps.App) !?usize {
+/// final process state; window destruction and SDL quit still run. The separate
+/// concrete history reader is called only by the exact notifications route.
+pub fn run(
+    operations: anytype,
+    history_reader: anytype,
+    allocator: std.mem.Allocator,
+    applications: []const apps.App,
+) !?usize {
+    var owned_rows: ?*Rows = null;
+    defer if (owned_rows) |rows| rows.deinit(allocator);
+
     try operations.init();
     defer operations.quit();
 
@@ -164,7 +245,8 @@ pub fn run(operations: anytype, applications: []const apps.App) !?usize {
     try operations.startText();
 
     var state: State = .{};
-    const result = eventLoop(operations, applications, &state);
+    owned_rows = &state.rows;
+    const result = eventLoop(operations, history_reader, allocator, applications, &state);
     try operations.stopText();
     return result;
 }
@@ -175,24 +257,69 @@ const State = struct {
     selected: usize = 0,
     first: usize = 0,
 
-    fn setQuery(state: *State, applications: []const apps.App, query: Query) !void {
-        const rows = try Rows.initApps(applications, query.text());
+    fn setQuery(
+        state: *State,
+        history_reader: anytype,
+        allocator: std.mem.Allocator,
+        applications: []const apps.App,
+        query: Query,
+    ) !void {
+        const rows = try openRows(history_reader, applications, query.text());
+        state.rows.deinit(allocator);
         state.query = query;
         state.rows = rows;
         state.selected = 0;
         state.first = 0;
     }
 
-    fn selection(state: *const State) ?usize {
-        const row = state.rows.row(state.selected) orelse return null;
-        return switch (row) {
+    fn row(state: *const State, index: usize) ?Row {
+        return state.rows.row(state.query.text(), index);
+    }
+
+    fn selectRow(
+        state: *State,
+        history_reader: anytype,
+        allocator: std.mem.Allocator,
+        applications: []const apps.App,
+        selected: Row,
+    ) !?usize {
+        return switch (selected) {
+            .table => |table| {
+                var query: Query = .{};
+                try query.set(switch (table) {
+                    .root => "/",
+                    .apps => "/apps",
+                    .notifications => "/notifications",
+                });
+                try state.setQuery(history_reader, allocator, applications, query);
+                return null;
+            },
             .app => |index| @intCast(index),
+            .notification => null,
         };
     }
 };
 
-fn eventLoop(operations: anytype, applications: []const apps.App, state: *State) !?usize {
-    state.rows = try Rows.initApps(applications, state.query.text());
+fn openRows(history_reader: anytype, applications: []const apps.App, query: []const u8) !Rows {
+    if (query.len == 0 or query[0] != '/') return Rows.initApps(applications, query);
+    if (std.mem.eql(u8, query, "/apps")) return Rows.initApps(applications, "");
+    if (std.mem.startsWith(u8, query, "/apps ")) {
+        return Rows.initApps(applications, query["/apps ".len..]);
+    }
+    if (std.mem.eql(u8, query, "/notifications")) {
+        return .{ .notifications = try history_reader.readHistory() };
+    }
+    return .root;
+}
+
+fn eventLoop(
+    operations: anytype,
+    history_reader: anytype,
+    allocator: std.mem.Allocator,
+    applications: []const apps.App,
+    state: *State,
+) !?usize {
+    state.rows = try openRows(history_reader, applications, state.query.text());
     var frame = makeFrame(state);
     try operations.draw(&frame);
 
@@ -207,24 +334,29 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
                 .backspace => {
                     var query = state.query;
                     query.delete();
-                    try state.setQuery(applications, query);
+                    try state.setQuery(history_reader, allocator, applications, query);
                 },
                 .up => {
                     state.selected -|= 1;
                     keepSelectedVisible(state);
                 },
                 .down => {
-                    if (state.selected + 1 < state.rows.count()) state.selected += 1;
+                    if (state.selected + 1 < state.rows.count(state.query.text())) state.selected += 1;
                     keepSelectedVisible(state);
                 },
-                .enter => return state.selection(),
+                .enter => {
+                    const row = state.row(state.selected) orelse return null;
+                    if (try state.selectRow(history_reader, allocator, applications, row)) |index| {
+                        return index;
+                    }
+                },
                 .text => |text| {
                     var query = state.query;
                     try query.append(text.slice());
-                    try state.setQuery(applications, query);
+                    try state.setQuery(history_reader, allocator, applications, query);
                 },
                 .hover => |row| {
-                    if (visibleSelection(state, row, state.rows.count())) |selected| {
+                    if (visibleSelection(state, row, state.rows.count(state.query.text()))) |selected| {
                         state.selected = selected;
                     }
                 },
@@ -232,11 +364,14 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
                     state.selected = visibleSelection(
                         state,
                         row,
-                        state.rows.count(),
+                        state.rows.count(state.query.text()),
                     ) orelse continue;
-                    return state.selection();
+                    const selected = state.row(state.selected) orelse continue;
+                    if (try state.selectRow(history_reader, allocator, applications, selected)) |index| {
+                        return index;
+                    }
                 },
-                .scroll => |rows| scroll(state, state.rows.count(), rows),
+                .scroll => |rows| scroll(state, state.rows.count(state.query.text()), rows),
                 .redraw => {},
                 .ignored => continue,
                 .idle => {},
@@ -258,13 +393,14 @@ fn eventLoop(operations: anytype, applications: []const apps.App, state: *State)
 
 fn makeFrame(state: *const State) Frame {
     var frame = Frame{
+        .table = std.meta.activeTag(state.rows),
         .query = state.query.text(),
-        .first = @min(state.first, state.rows.count()),
-        .total_count = state.rows.count(),
+        .first = @min(state.first, state.rows.count(state.query.text())),
+        .total_count = state.rows.count(state.query.text()),
     };
     while (frame.first + frame.row_count < frame.total_count) {
         if (frame.row_count == visible_row_capacity) break;
-        frame.rows[frame.row_count] = state.rows.row(frame.first + frame.row_count) orelse unreachable;
+        frame.rows[frame.row_count] = state.row(frame.first + frame.row_count) orelse unreachable;
         frame.row_count += 1;
     }
     if (frame.row_count > 0) {
@@ -353,11 +489,11 @@ test "apps rows borrow one app slice and return only checked indexes" {
     const rows = try Rows.initApps(&applications, "");
     try std.testing.expect(rows == .apps);
     try std.testing.expect(rows.apps.applications.ptr == &applications);
-    try std.testing.expectEqual(@as(usize, 2), rows.count());
-    try std.testing.expectEqual(Row{ .app = 1 }, rows.row(0).?);
-    try std.testing.expectEqual(Row{ .app = 0 }, rows.row(1).?);
-    try std.testing.expectEqual(@as(?Row, null), rows.row(2));
-    try std.testing.expect(@sizeOf(Row) <= @sizeOf(u16) * 2);
+    try std.testing.expectEqual(@as(usize, 2), rows.count(""));
+    try std.testing.expectEqual(Row{ .app = 1 }, rows.row("", 0).?);
+    try std.testing.expectEqual(Row{ .app = 0 }, rows.row("", 1).?);
+    try std.testing.expectEqual(@as(?Row, null), rows.row("", 2));
+    try std.testing.expectEqual(@sizeOf(u16), @sizeOf(@FieldType(Row, "app")));
 }
 
 test "failed rows transition preserves query rows and selection" {
@@ -371,13 +507,118 @@ test "failed rows transition preserves query rows and selection" {
     var invalid: Query = .{};
     invalid.bytes[0] = 0xff;
     invalid.len = 1;
-    try std.testing.expectError(error.InvalidText, state.setQuery(&applications, invalid));
+    var history_reader: TestHistoryReader = .{};
+    try std.testing.expectError(
+        error.InvalidText,
+        state.setQuery(&history_reader, std.testing.allocator, &applications, invalid),
+    );
     try std.testing.expectEqualStrings("", state.query.text());
     try std.testing.expectEqual(before_rows.apps.applications.ptr, state.rows.apps.applications.ptr);
     try std.testing.expectEqual(before_rows.apps.matches.count, state.rows.apps.matches.count);
     try std.testing.expectEqual(@as(usize, 0), state.selected);
     try std.testing.expectEqual(@as(usize, 0), state.first);
 }
+
+test "root rows are static ordered and prefix filtered" {
+    const root: Rows = .root;
+    try std.testing.expectEqual(@as(usize, 2), root.count("/"));
+    try std.testing.expectEqual(Row{ .table = .apps }, root.row("/", 0).?);
+    try std.testing.expectEqual(Row{ .table = .notifications }, root.row("/", 1).?);
+    try std.testing.expectEqual(@as(usize, 1), root.count("/ap"));
+    try std.testing.expectEqual(Row{ .table = .apps }, root.row("/AP", 0).?);
+    try std.testing.expectEqual(@as(usize, 0), root.count("/unknown"));
+    try std.testing.expectEqualStrings("apps", tableName(.apps));
+    try std.testing.expectEqualStrings("notifications", tableName(.notifications));
+    try std.testing.expectEqual(@as(usize, 0), root.count("/apps/extra"));
+}
+
+test "notification rows borrow retained records newest first" {
+    var history = try notification_history.parse(
+        std.testing.allocator,
+        "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\",\"summary\":\"one\",\"body\":\"a\"}\n" ++
+            "{\"received_unix_seconds\":2,\"history_id\":2,\"app_name\":\"new\",\"summary\":\"two\",\"body\":\"b\"}\n",
+        2,
+    );
+    var rows = Rows{ .notifications = history };
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), rows.count("/notifications"));
+    const newest = rows.row("/notifications", 0).?.notification;
+    const oldest = rows.row("/notifications", 1).?.notification;
+    try std.testing.expectEqualStrings("new", newest.app_name);
+    try std.testing.expectEqualStrings("old", oldest.app_name);
+    try std.testing.expect(newest == &rows.notifications.records[1].?);
+    history = undefined;
+}
+
+test "route construction is lazy and history failure is atomic" {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{ .rows = try Rows.initApps(&applications, "") };
+    defer state.rows.deinit(std.testing.allocator);
+    var history_reader: TestHistoryReader = .{};
+
+    var query: Query = .{};
+    try query.set("/");
+    try state.setQuery(&history_reader, std.testing.allocator, &applications, query);
+    try std.testing.expect(state.rows == .root);
+    try std.testing.expectEqual(@as(usize, 0), history_reader.reads);
+
+    try query.set("/apps alp");
+    try state.setQuery(&history_reader, std.testing.allocator, &applications, query);
+    try std.testing.expect(state.rows == .apps);
+    try std.testing.expectEqual(@as(usize, 1), state.rows.count(state.query.text()));
+    try std.testing.expectEqual(Row{ .app = 0 }, state.row(0).?);
+    try std.testing.expectEqual(@as(usize, 0), history_reader.reads);
+
+    history_reader.failure = error.HistoryOpenFailed;
+    try query.set("/notifications");
+    try std.testing.expectError(
+        error.HistoryOpenFailed,
+        state.setQuery(&history_reader, std.testing.allocator, &applications, query),
+    );
+    try std.testing.expect(state.rows == .apps);
+    try std.testing.expectEqualStrings("/apps alp", state.query.text());
+    try std.testing.expectEqual(@as(usize, 1), history_reader.reads);
+}
+
+test "generated route edits remain bounded and own one rows value" {
+    if (builtin.fuzz) {
+        try std.testing.fuzz({}, fuzzRoutes, .{});
+        return;
+    }
+    var baseline = std.testing.Smith{ .in = "" };
+    try fuzzRoutes({}, &baseline);
+}
+
+fn fuzzRoutes(_: void, smith: *std.testing.Smith) !void {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{ .rows = try Rows.initApps(&applications, "") };
+    defer state.rows.deinit(std.testing.allocator);
+    var history_reader: TestHistoryReader = .{};
+    const edits = [_][]const u8{
+        "", "/", "/a", "/apps", "/apps alpha", "/n", "/notifications", "/unknown", "alpha",
+    };
+    const count = smith.valueRangeAtMost(u8, 1, 32);
+    for (0..count) |_| {
+        const text = edits[smith.valueRangeLessThan(u8, 0, edits.len)];
+        var query: Query = .{};
+        try query.set(text);
+        try state.setQuery(&history_reader, std.testing.allocator, &applications, query);
+        const total = state.rows.count(state.query.text());
+        try std.testing.expect(total <= notification_history.record_capacity);
+        if (total > 0) try std.testing.expect(state.row(0) != null);
+    }
+}
+
+const TestHistoryReader = struct {
+    reads: usize = 0,
+    failure: ?notification_history.Error = null,
+
+    fn readHistory(reader: *TestHistoryReader) !notification_history.History {
+        reader.reads += 1;
+        if (reader.failure) |failure| return failure;
+        return .{};
+    }
+};
 
 fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {
     return .{
