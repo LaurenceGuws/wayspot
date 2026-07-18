@@ -128,7 +128,6 @@ pub const Native = struct {
     }
 
     pub fn signalClosed(native: *Native, id: u32, reason: service.CloseReason) !void {
-        std.debug.assert(native.message != null);
         std.debug.assert(id != 0);
         const signal = c.dbus_message_new_signal(path, interface, "NotificationClosed") orelse {
             return error.OutOfMemory;

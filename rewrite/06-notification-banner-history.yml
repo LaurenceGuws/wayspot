@@ -1,0 +1,209 @@
+# Temporary Marathon 6 design. It may be deleted after acceptance.
+# It narrows DOMAIN.yml; it does not add product scope.
+
+marathon: notification_banner_history
+state: one_visible_banner_ready_for_review
+
+outcome: >
+  Show accepted notifications immediately, then retain only bounded private
+  records from the last thirty days for the user to inspect.
+
+order:
+  - live_banner
+  - retained_history
+  - history_interfaces
+
+live_banner:
+  useful_path: >
+    A successful Notify publishes one owned banner update; the SDL main thread
+    shows summary and body at the existing Hyprland notification position.
+  process:
+    main_thread: owns SDL, banner state, drawing, pointer dismissal, and deadlines
+    dbus_worker: owns libdbus, active notification records, replies, and close signals
+    reason: >
+      SDL window and event APIs require the main thread. A blocking libdbus
+      resident loop cannot share that thread without polling while idle.
+  bridge:
+    dbus_to_main:
+      capacity: 16
+      values:
+        - show: complete owned banner record
+        - replace: complete owned banner record
+        - close: notification id
+        - stop
+        - failed
+    main_to_dbus:
+      capacity: 16
+      values:
+        - closed: notification id and expired or dismissed reason
+        - failed
+    rules:
+      - fixed queues are created before the worker
+      - producers sleep when a queue is full
+      - closing either queue wakes the other owner
+      - before SDL exists, the main thread sleeps on the DBus-to-main queue
+      - after SDL exists, the worker wakes SDL with one registered user event
+      - SDL readiness is published before the main thread drains the queue and waits
+      - SDL_PushEvent is the only SDL call permitted on the DBus worker
+      - the visible record and every record in transit each have exactly one deinit path
+      - worker failure stops the banner owner and becomes process failure
+      - banner failure stops the DBus owner and becomes process failure
+  banner:
+    app_id: wayspot-notification
+    window:
+      logical_width: 420
+      logical_height: 120
+      high_pixel_density: true
+      focusable: false
+      borderless: true
+      always_on_top: true
+    visible_records: 1
+    text:
+      summary_lines: 1
+      body_lines: 3
+      markup: rendered as plain text
+      font: existing embedded Noto Sans
+    timeout:
+      sender_default_milliseconds: 5000
+      negative_one: sender_default
+      maximum_milliseconds: 60000
+      zero: maximum
+      positive: exact milliseconds capped at maximum
+    selection:
+      newest accepted notification becomes visible
+      replacement of the visible id redraws without recreating the window
+      a different id ends the prior presentation before becoming visible
+      displacement invalidates the prior id before NotificationClosed reason 1
+      transport batches converge immediately to their newest notification
+      sender close removes the matching visible id
+      timeout invalidates the id before NotificationClosed reason 1
+      pointer dismissal invalidates the id before NotificationClosed reason 2
+    excluded:
+      - notification icons and transferred image data
+      - actions and activation tokens
+      - sound
+      - multiple simultaneous windows
+      - keyboard focus
+      - animation
+    measured_native_cost:
+      before_first_window:
+        rss_kib: 9476
+      active_window:
+        rss_kib: 247180
+        meaning: mostly shared file-backed Wayland and NVIDIA mappings loaded by SDL video
+      after_sdl_quit:
+        rss_kib: 122620
+        anonymous_kib: approximately 10000 to 13000
+        meaning: SDL and driver mappings remain partly resident after teardown
+      decision: >
+        Destroy the window, renderer, text owner, and SDL after the final banner.
+        Raw Wayland replacement, a helper process, and a resident GPU renderer
+        are rejected because their added ownership exceeds the accepted scope.
+
+retained_history:
+  useful_path: >
+    Every accepted notification is appended or replaced in one private history;
+    startup prunes records older than thirty days before publication.
+  path: $XDG_STATE_HOME/wayspot/notifications.jsonl
+  fallback_path: $HOME/.local/state/wayspot/notifications.jsonl
+  permissions:
+    directory: "0700"
+    file: "0600"
+  record:
+    fields:
+      - received_unix_seconds
+      - history_id
+      - app_name
+      - summary
+      - body
+    excluded:
+      - hints
+      - actions
+      - image bytes
+      - environment
+      - process facts
+      - window facts
+  bounds:
+    retention_days: 30
+    records: 4096
+    bytes: 33554432
+    line_bytes: 18432
+  pruning:
+    - remove records strictly older than thirty days
+    - when records exceed 4096, remove oldest first
+    - when bytes exceed 33554432, remove oldest first
+    - replacement of a currently active notification retains its history_id
+    - startup allocates history_id from the greatest retained value plus one
+    - Freedesktop notification ids are never persisted
+  write:
+    - serialize the complete bounded history to a sibling temporary file
+    - sync the file
+    - atomically replace the prior file
+    - sync the parent directory
+    - failed persistence never changes the last complete file
+    - persistence failure is visible but does not reject an already accepted DBus notification
+  corruption:
+    - parse complete newline-terminated records only
+    - reject an oversized line before allocation
+    - preserve no partially parsed record
+    - quarantine is excluded; corruption returns a visible startup error
+  sensitive_text:
+    - summary and body are private user activity data
+    - no logs print retained text
+    - no other mode reads history without an explicit user request
+    - no migration exists during beta
+
+history_interfaces:
+  cli:
+    entry: wayspot-beta notifications history
+    output: bounded newest-first records
+  gui:
+    entry: notifications mode in the shared picker
+    rows: bounded newest-first records
+    selection: display-only
+  shared:
+    - CLI and GUI consume the same retained record values
+    - banner state is not a candidate source
+    - history never becomes application ranking input
+    - the history file is retained data, never runtime IPC
+
+files_proposed:
+  src/notification_banner.zig: deterministic one-value banner state and deadlines
+  src/notification_banner_run.zig: deterministic window sessions and strict transcript
+  src/notification_banner_sdl.zig: one SDL window, text, pointer input, and cleanup
+  src/notification_history.zig: retention, pruning, JSONL, and atomic persistence
+  existing_notification_files: retain DBus and active-record ownership
+
+proof:
+  unit:
+    - timeout values and exact deadline boundaries
+    - displacement, replacement, close, timeout, and dismissal ordering
+    - thirty-day boundary, record cap, byte cap, and replacement
+  fuzz:
+    - banner event histories
+    - JSONL bytes and bounded record histories
+  simulation:
+    - paired DBus and banner queues under full, closed, canceled, and failed states
+    - SDL creation, draw, replacement, dismissal, reset, and cleanup
+    - filesystem open, read, write, sync, rename, and parent-sync failures
+    - simulated wall clock at retention boundaries
+  native:
+    - existing notification D-Bus receipt remains green
+    - one real banner receives replacement, sender close, timeout, and pointer dismissal
+    - restart reads only retained records within every hard bound
+  live_banner_receipts:
+    - 245 tests pass with generated banner histories and strict window transcripts
+    - app id wayspot-notification and logical geometry 420 by 120
+    - replacement retained the exact native window address
+    - timeout hid the window and left no retained presentation
+    - DBus server information remained available while the banner was visible
+    - pointer dismissal is pending because local ydotool did not move the compositor cursor
+
+negative_space:
+  - no generic window toolkit
+  - no generic storage layer
+  - no daemon supervisor
+  - no polling while idle
+  - no unbounded task, queue, record, byte buffer, line, or deadline
+  - no fixtures as external-I/O proof
+  - no notification text in logs

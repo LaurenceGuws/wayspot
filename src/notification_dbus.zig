@@ -40,8 +40,23 @@ pub const Event = union(enum) {
     name_lost,
 };
 
+pub const BannerEvent = union(enum) {
+    none,
+    closed: struct { id: u32, reason: CloseReason },
+    failed,
+};
+
+/// Bounds close and failure values returned before one DBus receive.
+pub const banner_event_capacity = 16;
+
 /// Serves methods until explicit stop; bus or name loss is a process failure.
 pub fn run(dbus: anytype, allocator: std.mem.Allocator) !void {
+    var banner: NoBanner = .{};
+    return runWithBanner(dbus, &banner, allocator);
+}
+
+/// Serves DBus and applies banner closes before receiving the next method.
+pub fn runWithBanner(dbus: anytype, banner: anytype, allocator: std.mem.Allocator) !void {
     try dbus.open();
     defer dbus.close();
 
@@ -52,8 +67,9 @@ pub fn run(dbus: anytype, allocator: std.mem.Allocator) !void {
 
     // DOMAIN.yml declares this a resident process; only stop or failure ends it.
     while (true) {
+        try drainBanner(dbus, banner, allocator, &store);
         switch (try dbus.next()) {
-            .method => |method| try dispatch(dbus, allocator, &store, method),
+            .method => |method| try dispatch(dbus, banner, allocator, &store, method),
             .reject => |err| try dbus.replyError(err),
             .idle => {},
             .stop => return,
@@ -63,8 +79,27 @@ pub fn run(dbus: anytype, allocator: std.mem.Allocator) !void {
     }
 }
 
+fn drainBanner(
+    dbus: anytype,
+    banner: anytype,
+    allocator: std.mem.Allocator,
+    store: *notification.Store,
+) !void {
+    for (0..banner_event_capacity) |_| {
+        switch (try banner.next()) {
+            .none => return,
+            .closed => |closed| {
+                store.close(allocator, closed.id) catch continue;
+                try dbus.signalClosed(closed.id, closed.reason);
+            },
+            .failed => return error.BannerFailed,
+        }
+    }
+}
+
 fn dispatch(
     dbus: anytype,
+    banner: anytype,
     allocator: std.mem.Allocator,
     store: *notification.Store,
     method: Method,
@@ -72,6 +107,7 @@ fn dispatch(
     switch (method) {
         .get_capabilities => try dbus.replyCapabilities(),
         .notify => |request| {
+            const replaces = request.replaces_id != 0 and store.get(request.replaces_id) != null;
             const id = store.notify(allocator, request) catch |err| {
                 try dbus.replyError(switch (err) {
                     error.InvalidUtf8 => .invalid_utf8,
@@ -82,6 +118,7 @@ fn dispatch(
                 });
                 return;
             };
+            try banner.show(allocator, store.get(id).?, replaces);
             try dbus.replyNotify(id);
         },
         .close => |id| {
@@ -89,12 +126,28 @@ fn dispatch(
                 try dbus.replyError(.unknown_notification);
                 return;
             };
+            try banner.close(id);
             try dbus.signalClosed(id, .requested);
             try dbus.replyClose();
         },
         .get_server_information => try dbus.replyServerInformation(),
     }
 }
+
+const NoBanner = struct {
+    fn next(_: *NoBanner) !BannerEvent {
+        return .none;
+    }
+
+    fn show(
+        _: *NoBanner,
+        _: std.mem.Allocator,
+        _: *const notification.Notification,
+        _: bool,
+    ) !void {}
+
+    fn close(_: *NoBanner, _: u32) !void {}
+};
 
 const step_capacity = 32;
 
@@ -206,6 +259,29 @@ const Transcript = struct {
     }
 };
 
+const BannerTranscript = struct {
+    events: []const BannerEvent,
+    index: usize = 0,
+    show_count: usize = 0,
+
+    fn next(transcript: *BannerTranscript) !BannerEvent {
+        if (transcript.index == transcript.events.len) return error.TranscriptMismatch;
+        defer transcript.index += 1;
+        return transcript.events[transcript.index];
+    }
+
+    fn show(
+        transcript: *BannerTranscript,
+        _: std.mem.Allocator,
+        _: *const notification.Notification,
+        _: bool,
+    ) !void {
+        transcript.show_count += 1;
+    }
+
+    fn close(_: *BannerTranscript, _: u32) !void {}
+};
+
 fn simulate(steps: []const Step) !void {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
     var transcript = Transcript{ .steps = steps };
@@ -245,6 +321,37 @@ test "all methods share one store and close invalidates before its signal" {
         .{ .next = .stop },
         .close,
     });
+}
+
+test "banner close burst drains in order before the next DBus receive" {
+    var dbus = Transcript{ .steps = &.{
+        .{ .open = true },
+        .{ .own = true },
+        .{ .next = .{ .method = .{ .notify = sampleRequest(0, "one") } } },
+        .{ .reply_notify = 1 },
+        .{ .next = .{ .method = .{ .notify = sampleRequest(0, "two") } } },
+        .{ .reply_notify = 2 },
+        .{ .next = .{ .method = .{ .notify = sampleRequest(0, "three") } } },
+        .{ .reply_notify = 3 },
+        .{ .signal_closed = .{ .id = 1, .reason = .expired } },
+        .{ .signal_closed = .{ .id = 2, .reason = .expired } },
+        .{ .next = .stop },
+        .close,
+    } };
+    var banner = BannerTranscript{ .events = &.{
+        .none,
+        .none,
+        .none,
+        .{ .closed = .{ .id = 1, .reason = .expired } },
+        .{ .closed = .{ .id = 999, .reason = .expired } },
+        .{ .closed = .{ .id = 2, .reason = .expired } },
+        .none,
+    } };
+
+    try runWithBanner(&dbus, &banner, std.testing.allocator);
+    try dbus.done();
+    try std.testing.expectEqual(banner.events.len, banner.index);
+    try std.testing.expectEqual(@as(usize, 3), banner.show_count);
 }
 
 test "native rejections receive one error and do not stop the service" {

@@ -130,6 +130,48 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_notification_dbus_tests = b.addRunArtifact(notification_dbus_tests);
+    const notification_banner_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_banner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_banner_tests = b.addRunArtifact(notification_banner_tests);
+    const notification_banner_run_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_banner_run.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_banner_run_tests = b.addRunArtifact(notification_banner_run_tests);
+    const notification_bridge_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_bridge.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_notification_bridge_tests = b.addRunArtifact(notification_bridge_tests);
+    const notification_banner_sdl_check = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_banner_sdl.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    notification_banner_sdl_check.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
+        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
+    });
+    notification_banner_sdl_check.root_module.addIncludePath(sdl.path("include"));
+    notification_banner_sdl_check.root_module.addIncludePath(text.include);
+    notification_banner_sdl_check.root_module.linkLibrary(sdl.artifact("SDL3"));
+    notification_banner_sdl_check.root_module.linkLibrary(text.library);
+    notification_banner_sdl_check.use_llvm = true;
+    notification_banner_sdl_check.use_lld = true;
+    const run_notification_banner_sdl_check = b.addRunArtifact(notification_banner_sdl_check);
     const notification_dbus_native_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/notification_dbus_native.zig"),
@@ -155,6 +197,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     test_step.dependOn(&run_notification_dbus_tests.step);
+    test_step.dependOn(&run_notification_banner_tests.step);
+    test_step.dependOn(&run_notification_banner_run_tests.step);
+    test_step.dependOn(&run_notification_bridge_tests.step);
+    test_step.dependOn(&run_notification_banner_sdl_check.step);
     test_step.dependOn(&run_notification_dbus_native_tests.step);
 
     const run = b.addRunArtifact(executable);

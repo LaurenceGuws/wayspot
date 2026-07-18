@@ -7,6 +7,8 @@ const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
 const notification_dbus = @import("notification_dbus.zig");
 const notification_dbus_native = @import("notification_dbus_native.zig");
+const notification_banner_sdl = @import("notification_banner_sdl.zig");
+const notification_bridge = @import("notification_bridge.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
 
@@ -25,7 +27,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (argument_count == 1 and std.mem.eql(u8, arguments[0], "notifications")) {
-        try runNotifications(init.gpa);
+        try runNotifications(init);
         return 0;
     }
 
@@ -90,7 +92,7 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
-fn runNotifications(allocator: std.mem.Allocator) !void {
+fn runNotifications(init: std.process.Init) !void {
     notification_stop.store(false, .release);
     const action: std.posix.Sigaction = .{
         .handler = .{ .handler = stopNotification },
@@ -104,8 +106,34 @@ fn runNotifications(allocator: std.mem.Allocator) !void {
     std.posix.sigaction(.TERM, &action, &old_terminate);
     defer std.posix.sigaction(.TERM, &old_terminate, null);
 
+    var bridge: notification_bridge.Bridge = undefined;
+    bridge.init(init.io);
+    defer bridge.deinit(init.gpa);
     var native: notification_dbus_native.Native = .{ .stop = &notification_stop };
-    try notification_dbus.run(&native, allocator);
+    var worker = try init.io.concurrent(notificationWorker, .{ &native, &bridge, init.gpa });
+
+    const banner_result = notification_banner_sdl.run(&bridge, init.gpa);
+    if (banner_result) {
+        notification_stop.store(true, .release);
+    } else |_| {
+        notification_stop.store(true, .release);
+        bridge.bannerFailed();
+    }
+    const worker_result = worker.await(init.io);
+    try banner_result;
+    try worker_result;
+}
+
+fn notificationWorker(
+    native: *notification_dbus_native.Native,
+    bridge: *notification_bridge.Bridge,
+    allocator: std.mem.Allocator,
+) !void {
+    notification_dbus.runWithBanner(native, bridge, allocator) catch |err| {
+        bridge.workerFailed();
+        return err;
+    };
+    try bridge.workerStopped();
 }
 
 fn stopNotification(_: std.posix.SIG) callconv(.c) void {
