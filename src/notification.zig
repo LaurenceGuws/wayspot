@@ -20,6 +20,7 @@ pub const Request = struct {
 
 pub const Notification = struct {
     id: u32,
+    storage: []u8,
     app_name: []u8,
     app_icon: []u8,
     summary: []u8,
@@ -28,34 +29,35 @@ pub const Notification = struct {
 
     fn init(allocator: std.mem.Allocator, id: u32, request: Request) error{OutOfMemory}!Notification {
         std.debug.assert(id != 0);
-
-        const app_name = try allocator.dupe(u8, request.app_name);
-        errdefer allocator.free(app_name);
-        const app_icon = try allocator.dupe(u8, request.app_icon);
-        errdefer allocator.free(app_icon);
-        const summary = try allocator.dupe(u8, request.summary);
-        errdefer allocator.free(summary);
-        const body = try allocator.dupe(u8, request.body);
-        errdefer allocator.free(body);
+        const size = request.app_name.len + request.app_icon.len + request.summary.len + request.body.len;
+        const storage = try allocator.alloc(u8, size);
+        var offset: usize = 0;
 
         return .{
             .id = id,
-            .app_name = app_name,
-            .app_icon = app_icon,
-            .summary = summary,
-            .body = body,
+            .storage = storage,
+            .app_name = copy(storage, &offset, request.app_name),
+            .app_icon = copy(storage, &offset, request.app_icon),
+            .summary = copy(storage, &offset, request.summary),
+            .body = copy(storage, &offset, request.body),
             .expire_timeout = request.expire_timeout,
         };
     }
 
     fn deinit(notification: *Notification, allocator: std.mem.Allocator) void {
-        allocator.free(notification.body);
-        allocator.free(notification.summary);
-        allocator.free(notification.app_icon);
-        allocator.free(notification.app_name);
+        allocator.free(notification.storage);
         notification.* = undefined;
     }
 };
+
+fn copy(storage: []u8, offset: *usize, bytes: []const u8) []u8 {
+    std.debug.assert(offset.* <= storage.len);
+    std.debug.assert(bytes.len <= storage.len - offset.*);
+    const result = storage[offset.*..][0..bytes.len];
+    @memcpy(result, bytes);
+    offset.* += bytes.len;
+    return result;
+}
 
 pub const Store = struct {
     slots: [capacity]?Notification = @splat(null),

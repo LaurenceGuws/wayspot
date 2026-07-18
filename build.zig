@@ -130,6 +130,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_notification_dbus_tests = b.addRunArtifact(notification_dbus_tests);
+    const notification_dbus_native_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/notification_dbus_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    notification_dbus_native_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    notification_dbus_native_tests.use_llvm = true;
+    notification_dbus_native_tests.use_lld = true;
+    const run_notification_dbus_native_tests = b.addRunArtifact(notification_dbus_native_tests);
     const test_step = b.step("test", "Run Wayspot beta tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
@@ -143,6 +155,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     test_step.dependOn(&run_notification_dbus_tests.step);
+    test_step.dependOn(&run_notification_dbus_native_tests.step);
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);

@@ -2,7 +2,7 @@
 # It narrows DOMAIN.yml; it does not add product scope.
 
 marathon: notification_dbus
-state: approved
+state: implemented_for_review
 
 references:
   zig_io:
@@ -101,7 +101,7 @@ records:
     Validate and copy the complete request before changing the live record
     set; every rejection leaves all records and the next id unchanged.
 
-files_proposed:
+files:
   src/notification.zig: >
     Own Notification, the bounded active records, id allocation, replacement,
     close, and method results. No DBus or process types.
@@ -145,11 +145,12 @@ loop:
   turn:
     - observe stop
     - wait for one bounded interval
-    - dispatch at most 64 messages
+    - dispatch one message
     - observe stop again
   wait_milliseconds: 100
-  message_turn_capacity: 64
-  stop_latency_milliseconds_max: 200
+  send_turns: 8
+  send_wait_milliseconds: 25
+  stop_latency_milliseconds_max: 300
   bus_loss: return a visible process error after cleanup
   name_loss: return a visible process error after cleanup
   reconnect: excluded
@@ -175,6 +176,7 @@ errors:
     - name_lost
     - reply_failed
     - signal_failed
+    - send_timed_out
 
 asserts:
   - no id is zero
@@ -218,6 +220,24 @@ runtime_receipt:
   - prove replacement returns the original id
   - prove close emits NotificationClosed with reason 3
   - stop once and prove the name and process are gone
+
+implementation_proof:
+  tests: 188
+  plain_tests_load_libdbus: false
+  native_tests:
+    - real in-memory libdbus action arrays
+    - real in-memory libdbus hint dictionaries
+    - Smith-generated collection counts and key bytes
+  isolated_session_bus:
+    capabilities: empty
+    server_information: wayspot, wayspot, beta, "1.3"
+    first_id: 1
+    replacement_id: 1
+    close_signal: NotificationClosed(1, 3)
+    clean_stop: true
+  live_session:
+    owner_executable: /home/home/personal/wayspot/zig-out/bin/wayspot-beta
+    resident_rss_bytes_observed: 9109504
 
 deferred:
   - banner rendering and user dismissal

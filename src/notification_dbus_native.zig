@@ -1,6 +1,7 @@
 //! Adapts one private libdbus session connection to the notification service.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const notification = @import("notification.zig");
 const service = @import("notification_dbus.zig");
 
@@ -326,4 +327,127 @@ fn countHints(iter: *c.DBusMessageIter) ?service.ReplyError {
     }
     _ = c.dbus_message_iter_next(iter);
     return null;
+}
+
+test "action arrays require bounded key label pairs" {
+    try std.testing.expectEqual(null, try actionError(&.{ "open", "Open" }));
+    try std.testing.expectEqual(service.ReplyError.invalid_signature, try actionError(&.{"open"}));
+
+    var actions: [65][]const u8 = @splat("x");
+    try std.testing.expectEqual(service.ReplyError.too_many_actions, try actionError(&actions));
+    var long: [257]u8 = @splat('x');
+    try std.testing.expectEqual(service.ReplyError.too_many_actions, try actionError(&.{&long}));
+}
+
+test "hint dictionaries bound count and key bytes" {
+    try std.testing.expectEqual(null, try hintError(&.{"urgency"}));
+
+    var keys: [65][]const u8 = @splat("x");
+    try std.testing.expectEqual(service.ReplyError.too_many_hints, try hintError(&keys));
+    var long: [257]u8 = @splat('x');
+    try std.testing.expectEqual(service.ReplyError.too_many_hints, try hintError(&.{&long}));
+}
+
+test "generated action and hint bounds match native iterators" {
+    if (builtin.fuzz) {
+        try std.testing.fuzz({}, fuzzCollections, .{});
+        return;
+    }
+    var empty = std.testing.Smith{ .in = "" };
+    try fuzzCollections({}, &empty);
+}
+
+fn fuzzCollections(_: void, smith: *std.testing.Smith) !void {
+    var bytes: [257]u8 = @splat('x');
+    var values: [65][]const u8 = undefined;
+    const count = smith.value(u8) % (values.len + 1);
+    const length = smith.value(u16) % (bytes.len + 1);
+    for (values[0..count]) |*value| value.* = bytes[0..length];
+
+    const actions = try actionError(values[0..count]);
+    if (count > 64 or length > 256) {
+        try std.testing.expectEqual(service.ReplyError.too_many_actions, actions);
+    } else if (count % 2 != 0) {
+        try std.testing.expectEqual(service.ReplyError.invalid_signature, actions);
+    } else {
+        try std.testing.expectEqual(null, actions);
+    }
+
+    const hints = try hintError(values[0..count]);
+    if (count > 64 or length > 256) {
+        try std.testing.expectEqual(service.ReplyError.too_many_hints, hints);
+    } else {
+        try std.testing.expectEqual(null, hints);
+    }
+}
+
+fn actionError(actions: []const []const u8) !?service.ReplyError {
+    const message = c.dbus_message_new_signal(path, interface, "Test") orelse return error.OutOfMemory;
+    defer c.dbus_message_unref(message);
+    var root: c.DBusMessageIter = undefined;
+    var array: c.DBusMessageIter = undefined;
+    c.dbus_message_iter_init_append(message, &root);
+    if (c.dbus_message_iter_open_container(&root, c.DBUS_TYPE_ARRAY, "s", &array) == 0) {
+        return error.OutOfMemory;
+    }
+    for (actions) |action| {
+        const terminated = try std.testing.allocator.dupeZ(u8, action);
+        defer std.testing.allocator.free(terminated);
+        var pointer: [*:0]const u8 = terminated;
+        if (c.dbus_message_iter_append_basic(&array, c.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0) {
+            c.dbus_message_iter_abandon_container(&root, &array);
+            return error.OutOfMemory;
+        }
+    }
+    if (c.dbus_message_iter_close_container(&root, &array) == 0) {
+        c.dbus_message_iter_abandon_container(&root, &array);
+        return error.OutOfMemory;
+    }
+    var read: c.DBusMessageIter = undefined;
+    std.debug.assert(c.dbus_message_iter_init(message, &read) != 0);
+    return countActions(&read);
+}
+
+fn hintError(keys: []const []const u8) !?service.ReplyError {
+    const message = c.dbus_message_new_signal(path, interface, "Test") orelse return error.OutOfMemory;
+    defer c.dbus_message_unref(message);
+    var root: c.DBusMessageIter = undefined;
+    var array: c.DBusMessageIter = undefined;
+    c.dbus_message_iter_init_append(message, &root);
+    if (c.dbus_message_iter_open_container(&root, c.DBUS_TYPE_ARRAY, "{sv}", &array) == 0) {
+        return error.OutOfMemory;
+    }
+    for (keys) |key| try appendHint(&array, key);
+    if (c.dbus_message_iter_close_container(&root, &array) == 0) {
+        c.dbus_message_iter_abandon_container(&root, &array);
+        return error.OutOfMemory;
+    }
+    var read: c.DBusMessageIter = undefined;
+    std.debug.assert(c.dbus_message_iter_init(message, &read) != 0);
+    return countHints(&read);
+}
+
+fn appendHint(array: *c.DBusMessageIter, key: []const u8) !void {
+    const terminated = try std.testing.allocator.dupeZ(u8, key);
+    defer std.testing.allocator.free(terminated);
+    var pointer: [*:0]const u8 = terminated;
+    var entry: c.DBusMessageIter = undefined;
+    var variant: c.DBusMessageIter = undefined;
+    if (c.dbus_message_iter_open_container(array, c.DBUS_TYPE_DICT_ENTRY, null, &entry) == 0) {
+        return error.OutOfMemory;
+    }
+    if (c.dbus_message_iter_append_basic(&entry, c.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0 or
+        c.dbus_message_iter_open_container(&entry, c.DBUS_TYPE_VARIANT, "s", &variant) == 0)
+    {
+        c.dbus_message_iter_abandon_container(array, &entry);
+        return error.OutOfMemory;
+    }
+    if (c.dbus_message_iter_append_basic(&variant, c.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0 or
+        c.dbus_message_iter_close_container(&entry, &variant) == 0 or
+        c.dbus_message_iter_close_container(array, &entry) == 0)
+    {
+        c.dbus_message_iter_abandon_container_if_open(&entry, &variant);
+        c.dbus_message_iter_abandon_container_if_open(array, &entry);
+        return error.OutOfMemory;
+    }
 }
