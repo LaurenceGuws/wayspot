@@ -458,8 +458,10 @@ ownership:
     cleanup: SDL_DestroySurface exactly once
     failure: no surface publication
   - resource: shared-memory file and mapping
-    owner: one Surface
-    cleanup: wl_buffer release precedes unmap and close; forced disconnect makes release unnecessary
+    owner: one Surface preparation call until successful wl_buffer creation
+    cleanup: >
+      Close and unmap client backing immediately after wl_buffer creation; the
+      compositor-retained pool mapping remains valid through wl_buffer lifetime.
     failure: destroy the complete unpublished surface set
   - resource: current Round
     owner: wallpaper run loop
@@ -710,29 +712,29 @@ buffer_release:
       Until all retiring buffers report wl_buffer.release, dispatch at most
       buffer_release_callback_capacity callbacks and poll only until the shared
       buffer_release_wait_milliseconds deadline.
-    - destroy each released buffer, pool, mapping, and file exactly once
+    - destroy each released wl_buffer; its client fd, mapping, and pool were already released after creation
     - destroy its viewport, layer surface, and wl_surface
   timeout_or_display_loss:
     - cancel any prepared Wayland read
-    - disconnect the Wayland display before touching mapped pixel memory
+    - disconnect the Wayland display before clearing unreleased wl_buffer ownership
     - >
       Mark every native Wayland object dead without sending destructor
-      requests, then unmap and close every local mapping and file exactly once.
+      requests; no client shm fd, mapping, or pool remains resident.
     - terminate the process visibly; replacement cannot retain new surfaces after disconnect
   invariants:
     - no callback wait is indefinite
-    - no connected compositor can reference memory when it is unmapped
+    - compositor-retained pool mapping remains valid through every wl_buffer lifetime
     - orderly cleanup and display-loss cleanup are disjoint exhaustive paths
     - the resource record becomes vacant only after its complete cleanup path
 
 cleanup:
   order:
     - mark stop; perform no new external task
-    - use orderly unmap and bounded release while the display remains healthy
-    - on timeout or display loss, disconnect before local mapping cleanup
+    - use orderly null attach and bounded release while the display remains healthy
+    - on timeout or display loss, disconnect before clearing unreleased wl_buffer ownership
     - >
-      Destroy or discard every wl_buffer, pool, mapping, shared-memory file,
-      viewport, layer surface, and wl_surface once.
+      Destroy or discard every wl_buffer, viewport, layer surface, and
+      wl_surface once; client shm backing was released during preparation.
     - >
       On healthy cleanup release the exact matched wl_output after the Surface;
       after disconnect mark the proxy dead without a request.
@@ -744,7 +746,7 @@ cleanup:
   assertions:
     - prepared_surface_count is zero or equals monitor_count before publish
     - current surface count always equals current monitor count
-    - no busy buffer is unmapped while the Wayland connection can still release it
+    - compositor-retained pool backing remains valid until each busy wl_buffer is released or disconnected
     - every error path ends with zero owned unpublished resources
 
 phased_checkpoints:
@@ -1097,9 +1099,6 @@ phased_checkpoints:
       prepared_not_committed:
         order:
           - destroy buffer
-          - destroy shm pool
-          - unmap shm
-          - close shm file
           - destroy viewport
           - destroy layer surface
           - destroy wl_surface
@@ -1108,9 +1107,6 @@ phased_checkpoints:
         order:
           - wait boundedly for wl_buffer.release with stop priority
           - destroy buffer
-          - destroy shm pool
-          - unmap shm
-          - close shm file
           - destroy viewport
           - destroy layer surface
           - destroy wl_surface
@@ -1122,8 +1118,8 @@ phased_checkpoints:
           the retired cleanup order.
       display_loss:
         rule: >
-          Disconnect Wayland before destroying or unmapping any local resource
-          the compositor might still read. No callback wait occurs afterward.
+          Disconnect Wayland before clearing any unreleased wl_buffer the
+          compositor might still read. No callback wait occurs afterward.
       outputs: release exact retained output proxies after all surfaces, then registry and display
       exactly_once: every occupied Surface record reaches vacant once; stale handles then reject
     failure_meaning:
@@ -1375,7 +1371,7 @@ phased_checkpoints:
         owns:
           - exactly one Wayland display connection
           - globals and output proxies obtained from that display
-          - surfaces, shm pools, buffers, mappings, and checked handles for its Round
+          - surfaces, buffers, and checked handles for its Round; client shm backing ends during preparation
           - existing image-file task fields only while loading; all are null during residence
         does_not_own:
           - Stop or its signal mask
@@ -1694,7 +1690,7 @@ phased_checkpoints:
           meaning remains authoritative over later cleanup failures.
       wayland_loss:
         - resolve/cancel read intent according to readiness state
-        - disconnect affected display before local mappings or handles are cleared
+        - disconnect affected display before unreleased buffer handles are cleared
         - retain unrelated candidate/current display only when it already owns complete published state
       fatal: same exact owner order as stop, while preserving the first visible error
     functions:
@@ -1922,15 +1918,16 @@ phased_checkpoints:
         - resolve the exact borrowed image path before application discovery
         - read XDG_RUNTIME_DIR and HYPRLAND_INSTANCE_SIGNATURE once from process Init
         - build and validate both fixed Hyprland socket paths once
-        - allocate one stable disconnected Native
-        - load and decode the PNG once through that Native into one process-lifetime Image
+        - initialize one stable resident Native and allocate one disconnected Current Native
+        - load and decode the PNG once through the resident Native into one process-lifetime Image
         - open one Stop, retaining its exact prior signal mask
         - initialize resident event fd to the explicit absent value
-        - create one empty Current Round around the stable Native
+        - create one empty Current Round around the allocated disconnected Native
         - >
           Enter Work.reconnect. With an empty Round, wait omits the absent
           Wayland fd, socket2 connects before j/monitors, and the first complete
-          snapshot prepares/publishes directly on that stable Native.
+          snapshot prepares/publishes on a candidate before replacing the empty
+          Current Native.
         - converge and publish one complete Round, then block in the approved resident loop
       ownership:
         image: runWallpaper owns and deinitializes exactly once after every later owner
@@ -1997,15 +1994,20 @@ phased_checkpoints:
       current_target_after_reduction: 38500
       deletion_to_current_target_before_checkpoint_6_additions: 16312
       deletion_to_current_target_if_entry_uses_1700: 18012
+      operator_ruling: >
+        46590 and 38500 are awareness scores, not blockers or closure law.
+        Record honest misses, but references and executable invariants win; no
+        architecture redesign is justified merely to improve either score.
+        This ruling supersedes earlier receipts describing a carried mandatory
+        gate while preserving their measurements as historical evidence.
       target_assessment: >
         38500 is not currently credible without deleting or hiding accepted
         direct Wayland/Hyprland ownership. The audit found an honest route to
-        the mandatory 46590 ceiling, not to 38500. Keep 38500 visible as the
-        original target and stop for reviewer judgment after the mandatory
-        reduction rather than manufacturing a pass.
+        the earlier 46590 score, not to 38500. Keep both visible as awareness
+        scores rather than manufacturing a pass.
       rule: >
-        The 15 percent deletion is a minimum gate, not a replacement for the
-        unchanged 38500 Marathon 8 production target.
+        Numeric deletion targets are awareness scores. They never override
+        references, executable invariants, or reviewer judgment.
     reduction_audit:
       retained_shape:
         - >
@@ -2148,9 +2150,8 @@ phased_checkpoints:
       - order: 4
         id: final_shape_gate
         gate: >
-          Recount from fbcce56. Final production must be at most 46590 and no
-          accepted theorem or source contract may be absent. Report the
-          unchanged 38500 target separately as met or honestly missed.
+          Recount from fbcce56, preserve every accepted theorem and source
+          contract, and report 46590 and 38500 honestly as awareness scores.
     reviewer_checkpoint_1_receipt:
       source_scope:
         - src/wallpaper.zig
@@ -2290,6 +2291,253 @@ phased_checkpoints:
         The whole checkpoint-6 mandatory final production ceiling of 46590 is
         red by 6938 characters and remains pending. This receipt is not
         checkpoint-6 or Marathon-8 closure.
+    final_shape_f6252a0_audit:
+      scope: audit_only
+      production_nonwhitespace:
+        method: source before the first test declaration with ASCII whitespace removed
+        wallpaper: 20222
+        wallpaper_native: 31816
+        marathon_8_cmd_main_cli_additions: 1490
+        current: 53528
+        awareness_score_46590: 46590
+        distance_at_audit: 6938
+      measured_current_regions:
+        wallpaper:
+          constants_work_ready_paths_current: 2109
+          monitor_snapshot_parser: 5035
+          event_feed_drain: 1641
+          image_crop_round_model: 681
+          round_open_prepare_transition_discard: 2118
+          reconcile: 2520
+          request_monitors: 1079
+          run_wait_transient: 1449
+          image_load_cover_validation_png: 2971
+          event_classification: 493
+        native:
+          imports_stop_fields: 1260
+          file_clock_candidate_event_request_operations: 2838
+          output_discovery_disconnect: 2296
+          surface_prepare: 3855
+          publication_release_discard_loss: 4498
+          checked_roundtrip_change_drain: 979
+          resident_wait: 3165
+          request_wait_and_poll: 1546
+          unix_connect: 1594
+          decode_scale: 1926
+          paths_stop: 1303
+          surface_state_cleanup: 1137
+          registry_protocol: 2240
+          output_protocol: 1152
+          layer_buffer_protocol: 1150
+          scalar_helpers: 877
+      safe_deletions_within_approved_shape:
+        - id: inline_generic_open_outputs_validation
+          current_region: 215
+          projected_deletion: 95
+          confidence: high
+          replacement: >
+            Keep the same validation and source.openOutputs call directly in
+            prepareRound; remove only the one-call top-level forwarding owner.
+        - id: use_existing_transition_as_the_public_round_operation
+          current_region: 1147
+          projected_deletion: 260
+          confidence: medium
+          replacement: >
+            Fold publish/release preconditions into the existing
+            transitionRound boundary and update theorem callers without
+            changing prevalidation, one flush, handoff, or reverse release.
+        - id: one_wait_for_work_socket_loss_tail
+          current_region: 730
+          projected_deletion: 110
+          confidence: high
+          replacement: >
+            Let wait and drain errors reach one EventSocketLost classifier in
+            waitForWork; retain exact close, EventLines reset, reconnect work,
+            and stop priority.
+        - id: one_native_wait_classification_tail
+          current_region: 3165
+          projected_deletion: 225
+          confidence: medium
+          replacement: >
+            In the existing wait function, share stop-record and socket2
+            classification after the absent-display and prepared-read poll
+            setup; add no helper or new wait boundary.
+        - id: immediate_shm_client_backing_cleanup
+          current_regions: {prepare_backing: 807, surface_cleanup: 492}
+          projected_deletion: 180
+          confidence: medium
+          replacement: >
+            Keep fd, mapping, and pool as prepare locals and release each
+            immediately after buffer creation; Surface retains the buffer and
+            all configure/release state. This requires protocol confirmation
+            before implementation but no new owner.
+        - id: consolidate_existing_surface_and_display_resets
+          current_regions: {healthy_disconnect: 572, discard_loss_clear: 690}
+          projected_deletion: 70
+          confidence: medium
+          replacement: >
+            Make the existing cleanup methods perform their own final reset
+            once and remove repeated caller assignments while preserving
+            healthy proxy requests versus unknown-prefix local destruction.
+        - summary:
+            projected_deletion: 940
+            confidence_range: 700_to_1150
+            projected_production: 52588
+            remaining_to_46590_awareness_score: 5998
+      reductions_requiring_operator_architecture_approval:
+        - id: stable_resident_and_display_candidate_ownership
+          measured_regions: {current_type: 148, create_destroy: 505, reconcile: 2520, entry_leaf: 1007}
+          projected_deletion: 900
+          confidence: low
+          reason: >
+            Startup allocates an empty Current Native which the first
+            reconciliation replaces. Removing that allocation and later
+            pointer handoff requires a newly approved ownership/data shape for
+            transactional candidate display state.
+        - id: resident_native_transcript_operation_vocabulary
+          measured_regions: {native_forwarding: 2838, request_task: 1079, resident_control: 1449}
+          projected_deletion: 1100
+          confidence: low
+          reason: >
+            Removing std.Io and socket forwarding honestly changes the shared
+            Native/Transcript task boundary. Moving choreography into tests
+            earns no credit and is forbidden.
+        - id: publication_and_resident_poll_contract
+          measured_regions: {resident_wait: 3165, publication_flush: 1268, poll_helpers: 787}
+          projected_deletion: 1350
+          confidence: low
+          reason: >
+            One replacement must encode publication's no-dispatch rule,
+            prepare-read pairing, stop mapping, independent attempt bounds,
+            zero-time polls, and writable EAGAIN retries. That changes the
+            approved external operation contract even if it adds no file.
+        - id: scale_directly_into_wayland_backing
+          measured_regions: {cover_image: 427, native_scale: 941, prepare_backing: 807}
+          projected_deletion: 650
+          confidence: low
+          reason: >
+            Eliminating the transient scaled Image changes image/output
+            ownership and the shared scale theorem, so it needs a new approved
+            data and operation boundary.
+        - summary:
+            projected_deletion_without_overlap: 4000
+            confidence_range: 3000_to_5200
+      irreducible_protocol_and_product_cost:
+        - "strict monitor model and JSON parser: 5035"
+        - "event framing, bounded drain, and closed classification: 2134"
+        - "Wayland output discovery and registry/output/layer/buffer callbacks: 6838"
+        - "surface preparation before optional backing simplification: 3855"
+        - "Unix connect plus validated paths and exact Stop ownership: 2897"
+        - "PNG/image validation and native decode/scale before architectural change: 4897"
+        - >
+          Checked handles, configure refresh, semantic publication, reverse
+          release, socket2 reconnect, and disconnect-before-local-cleanup are
+          product theorems, not removable scaffolding.
+      stale_but_zero_credit:
+        - >
+          Current's comment says its native pointer is stable, but
+          reconciliation replaces that pointer; the separate resident Native
+          is stable. Correct the comment, but claim no deletion.
+        - >
+          The lifecycle text says startup publishes on the initial stable
+          Native, while current reconcile always creates and publishes a
+          candidate then retires the empty Current Native. Correct the receipt,
+          but claim no deletion.
+        - >
+          Every named capacity remains reached by production or retained
+          theorem tests; no stale bound was found that can honestly disappear.
+      conclusion: >
+        The 46590 awareness score is not honestly reachable inside the approved
+        shape. Safe same-boundary work projects 940 characters, far short of
+        6938. Even adding all identified architecture changes projects 4940
+        characters with low confidence and leaves 1998. References and
+        executable invariants win; this score does not justify architecture
+        redesign and is not closure law.
+    final_shape_local_pass_receipt:
+      state: reviewer_accepted_ready_to_commit
+      baseline_commit: f6252a0
+      source_scope:
+        - src/wallpaper.zig
+        - src/wallpaper_native.zig
+      tests: 525
+      gates:
+        zig_fmt_check: pass
+        zig_build_test: 525_pass
+        zig_build: pass
+        pinned_protocol_copy_and_build: pass
+        yaml_parse: pass
+        diff_check: pass
+      isolated_runtime_not_live:
+        invalid_argv_status: 2
+        missing_environment_status: 1
+        missing_image_status: 1
+        compositor_launched: false
+      production_nonwhitespace:
+        baseline: 53528
+        current: 53304
+        deletion: 224
+        awareness_scores:
+          score_46590: {result: missed, distance: 6714}
+          score_38500: {result: missed, distance: 14804}
+          closure_law: false
+      category_deltas:
+        wallpaper:
+          current_comment_correction: 2
+          shared_socket_loss_cleanup: 18
+          total: 20
+        wallpaper_native:
+          local_shm_prepare_cleanup_and_source_contract: 126
+          removed_surface_backing_fields_and_cleanup: -308
+          consolidated_release_discard_loss_resets: -62
+          total: -244
+      deleted_duplication:
+        - EventSocketLost closes and resets through one deferred tail in waitForWork
+        - Surface no longer retains shm_fd, mapping, or pool after wl_buffer creation
+        - releaseRetired no longer resets after destroyConnected already resets
+        - disconnect-after-loss no longer walks a second local-backing cleanup path
+      retained_for_readability:
+        - >
+          Keep wallpaper.openOutputs: it is exercised directly as the strict
+          Snapshot-to-output theorem, not merely a product forwarding call.
+        - >
+          Keep publishRound and releaseRound: their named public meanings make
+          publication versus healthy release explicit while transitionRound
+          remains the shared mechanism.
+        - >
+          Keep absent-display and prepared-read readiness setup visibly
+          separate. Sharing more classification without a helper made
+          prepare_read cancellation and descriptor indexes less auditable.
+      source_bible:
+        - >
+          Pinned wayland.xml wl_shm_pool.create_buffer states that each buffer
+          retains the pool and the pool may be destroyed immediately after
+          buffer creation; pool.destroy retains mapped memory until all
+          buffers are gone.
+        - >
+          Pinned Wayland wayland-shm.c maps the received fd into server-owned
+          pool state and releases that mapping only when its references end.
+        - >
+          Foot shm.c retains backing for mutable reusable pools; Wayspot's
+          static one-write buffer has no later client mutation, so immediate
+          client fd/mapping/pool cleanup is the smaller exact lifetime.
+      corrected_contracts:
+        - Current owns a replaceable native pointer, not a stable pointer
+        - startup publishes a candidate before replacing the empty Current Native
+      excluded:
+        - no resident/display redesign or operation-vocabulary change
+        - no publication/resident polling merge or direct shm scaling
+        - no test, Transcript, C, generated-code, or comment deletion credited
+        - no live compositor launch
+      remaining_debt: >
+        Stable Resident versus replaceable display ownership still requires an
+        allocated empty Current Native at startup. Native wait and publication
+        retain distinct polling logic for distinct dispatch/failure contracts.
+        Both are real architectural questions, not local cleanup work, and the
+        operator does not justify redesigning them to improve an awareness score.
+      closure: >
+        References and executable invariants win over numeric awareness scores.
+        Marathon 8 remains open only for its coordinated live receipt; this
+        reviewer acceptance is not Marathon closure.
     tests:
       unit:
         - exact wallpaper argv and every missing/extra argument rejection
@@ -2338,7 +2586,7 @@ phased_checkpoints:
       - no source deletion credited from tests, Transcript, comments, assertions, protocol XML, or generated C
     closes_when:
       - exact product argv links and reaches the complete native resident path
-      - final production is at most 46590 characters from the fbcce56 baseline
+      - 46590 and 38500 awareness-score misses are recorded honestly
       - every checkpoint-1-through-5 theorem and source contract remains green
       - deterministic and isolated native gates pass without compositor mutation
       - one coordinated single- and multi-monitor live receipt is approved and later passes
@@ -2354,8 +2602,9 @@ character_budget:
     src_wallpaper_native_zig: 33686
     total: 54812
     over_production_maximum_before_reduction: 9312
-    checkpoint_6_reduction_gate: pending
-    production_target_after_reduction: pending
+    checkpoint_6_reduction_gate: awareness_score_missed
+    production_target_after_reduction: awareness_score_missed
+    closure_law: false
   generated_protocol_code: measured_separately
   protocol_xml: measured_separately_as_pinned_external_input
   rule: >
@@ -2433,7 +2682,7 @@ deterministic_simulations:
   - every buffer commit precedes one batch flush
   - old surfaces remain owned until the replacement batch succeeds
   - orderly unmap waits for every release within the shared callback/deadline bounds
-  - release timeout disconnects before unmapping and exits without a live replacement Round
+  - release timeout disconnects before clearing the unreleased buffer and exits without a live replacement Round
   - socket loss retains current surfaces during bounded reconnect
   - malformed wire data does not reconnect
   - reconnect exhaustion exits and cleans every owner
@@ -2455,7 +2704,11 @@ negative_assertions:
   - no transient monitor/output mismatch mutates current Round or prepares a surface
   - no image bytes, SDL surface, shm mapping, socket, or Wayland object lacks one cleanup path
   - no timer wakes an idle healthy process
-  - no buffer mapping is unmapped before release while Wayland remains connected
+  - >
+    Wayspot may close, unmap, and destroy its client fd, mapping, and pool
+    immediately after successful wl_buffer creation. The compositor-retained
+    pool mapping and backing remain valid through wl_buffer lifetime under the
+    pinned protocol. Wayspot destroys wl_buffer only after release or disconnect.
   - no wallpaper code imports picker, notifications, app discovery, config, cache, or history
   - no rotation, randomness, schedule, direct rotate action, or process supervisor exists
 
@@ -2513,7 +2766,7 @@ closure_candidate:
   - focus, workspace, window, and mouse histories leave the image Round unchanged
   - request, event, image, Wayland, stop, reconnect, and cleanup histories pass strict simulation
   - the healthy resident process blocks while idle
-  - source fits the approved character budget after reduction
+  - numeric awareness-score misses are recorded without weakening references or invariants
   - no known Marathon 8 debt remains for Marathon 9
 
 open_product_decisions: []

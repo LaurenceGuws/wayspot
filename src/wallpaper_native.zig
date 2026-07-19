@@ -272,24 +272,28 @@ pub const Native = struct {
             @intCast(configured.height),
         );
         const length = pixels.pixels.len * @sizeOf(u32);
-        surface.shm_fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
+        // Pixels are written once; wl_buffer retains server backing after client fd/map/pool cleanup.
+        const shm_fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
+        defer _ = std.posix.system.close(shm_fd);
         try (std.Io.File{
-            .handle = surface.shm_fd.?,
+            .handle = shm_fd,
             .flags = .{ .nonblocking = false },
         }).setLength(native.io, length);
-        surface.mapping = try std.posix.mmap(
+        const mapping = try std.posix.mmap(
             null,
             length,
             .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
-            surface.shm_fd.?,
+            shm_fd,
             0,
         );
-        @memcpy(surface.mapping.?[0..length], std.mem.sliceAsBytes(pixels.pixels));
-        surface.pool = wl.wl_shm_create_pool(native.shm.?, surface.shm_fd.?, @intCast(length)) orelse
+        defer std.posix.munmap(mapping);
+        @memcpy(mapping[0..length], std.mem.sliceAsBytes(pixels.pixels));
+        const pool = wl.wl_shm_create_pool(native.shm.?, shm_fd, @intCast(length)) orelse
             return error.SurfacePoolFailed;
+        defer wl.wl_shm_pool_destroy(pool);
         surface.buffer = wl.wl_shm_pool_create_buffer(
-            surface.pool.?,
+            pool,
             0,
             @intCast(pixels.width),
             @intCast(pixels.height),
@@ -412,22 +416,17 @@ pub const Native = struct {
         }
         if (!surface.released) return error.SurfaceReleaseMissing;
         surface.destroyConnected();
-        surface.* = .{};
     }
 
     pub fn discardPrepared(native: *Native, handle: wallpaper.SurfaceHandle) void {
         const surface = native.checkedSurface(handle) catch unreachable;
         std.debug.assert(surface.state == .prepared);
-        if (native.display != null) surface.destroyConnected() else surface.destroyLocal();
-        surface.* = .{};
+        if (native.display != null) surface.destroyConnected() else surface.* = .{};
     }
 
     pub fn disconnectAfterDisplayLoss(native: *Native) void {
         if (native.display) |display| wl.wl_display_disconnect(display);
-        for (&native.surfaces) |*surface| {
-            surface.destroyLocal();
-            surface.* = .{};
-        }
+        for (&native.surfaces) |*surface| surface.* = .{};
         native.clearDisplay();
     }
 
@@ -792,9 +791,6 @@ const Surface = struct {
     surface: ?*wl.wl_surface = null,
     layer: ?*wl.zwlr_layer_surface_v1 = null,
     viewport: ?*wl.wp_viewport = null,
-    shm_fd: ?std.posix.fd_t = null,
-    mapping: ?[]align(std.heap.page_size_min) u8 = null,
-    pool: ?*wl.wl_shm_pool = null,
     buffer: ?*wl.wl_buffer = null,
     configure: ?wallpaper.Configure = null,
     configure_count: u8 = 0,
@@ -805,16 +801,10 @@ const Surface = struct {
 
     fn destroyConnected(surface: *Surface) void {
         if (surface.buffer) |proxy| wl.wl_buffer_destroy(proxy);
-        if (surface.pool) |proxy| wl.wl_shm_pool_destroy(proxy);
-        surface.destroyLocal();
         if (surface.viewport) |proxy| wl.wp_viewport_destroy(proxy);
         if (surface.layer) |proxy| wl.zwlr_layer_surface_v1_destroy(proxy);
         if (surface.surface) |proxy| wl.wl_surface_destroy(proxy);
-    }
-
-    fn destroyLocal(surface: *Surface) void {
-        if (surface.mapping) |mapping| std.posix.munmap(mapping);
-        if (surface.shm_fd) |fd| _ = std.posix.system.close(fd);
+        surface.* = .{};
     }
 };
 
@@ -1035,6 +1025,12 @@ test "absent display zero wait polls no Wayland descriptor" {
     var native = Native{ .io = std.testing.io };
     const ready = try native.wait(&native, -1, -1, 0);
     try std.testing.expectEqual(wallpaper.Ready{}, ready);
+}
+
+test "surface retains no client buffer backing" {
+    try std.testing.expect(!@hasField(Surface, "shm_fd"));
+    try std.testing.expect(!@hasField(Surface, "mapping"));
+    try std.testing.expect(!@hasField(Surface, "pool"));
 }
 
 fn surfaceParity(

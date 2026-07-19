@@ -54,7 +54,7 @@ pub const SocketPath = struct {
 /// Owns the exact Hyprland request and socket2 paths used by one resident run.
 pub const SocketPaths = struct { request: SocketPath, event: SocketPath };
 
-/// Owns one published Round and the stable native pointer behind its callbacks.
+/// Owns one published Round and its replaceable native pointer behind callbacks.
 pub fn Current(comptime Native: type) type {
     return struct { native: *Native, round: Round };
 }
@@ -573,11 +573,15 @@ fn waitForWork(
     work: *Work,
     timeout: ?u64,
 ) !bool {
-    const ready = resident.wait(native, stop_fd, event_fd.*, timeout) catch |err| {
-        if (err != error.EventSocketLost) return err;
+    var socket_lost = false;
+    defer if (socket_lost) {
         resident.closeEvent(event_fd);
         lines.* = .{};
         work.* = .reconnect;
+    };
+    const ready = resident.wait(native, stop_fd, event_fd.*, timeout) catch |err| {
+        if (err != error.EventSocketLost) return err;
+        socket_lost = true;
         return true;
     };
     if (ready.stop) return error.Stopped;
@@ -588,9 +592,7 @@ fn waitForWork(
     }
     if (ready.event) changed = drainEvents(resident, event_fd.*, lines, work) catch |err| {
         if (err != error.EventSocketLost) return err;
-        resident.closeEvent(event_fd);
-        lines.* = .{};
-        work.* = .reconnect;
+        socket_lost = true;
         return true;
     } or changed;
     return changed;
