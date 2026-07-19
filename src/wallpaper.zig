@@ -230,13 +230,8 @@ fn monitorLessThan(_: void, left: Monitor, right: Monitor) bool {
 pub const Event = enum { refresh, ignore, malformed };
 
 pub const Feed = struct {
-    events: [event_batch_capacity]Event = undefined,
-    count: u8 = 0,
+    event: ?Event = null,
     consumed: usize = 0,
-
-    pub fn slice(feed: *const Feed) []const Event {
-        return feed.events[0..feed.count];
-    }
 };
 
 pub const EventLines = struct {
@@ -244,24 +239,24 @@ pub const EventLines = struct {
     len: u16 = 0,
     discarding: bool = false,
 
-    /// Feed stops at an event boundary when its output is full; consumed preserves the caller's remainder.
+    /// Returns at the first complete event; consumed preserves the caller's exact remainder.
     pub fn feed(lines: *EventLines, input: []const u8) Feed {
         var result: Feed = .{};
-        while (result.consumed < input.len and result.count < event_batch_capacity) {
+        while (result.consumed < input.len) {
             const byte = input[result.consumed];
             result.consumed += 1;
             if (lines.discarding) {
                 if (byte == '\n') {
                     lines.discarding = false;
-                    result.events[result.count] = .malformed;
-                    result.count += 1;
+                    result.event = .malformed;
+                    return result;
                 }
                 continue;
             }
             if (byte == '\n') {
-                result.events[result.count] = classify(lines.bytes[0..lines.len]);
-                result.count += 1;
+                result.event = classify(lines.bytes[0..lines.len]);
                 lines.len = 0;
+                return result;
             } else if (lines.len == event_line_capacity) {
                 lines.len = 0;
                 lines.discarding = true;
@@ -278,6 +273,7 @@ pub const EventLines = struct {
 pub fn drainEvents(source: anytype, event_fd: anytype, lines: *EventLines, work: *Work) !bool {
     var bytes: [event_read_capacity]u8 = undefined;
     var total: usize = 0;
+    var events: u8 = 0;
     var changed = false;
     for (0..event_drain_capacity) |_| {
         const count = source.readEvent(event_fd, &bytes) catch |err| switch (err) {
@@ -292,10 +288,14 @@ pub fn drainEvents(source: anytype, event_fd: anytype, lines: *EventLines, work:
             const feed = lines.feed(bytes[offset..count]);
             std.debug.assert(feed.consumed > 0);
             offset += feed.consumed;
-            for (feed.slice()) |event| if (event == .refresh) {
-                work.* = .refresh;
-                changed = true;
-            };
+            if (feed.event) |event| {
+                if (events == event_batch_capacity) return error.EventDrainExceeded;
+                events += 1;
+                if (event == .refresh) {
+                    work.* = .refresh;
+                    changed = true;
+                }
+            }
         }
         if (count < bytes.len) return changed;
     }
@@ -422,78 +422,80 @@ pub fn reconcile(
 ) !void {
     const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
     for (0..reconcile_attempt_capacity) |attempt| {
-        _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
-        if (work.* == .reconnect) {
-            resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
-                if (attempt + 1 == reconcile_attempt_capacity) return err;
-                try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
-                continue;
+        const failure: ?anyerror = attempt_work: {
+            _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
+            if (work.* == .reconnect) {
+                resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
+                    break :attempt_work err;
+                };
+            }
+            var reply: [monitor_response_capacity]u8 = undefined;
+            const count = requestMonitors(
+                resident,
+                paths.request.slice(),
+                stop_fd,
+                event_fd.*,
+                &reply,
+                deadline,
+            ) catch |err| break :attempt_work err;
+            const snapshot = try parseMonitors(allocator, reply[0..count]);
+            if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
+                break :attempt_work null;
+            }
+            if (snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
+                work.* = .idle;
+                return;
+            }
+            const candidate = try resident.createNative(allocator);
+            var candidate_round: Round = .{};
+            var candidate_owned = true;
+            defer if (candidate_owned) {
+                discardRound(candidate, &candidate_round);
+                resident.destroyNative(allocator, candidate);
             };
-        }
-        var reply: [monitor_response_capacity]u8 = undefined;
-        const count = requestMonitors(
-            resident,
-            paths.request.slice(),
-            stop_fd,
-            event_fd.*,
-            &reply,
-            deadline,
-        ) catch |err| {
+            candidate_round = prepareRound(candidate, allocator, &snapshot, image) catch |err| {
+                break :attempt_work err;
+            };
+            var published: Round = .{};
+            publishRound(candidate, &published, &candidate_round, stop_fd) catch |err| {
+                candidate_round = .{};
+                return err;
+            };
+            const old_native = current.native;
+            var old_round = current.round;
+            current.* = .{ .native = candidate, .round = published };
+            candidate_owned = false;
+            releaseRound(old_native, &old_round, stop_fd) catch |err| {
+                old_native.disconnectAfterDisplayLoss();
+                resident.destroyNative(allocator, old_native);
+                if (err == error.WaylandFlushStopped) {
+                    releaseRound(current.native, &current.round, stop_fd) catch {
+                        current.native.disconnectAfterDisplayLoss();
+                        current.round = .{};
+                    };
+                    return error.Stopped;
+                }
+                return err;
+            };
+            resident.destroyNative(allocator, old_native);
+            work.* = .idle;
+            return;
+        };
+        if (failure) |err| {
             if (err == error.EventSocketLost) {
                 resident.closeEvent(event_fd);
                 lines.* = .{};
                 work.* = .reconnect;
             }
-            if (!transient(err) or attempt + 1 == reconcile_attempt_capacity) return err;
-            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
-            continue;
-        };
-        const snapshot = try parseMonitors(allocator, reply[0..count]);
-        if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
-            if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
-            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
-            continue;
-        }
-        if (snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
-            work.* = .idle;
-            return;
-        }
-        const candidate = try resident.createNative(allocator);
-        var candidate_round: Round = .{};
-        var candidate_owned = true;
-        defer if (candidate_owned) {
-            discardRound(candidate, &candidate_round);
-            resident.destroyNative(allocator, candidate);
-        };
-        candidate_round = prepareRound(candidate, allocator, &snapshot, image) catch |err| {
-            if (!transient(err) or attempt + 1 == reconcile_attempt_capacity) return err;
-            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
-            continue;
-        };
-        var published: Round = .{};
-        publishRound(candidate, &published, &candidate_round, stop_fd) catch |err| {
-            candidate_round = .{};
-            return err;
-        };
-        const old_native = current.native;
-        var old_round = current.round;
-        current.* = .{ .native = candidate, .round = published };
-        candidate_owned = false;
-        releaseRound(old_native, &old_round, stop_fd) catch |err| {
-            old_native.disconnectAfterDisplayLoss();
-            resident.destroyNative(allocator, old_native);
-            if (err == error.WaylandFlushStopped) {
-                releaseRound(current.native, &current.round, stop_fd) catch {
-                    current.native.disconnectAfterDisplayLoss();
-                    current.round = .{};
-                };
-                return error.Stopped;
-            }
-            return err;
-        };
-        resident.destroyNative(allocator, old_native);
-        work.* = .idle;
-        return;
+            if (!transient(err)) return err;
+            if (attempt + 1 == reconcile_attempt_capacity) return err;
+        } else if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
+        const now = resident.now();
+        if (now >= deadline) return error.ReconcileTimeout;
+        _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, @min(
+            reconcile_wait_milliseconds,
+            deadline - now,
+        ));
     }
     return error.ReconcileExhausted;
 }
@@ -551,7 +553,7 @@ pub fn run(
     paths: *const SocketPaths,
 ) !void {
     var lines: EventLines = .{};
-    var work: Work = .refresh;
+    var work: Work = .reconnect;
     while (true) {
         if (work == .idle) {
             _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
@@ -559,24 +561,6 @@ pub fn run(
             try reconcile(resident, allocator, image, current, stop_fd, event_fd, paths, &lines, &work);
         }
     }
-}
-
-// Blocks one bounded convergence interval without taking ownership of resident state.
-fn waitAttempt(
-    resident: anytype,
-    native: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    deadline: u64,
-    lines: *EventLines,
-    work: *Work,
-) !void {
-    const now = resident.now();
-    if (now >= deadline) return error.ReconcileTimeout;
-    _ = try waitForWork(resident, native, stop_fd, event_fd, lines, work, @min(
-        reconcile_wait_milliseconds,
-        deadline - now,
-    ));
 }
 
 // Classifies one borrowed-fd wait and drains only the descriptors reported ready.
@@ -906,51 +890,72 @@ test "monitor response bytes and JSON are bounded" {
 
 test "event fragments coalesce and classify without payload state" {
     var lines: EventLines = .{};
-    try std.testing.expectEqual(@as(usize, 0), lines.feed("monitoradd").count);
-    const feed = lines.feed("ed>>DP-1\nworkspace>>1\nconfigreloaded>>\n");
-    try std.testing.expectEqualSlices(Event, &.{ .refresh, .ignore, .refresh }, feed.slice());
+    try std.testing.expectEqual(@as(?Event, null), lines.feed("monitoradd").event);
+    var events: [3]Event = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        collectEvents(&lines, "ed>>DP-1\nworkspace>>1\nconfigreloaded>>\n", &events),
+    );
+    try std.testing.expectEqualSlices(Event, &.{ .refresh, .ignore, .refresh }, &events);
     try std.testing.expectEqual(@as(u16, 0), lines.len);
 }
 
 test "only exact monitor and config event names refresh" {
     var lines: EventLines = .{};
-    const feed = lines.feed(
+    var events: [10]Event = undefined;
+    const count = collectEvents(
+        &lines,
         "monitoradded>>A\nmonitoraddedv2>>1,A,x\nmonitorremoved>>A\n" ++
             "monitorremovedv2>>1,A,x\nconfigreloaded>>\nfocusedmon>>A,1\n" ++
             "workspace>>1\nactivewindow>>kitty,x\nopenwindow>>x\nmouse>>move\n",
+        &events,
     );
     try std.testing.expectEqualSlices(Event, &.{
         .refresh, .refresh, .refresh, .refresh, .refresh,
         .ignore,  .ignore,  .ignore,  .ignore,  .ignore,
-    }, feed.slice());
+    }, events[0..count]);
 }
 
 test "malformed and overlong lines preserve following valid lines" {
     var lines: EventLines = .{};
-    const malformed = lines.feed(">>x\nmissing\nbad-name>>x\nok>>a\x00b\nworkspace>>1\n");
+    var malformed: [5]Event = undefined;
+    const malformed_count = collectEvents(
+        &lines,
+        ">>x\nmissing\nbad-name>>x\nok>>a\x00b\nworkspace>>1\n",
+        &malformed,
+    );
     try std.testing.expectEqualSlices(
         Event,
         &.{ .malformed, .malformed, .malformed, .malformed, .ignore },
-        malformed.slice(),
+        malformed[0..malformed_count],
     );
     var bytes: [event_line_capacity + 32]u8 = @splat('a');
     bytes[event_line_capacity + 1] = '\n';
     @memcpy(bytes[event_line_capacity + 2 ..][0.."monitoradded>>A\n".len], "monitoradded>>A\n");
-    const overlong = lines.feed(bytes[0 .. event_line_capacity + 2 + "monitoradded>>A\n".len]);
-    try std.testing.expectEqualSlices(Event, &.{ .malformed, .refresh }, overlong.slice());
+    var overlong: [2]Event = undefined;
+    const overlong_count = collectEvents(
+        &lines,
+        bytes[0 .. event_line_capacity + 2 + "monitoradded>>A\n".len],
+        &overlong,
+    );
+    try std.testing.expectEqualSlices(
+        Event,
+        &.{ .malformed, .refresh },
+        overlong[0..overlong_count],
+    );
 }
 
-test "event batch returns an exact unconsumed remainder" {
+test "one event returns an exact unconsumed remainder" {
     const line = "workspace>>1\n";
     var bytes: [line.len * (event_batch_capacity + 1)]u8 = undefined;
     for (0..event_batch_capacity + 1) |index| @memcpy(bytes[index * line.len ..][0..line.len], line);
     var lines: EventLines = .{};
     const first = lines.feed(&bytes);
-    try std.testing.expectEqual(@as(u8, event_batch_capacity), first.count);
-    try std.testing.expectEqual(line.len * event_batch_capacity, first.consumed);
+    try std.testing.expectEqual(Event.ignore, first.event.?);
+    try std.testing.expectEqual(line.len, first.consumed);
     const second = lines.feed(bytes[first.consumed..]);
-    try std.testing.expectEqualSlices(Event, &.{.ignore}, second.slice());
-    try std.testing.expectEqual(bytes.len - first.consumed, second.consumed);
+    try std.testing.expectEqual(Event.ignore, second.event.?);
+    try std.testing.expectEqual(line.len, second.consumed);
 }
 
 test "generated monitor JSON and arbitrary bytes remain bounded" {
@@ -1362,7 +1367,6 @@ fn fuzzEvents(_: void, smith: *std.testing.Smith) !void {
     var feeds: usize = 0;
     while (consumed < bytes.len and feeds <= bytes.len) : (feeds += 1) {
         const feed = lines.feed(bytes[consumed..]);
-        try std.testing.expect(feed.count <= event_batch_capacity);
         try std.testing.expect(feed.consumed <= bytes.len - consumed);
         if (feed.consumed == 0) break;
         consumed += feed.consumed;
@@ -1394,12 +1398,32 @@ fn fuzzEvents(_: void, smith: *std.testing.Smith) !void {
     while (consumed < history_len) {
         const remaining = history_len - consumed;
         const chunk = smith.valueRangeAtMost(u16, 1, @intCast(remaining));
-        const feed = lines.feed(history[consumed .. consumed + chunk]);
-        @memcpy(actual[emitted..][0..feed.count], feed.slice());
-        emitted += feed.count;
-        consumed += feed.consumed;
+        const end = consumed + chunk;
+        while (consumed < end) {
+            const feed = lines.feed(history[consumed..end]);
+            if (feed.event) |event| {
+                actual[emitted] = event;
+                emitted += 1;
+            }
+            consumed += feed.consumed;
+        }
     }
     try std.testing.expectEqual(@as(usize, count), emitted);
     try std.testing.expectEqualSlices(Event, expected[0..count], actual[0..emitted]);
     try std.testing.expectEqual(@as(u16, 0), lines.len);
+}
+
+fn collectEvents(lines: *EventLines, input: []const u8, events: []Event) usize {
+    var consumed: usize = 0;
+    var count: usize = 0;
+    while (consumed < input.len) {
+        const feed = lines.feed(input[consumed..]);
+        consumed += feed.consumed;
+        if (feed.event) |event| {
+            std.debug.assert(count < events.len);
+            events[count] = event;
+            count += 1;
+        }
+    }
+    return count;
 }

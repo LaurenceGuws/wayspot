@@ -2135,6 +2135,7 @@ phased_checkpoints:
           existing theorem and report operation-history changes before entry.
       - order: 2
         id: convergence_and_event_reduction
+        state: reviewer_accepted_ready_to_commit
         gate: >
           Reduce resident and event control while preserving all current
           transcript histories, Smith properties, comments, and negative scans.
@@ -2187,6 +2188,51 @@ phased_checkpoints:
         remains red and pending. Checkpoint-1 acceptance carries that gate
         forward and is not checkpoint-6 or Marathon-8 closure; targets and
         later scope remain unchanged.
+    reviewer_checkpoint_2_receipt:
+      source_scope:
+        - src/wallpaper.zig
+      unchanged_authorized_files:
+        - src/wallpaper_native.zig
+        - src/wallpaper_transcript.zig
+      operation_vocabulary_changed: false
+      operation_history: >
+        Strict request fragments, zero-time waits, event reads, candidate
+        prepare/publication, handoff, reverse release, and display-loss
+        histories are unchanged. The existing Native operations still each
+        name external I/O or ownership behavior, so no trivial forwarding was
+        removed dishonestly.
+      behavior:
+        convergence: >
+          Startup enters the real reconnect work state. Reconnect, request,
+          and candidate-preparation failures now share one transient tail and
+          one of at most seven bounded inter-attempt waits while retaining the
+          pre/post zero-time drains, stop priority, old Current, and atomic
+          candidate failure.
+        events: >
+          Feed retains one optional closed Event classification and exact
+          consumed remainder instead of a resident event array. drainEvents
+          consumes that fact directly and retains the 64-event and 8-read
+          bounds, exact malformed/ignore/refresh tests, fragmentation,
+          overlong discard, and following-valid-line behavior.
+      production_nonwhitespace:
+        method: source before the first test declaration with ASCII whitespace removed
+        baseline_d1b122e: 52275
+        current: 51669
+        reduction: 606
+        whole_marathon_delta_from_fbcce56: 51669
+      audited_region_recount:
+        resident_convergence: {baseline: 5546, current: 5048, reduction: 498, ceiling: 3100, over: 1948}
+        event_collapse: {baseline: 1749, current: 1641, reduction: 108, ceiling: 1200, over: 441}
+        combined: {baseline: 7295, current: 6689, reduction: 606, ceiling: 4300, over: 2389}
+        assessment: >
+          Both approved replacement estimates miss. The deletion is direct;
+          no names, comments, Transcript proof, request framing, bounds, or
+          failure theorem were moved or hidden to force an estimate pass.
+      carried_gate: >
+        The whole checkpoint-6 mandatory final production ceiling of 46590 is
+        red by 5079 characters and remains pending. This checkpoint receipt is
+        reviewer accepted, but is not checkpoint-6 or Marathon-8 closure;
+        product entry and later scope remain unchanged.
     tests:
       unit:
         - exact wallpaper argv and every missing/extra argument rejection
