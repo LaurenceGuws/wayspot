@@ -6,7 +6,8 @@ const apps = @import("apps.zig");
 pub const help =
     \\usage:
     \\  wayspot-beta
-    \\  wayspot-beta wallpaper IMAGE.png
+    \\  wayspot-beta wallpaper ROOT
+    \\  wayspot-beta wallpaper rotate
     \\  wayspot-beta apps [terms...]
     \\  wayspot-beta <exact application name or desktop id>
     \\

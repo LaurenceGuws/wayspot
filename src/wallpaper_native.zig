@@ -11,13 +11,63 @@ const wl = @cImport({
     @cInclude("viewporter-client.h");
 });
 
+extern fn wayspot_jpeg_decode(
+    bytes: [*]const u8,
+    length: usize,
+    side_limit: u32,
+    pixel_limit: u64,
+    width: *u32,
+    height: *u32,
+) callconv(.c) ?[*]u8;
+extern fn wayspot_jpeg_free(pixels: *anyopaque) callconv(.c) void;
+
 /// Owns one signalfd and the signal mask restored exactly by `closeStop`.
 pub const Stop = struct { fd: std.posix.fd_t, prior_mask: std.posix.sigset_t };
+
+pub fn discoverCatalog(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8) !wallpaper.Catalog {
+    var source = Discovery{ .io = io };
+    return wallpaper.collectCatalog(&source, allocator, root_path);
+}
+
+const Discovery = struct {
+    io: std.Io,
+    root: ?std.Io.Dir = null,
+    iterator: std.Io.Dir.Iterator = undefined,
+
+    pub fn openRoot(source: *Discovery, path: []const u8) !void {
+        source.root = try std.Io.Dir.openDirAbsolute(source.io, path, .{ .iterate = true, .follow_symlinks = false });
+        source.iterator = source.root.?.iterate();
+    }
+
+    pub fn closeRoot(source: *Discovery) void {
+        source.root.?.close(source.io);
+        source.root = null;
+    }
+
+    pub fn nextEntry(source: *Discovery) !?wallpaper.CatalogEntry {
+        const entry = try source.iterator.next(source.io) orelse return null;
+        return .{ .name = entry.name, .kind = entry.kind };
+    }
+
+    pub fn statEntry(source: *Discovery, name: []const u8) !std.Io.File.Kind {
+        return (try source.root.?.statFile(source.io, name, .{ .follow_symlinks = false })).kind;
+    }
+
+    pub fn randomSeed(source: *Discovery) !u64 {
+        var seed: u64 = undefined;
+        try source.io.randomSecure(std.mem.asBytes(&seed));
+        return seed;
+    }
+};
 
 /// Owns one Wayland display and its resources; resident stop/socket2/path state is always borrowed.
 pub const Native = struct {
     io: std.Io,
     file: ?std.Io.File = null,
+    rotate_listener: std.posix.fd_t = -1,
+    rotate_client: std.posix.fd_t = -1,
+    rotate_bytes: [16]u8 = undefined,
+    rotate_length: u8 = 0,
     display: ?*wl.wl_display = null,
     registry_proxy: ?*wl.wl_registry = null,
     compositor: ?*wl.wl_compositor = null,
@@ -60,6 +110,91 @@ pub const Native = struct {
         const file = native.file orelse unreachable;
         file.close(native.io);
         native.file = null;
+    }
+
+    pub fn openRotation(native: *Native, signature: []const u8) !void {
+        std.debug.assert(native.rotate_listener < 0 and native.rotate_client < 0);
+        const address = try abstractAddress(signature);
+        const result = std.posix.system.socket(
+            std.posix.AF.UNIX,
+            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+            0,
+        );
+        const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.RotationSocketOpenFailed;
+        errdefer _ = std.posix.system.close(fd);
+        switch (std.posix.errno(std.posix.system.bind(fd, @ptrCast(&address.value), address.length))) {
+            .SUCCESS => {},
+            .ADDRINUSE => return error.RotationNameInUse,
+            else => return error.RotationSocketBindFailed,
+        }
+        if (std.posix.errno(std.posix.system.listen(fd, 4)) != .SUCCESS) {
+            return error.RotationSocketListenFailed;
+        }
+        native.rotate_listener = fd;
+    }
+
+    pub fn closeRotation(native: *Native) void {
+        if (native.rotate_client >= 0) _ = std.posix.system.close(native.rotate_client);
+        if (native.rotate_listener >= 0) _ = std.posix.system.close(native.rotate_listener);
+        native.rotate_client = -1;
+        native.rotate_listener = -1;
+        native.rotate_length = 0;
+    }
+
+    pub fn receiveRotation(native: *Native) !bool {
+        if (native.rotate_client >= 0) native.rejectBusy();
+        if (native.rotate_client < 0) {
+            const accepted = std.os.linux.accept4(
+                native.rotate_listener,
+                null,
+                null,
+                std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+            );
+            native.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS) @intCast(accepted) else return error.RotationAcceptFailed;
+            errdefer {
+                _ = std.posix.system.close(native.rotate_client);
+                native.rotate_client = -1;
+            }
+            try authenticatePeer(native.rotate_client, std.os.linux.geteuid());
+        }
+        const file: std.Io.File = .{ .handle = native.rotate_client, .flags = .{ .nonblocking = true } };
+        const suffix = native.rotate_bytes[native.rotate_length..];
+        const count = file.readStreaming(native.io, &.{suffix}) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            error.EndOfStream => return error.RotationRequestIncomplete,
+            else => return err,
+        };
+        native.rotate_length += @intCast(count);
+        const bytes = native.rotate_bytes[0..native.rotate_length];
+        return switch (wallpaper.classifyRotationRequest(bytes)) {
+            .incomplete => false,
+            .rotate => true,
+            .invalid => error.RotationRequestInvalid,
+        };
+    }
+
+    fn rejectBusy(native: *Native) void {
+        const accepted = std.os.linux.accept4(
+            native.rotate_listener,
+            null,
+            null,
+            std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        );
+        if (std.os.linux.errno(accepted) != .SUCCESS) return;
+        const fd: std.posix.fd_t = @intCast(accepted);
+        defer _ = std.posix.system.close(fd);
+        authenticatePeer(fd, std.os.linux.geteuid()) catch return;
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        file.writeStreamingAll(native.io, "error\n") catch {};
+    }
+
+    pub fn replyRotation(native: *Native, success: bool) void {
+        if (native.rotate_client < 0) return;
+        const file: std.Io.File = .{ .handle = native.rotate_client, .flags = .{ .nonblocking = true } };
+        file.writeStreamingAll(native.io, if (success) "ok\n" else "error\n") catch {};
+        _ = std.posix.system.close(native.rotate_client);
+        native.rotate_client = -1;
+        native.rotate_length = 0;
     }
 
     /// Returns the borrowed I/O clock in monotonic milliseconds for bounded waits.
@@ -469,6 +604,10 @@ pub const Native = struct {
         return changed;
     }
 
+    pub fn currentUsable(_: *Native, native: *Native) bool {
+        return native.display != null and !native.failed;
+    }
+
     /// Borrows resident fds for one bounded poll; stop wins and timeout zero still polls once.
     pub fn wait(
         resident: *Native,
@@ -485,6 +624,8 @@ pub const Native = struct {
             var fds = [_]std.posix.pollfd{
                 .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
                 .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = resident.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = resident.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
             };
             _ = try resident.pollUntil(&fds, deadline, timeout_ms == 0);
             if (fds[0].revents != 0) {
@@ -499,7 +640,12 @@ pub const Native = struct {
             }
             const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
             if (fds[1].revents & failed != 0) return error.EventSocketLost;
-            return .{ .event = fds[1].revents & std.posix.POLL.IN != 0 };
+            if (fds[2].revents & failed != 0) return error.RotationListenerLost;
+            if (fds[3].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationClientLost;
+            return .{
+                .event = fds[1].revents & std.posix.POLL.IN != 0,
+                .rotate = fds[2].revents != 0 or fds[3].revents != 0,
+            };
         }
         var dispatches: u8 = 0;
         var write_deadline: ?u64 = null;
@@ -527,6 +673,8 @@ pub const Native = struct {
                     .revents = 0,
                 },
                 .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = resident.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = resident.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
             };
             const poll_deadline = if (write_deadline) |flush_end|
                 if (deadline) |wait_end| @min(flush_end, wait_end) else flush_end
@@ -560,6 +708,9 @@ pub const Native = struct {
             }
             if (fds[2].revents & failed != 0) return error.EventSocketLost;
             ready.event = ready.event or fds[2].revents & std.posix.POLL.IN != 0;
+            if (fds[3].revents & failed != 0) return error.RotationListenerLost;
+            if (fds[4].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationClientLost;
+            ready.rotate = ready.rotate or fds[3].revents != 0 or fds[4].revents != 0;
             if (count == 0) {
                 if (write and (deadline == null or write_deadline.? <= deadline.?)) {
                     return error.WaylandFlushTimeout;
@@ -676,7 +827,8 @@ pub const Native = struct {
         return fd;
     }
 
-    pub fn decode(_: *Native, allocator: std.mem.Allocator, bytes: []const u8) !wallpaper.Image {
+    pub fn decode(_: *Native, allocator: std.mem.Allocator, format: wallpaper.ImageFormat, bytes: []const u8) !wallpaper.Image {
+        if (format == .jpeg) return decodeJpeg(allocator, bytes);
         const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse return error.ImageStreamFailed;
         const decoded = sdl.SDL_LoadPNG_IO(stream, true) orelse return error.ImageDecodeFailed;
         defer sdl.SDL_DestroySurface(decoded);
@@ -737,6 +889,112 @@ pub const Native = struct {
         }
     }
 };
+
+const AbstractAddress = struct { value: std.posix.sockaddr.un, length: std.posix.socklen_t };
+
+fn abstractAddress(signature: []const u8) !AbstractAddress {
+    const prefix = "wayspot-beta-wallpaper:";
+    if (signature.len == 0 or !std.unicode.utf8ValidateSlice(signature) or
+        std.mem.indexOfAny(u8, signature, "\x00/") != null or
+        prefix.len + signature.len > 107)
+    {
+        return error.HyprlandSignatureInvalid;
+    }
+    var value: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = @splat(0) };
+    @memcpy(value.path[1..][0..prefix.len], prefix);
+    @memcpy(value.path[1 + prefix.len ..][0..signature.len], signature);
+    return .{
+        .value = value,
+        .length = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + 1 + prefix.len + signature.len),
+    };
+}
+
+const Credentials = extern struct { pid: c_int, uid: c_uint, gid: c_uint };
+
+fn authenticatePeer(fd: std.posix.fd_t, expected_uid: c_uint) !void {
+    var credentials: Credentials = undefined;
+    var length: std.posix.socklen_t = @sizeOf(Credentials);
+    if (std.posix.errno(std.posix.system.getsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        std.os.linux.SO.PEERCRED,
+        @ptrCast(&credentials),
+        &length,
+    )) != .SUCCESS or length != @sizeOf(Credentials)) return error.RotationPeerCredentialsFailed;
+    try requireUid(credentials.uid, expected_uid);
+}
+
+fn requireUid(actual: c_uint, expected: c_uint) !void {
+    if (actual != expected) return error.RotationPeerInvalid;
+}
+
+pub fn requestRotation(io: std.Io, signature: []const u8) !void {
+    const address = try abstractAddress(signature);
+    const result = std.posix.system.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        0,
+    );
+    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.RotationSocketOpenFailed;
+    defer _ = std.posix.system.close(fd);
+    switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
+        .SUCCESS => {},
+        .INPROGRESS => {
+            try pollDirect(fd, std.posix.POLL.OUT);
+            var socket_error: c_int = 0;
+            var length: std.posix.socklen_t = @sizeOf(c_int);
+            if (std.posix.errno(std.posix.system.getsockopt(
+                fd,
+                std.posix.SOL.SOCKET,
+                std.posix.SO.ERROR,
+                @ptrCast(&socket_error),
+                &length,
+            )) != .SUCCESS or length != @sizeOf(c_int)) return error.RotationSocketConnectFailed;
+            if (socket_error != 0) return switch (@as(std.posix.E, @enumFromInt(socket_error))) {
+                .CONNREFUSED => error.WallpaperResidentUnavailable,
+                .TIMEDOUT => error.RotationTimedOut,
+                else => error.RotationSocketConnectFailed,
+            };
+        },
+        .CONNREFUSED => return error.WallpaperResidentUnavailable,
+        else => return error.RotationSocketConnectFailed,
+    }
+    try authenticatePeer(fd, std.os.linux.geteuid());
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    var written: usize = 0;
+    for (0..16) |_| {
+        written += file.writeStreaming(io, &.{}, &.{"rotate\n"[written..]}, 1) catch |err| switch (err) {
+            error.WouldBlock => {
+                try pollDirect(fd, std.posix.POLL.OUT);
+                continue;
+            },
+            else => return err,
+        };
+        if (written == "rotate\n".len) break;
+    }
+    if (written != "rotate\n".len) return error.RotationRequestIncomplete;
+    var reply: [16]u8 = undefined;
+    var used: usize = 0;
+    for (0..16) |_| {
+        used += file.readStreaming(io, &.{reply[used..]}) catch |err| switch (err) {
+            error.WouldBlock => {
+                try pollDirect(fd, std.posix.POLL.IN);
+                continue;
+            },
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (std.mem.indexOfScalar(u8, reply[0..used], '\n') != null) break;
+    }
+    if (!std.mem.eql(u8, reply[0..used], "ok\n")) return error.RotationRejected;
+}
+
+fn pollDirect(fd: std.posix.fd_t, events: i16) !void {
+    var descriptors = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+    if (try std.posix.poll(&descriptors, 2000) == 0) return error.RotationTimedOut;
+    if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationSocketFailed;
+    if (events == std.posix.POLL.OUT and descriptors[0].revents & std.posix.POLL.HUP != 0) return error.RotationSocketFailed;
+}
 
 /// Builds both bounded Hyprland Unix paths; invalid components publish no partial paths.
 pub fn buildSocketPaths(runtime: []const u8, signature: []const u8) !wallpaper.SocketPaths {
@@ -1001,6 +1259,29 @@ fn surfaceSide(value: c_int) !u32 {
     return @intCast(value);
 }
 
+fn decodeJpeg(allocator: std.mem.Allocator, bytes: []const u8) !wallpaper.Image {
+    var width: u32 = 0;
+    var height: u32 = 0;
+    const decoded = wayspot_jpeg_decode(
+        bytes.ptr,
+        bytes.len,
+        wallpaper.image_side_capacity,
+        wallpaper.image_pixel_capacity,
+        &width,
+        &height,
+    ) orelse return error.ImageDecodeFailed;
+    defer wayspot_jpeg_free(decoded);
+    const count = @as(usize, width) * height;
+    const pixels = try allocator.alloc(u32, count);
+    errdefer allocator.free(pixels);
+    const rgba = decoded[0 .. count * 4];
+    for (pixels, 0..) |*pixel, index| {
+        const source = rgba[index * 4 ..][0..4];
+        pixel.* = 0xff000000 | @as(u32, source[0]) << 16 | @as(u32, source[1]) << 8 | source[2];
+    }
+    return .{ .width = width, .height = height, .pitch = width * 4, .pixels = pixels };
+}
+
 fn xrgbSurface(surface: *sdl.SDL_Surface, width: u32, height: u32) !void {
     if (surface.*.format != sdl.SDL_PIXELFORMAT_XRGB8888 or surface.*.w != width or
         surface.*.h != height or surface.*.pitch != width * 4 or surface.*.pixels == null)
@@ -1062,10 +1343,11 @@ fn reconcileParity(
 ) !void {
     var lines: wallpaper.EventLines = .{};
     var work: wallpaper.Work = .refresh;
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         native,
         allocator,
         image,
+        false,
         current,
         stop_fd,
         event_fd,
@@ -1253,6 +1535,106 @@ test "native malformed PNG closes its file and publishes no image" {
     try std.testing.expect(native.file == null);
 }
 
+test "native JPEG memory boundary decodes and frees one bounded image" {
+    const encoded = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8APg3Lr//Z";
+    var bytes: [285]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&bytes, encoded);
+    var native = Native{ .io = std.testing.io };
+    var image = try native.decode(std.testing.allocator, .jpeg, &bytes);
+    defer image.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), image.width);
+    try std.testing.expectEqual(@as(u32, 1), image.height);
+    try std.testing.expectEqual(@as(usize, 1), image.pixels.len);
+}
+
+test "abstract rotation endpoint is exact single-instance kernel state" {
+    const signature = "x" ** 62;
+    const address = try abstractAddress(signature);
+    try std.testing.expectEqual(@as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 85), address.length);
+    try std.testing.expectEqual(@as(u8, 0), address.value.path[0]);
+    try std.testing.expectEqualStrings("wayspot-beta-wallpaper:" ++ signature, address.value.path[1..][0..85]);
+    var resident = Native{ .io = std.testing.io };
+    try resident.openRotation(signature);
+    defer resident.closeRotation();
+    var duplicate = Native{ .io = std.testing.io };
+    try std.testing.expectError(error.RotationNameInUse, duplicate.openRotation(signature));
+    var requester = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, signature });
+    while (true) {
+        const ready = try resident.wait(&resident, -1, -1, 100);
+        if (ready.rotate and try resident.receiveRotation()) break;
+    }
+    resident.replyRotation(true);
+    try requester.await(std.testing.io);
+    resident.closeRotation();
+    try duplicate.openRotation(signature);
+    duplicate.closeRotation();
+}
+
+test "partial request client HUP busy peer and closed fd ownership are exact" {
+    const signature = "partial-test";
+    var resident = Native{ .io = std.testing.io };
+    try resident.openRotation(signature);
+    defer resident.closeRotation();
+    const client = try connectRotationTest(signature);
+    defer _ = std.posix.system.close(client);
+    const file: std.Io.File = .{ .handle = client, .flags = .{ .nonblocking = true } };
+    try file.writeStreamingAll(std.testing.io, "rot");
+    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    try std.testing.expect(!try resident.receiveRotation());
+    try file.writeStreamingAll(std.testing.io, "ate\n");
+    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    try std.testing.expect(try resident.receiveRotation());
+
+    var busy = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, signature });
+    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    resident.rejectBusy();
+    if (busy.await(std.testing.io)) |_| return error.BusyRequestAccepted else |err| {
+        try std.testing.expect(err == error.RotationRejected or err == error.RotationSocketFailed);
+    }
+    resident.replyRotation(true);
+
+    const disconnected = try connectRotationTest(signature);
+    _ = std.posix.system.close(disconnected);
+    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    try std.testing.expectError(error.RotationRequestIncomplete, resident.receiveRotation());
+    resident.replyRotation(false);
+    const ready = try resident.wait(&resident, -1, -1, 0);
+    try std.testing.expect(!ready.rotate);
+}
+
+fn connectRotationTest(signature: []const u8) !std.posix.fd_t {
+    const address = try abstractAddress(signature);
+    const result = std.posix.system.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        0,
+    );
+    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.TestSocketFailed;
+    errdefer _ = std.posix.system.close(fd);
+    switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
+        .SUCCESS => {},
+        .INPROGRESS => try pollDirect(fd, std.posix.POLL.OUT),
+        else => return error.TestSocketFailed,
+    }
+    try authenticatePeer(fd, std.os.linux.geteuid());
+    return fd;
+}
+
+test "socket credential transcript rejects either wrong uid before protocol bytes" {
+    const own: c_uint = 1000;
+    for ([_]struct { peer: c_uint, accepted: bool }{
+        .{ .peer = own, .accepted = true },
+        .{ .peer = own + 1, .accepted = false },
+    }) |step| {
+        if (requireUid(step.peer, own)) |_| {
+            try std.testing.expect(step.accepted);
+        } else |err| {
+            try std.testing.expectEqual(error.RotationPeerInvalid, err);
+            try std.testing.expect(!step.accepted);
+        }
+    }
+}
+
 test "native unsupported IO acquires no file" {
     var native = Native{ .io = std.Io.failing };
     if (native.open("wallpaper.png")) |_| {
@@ -1261,20 +1643,16 @@ test "native unsupported IO acquires no file" {
     try std.testing.expect(native.file == null);
 }
 
-test "bounded malformed PNG data publishes no partial image" {
-    if (@import("builtin").fuzz) {
-        try std.testing.fuzz({}, fuzzPng, .{});
-        return;
-    }
-    var empty = std.testing.Smith{ .in = "" };
-    try fuzzPng({}, &empty);
+test "bounded malformed image data publishes no partial image" {
+    try std.testing.fuzz(wallpaper.ImageFormat.png, fuzzImage, .{ .corpus = &.{ "", "not png" } });
+    try std.testing.fuzz(wallpaper.ImageFormat.jpeg, fuzzImage, .{ .corpus = &.{ "", "\xff\xd8\xff\xd9", "not jpeg" } });
 }
 
-fn fuzzPng(_: void, smith: *std.testing.Smith) !void {
+fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
     var bytes: [4096]u8 = undefined;
     const input = bytes[0..smith.slice(&bytes)];
     var native = Native{ .io = std.Io.failing };
-    if (native.decode(std.testing.allocator, input)) |value| {
+    if (native.decode(std.testing.allocator, format, input)) |value| {
         var image = value;
         defer image.deinit(std.testing.allocator);
         try std.testing.expect(image.width > 0 and image.width <= wallpaper.image_side_capacity);

@@ -58,6 +58,8 @@ const Transcript = struct {
     next_generation: u32 = 1,
     stop_on_flush: bool = false,
     stop_on_release: bool = false,
+    release_failure: ?u8 = null,
+    release_count: u8 = 0,
 
     pub fn openOutputs(transcript: *Transcript, snapshot: *const wallpaper.Snapshot) !void {
         if (transcript.connected) {
@@ -211,6 +213,8 @@ const Transcript = struct {
         const resource = try transcript.checkedResource(handle);
         if (resource.state != .retiring) return error.SurfaceStateInvalid;
         if (transcript.stop_on_release) return error.WaylandFlushStopped;
+        defer transcript.release_count += 1;
+        if (transcript.release_failure == transcript.release_count) return error.SurfaceReleaseMissing;
         try transcript.step(.{ .release = handle });
         resource.* = .{};
     }
@@ -272,6 +276,10 @@ const ResidentOperation = union(enum) {
     read_event,
     create: u8,
     destroy: u8,
+    rotate_receive,
+    rotate_reply: bool,
+    image_open,
+    image_close,
 };
 
 const Resident = struct {
@@ -305,10 +313,54 @@ const Resident = struct {
     event_read_index: u8 = 0,
     wayland_changes: []const bool = &.{false},
     wayland_change_index: u8 = 0,
+    stop_release_id: ?u8 = null,
+    retirement_fail_offset: ?u8 = null,
+    image_failures: u8 = 0,
 
     pub fn now(resident: *Resident) u64 {
         resident.record(.{ .now = resident.clock });
         return resident.clock;
+    }
+
+    pub fn receiveRotation(resident: *Resident) !bool {
+        resident.record(.rotate_receive);
+        return true;
+    }
+
+    pub fn replyRotation(resident: *Resident, success: bool) void {
+        resident.record(.{ .rotate_reply = success });
+    }
+
+    pub fn open(resident: *Resident, _: []const u8) !void {
+        resident.record(.image_open);
+    }
+
+    pub fn stat(_: *Resident) !struct { kind: std.Io.File.Kind, size: u64 } {
+        return .{ .kind = .file, .size = 24 };
+    }
+
+    pub fn read(_: *Resident, bytes: []u8) !usize {
+        const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x02\x00\x00\x00\x01";
+        @memcpy(bytes, png);
+        return bytes.len;
+    }
+
+    pub fn close(resident: *Resident) void {
+        resident.record(.image_close);
+    }
+
+    pub fn decode(resident: *Resident, allocator: std.mem.Allocator, _: wallpaper.ImageFormat, _: []const u8) !wallpaper.Image {
+        if (resident.image_failures > 0) {
+            resident.image_failures -= 1;
+            return error.ImageDecodeFailed;
+        }
+        const pixels = try allocator.alloc(u32, 2);
+        @memset(pixels, 0xff203040);
+        return .{ .width = 2, .height = 1, .pitch = 8, .pixels = pixels };
+    }
+
+    pub fn currentUsable(_: *Resident, native: *Transcript) bool {
+        return native.connected;
     }
 
     pub fn wait(
@@ -450,6 +502,10 @@ const Resident = struct {
         ];
         resident.candidate_index += 1;
         native.* = .{ .id = resident.next_display, .output_result = output };
+        if (resident.stop_release_id == native.id) native.stop_on_release = true;
+        if (native.id == 2) if (resident.retirement_fail_offset) |offset| {
+            native.release_failure = offset;
+        };
         resident.next_display += 1;
         resident.record(.{ .create = native.id });
         return native;
@@ -550,10 +606,11 @@ test "reconciliation swaps only Wayland ownership and preserves resident fds" {
     var event_fd = resident.event_identity;
     var work: wallpaper.Work = .refresh;
     var paths = pathsValue();
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -600,6 +657,7 @@ test "successful event reconnect survives transient request retries and preserve
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -640,10 +698,11 @@ test "successful event reconnect is reused after transient candidate mismatch" {
     var event_fd: u8 = 0;
     var work: wallpaper.Work = .reconnect;
     var paths = pathsValue();
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -682,6 +741,7 @@ test "failed event reconnect keeps absent ownership and reconnect work" {
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -719,10 +779,11 @@ test "pre-drain event loss reconnects before requesting a snapshot" {
     var event_fd = resident.event_identity;
     var work: wallpaper.Work = .refresh;
     var paths = pathsValue();
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -791,10 +852,11 @@ test "both zero-time checks discard stale snapshots before candidate allocation"
         var event_fd = resident.event_identity;
         var paths = pathsValue();
         var work: wallpaper.Work = .refresh;
-        try wallpaper.reconcile(
+        _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
             &image,
+            false,
             &current,
             resident.stop_identity,
             &event_fd,
@@ -842,10 +904,11 @@ test "changed configure with unchanged snapshot recreates candidate" {
     var event_fd = resident.event_identity;
     var paths = pathsValue();
     var work: wallpaper.Work = .refresh;
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -884,6 +947,7 @@ test "stop during old retirement remains sticky through new current cleanup" {
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -933,6 +997,205 @@ test "unchanged round reaches one infinite idle wait and stop wins" {
     resident.destroyNative(std.testing.allocator, current.native);
 }
 
+test "direct rotate acknowledges only after forced complete replacement" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{ .{}, .{}, .{ .rotate = true }, .{}, .{}, .{ .stop = true } },
+        .replies = &.{ reply, reply },
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(4) };
+    defer catalog.deinit();
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "first.png"));
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "second.png"));
+    try catalog.shuffle();
+    catalog.published = catalog.order.items[0];
+    catalog.cursor = 1;
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.runRotation(
+        &resident,
+        std.testing.allocator,
+        &catalog,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+    ));
+    var received: ?usize = null;
+    var retired: ?usize = null;
+    var acknowledged: ?usize = null;
+    for (resident.operations[0..resident.count], 0..) |operation, index| switch (operation) {
+        .rotate_receive => received = index,
+        .destroy => |id| if (id == 2) {
+            retired = index;
+        },
+        .rotate_reply => |success| {
+            if (success) acknowledged = index;
+        },
+        else => {},
+    };
+    try std.testing.expect(received != null and retired != null and acknowledged != null);
+    try std.testing.expect(received.? < retired.? and retired.? < acknowledged.?);
+    try std.testing.expectEqual(@as(u8, 3), current.native.id);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "stop after publication replies error and every retirement failure keeps valid new Current" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false},
+        \\ {"name":"M1","width":2,"height":1,"x":2,"y":0,"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    for ([_]?u8{ 0, 1, null }) |failure| {
+        var resident = Resident{
+            .waits = &.{ .{}, .{}, .{ .rotate = true }, .{}, .{}, .{ .stop = true } },
+            .replies = &.{ reply, reply },
+            .retirement_fail_offset = failure,
+            .stop_release_id = if (failure == null) 2 else null,
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(5) };
+        defer catalog.deinit();
+        try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "first.png"));
+        try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "second.png"));
+        try catalog.shuffle();
+        catalog.published = catalog.order.items[0];
+        catalog.cursor = 1;
+        var event_fd: u8 = 0;
+        var paths = pathsValue();
+        const result = wallpaper.runRotation(
+            &resident,
+            std.testing.allocator,
+            &catalog,
+            &image,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+        );
+        if (failure == null) {
+            try std.testing.expectError(error.Stopped, result);
+            try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
+        } else {
+            try std.testing.expectError(error.Stopped, result);
+            try std.testing.expectEqual(@as(u8, 2), current.round.monitors.count);
+        }
+        var success = false;
+        var failed = false;
+        for (resident.operations[0..resident.count]) |operation| switch (operation) {
+            .rotate_reply => |ok| if (ok) {
+                success = true;
+            } else {
+                failed = true;
+            },
+            else => {},
+        };
+        if (failure == null) try std.testing.expect(failed and !success) else try std.testing.expect(success and !failed);
+        if (current.round.monitors.count > 0) {
+            try wallpaper.releaseRound(current.native, &current.round, false);
+        }
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "one file and invalid alternatives never select published or replace Current" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    for ([_]usize{ 1, 3 }) |count| {
+        var resident = Resident{
+            .waits = &.{ .{}, .{}, .{ .rotate = true }, .{ .stop = true } },
+            .replies = &.{reply},
+            .image_failures = @intCast(count - 1),
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(6) };
+        defer catalog.deinit();
+        for (0..count) |index| {
+            const name = if (index == 0) "published.png" else if (index == 1) "bad.jpg" else "missing.png";
+            try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, name));
+        }
+        try catalog.shuffle();
+        catalog.published = catalog.order.items[0];
+        catalog.cursor = 1;
+        var event_fd: u8 = 0;
+        var paths = pathsValue();
+        try std.testing.expectError(error.Stopped, wallpaper.runRotation(
+            &resident,
+            std.testing.allocator,
+            &catalog,
+            &image,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+        ));
+        try std.testing.expectEqual(@as(u8, 2), current.native.id);
+        var success = false;
+        var failure = false;
+        for (resident.operations[0..resident.count]) |operation| switch (operation) {
+            .rotate_reply => |ok| if (ok) {
+                success = true;
+            } else {
+                failure = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(failure and !success);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "stop and rotate readiness together sends no reply and stop propagates" {
+    var resident = Resident{ .waits = &.{.{ .stop = true, .rotate = true }}, .replies = &.{} };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(7) };
+    defer catalog.deinit();
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "a.png"));
+    try catalog.shuffle();
+    catalog.published = catalog.order.items[0];
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.runRotation(
+        &resident,
+        std.testing.allocator,
+        &catalog,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+    ));
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .rotate_reply => return error.UnexpectedRotationReply,
+        else => {},
+    };
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
 test "independent snapshot and output order retries without changing current early" {
     const first_snapshot = snapshotValue(1);
     const second_json =
@@ -957,10 +1220,11 @@ test "independent snapshot and output order retries without changing current ear
     var event_fd = resident.event_identity;
     var paths = pathsValue();
     var work: wallpaper.Work = .refresh;
-    try wallpaper.reconcile(
+    _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -1060,6 +1324,7 @@ test "balanced malformed reset frame reaches parser but no candidate or publicat
         &resident,
         std.testing.allocator,
         &image,
+        false,
         &current,
         resident.stop_identity,
         &event_fd,

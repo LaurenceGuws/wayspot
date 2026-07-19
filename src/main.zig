@@ -132,7 +132,14 @@ fn perform(
     home: ?[]const u8,
 ) !u8 {
     switch (meaning) {
-        .wallpaper => |path| try runWallpaper(init, path),
+        .wallpaper => |wallpaper_command| switch (wallpaper_command) {
+            .run => |root| try runWallpaper(init, root),
+            .rotate => try wallpaper_native.requestRotation(
+                init.io,
+                init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse
+                    return error.HyprlandSignatureMissing,
+            ),
+        },
         .apps => |app| switch (app) {
             .list => |query| {
                 var stdout_buffer: [4096]u8 = undefined;
@@ -156,17 +163,30 @@ fn perform(
 }
 
 /// Owns one image and resident lifetime; teardown disconnects before local owners are freed.
-fn runWallpaper(init: std.process.Init, path: []const u8) !void {
+fn runWallpaper(init: std.process.Init, root: []const u8) !void {
+    var catalog = try wallpaper_native.discoverCatalog(init.io, init.gpa, root);
+    defer catalog.deinit();
+    const signature = init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse
+        return error.HyprlandSignatureMissing;
     const paths = try wallpaper_native.buildSocketPaths(
         init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
-        init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandSignatureMissing,
+        signature,
     );
     var resident = wallpaper_native.Native{ .io = init.io };
+    try resident.openRotation(signature);
+    defer resident.closeRotation();
     const native = try resident.createNative(init.gpa);
     var current = wallpaper.Current(wallpaper_native.Native){ .native = native, .round = .{} };
     defer init.gpa.destroy(current.native);
-    var image = try wallpaper.loadImage(&resident, init.gpa, path);
-    defer image.deinit(init.gpa);
+    var image: ?wallpaper.Image = null;
+    for (0..catalog.paths.items.len) |_| {
+        image = wallpaper.loadImage(&resident, init.gpa, try catalog.next()) catch continue;
+        break;
+    }
+    if (image == null) return error.WallpaperCatalogUnusable;
+    catalog.published = catalog.last;
+    var selected = image.?;
+    defer selected.deinit(init.gpa);
     const stop = try wallpaper_native.openStop();
     defer wallpaper_native.closeStop(stop);
     var event_fd: std.posix.fd_t = -1;
@@ -175,7 +195,7 @@ fn runWallpaper(init: std.process.Init, path: []const u8) !void {
         current.round = .{};
         if (event_fd >= 0) resident.closeEvent(&event_fd);
     }
-    wallpaper.run(&resident, init.gpa, &image, &current, stop.fd, &event_fd, &paths) catch |err| {
+    wallpaper.runRotation(&resident, init.gpa, &catalog, &selected, &current, stop.fd, &event_fd, &paths) catch |err| {
         if (err != error.Stopped) return err;
     };
 }

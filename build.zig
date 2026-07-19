@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     wayspot_beta.addIncludePath(sdl.path("include"));
+    wayspot_beta.addIncludePath(b.path("vendor/stb"));
+    wayspot_beta.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
     wayspot_beta.addIncludePath(text.include);
     wayspot_beta.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
@@ -139,6 +141,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     wallpaper_native_tests.root_module.addIncludePath(sdl.path("include"));
+    wallpaper_native_tests.root_module.addIncludePath(b.path("vendor/stb"));
+    wallpaper_native_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
     wallpaper_native_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     addWaylandProtocol(
         b,

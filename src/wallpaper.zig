@@ -13,6 +13,9 @@ pub const event_read_capacity = 8192;
 pub const event_batch_capacity = 64;
 pub const image_path_capacity = 4095;
 pub const image_file_capacity = 64 * 1024 * 1024;
+pub const catalog_file_capacity = 16 * 1024;
+pub const catalog_entry_capacity = 32 * 1024;
+pub const catalog_path_capacity = 1024;
 pub const image_side_capacity = 16_384;
 pub const image_pixel_capacity = 67_108_864;
 pub const wayland_global_capacity = 128;
@@ -34,12 +37,22 @@ pub const event_drain_capacity = 8;
 pub const event_drain_byte_capacity = 64 * 1024;
 
 /// Collapses resident work without retaining individual external events.
-pub const Work = enum { idle, refresh, reconnect };
+pub const Work = enum { idle, refresh, reconnect, rotate };
+pub const ReconcileOutcome = enum { unchanged, published, published_cleanup_failed };
+pub const RotationRequest = enum { incomplete, rotate, invalid };
+
+pub fn classifyRotationRequest(bytes: []const u8) RotationRequest {
+    if (bytes.len > "rotate\n".len) return .invalid;
+    if (!std.mem.eql(u8, bytes, "rotate\n"[0..bytes.len])) return .invalid;
+    return if (bytes.len == "rotate\n".len) .rotate else .incomplete;
+}
+pub const ImageFormat = enum { png, jpeg };
 /// One classified wait result; stop has priority over every other bit.
 pub const Ready = packed struct {
     stop: bool = false,
     wayland: bool = false,
     event: bool = false,
+    rotate: bool = false,
 };
 /// Owns one bounded Unix socket path without allocation; callers borrow `slice()`.
 pub const SocketPath = struct {
@@ -53,6 +66,97 @@ pub const SocketPath = struct {
 };
 /// Owns the exact Hyprland request and socket2 paths used by one resident run.
 pub const SocketPaths = struct { request: SocketPath, event: SocketPath };
+
+pub const Catalog = struct {
+    paths: std.ArrayList([]u8) = .empty,
+    order: std.ArrayList(u16) = .empty,
+    cursor: usize = 0,
+    last: ?u16 = null,
+    published: ?u16 = null,
+    allocator: std.mem.Allocator,
+    prng: std.Random.DefaultPrng,
+
+    pub fn deinit(catalog: *Catalog) void {
+        for (catalog.paths.items) |path| catalog.allocator.free(path);
+        catalog.paths.deinit(catalog.allocator);
+        catalog.order.deinit(catalog.allocator);
+    }
+
+    pub fn shuffle(catalog: *Catalog) !void {
+        catalog.order.clearRetainingCapacity();
+        try catalog.order.ensureTotalCapacity(catalog.allocator, catalog.paths.items.len);
+        for (0..catalog.paths.items.len) |index| catalog.order.appendAssumeCapacity(@intCast(index));
+        catalog.prng.random().shuffle(u16, catalog.order.items);
+        if (catalog.published) |last| if (catalog.order.items.len > 1 and catalog.order.items[0] == last) {
+            std.mem.swap(u16, &catalog.order.items[0], &catalog.order.items[1]);
+        };
+        catalog.cursor = 0;
+    }
+
+    pub fn next(catalog: *Catalog) ![]const u8 {
+        if (catalog.paths.items.len == 0) return error.WallpaperCatalogEmpty;
+        if (catalog.cursor == catalog.order.items.len) try catalog.shuffle();
+        const index = catalog.order.items[catalog.cursor];
+        catalog.cursor += 1;
+        catalog.last = index;
+        return catalog.paths.items[index];
+    }
+};
+
+pub const CatalogEntry = struct { name: []const u8, kind: std.Io.File.Kind };
+
+fn alternativeSelectionLimit(file_count: usize) usize {
+    std.debug.assert(file_count > 0 and file_count <= catalog_file_capacity);
+    return file_count * 2 - 1;
+}
+
+pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: []const u8) !Catalog {
+    if (root_path.len == 0 or root_path.len > image_path_capacity or
+        !std.fs.path.isAbsolute(root_path) or !std.unicode.utf8ValidateSlice(root_path) or
+        std.mem.indexOfScalar(u8, root_path, 0) != null)
+    {
+        return error.WallpaperRootInvalid;
+    }
+    try source.openRoot(root_path);
+    defer source.closeRoot();
+    var paths: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (paths.items) |path| allocator.free(path);
+        paths.deinit(allocator);
+    }
+    var visited: usize = 0;
+    while (try source.nextEntry()) |entry| {
+        visited += 1;
+        if (visited > catalog_entry_capacity) return error.WallpaperEntryCapacityExceeded;
+        if (entry.name.len == 0 or entry.name.len > catalog_path_capacity or
+            !std.unicode.utf8ValidateSlice(entry.name) or std.mem.indexOfScalar(u8, entry.name, 0) != null)
+        {
+            return error.WallpaperPathInvalid;
+        }
+        const kind = if (entry.kind == .unknown) try source.statEntry(entry.name) else entry.kind;
+        if (kind != .file) continue;
+        _ = imageFormat(entry.name) catch continue;
+        if (paths.items.len == catalog_file_capacity) return error.WallpaperFileCapacityExceeded;
+        const path = try std.fs.path.join(allocator, &.{ root_path, entry.name });
+        errdefer allocator.free(path);
+        if (path.len > image_path_capacity) return error.ImagePathTooLong;
+        try paths.append(allocator, path);
+    }
+    if (paths.items.len == 0) return error.WallpaperCatalogEmpty;
+    std.mem.sort([]u8, paths.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    var catalog = Catalog{
+        .paths = paths,
+        .allocator = allocator,
+        .prng = .init(try source.randomSeed()),
+    };
+    errdefer catalog.deinit();
+    try catalog.shuffle();
+    return catalog;
+}
 
 /// Owns one published Round and its replaceable native pointer behind callbacks.
 pub fn Current(comptime Native: type) type {
@@ -413,18 +517,20 @@ pub fn reconcile(
     resident: anytype,
     allocator: std.mem.Allocator,
     image: *const Image,
+    force_publication: bool,
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
     paths: *const SocketPaths,
     lines: *EventLines,
     work: *Work,
-) !void {
+) !ReconcileOutcome {
     const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
     for (0..reconcile_attempt_capacity) |attempt| {
         const failure: ?anyerror = attempt_work: {
             var reconnect = work.* == .reconnect;
             _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
+            if (work.* == .rotate) return .unchanged;
             reconnect = reconnect or work.* == .reconnect;
             if (reconnect) {
                 resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
@@ -446,9 +552,9 @@ pub fn reconcile(
             if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
                 break :attempt_work null;
             }
-            if (snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
+            if (!force_publication and snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
                 work.* = .idle;
-                return;
+                return .unchanged;
             }
             const candidate = try resident.createNative(allocator);
             var candidate_round: Round = .{};
@@ -479,11 +585,12 @@ pub fn reconcile(
                     };
                     return error.Stopped;
                 }
-                return err;
+                work.* = .idle;
+                return .published_cleanup_failed;
             };
             resident.destroyNative(allocator, old_native);
             work.* = .idle;
-            return;
+            return .published;
         };
         if (failure) |err| {
             if (err == error.EventSocketLost) {
@@ -604,7 +711,77 @@ pub fn run(
         if (work == .idle) {
             _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
         } else {
-            try reconcile(resident, allocator, image, current, stop_fd, event_fd, paths, &lines, &work);
+            _ = try reconcile(resident, allocator, image, false, current, stop_fd, event_fd, paths, &lines, &work);
+        }
+    }
+}
+
+/// Owns direct-request image replacement; acknowledgement follows complete publication only.
+pub fn runRotation(
+    resident: anytype,
+    allocator: std.mem.Allocator,
+    catalog: *Catalog,
+    image: *Image,
+    current: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    paths: *const SocketPaths,
+) !void {
+    var lines: EventLines = .{};
+    var work: Work = .reconnect;
+    while (true) {
+        if (work == .idle) {
+            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
+            continue;
+        }
+        if (work != .rotate) {
+            _ = try reconcile(resident, allocator, image, false, current, stop_fd, event_fd, paths, &lines, &work);
+            continue;
+        }
+        const complete = resident.receiveRotation() catch {
+            resident.replyRotation(false);
+            work = .idle;
+            continue;
+        };
+        if (!complete) {
+            work = .idle;
+            continue;
+        }
+        var attempted: [catalog_file_capacity]bool = @splat(false);
+        var alternatives: usize = 0;
+        var rotated = false;
+        const selection_limit = alternativeSelectionLimit(catalog.paths.items.len);
+        for (0..selection_limit) |_| {
+            if (alternatives == catalog.paths.items.len - 1) break;
+            const path = try catalog.next();
+            const index = catalog.last.?;
+            if (index == catalog.published.? or attempted[index]) continue;
+            attempted[index] = true;
+            alternatives += 1;
+            var next = loadImage(resident, allocator, path) catch continue;
+            var published = false;
+            defer if (!published) next.deinit(allocator);
+            work = .refresh;
+            const outcome = reconcile(resident, allocator, &next, true, current, stop_fd, event_fd, paths, &lines, &work) catch |err| {
+                if (err == error.Stopped) {
+                    resident.replyRotation(false);
+                    return err;
+                }
+                continue;
+            };
+            if (outcome == .unchanged or current.round.monitors.count == 0 or !resident.currentUsable(current.native)) continue;
+            image.deinit(allocator);
+            image.* = next;
+            catalog.published = index;
+            published = true;
+            rotated = true;
+            resident.replyRotation(true);
+            break;
+        }
+        std.debug.assert(rotated or alternatives == catalog.paths.items.len - 1);
+        if (!rotated) {
+            resident.replyRotation(false);
+            work = .refresh;
         }
     }
 }
@@ -641,6 +818,10 @@ fn waitForWork(
         socket_lost = true;
         return true;
     } or changed;
+    if (ready.rotate) {
+        work.* = .rotate;
+        changed = true;
+    }
     return changed;
 }
 
@@ -661,6 +842,7 @@ fn transient(err: anyerror) bool {
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
     try validateImagePath(path);
+    const format = try imageFormat(path);
     const bytes = bytes: {
         try source.open(path);
         defer source.close();
@@ -673,14 +855,22 @@ pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8
         break :bytes bytes;
     };
     defer allocator.free(bytes);
-    const dimensions = try inspectPng(bytes);
-    var image = try source.decode(allocator, bytes);
+    const dimensions = if (format == .png) try inspectPng(bytes) else null;
+    var image = try source.decode(allocator, format, bytes);
     errdefer image.deinit(allocator);
     try validateImage(&image);
-    if (image.width != dimensions.width or image.height != dimensions.height) {
+    if (dimensions) |value| if (image.width != value.width or image.height != value.height) {
         return error.ImageDimensionsChanged;
-    }
+    };
     return image;
+}
+
+pub fn imageFormat(path: []const u8) !ImageFormat {
+    const extension = std.fs.path.extension(path);
+    if (std.ascii.eqlIgnoreCase(extension, ".png")) return .png;
+    if (std.ascii.eqlIgnoreCase(extension, ".jpg") or
+        std.ascii.eqlIgnoreCase(extension, ".jpeg")) return .jpeg;
+    return error.ImageFormatUnsupported;
 }
 
 pub fn coverImage(
@@ -1105,7 +1295,7 @@ const ImageTranscript = struct {
         transcript.opened = false;
     }
 
-    fn decode(transcript: *ImageTranscript, allocator: std.mem.Allocator, _: []const u8) !Image {
+    fn decode(transcript: *ImageTranscript, allocator: std.mem.Allocator, _: ImageFormat, _: []const u8) !Image {
         std.debug.assert(!transcript.opened);
         const dimensions = switch (try transcript.next()) {
             .decode => |result| switch (result) {
@@ -1177,6 +1367,206 @@ test "image task owns exact file decode and scale history" {
     try transcript.done();
 }
 
+test "formats and shuffled catalog boundaries are exact" {
+    try std.testing.expectEqual(ImageFormat.png, try imageFormat("A.PNG"));
+    try std.testing.expectEqual(ImageFormat.jpeg, try imageFormat("a.JpEg"));
+    try std.testing.expectError(error.ImageFormatUnsupported, imageFormat("a.webp"));
+    var catalog = Catalog{ .allocator = std.testing.allocator, .prng = .init(7) };
+    defer catalog.deinit();
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "a.png"));
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "b.jpg"));
+    try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "c.jpeg"));
+    try catalog.shuffle();
+    var seen: u3 = 0;
+    for (0..3) |_| {
+        const path = try catalog.next();
+        const index: u2 = if (path[0] == 'a') 0 else if (path[0] == 'b') 1 else 2;
+        seen |= @as(u3, 1) << index;
+    }
+    try std.testing.expectEqual(@as(u3, 0b111), seen);
+    const prior = catalog.last.?;
+    catalog.published = prior;
+    _ = try catalog.next();
+    try std.testing.expect(catalog.last.? != prior);
+}
+
+test "alternative selection draw bound covers every cursor and skipped index" {
+    const file_count = 7;
+    try std.testing.expectEqual(@as(usize, 1), alternativeSelectionLimit(1));
+    try std.testing.expectEqual(
+        @as(usize, catalog_file_capacity * 2 - 1),
+        alternativeSelectionLimit(catalog_file_capacity),
+    );
+    for (0..file_count + 1) |cursor| for (0..file_count) |published| {
+        var catalog = Catalog{ .allocator = std.testing.allocator, .prng = .init(19) };
+        defer catalog.deinit();
+        for (0..file_count) |index| {
+            try catalog.paths.append(std.testing.allocator, try std.fmt.allocPrint(std.testing.allocator, "{d}.png", .{index}));
+            try catalog.order.append(std.testing.allocator, @intCast(index));
+        }
+        catalog.cursor = cursor;
+        catalog.published = @intCast(published);
+        var attempted: [catalog_file_capacity]bool = @splat(false);
+        var alternatives: usize = 0;
+        var draws: usize = 0;
+        for (0..alternativeSelectionLimit(file_count)) |_| {
+            if (alternatives == file_count - 1) break;
+            _ = try catalog.next();
+            draws += 1;
+            const index = catalog.last.?;
+            if (index == catalog.published.? or attempted[index]) continue;
+            attempted[index] = true;
+            alternatives += 1;
+        }
+        try std.testing.expectEqual(file_count - 1, alternatives);
+        try std.testing.expect(draws <= alternativeSelectionLimit(file_count));
+    };
+}
+
+test "rotation request framing is exact and unconditionally fuzz discoverable" {
+    try std.testing.expectEqual(RotationRequest.incomplete, classifyRotationRequest(""));
+    try std.testing.expectEqual(RotationRequest.incomplete, classifyRotationRequest("rot"));
+    try std.testing.expectEqual(RotationRequest.rotate, classifyRotationRequest("rotate\n"));
+    try std.testing.expectEqual(RotationRequest.incomplete, classifyRotationRequest("rotate"));
+    try std.testing.expectEqual(RotationRequest.invalid, classifyRotationRequest("rotate\nextra"));
+    try std.testing.fuzz({}, fuzzRotationRequest, .{ .corpus = &.{ "", "r", "rotate\n", "rotate", "rotate\nextra", "\x00" } });
+}
+
+fn fuzzRotationRequest(_: void, smith: *std.testing.Smith) !void {
+    var bytes: [32]u8 = undefined;
+    const input = bytes[0..smith.slice(&bytes)];
+    switch (classifyRotationRequest(input)) {
+        .incomplete => try std.testing.expect(input.len < "rotate\n".len and std.mem.eql(u8, input, "rotate\n"[0..input.len])),
+        .rotate => try std.testing.expectEqualStrings("rotate\n", input),
+        .invalid => {},
+    }
+}
+
+const CatalogScriptEntry = struct {
+    name: []const u8,
+    kind: std.Io.File.Kind,
+    stat_kind: std.Io.File.Kind = .file,
+    stat_fails: bool = false,
+};
+
+const CatalogTranscript = struct {
+    entries: []const CatalogScriptEntry,
+    index: usize = 0,
+    opened: bool = false,
+    closed: bool = false,
+    entropy_fails: bool = false,
+    operations: [64]enum { open, next, stat, random, close } = undefined,
+    operation_count: usize = 0,
+
+    fn record(source: *CatalogTranscript, operation: @TypeOf(source.operations[0])) void {
+        std.debug.assert(source.operation_count < source.operations.len);
+        source.operations[source.operation_count] = operation;
+        source.operation_count += 1;
+    }
+    fn openRoot(source: *CatalogTranscript, _: []const u8) !void {
+        source.record(.open);
+        source.opened = true;
+    }
+    fn closeRoot(source: *CatalogTranscript) void {
+        source.record(.close);
+        source.closed = true;
+    }
+    fn nextEntry(source: *CatalogTranscript) !?CatalogEntry {
+        source.record(.next);
+        if (source.index == source.entries.len) return null;
+        defer source.index += 1;
+        const entry = source.entries[source.index];
+        return .{ .name = entry.name, .kind = entry.kind };
+    }
+    fn statEntry(source: *CatalogTranscript, _: []const u8) !std.Io.File.Kind {
+        source.record(.stat);
+        const entry = source.entries[source.index - 1];
+        if (entry.stat_fails) return error.StatFailed;
+        return entry.stat_kind;
+    }
+    fn randomSeed(source: *CatalogTranscript) !u64 {
+        source.record(.random);
+        if (source.entropy_fails) return error.EntropyUnavailable;
+        return 9;
+    }
+};
+
+test "catalog transcript sorts before shuffle and closes on every outcome" {
+    const entries_a = [_]CatalogScriptEntry{
+        .{ .name = "z.jpg", .kind = .file },
+        .{ .name = "palette", .kind = .directory },
+        .{ .name = "ignored.txt", .kind = .file },
+        .{ .name = "a.PNG", .kind = .unknown, .stat_kind = .file },
+    };
+    const entries_b = [_]CatalogScriptEntry{ entries_a[3], entries_a[2], entries_a[1], entries_a[0] };
+    var first = CatalogTranscript{ .entries = &entries_a };
+    var second = CatalogTranscript{ .entries = &entries_b };
+    var a = try collectCatalog(&first, std.testing.allocator, "/root");
+    defer a.deinit();
+    var b = try collectCatalog(&second, std.testing.allocator, "/root");
+    defer b.deinit();
+    try std.testing.expect(first.closed and second.closed);
+    try std.testing.expectEqualStrings("/root/a.PNG", a.paths.items[0]);
+    try std.testing.expectEqualStrings("/root/z.jpg", a.paths.items[1]);
+    for (a.paths.items, b.paths.items) |left, right| try std.testing.expectEqualStrings(left, right);
+    try std.testing.expectEqualSlices(u16, a.order.items, b.order.items);
+
+    var stat_failure = CatalogTranscript{ .entries = &.{.{ .name = "a.png", .kind = .unknown, .stat_fails = true }} };
+    try std.testing.expectError(error.StatFailed, collectCatalog(&stat_failure, std.testing.allocator, "/root"));
+    try std.testing.expect(stat_failure.closed);
+    var entropy_failure = CatalogTranscript{ .entries = &.{.{ .name = "a.png", .kind = .file }}, .entropy_fails = true };
+    try std.testing.expectError(error.EntropyUnavailable, collectCatalog(&entropy_failure, std.testing.allocator, "/root"));
+    try std.testing.expect(entropy_failure.closed);
+}
+
+const GeneratedCatalog = struct {
+    count: usize,
+    accepted: usize,
+    index: usize = 0,
+    opened: bool = false,
+    closed: bool = false,
+
+    fn openRoot(source: *GeneratedCatalog, _: []const u8) !void {
+        source.opened = true;
+    }
+    fn closeRoot(source: *GeneratedCatalog) void {
+        source.closed = true;
+    }
+    fn nextEntry(source: *GeneratedCatalog) !?CatalogEntry {
+        if (source.index == source.count) return null;
+        defer source.index += 1;
+        return .{ .name = if (source.index < source.accepted) "same.png" else "ignored.txt", .kind = .file };
+    }
+    fn statEntry(_: *GeneratedCatalog, _: []const u8) !std.Io.File.Kind {
+        unreachable;
+    }
+    fn randomSeed(_: *GeneratedCatalog) !u64 {
+        return 1;
+    }
+};
+
+test "catalog exact entry file and path bounds accept then reject without partial ownership" {
+    var entries_ok = GeneratedCatalog{ .count = catalog_entry_capacity, .accepted = 1 };
+    var one = try collectCatalog(&entries_ok, std.testing.allocator, "/r");
+    one.deinit();
+    try std.testing.expect(entries_ok.closed);
+    var entries_over = GeneratedCatalog{ .count = catalog_entry_capacity + 1, .accepted = 1 };
+    try std.testing.expectError(error.WallpaperEntryCapacityExceeded, collectCatalog(&entries_over, std.testing.allocator, "/r"));
+    try std.testing.expect(entries_over.closed);
+    var files_ok = GeneratedCatalog{ .count = catalog_file_capacity, .accepted = catalog_file_capacity };
+    var full = try collectCatalog(&files_ok, std.testing.allocator, "/r");
+    full.deinit();
+    var files_over = GeneratedCatalog{ .count = catalog_file_capacity + 1, .accepted = catalog_file_capacity + 1 };
+    try std.testing.expectError(error.WallpaperFileCapacityExceeded, collectCatalog(&files_over, std.testing.allocator, "/r"));
+    const exact = "a" ** catalog_path_capacity;
+    var path_ok = CatalogTranscript{ .entries = &.{.{ .name = exact[0 .. exact.len - 4] ++ ".png", .kind = .file }} };
+    var bounded = try collectCatalog(&path_ok, std.testing.allocator, "/r");
+    bounded.deinit();
+    const over = "a" ** (catalog_path_capacity + 1);
+    var path_over = CatalogTranscript{ .entries = &.{.{ .name = over, .kind = .file }} };
+    try std.testing.expectError(error.WallpaperPathInvalid, collectCatalog(&path_over, std.testing.allocator, "/r"));
+}
+
 test "image file failures close exactly once before decode" {
     const histories = [_]struct { expected: anyerror, steps: []const ImageStep }{
         .{ .expected = error.ImageOpenFailed, .steps = &.{.{ .open = false }} },
@@ -1239,6 +1629,7 @@ test "image path dimensions crop and allocation endpoints are exact" {
     try std.testing.expectError(error.ImagePathTooLong, loadImage(&transcript, std.testing.allocator, &path));
     const valid_path_steps = [_]ImageStep{.{ .open = false }};
     transcript = .{ .steps = &valid_path_steps };
+    @memcpy(path[image_path_capacity - 4 .. image_path_capacity], ".png");
     try std.testing.expectError(
         error.ImageOpenFailed,
         loadImage(&transcript, std.testing.allocator, path[0..image_path_capacity]),
