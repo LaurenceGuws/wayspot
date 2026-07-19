@@ -42,6 +42,7 @@ const Resource = struct {
 };
 
 const Transcript = struct {
+    id: u8 = 0,
     operations: [operation_capacity]Operation = undefined,
     count: u16 = 0,
     fail_at: ?u16 = null,
@@ -55,6 +56,8 @@ const Transcript = struct {
     output_snapshot: ?wallpaper.Snapshot = null,
     resources: [wallpaper.surface_resource_capacity]Resource = @splat(.{}),
     next_generation: u32 = 1,
+    stop_on_flush: bool = false,
+    stop_on_release: bool = false,
 
     pub fn openOutputs(transcript: *Transcript, snapshot: *const wallpaper.Snapshot) !void {
         if (transcript.connected) {
@@ -162,7 +165,8 @@ const Transcript = struct {
         resource.state = .retiring;
     }
 
-    pub fn flushPublication(transcript: *Transcript, stopped: bool) !void {
+    pub fn flushPublication(transcript: *Transcript, stop: anytype) !void {
+        const stopped = transcript.stop_on_flush or if (@TypeOf(stop) == bool) stop else false;
         var flush_count: u8 = 0;
         var poll_count: u8 = 0;
         while (flush_count < wallpaper.publication_flush_capacity) {
@@ -203,9 +207,10 @@ const Transcript = struct {
         transcript.record(.finish);
     }
 
-    pub fn releaseRetired(transcript: *Transcript, handle: wallpaper.SurfaceHandle) !void {
+    pub fn releaseRetired(transcript: *Transcript, handle: wallpaper.SurfaceHandle, _: anytype) !void {
         const resource = try transcript.checkedResource(handle);
         if (resource.state != .retiring) return error.SurfaceStateInvalid;
+        if (transcript.stop_on_release) return error.WaylandFlushStopped;
         try transcript.step(.{ .release = handle });
         resource.* = .{};
     }
@@ -256,6 +261,196 @@ const Transcript = struct {
         if (transcript.poll_index == transcript.polls.len) return .timeout;
         defer transcript.poll_index += 1;
         return transcript.polls[transcript.poll_index];
+    }
+};
+
+const ResidentOperation = union(enum) {
+    now: u64,
+    wait: struct { display: u8, stop_fd: u8, event_fd: u8, timeout: ?u64 },
+    request,
+    read_event,
+    create: u8,
+    destroy: u8,
+};
+
+const Resident = struct {
+    operations: [128]ResidentOperation = undefined,
+    count: u8 = 0,
+    waits: []const wallpaper.Ready,
+    replies: []const []const u8,
+    wait_index: u8 = 0,
+    reply_index: u8 = 0,
+    reply_done: bool = false,
+    request_offset: u8 = 0,
+    reply_offset: u16 = 0,
+    request_chunk: u8 = 10,
+    reply_chunk: u16 = std.math.maxInt(u16),
+    block_write: bool = false,
+    block_read: bool = false,
+    socket_waits: u8 = 0,
+    request_closes: u8 = 0,
+    clock: u64 = 0,
+    next_display: u8 = 2,
+    stop_identity: u8 = 7,
+    event_identity: u8 = 9,
+    candidate_outputs: []const Outputs = &.{.exact},
+    candidate_index: u8 = 0,
+    output_changes: []const bool = &.{false},
+    output_index: u8 = 0,
+    event_reads: []const []const u8 = &.{"workspace>>1\n"},
+    event_read_index: u8 = 0,
+    wayland_changes: []const bool = &.{false},
+    wayland_change_index: u8 = 0,
+
+    pub fn now(resident: *Resident) u64 {
+        resident.record(.{ .now = resident.clock });
+        return resident.clock;
+    }
+
+    pub fn wait(
+        resident: *Resident,
+        native: *Transcript,
+        stop_fd: u8,
+        event_fd: u8,
+        timeout: ?u64,
+    ) !wallpaper.Ready {
+        std.debug.assert(stop_fd == resident.stop_identity);
+        std.debug.assert(event_fd == resident.event_identity);
+        resident.record(.{ .wait = .{
+            .display = native.id,
+            .stop_fd = stop_fd,
+            .event_fd = event_fd,
+            .timeout = timeout,
+        } });
+        if (timeout) |milliseconds| if (milliseconds != 0) {
+            resident.clock += milliseconds;
+        };
+        if (resident.wait_index == resident.waits.len) return .{};
+        defer resident.wait_index += 1;
+        return resident.waits[resident.wait_index];
+    }
+
+    pub fn connectRequest(
+        resident: *Resident,
+        _: []const u8,
+        stop_fd: u8,
+        event_fd: u8,
+        _: u64,
+    ) !u8 {
+        std.debug.assert(stop_fd == resident.stop_identity);
+        std.debug.assert(event_fd == resident.event_identity);
+        resident.record(.request);
+        if (resident.reply_index == resident.replies.len) return error.ConnectionTimedOut;
+        resident.reply_done = false;
+        return 11;
+    }
+
+    pub fn writeRequest(resident: *Resident, fd: u8, bytes: []const u8) anyerror!usize {
+        std.debug.assert(fd == 11);
+        if (resident.block_write) {
+            resident.block_write = false;
+            return error.WouldBlock;
+        }
+        const count = @min(bytes.len, resident.request_chunk);
+        try std.testing.expectEqualStrings(
+            "j/monitors"[resident.request_offset..][0..count],
+            bytes[0..count],
+        );
+        resident.request_offset += @intCast(count);
+        return count;
+    }
+
+    pub fn readReply(resident: *Resident, fd: u8, bytes: []u8) anyerror!usize {
+        std.debug.assert(fd == 11);
+        if (resident.reply_done) {
+            resident.reply_index += 1;
+            return 0;
+        }
+        const reply = resident.replies[resident.reply_index];
+        if (resident.block_read) {
+            resident.block_read = false;
+            return error.WouldBlock;
+        }
+        const count = @min(bytes.len, resident.reply_chunk, reply.len - resident.reply_offset);
+        @memcpy(bytes[0..count], reply[resident.reply_offset..][0..count]);
+        resident.reply_offset += @intCast(count);
+        resident.reply_done = resident.reply_offset == reply.len;
+        return count;
+    }
+
+    pub fn closeRequest(resident: *Resident, fd: u8) void {
+        std.debug.assert(fd == 11);
+        resident.request_offset = 0;
+        resident.reply_offset = 0;
+        resident.request_closes += 1;
+    }
+
+    pub fn waitSocket(resident: *Resident, _: u8, _: u8, _: u8, _: bool, _: u64) !void {
+        resident.socket_waits += 1;
+    }
+
+    pub fn readEvent(resident: *Resident, event_fd: u8, bytes: []u8) anyerror!usize {
+        std.debug.assert(event_fd == resident.event_identity);
+        resident.record(.read_event);
+        if (resident.event_read_index == resident.event_reads.len) return error.WouldBlock;
+        const source = resident.event_reads[resident.event_read_index];
+        resident.event_read_index += 1;
+        @memcpy(bytes[0..source.len], source);
+        return source.len;
+    }
+
+    pub fn reconnectEvent(resident: *Resident, event_fd: *u8, _: []const u8, stop_fd: u8, _: u64) !void {
+        std.debug.assert(stop_fd == resident.stop_identity);
+        event_fd.* = resident.event_identity;
+    }
+
+    pub fn closeEvent(_: *Resident, event_fd: *u8) void {
+        event_fd.* = 0;
+    }
+
+    pub fn drainWayland(resident: *Resident, _: *Transcript) !bool {
+        if (resident.wayland_change_index == resident.wayland_changes.len) return false;
+        defer resident.wayland_change_index += 1;
+        return resident.wayland_changes[resident.wayland_change_index];
+    }
+
+    pub fn outputsChanged(resident: *Resident, _: *Transcript) bool {
+        const changed = resident.output_changes[
+            @min(
+                resident.output_index,
+                resident.output_changes.len - 1,
+            )
+        ];
+        resident.output_index += 1;
+        return changed;
+    }
+
+    pub fn createNative(resident: *Resident, allocator: std.mem.Allocator) !*Transcript {
+        const native = try allocator.create(Transcript);
+        const output = resident.candidate_outputs[
+            @min(
+                resident.candidate_index,
+                resident.candidate_outputs.len - 1,
+            )
+        ];
+        resident.candidate_index += 1;
+        native.* = .{ .id = resident.next_display, .output_result = output };
+        resident.next_display += 1;
+        resident.record(.{ .create = native.id });
+        return native;
+    }
+
+    pub fn destroyNative(resident: *Resident, allocator: std.mem.Allocator, native: *Transcript) void {
+        const id = native.id;
+        native.disconnectAfterDisplayLoss();
+        allocator.destroy(native);
+        resident.record(.{ .destroy = id });
+    }
+
+    fn record(resident: *Resident, operation: ResidentOperation) void {
+        std.debug.assert(resident.count < resident.operations.len);
+        resident.operations[resident.count] = operation;
+        resident.count += 1;
     }
 };
 
@@ -318,6 +513,322 @@ test "healthy stop unmaps one batch and releases current in reverse" {
     try std.testing.expectEqual(Operation{ .release = old.handles[1] }, operations[5]);
     try std.testing.expectEqual(Operation{ .release = old.handles[0] }, operations[6]);
     try std.testing.expectEqual(@as(u8, 0), current.monitors.count);
+}
+
+test "reconciliation swaps only Wayland ownership and preserves resident fds" {
+    const first_snapshot = snapshotValue(1);
+    const second_json =
+        \\[{"name":"M0","width":2,"height":1,"x":1,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{ .waits = &.{}, .replies = &.{second_json} };
+    const old = try std.testing.allocator.create(Transcript);
+    old.* = .{ .id = 1 };
+    try old.openOutputs(&first_snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var first = try wallpaper.prepareRound(old, std.testing.allocator, &first_snapshot, &image);
+    var published: wallpaper.Round = .{};
+    try wallpaper.publishRound(old, &published, &first, false);
+    var current = wallpaper.Current(Transcript){ .native = old, .round = published };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var work: wallpaper.Work = .refresh;
+    var paths = pathsValue();
+    try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    );
+    try std.testing.expectEqual(@as(u8, 2), current.native.id);
+    try std.testing.expectEqual(resident.event_identity, event_fd);
+    try std.testing.expectEqual(wallpaper.Work.idle, work);
+    var saw_old_destroy = false;
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .wait => |wait| {
+            try std.testing.expectEqual(resident.stop_identity, wait.stop_fd);
+            try std.testing.expectEqual(resident.event_identity, wait.event_fd);
+        },
+        .destroy => |id| if (id == 1) {
+            saw_old_destroy = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_old_destroy);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "both zero-time checks discard stale snapshots before candidate allocation" {
+    const first_snapshot = snapshotValue(1);
+    const stale_json =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const fresh_json =
+        \\[{"name":"M0","width":2,"height":1,"x":1,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const races = [_]struct {
+        waits: [5]wallpaper.Ready,
+        event_reads: []const []const u8,
+        wayland_changes: []const bool,
+    }{
+        .{
+            .waits = .{ .{ .event = true }, .{ .wayland = true }, .{}, .{}, .{} },
+            .event_reads = &.{"monitoradded>>M0\n"},
+            .wayland_changes = &.{true},
+        },
+        .{
+            .waits = .{ .{ .wayland = true }, .{ .event = true }, .{}, .{}, .{} },
+            .event_reads = &.{"monitoradded>>M0\n"},
+            .wayland_changes = &.{true},
+        },
+    };
+    for (races) |race| {
+        var resident = Resident{
+            .waits = &race.waits,
+            .replies = &.{ stale_json, fresh_json },
+            .event_reads = race.event_reads,
+            .wayland_changes = race.wayland_changes,
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        try native.openOutputs(&first_snapshot);
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var first = try wallpaper.prepareRound(native, std.testing.allocator, &first_snapshot, &image);
+        var round: wallpaper.Round = .{};
+        try wallpaper.publishRound(native, &round, &first, false);
+        var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+        var lines: wallpaper.EventLines = .{};
+        var event_fd = resident.event_identity;
+        var paths = pathsValue();
+        var work: wallpaper.Work = .refresh;
+        try wallpaper.reconcile(
+            &resident,
+            std.testing.allocator,
+            &image,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+            &lines,
+            &work,
+        );
+        try std.testing.expectEqual(@as(u8, 1), resident.candidate_index);
+        try std.testing.expectEqual(@as(i32, 1), current.round.monitors.monitors[0].x);
+        var zero_waits: u8 = 0;
+        for (resident.operations[0..resident.count]) |operation| switch (operation) {
+            .wait => |wait| if (wait.timeout == 0) {
+                zero_waits += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(u8, 4), zero_waits);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "changed configure with unchanged snapshot recreates candidate" {
+    const snapshot = snapshotValue(1);
+    const reply =
+        \\[{"name":"M0","width":2,"height":2,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{ .{}, .{ .wayland = true }, .{}, .{}, .{} },
+        .replies = &.{ reply, reply },
+        .wayland_changes = &.{true},
+        .output_changes = &.{true},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    try native.openOutputs(&snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var first = try wallpaper.prepareRound(native, std.testing.allocator, &snapshot, &image);
+    var round: wallpaper.Round = .{};
+    try wallpaper.publishRound(native, &round, &first, false);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var paths = pathsValue();
+    var work: wallpaper.Work = .refresh;
+    try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    );
+    try std.testing.expectEqual(@as(u8, 1), resident.candidate_index);
+    try std.testing.expectEqual(@as(u8, 2), current.native.id);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "stop during old retirement remains sticky through new current cleanup" {
+    const first_snapshot = snapshotValue(1);
+    const second_json =
+        \\[{"name":"M0","width":2,"height":1,"x":1,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{ .waits = &.{}, .replies = &.{second_json} };
+    const old = try std.testing.allocator.create(Transcript);
+    old.* = .{ .id = 1 };
+    try old.openOutputs(&first_snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var first = try wallpaper.prepareRound(old, std.testing.allocator, &first_snapshot, &image);
+    var published: wallpaper.Round = .{};
+    try wallpaper.publishRound(old, &published, &first, false);
+    old.stop_on_release = true;
+    var current = wallpaper.Current(Transcript){ .native = old, .round = published };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var paths = pathsValue();
+    var work: wallpaper.Work = .refresh;
+    try std.testing.expectError(error.Stopped, wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    ));
+    try std.testing.expectEqual(@as(u8, 2), current.native.id);
+    try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
+    try std.testing.expectEqual(resident.event_identity, event_fd);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "unchanged round reaches one infinite idle wait and stop wins" {
+    const snapshot = snapshotValue(1);
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{ .{}, .{}, .{ .stop = true } },
+        .replies = &.{reply},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    try native.openOutputs(&snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var next = try wallpaper.prepareRound(native, std.testing.allocator, &snapshot, &image);
+    var round: wallpaper.Round = .{};
+    try wallpaper.publishRound(native, &round, &next, false);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+    var event_fd = resident.event_identity;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.run(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+    ));
+    const last = resident.operations[resident.count - 1].wait;
+    try std.testing.expectEqual(@as(?u64, null), last.timeout);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "independent snapshot and output order retries without changing current early" {
+    const first_snapshot = snapshotValue(1);
+    const second_json =
+        \\[{"name":"M0","width":2,"height":1,"x":2,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{ second_json, second_json },
+        .candidate_outputs = &.{ .missing, .exact },
+    };
+    const old = try std.testing.allocator.create(Transcript);
+    old.* = .{ .id = 1 };
+    try old.openOutputs(&first_snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var next = try wallpaper.prepareRound(old, std.testing.allocator, &first_snapshot, &image);
+    var round: wallpaper.Round = .{};
+    try wallpaper.publishRound(old, &round, &next, false);
+    var current = wallpaper.Current(Transcript){ .native = old, .round = round };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var paths = pathsValue();
+    var work: wallpaper.Work = .refresh;
+    try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    );
+    try std.testing.expectEqual(@as(u8, 3), current.native.id);
+    try std.testing.expectEqual(@as(i32, 2), current.round.monitors.monitors[0].x);
+    try std.testing.expectEqual(@as(u8, 2), resident.candidate_index);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "request wire handles partial would-block EOF and closes once" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{reply},
+        .request_chunk = 2,
+        .reply_chunk = 7,
+        .block_write = true,
+        .block_read = true,
+    };
+    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
+    const count = try wallpaper.requestMonitors(
+        &resident,
+        "/run/hypr/x/.socket.sock",
+        resident.stop_identity,
+        resident.event_identity,
+        &bytes,
+        2000,
+    );
+    try std.testing.expectEqualStrings(reply, bytes[0..count]);
+    try std.testing.expectEqual(@as(u8, 2), resident.socket_waits);
+    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+}
+
+test "generated request progress remains bounded and closes once" {
+    if (@import("builtin").fuzz) {
+        try std.testing.fuzz({}, fuzzRequest, .{});
+        return;
+    }
+    var smith = std.testing.Smith{ .in = "" };
+    try fuzzRequest({}, &smith);
 }
 
 test "partial preparation discards only new resources in reverse" {
@@ -570,6 +1081,20 @@ fn snapshotValue(count: u8) wallpaper.Snapshot {
     return snapshot;
 }
 
+fn pathsValue() wallpaper.SocketPaths {
+    var paths: wallpaper.SocketPaths = .{
+        .request = .{},
+        .event = .{},
+    };
+    const request = "/run/hypr/x/.socket.sock";
+    const event = "/run/hypr/x/.socket2.sock";
+    @memcpy(paths.request.bytes[0..request.len], request);
+    paths.request.len = request.len;
+    @memcpy(paths.event.bytes[0..event.len], event);
+    paths.event.len = event.len;
+    return paths;
+}
+
 fn imageValue() !wallpaper.Image {
     const pixels = try std.testing.allocator.alloc(u32, 4);
     @memset(pixels, 0xff123456);
@@ -609,4 +1134,28 @@ fn fuzzRounds(_: void, smith: *std.testing.Smith) !void {
     };
     try std.testing.expectEqual(@as(usize, count), occupied);
     try std.testing.expect(transcript.count <= operation_capacity);
+}
+
+fn fuzzRequest(_: void, smith: *std.testing.Smith) !void {
+    const reply = "[]";
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{reply},
+        .request_chunk = smith.valueRangeAtMost(u8, 1, 10),
+        .reply_chunk = smith.valueRangeAtMost(u16, 1, reply.len),
+        .block_write = smith.value(bool),
+        .block_read = smith.value(bool),
+    };
+    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
+    const count = try wallpaper.requestMonitors(
+        &resident,
+        "request",
+        resident.stop_identity,
+        resident.event_identity,
+        &bytes,
+        2000,
+    );
+    try std.testing.expectEqualStrings(reply, bytes[0..count]);
+    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+    try std.testing.expect(resident.socket_waits <= 2);
 }

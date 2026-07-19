@@ -1,4 +1,4 @@
-//! Parses the bounded Hyprland monitor and event facts used by wallpaper.
+//! Owns bounded wallpaper facts, parsing, image meaning, round publication, and resident reconciliation.
 
 const std = @import("std");
 
@@ -22,6 +22,43 @@ pub const wayland_wait_milliseconds = 1000;
 pub const surface_resource_capacity = monitor_capacity * 2;
 pub const publication_flush_capacity = 16;
 pub const publication_poll_capacity = 16;
+/// One reconciliation may compare at most eight complete monitor snapshots.
+pub const reconcile_attempt_capacity = 8;
+/// Transient protocol mismatch waits at most 250ms before another snapshot.
+pub const reconcile_wait_milliseconds = 250;
+/// One reconciliation fails visibly after two seconds.
+pub const reconcile_deadline_milliseconds = 2000;
+/// One readiness result drains at most eight socket2 reads.
+pub const event_drain_capacity = 8;
+/// One readiness result accepts at most 64KiB from socket2.
+pub const event_drain_byte_capacity = 64 * 1024;
+
+/// Collapses resident work without retaining individual external events.
+pub const Work = enum { idle, refresh, reconnect };
+/// One classified wait result; stop has priority over every other bit.
+pub const Ready = packed struct {
+    stop: bool = false,
+    wayland: bool = false,
+    event: bool = false,
+    deadline: bool = false,
+};
+/// Owns one bounded Unix socket path without allocation; callers borrow `slice()`.
+pub const SocketPath = struct {
+    bytes: [107]u8 = undefined,
+    len: u8 = 0,
+
+    /// Borrows the initialized path bytes.
+    pub fn slice(path: *const SocketPath) []const u8 {
+        return path.bytes[0..path.len];
+    }
+};
+/// Owns the exact Hyprland request and socket2 paths used by one resident run.
+pub const SocketPaths = struct { request: SocketPath, event: SocketPath };
+
+/// Owns one published Round and the stable native pointer behind its callbacks.
+pub fn Current(comptime Native: type) type {
+    return struct { native: *Native, round: Round };
+}
 
 pub const Transform = enum(u3) {
     normal,
@@ -238,6 +275,34 @@ pub const EventLines = struct {
     }
 };
 
+/// Drains one bounded socket2 batch; loss or excess is visible and no event mutates monitor facts.
+pub fn drainEvents(source: anytype, event_fd: anytype, lines: *EventLines, work: *Work) !bool {
+    var bytes: [event_read_capacity]u8 = undefined;
+    var total: usize = 0;
+    var changed = false;
+    for (0..event_drain_capacity) |_| {
+        const count = source.readEvent(event_fd, &bytes) catch |err| switch (err) {
+            error.WouldBlock => return changed,
+            else => return err,
+        };
+        if (count == 0) return error.EventSocketLost;
+        total += count;
+        if (total > event_drain_byte_capacity) return error.EventDrainExceeded;
+        var offset: usize = 0;
+        while (offset < count) {
+            const feed = lines.feed(bytes[offset..count]);
+            std.debug.assert(feed.consumed > 0);
+            offset += feed.consumed;
+            for (feed.slice()) |event| if (event == .refresh) {
+                work.* = .refresh;
+                changed = true;
+            };
+        }
+        if (count < bytes.len) return changed;
+    }
+    return error.EventDrainExceeded;
+}
+
 pub const Image = struct {
     width: u32,
     height: u32,
@@ -316,7 +381,7 @@ pub fn publishRound(source: anytype, current: *Round, next: *Round, stop: anytyp
     var index = old.monitors.count;
     while (index > 0) {
         index -= 1;
-        source.releaseRetired(old.handles[index]) catch |err| {
+        source.releaseRetired(old.handles[index], stop) catch |err| {
             source.disconnectAfterDisplayLoss();
             return err;
         };
@@ -341,7 +406,7 @@ pub fn releaseRound(source: anytype, current: *Round, stop: anytype) !void {
     index = old.monitors.count;
     while (index > 0) {
         index -= 1;
-        source.releaseRetired(old.handles[index]) catch |err| {
+        source.releaseRetired(old.handles[index], stop) catch |err| {
             source.disconnectAfterDisplayLoss();
             return err;
         };
@@ -355,6 +420,225 @@ pub fn discardRound(source: anytype, round: *Round) void {
         source.discardPrepared(round.handles[index]);
     }
     round.* = .{};
+}
+
+/// Tries at most eight snapshots in two seconds; Current changes only after candidate publication.
+pub fn reconcile(
+    resident: anytype,
+    allocator: std.mem.Allocator,
+    image: *const Image,
+    current: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    paths: *const SocketPaths,
+    lines: *EventLines,
+    work: *Work,
+) !void {
+    const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
+    for (0..reconcile_attempt_capacity) |attempt| {
+        _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
+        if (work.* == .reconnect) {
+            resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
+                if (attempt + 1 == reconcile_attempt_capacity) return err;
+                try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
+                continue;
+            };
+        }
+        var reply: [monitor_response_capacity]u8 = undefined;
+        const count = requestMonitors(
+            resident,
+            paths.request.slice(),
+            stop_fd,
+            event_fd.*,
+            &reply,
+            deadline,
+        ) catch |err| {
+            if (err == error.EventSocketLost) {
+                resident.closeEvent(event_fd);
+                lines.* = .{};
+                work.* = .reconnect;
+            }
+            if (!transient(err) or attempt + 1 == reconcile_attempt_capacity) return err;
+            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
+            continue;
+        };
+        const snapshot = try parseMonitors(allocator, reply[0..count]);
+        if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
+            if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
+            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
+            continue;
+        }
+        if (snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
+            work.* = .idle;
+            return;
+        }
+        const candidate = try resident.createNative(allocator);
+        var candidate_round: Round = .{};
+        var candidate_owned = true;
+        defer if (candidate_owned) {
+            discardRound(candidate, &candidate_round);
+            resident.destroyNative(allocator, candidate);
+        };
+        candidate_round = prepareRound(candidate, allocator, &snapshot, image) catch |err| {
+            if (!transient(err) or attempt + 1 == reconcile_attempt_capacity) return err;
+            try waitAttempt(resident, current.native, stop_fd, event_fd, deadline, lines, work);
+            continue;
+        };
+        var published: Round = .{};
+        publishRound(candidate, &published, &candidate_round, stop_fd) catch |err| {
+            candidate_round = .{};
+            return err;
+        };
+        const old_native = current.native;
+        var old_round = current.round;
+        current.* = .{ .native = candidate, .round = published };
+        candidate_owned = false;
+        releaseRound(old_native, &old_round, stop_fd) catch |err| {
+            old_native.disconnectAfterDisplayLoss();
+            resident.destroyNative(allocator, old_native);
+            if (err == error.WaylandFlushStopped) {
+                releaseRound(current.native, &current.round, stop_fd) catch {
+                    current.native.disconnectAfterDisplayLoss();
+                    current.round = .{};
+                };
+                return error.Stopped;
+            }
+            return err;
+        };
+        resident.destroyNative(allocator, old_native);
+        work.* = .idle;
+        return;
+    }
+    return error.ReconcileExhausted;
+}
+
+/// Reads one complete bounded `j/monitors` reply and closes its per-call socket on every path.
+pub fn requestMonitors(
+    source: anytype,
+    path: []const u8,
+    stop_fd: anytype,
+    event_fd: anytype,
+    reply: []u8,
+    deadline: u64,
+) !usize {
+    const fd = try source.connectRequest(path, stop_fd, event_fd, deadline);
+    defer source.closeRequest(fd);
+    var offset: usize = 0;
+    var attempts: u8 = 0;
+    while (offset < "j/monitors".len and attempts < 32) : (attempts += 1) {
+        offset += source.writeRequest(fd, "j/monitors"[offset..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                try source.waitSocket(fd, stop_fd, event_fd, true, deadline);
+                continue;
+            },
+            else => return err,
+        };
+    }
+    if (offset != "j/monitors".len) return error.RequestWriteIncomplete;
+    offset = 0;
+    attempts = 0;
+    while (attempts < 32) : (attempts += 1) {
+        var probe: [1]u8 = undefined;
+        const output = if (offset == reply.len) &probe else reply[offset..];
+        const count = source.readReply(fd, output) catch |err| switch (err) {
+            error.WouldBlock => {
+                try source.waitSocket(fd, stop_fd, event_fd, false, deadline);
+                continue;
+            },
+            else => return err,
+        };
+        if (offset == reply.len and count != 0) return error.MonitorResponseTooLong;
+        if (count == 0) return offset;
+        offset += count;
+    }
+    return error.RequestReadAttemptsExceeded;
+}
+
+/// Blocks one resident thread until stop or fatal error while borrowing resident fds and image.
+pub fn run(
+    resident: anytype,
+    allocator: std.mem.Allocator,
+    image: *const Image,
+    current: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    paths: *const SocketPaths,
+) !void {
+    var lines: EventLines = .{};
+    var work: Work = .refresh;
+    while (true) {
+        if (work == .idle) {
+            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
+        } else {
+            try reconcile(resident, allocator, image, current, stop_fd, event_fd, paths, &lines, &work);
+        }
+    }
+}
+
+// Blocks one bounded convergence interval without taking ownership of resident state.
+fn waitAttempt(
+    resident: anytype,
+    native: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    deadline: u64,
+    lines: *EventLines,
+    work: *Work,
+) !void {
+    const now = resident.now();
+    if (now >= deadline) return error.ReconcileTimeout;
+    _ = try waitForWork(resident, native, stop_fd, event_fd, lines, work, @min(
+        reconcile_wait_milliseconds,
+        deadline - now,
+    ));
+}
+
+// Classifies one borrowed-fd wait and drains only the descriptors reported ready.
+fn waitForWork(
+    resident: anytype,
+    native: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    lines: *EventLines,
+    work: *Work,
+    timeout: ?u64,
+) !bool {
+    const ready = resident.wait(native, stop_fd, event_fd.*, timeout) catch |err| {
+        if (err != error.EventSocketLost) return err;
+        resident.closeEvent(event_fd);
+        lines.* = .{};
+        work.* = .reconnect;
+        return true;
+    };
+    if (ready.stop) return error.Stopped;
+    var changed = false;
+    if (ready.wayland and try resident.drainWayland(native)) {
+        work.* = .refresh;
+        changed = true;
+    }
+    if (ready.event) changed = drainEvents(resident, event_fd.*, lines, work) catch |err| {
+        if (err != error.EventSocketLost) return err;
+        resident.closeEvent(event_fd);
+        lines.* = .{};
+        work.* = .reconnect;
+        return true;
+    } or changed;
+    return changed;
+}
+
+// Names only protocol-order failures that another complete snapshot may resolve.
+fn transient(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionTimedOut,
+        error.ConnectionInterrupted,
+        error.EventSocketLost,
+        error.WaylandOutputMissing,
+        error.WaylandOutputChanged,
+        => true,
+        else => false,
+    };
 }
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {

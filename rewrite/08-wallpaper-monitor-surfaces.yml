@@ -1224,16 +1224,650 @@ phased_checkpoints:
       - stale handles, cleanup order, display loss, and generation exhaustion are executable
   - order: 5
     id: reconcile_and_sleep
+    status: ready_for_reviewer_gate
     product_proof: add/remove/configure/socket-loss histories converge while unrelated events do no work
-    character_budget: 8500
+    character_budget: 20000
+    files:
+      - path: src/wallpaper.zig
+        owns: resident loop, bounded reconciliation, event collapse, and current Round handoff
+      - path: src/wallpaper_native.zig
+        owns: direct Wayland resources plus borrowed-fd waits and per-call Hyprland socket tasks
+      - path: src/wallpaper_transcript.zig
+        owns: strict operational histories and injected protocol order/failure
+      - path: rewrite/08-wallpaper-monitor-surfaces.yml
+        owns: temporary checkpoint design and receipts
+    original_production_tripwire:
+      src/wallpaper.zig: 3000
+      src/wallpaper_native.zig: 5000
+      planned_headroom: 500
+      total: 8500
+      result: red_by_10741
+      rule: >
+        Measure non-whitespace production characters against dcad390. Tests and
+        this scratchpad are excluded. No generated helper, C shim, generic
+        event loop, retry framework, or compressed naming may move cost.
+    implementation_measurement:
+      baseline_commit: dcad390
+      command: "sed '/^test \"/,$d' FILE | tr -d '[:space:]' | wc -c; subtract FILE at dcad390"
+      production_only:
+        src/wallpaper.zig: 7725
+        src/wallpaper_native.zig: 11516
+        total: 19241
+      production_boundary: source before the first test declaration
+      transcript_test_delta_measured_separately: 15249
+      original_tripwire: 8500
+      original_tripwire_overage: 10741
+      pre_comment_contract_total: 16292
+      required_source_contract_delta: 2949
+      final_total: 19241
+      reviewer_ceiling: 20000
+      reviewer_ceiling_headroom: 759
+      documented_public_symbols: "35/35"
+      original_tripwire_result: red
+      reviewer_ceiling_result: green
+      reviewer_gate: >
+        The reviewer accepted the direct convergence and native fd/protocol
+        ownership at a corrected 20000-character ceiling. The original 8500
+        tripwire remains red by 10741 and is retained as shape evidence.
+        Native ownership was not hidden in C, generic dispatch, erased
+        interfaces, or undocumented helpers. Required current source contracts
+        account for the final 2949-character increase.
+    implementation_receipts:
+      changed_files:
+        - src/wallpaper.zig
+        - src/wallpaper_native.zig
+        - src/wallpaper_transcript.zig
+        - rewrite/08-wallpaper-monitor-surfaces.yml
+      build_wiring_changed: false
+      deterministic:
+        - resident stop/event identities survive Native handoff
+        - stop during old buffer retirement cleans the newly current Round next
+        - unchanged snapshots reach one infinite wait before stop
+        - missing candidate output retries without changing Current
+        - partial and WouldBlock request writes/reads close the request fd once
+        - exact Hyprland socket paths and rejected endpoints
+        - >
+          A zero-time Native wait performs one ppoll with a zero timespec;
+          bounded EINTR retries repeat that nonblocking poll, while only an
+          expired positive deadline returns before ppoll.
+        - >
+          Socket2 refresh and Wayland output change are observed in either
+          pre-request or post-request zero-time check; stale monitor replies
+          allocate no candidate.
+        - >
+          Published identical nonzero layer configure dimensions are
+          acknowledged without work. Changed dimensions mark output change,
+          and an unchanged monitor snapshot then recreates the candidate.
+          Zero dimensions and configure-count overflow remain fatal.
+        - >
+          Every checkpoint-5 public type and operation has a source contract
+          naming current ownership or borrowing, exact bound where applicable,
+          and visible failure meaning. Private poll/reconcile helpers state
+          their bounded role; both wallpaper module boundaries are explicit.
+      smith:
+        - bounded partial request progress and WouldBlock positions
+        - existing bounded EventLines bytes and Round ownership histories remain green
+      gates:
+        zig_build_test_summary_all: "522/522 passed"
+        zig_build: passed
+        zig_fmt_check: passed
+        yaml: passed
+        git_diff_check: passed
+        live_compositor: deliberately_not_run
+    vocabulary:
+      Work:
+        declaration: "enum { idle, refresh, reconnect }"
+        meaning:
+          idle: no authoritative monitor work is pending
+          refresh: obtain and compare one authoritative monitor snapshot
+          reconnect: restore socket2, then obtain an authoritative snapshot because events were lost
+      Ready:
+        declaration: >
+          packed struct { stop: bool, wayland: bool,
+          event: bool, deadline: bool }
+        meaning: one poll result after error bits have been classified
+      Current:
+        declaration: "struct { native: *Native, round: Round }"
+        meaning: >
+          The one published Wayland connection and its Round. The pointer is
+          stable because Wayland callbacks retain addresses inside Native.
+      Stop:
+        declaration: "struct { fd: posix.fd_t, prior_mask: posix.sigset_t }"
+        meaning: >
+          The resident thread's blocked SIGINT/SIGTERM ownership. It is opened
+          once before socket2 or any Wayland display and never moves between
+          Native values.
+      exclusions:
+        - no StateMachine, Manager, Supervisor, Scheduler, Reactor, Registry, Session, or generic Retry noun
+        - no runtime interface or callback registry
+    ownership:
+      resident_thread:
+        owns:
+          - one process-lifetime decoded Image
+          - one Current allocated at a stable address
+          - one EventLines incomplete socket2 suffix
+          - one connected socket2 fd or explicit absent value
+          - one Stop containing the exact stop fd and prior signal mask
+          - one Work value
+          - validated environment bytes and both complete Hyprland socket paths
+          - reconciliation attempt count and absolute monotonic deadline
+        rule: >
+          Every callback, socket operation, poll, reconciliation attempt,
+          surface operation, and cleanup runs on this thread. No mutex,
+          atomics, worker, or asynchronous callback owner exists.
+        handoff_invariant: >
+          Candidate publication replaces only Current.native and Current.round.
+          Stop, socket2, EventLines, Work, environment/path bytes, and deadlines
+          keep the same storage and fd identities across every display handoff.
+      candidate:
+        owner: one reconciliation attempt
+        shape: one separately allocated stable Native and one local Round
+        maximum: 1
+        cleanup: >
+          Before publication failure, discard prepared resources and disconnect
+          the candidate. After publication, move candidate pointer and Round
+          into Current before retiring the old Current.
+        reason: >
+          A monitor-set change cannot reuse output_snapshot. The old display
+          must remain connected while a new display rediscovers exact outputs
+          and prepares a complete replacement.
+      Native:
+        owns:
+          - exactly one Wayland display connection
+          - globals and output proxies obtained from that display
+          - surfaces, shm pools, buffers, mappings, and checked handles for its Round
+          - existing image-file task fields only while loading; all are null during residence
+        does_not_own:
+          - Stop or its signal mask
+          - socket2 fd or EventLines
+          - Hyprland environment/path bytes
+          - request sockets
+          - Work, attempt count, or reconciliation deadline
+        replacement_rule: >
+          Moving candidate Native into Current transfers no fd or state from
+          old Native. Retiring old Native closes only resources rooted in its
+          own Wayland display.
+      hyprland_request_fd:
+        owner: one snapshot request
+        lifetime: connect immediately before writing j/monitors; close immediately after EOF or any failure
+        invariant: >
+          Never retain an open request socket between attempts. Hyprland serves
+          it synchronously and an unclosed client can stall the compositor.
+      socket2_fd:
+        owner: resident thread
+        lifetime: connected while idle; close exactly once on EOF/error, reconnect failure, stop, or exit
+        handoff: never copied, closed, reopened, or transferred because Current changes
+      wayland_read_intent:
+        owner: one wait call after wl_display_prepare_read succeeds
+        cleanup: exactly one wl_display_read_events or wl_display_cancel_read before returning
+      stop_fd:
+        owner: resident thread through Stop
+        source: Linux signalfd for blocked SIGINT and SIGTERM
+        cleanup: close once and restore the exact prior signal mask
+        handoff: exact fd and prior mask remain unchanged across every Native replacement
+      Current_resources:
+        owner: Current.native behind Current.round checked handles
+        cleanup: checkpoint-4 healthy release, or disconnect-first display-loss cleanup
+      io_boundary:
+        std_Io: >
+          Own allocator use and monotonic std.Io.Clock.awake timestamps. Clock
+          reads are explicit Transcript operations.
+        native_posix: >
+          Implement AF_UNIX socket/connect/SO_ERROR, read/write, signalfd,
+          close, and ppoll because these Linux fd semantics are the product
+          boundary. Ownership remains with the resident or per-call owner
+          named above; helper functions only borrow supplied fds.
+        wayland_client: >
+          Own display fd preparation/read/cancel/dispatch and protocol object
+          calls. Native never reads the Wayland fd through std.posix.read.
+    bounds:
+      reconciliation_attempt_capacity: 8
+      reconciliation_wait_capacity: 7
+      reconciliation_wait_milliseconds: 250
+      reconciliation_deadline_milliseconds: 2000
+      socket_path_capacity: 107
+      socket_path_capacity_reason: Linux sockaddr_un.sun_path excluding terminating NUL
+      hyprland_request_bytes: "j/monitors"
+      hyprland_request_byte_count: 10
+      monitor_reply_capacity: 65536
+      monitor_reply_probe_bytes: 1
+      request_write_attempt_capacity: 32
+      request_read_attempt_capacity: 32
+      event_read_bytes: 8192
+      event_read_attempt_capacity_per_drain: 8
+      event_drain_byte_capacity: 65536
+      event_batch_capacity: 64
+      wayland_pending_dispatch_capacity_per_drain: 128
+      wayland_prepare_read_attempt_capacity: 128
+      wait_fd_capacity: 3
+      poll_interrupt_capacity_per_wait: 16
+      wait_flush_attempt_capacity: 16
+      wait_flush_deadline_milliseconds: 1000
+      stop_record_bytes: 128
+      candidate_capacity: 1
+      current_capacity: 1
+      image_decode_count: 1
+      assertions:
+        - 8 attempts times 250 ms equals the 2 s hard ceiling
+        - waits are at most attempts minus one
+        - every timeout is recomputed from one monotonic absolute deadline
+        - request and event buffers include exact endpoint tests
+        - one Current plus one candidate is the complete Native pointer bound
+    socket_paths:
+      inputs:
+        - XDG_RUNTIME_DIR must be present, nonempty, UTF-8, and contain no NUL
+        - HYPRLAND_INSTANCE_SIGNATURE must be present, nonempty, UTF-8, and contain neither NUL nor slash
+      request: "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock"
+      event: "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+      construction: >
+        Construct each directly into one resident fixed sockaddr_un path
+        buffer, require the final byte count at most 107, and append one NUL.
+        These exact buffers are borrowed by every per-call connect and survive
+        every Native handoff; no Native stores a path copy.
+      environment_rule: >
+        Read and validate both values once into resident-owned bounded bytes
+        before opening Stop, socket2, or any Wayland display.
+    hyprland_request:
+      socket: AF_UNIX, SOCK_STREAM, SOCK_CLOEXEC, and SOCK_NONBLOCK
+      connect: >
+        Immediate success continues. EINPROGRESS polls writable within the
+        smaller attempt/deadline remainder and checks SO_ERROR. EINTR closes
+        that fd and consumes one transient reconciliation attempt; connect is
+        never reissued on an ambiguously connected fd. Permission, path,
+        descriptor, and address errors are fatal; unavailable/refused/timed-out
+        during a reconnect reconciliation are transient until the shared bound
+        expires.
+      write: >
+        Write exactly the ten bytes j/monitors, with checked partial progress.
+        std.posix.write retries EINTR internally; EAGAIN polls writable; zero
+        progress, attempt exhaustion, deadline, or other errors close the fd
+        and publish no reply.
+      read: >
+        Read fragments until EOF into the fixed 64 KiB response. At exactly
+        64 KiB, read one bounded probe byte: EOF accepts the complete response;
+        another byte is MonitorResponseTooLong. std.posix.read retries EINTR
+        internally; EAGAIN polls readable within the same attempt and absolute
+        deadlines.
+      close: close exactly once before JSON parsing, including every failure
+      parse: existing parseMonitors publishes one local Snapshot only after complete valid EOF
+    socket2:
+      connect: >
+        Use the same bounded nonblocking Unix connect rules. Connect before the
+        first j/monitors request so monitor events cannot be lost between
+        snapshot and idle wait.
+      read: >
+        Each drain performs at most 8 reads of at most 8192 bytes and consumes
+        at most 64 KiB. Feed bytes to existing EventLines, preserving its
+        incomplete suffix and overlong-line discard state.
+      collapse: >
+        Every refresh Event in one drain sets Work.refresh once. Valid ignore
+        and malformed events are consumed without changing Work. Event payload
+        never mutates Snapshot or Round.
+      loss: >
+        EOF, ECONNRESET, HUP, or read failure closes once, clears EventLines
+        because the byte stream identity ended, and sets Work.reconnect.
+      reconnect: >
+        A successful reconnect still requires a complete j/monitors snapshot;
+        events may have been lost while disconnected. Failure is transient only
+        inside the active eight-attempt/two-second reconciliation.
+    wayland_events:
+      current_native:
+        - >
+          Retain exact registry global ids for required globals and aligned
+          output proxies. Removing compositor, shm, viewporter, or layer-shell
+          is fatal display loss.
+        - >
+          Adding or removing any wl_output sets one outputs_changed marker.
+          global_remove is no longer an unconditional generic failed marker.
+        - >
+          A post-publication layer configure with changed nonzero logical
+          dimensions sets Work.refresh; identical configure is consumed
+          without work. closed is fatal for that display.
+      drain: >
+        Dispatch at most 128 already-pending callbacks. Any output change
+        collapses to Work.refresh. Callback overflow, protocol error, display
+        EOF, or required-global removal is fatal.
+      candidate_discovery: >
+        Candidate Native always starts disconnected. openOutputs binds and
+        completes every wl_output v4 probe and requires its complete sorted
+        connector-name set to equal the requested Snapshot exactly. Missing,
+        extra, or not-yet-complete output identity is transient mismatch;
+        duplicate name, malformed callback history, under-version output, or
+        missing required global is fatal.
+      retained_snapshot: >
+        Current Native reuses outputs only for exact output_snapshot equality.
+        A changed Snapshot or outputs_changed marker always uses a new Native;
+        it never mutates or clears Current.native output_snapshot in place.
+    wait:
+      prepare:
+        - dispatch bounded pending Wayland callbacks until wl_display_prepare_read succeeds
+        - >
+          Call wl_display_flush for already-queued housekeeping requests.
+          Success proceeds to the ordinary read wait. EAGAIN marks
+          wayland_write required; non-EAGAIN failure is fatal.
+        - record that a display read is prepared
+      poll:
+        fds_in_order:
+          - resident Stop.fd: POLLIN
+          - borrowed Current.native Wayland display fd: POLLIN and POLLOUT only while flush returned EAGAIN
+          - resident socket2 fd when connected: POLLIN
+        timeout_idle: infinite
+        timeout_reconcile: >
+          The smaller of 250 ms and remaining time to the one 2 s monotonic
+          deadline, represented as timespec for std.posix.ppoll.
+        interruption: >
+          std.posix.ppoll reports SignalInterrupt. Recompute remaining time and
+          retry at most 16 times; interruption never resets either deadline.
+        blocked_flush: >
+          EAGAIN starts one 1 s monotonic flush deadline and permits at most 16
+          flush attempts. Poll still includes Wayland POLLIN, socket2, and stop.
+          After resolving the prepared read, POLLOUT restarts prepare/flush from
+          the top; no callback is dispatched while read intent remains
+          unresolved. Exhaustion is fatal display loss.
+      readiness_priority:
+        - >
+          Stop readiness or stop-fd ERR/HUP/NVAL wins over every simultaneous
+          event: read exactly one complete signalfd record when readable,
+          cancel prepared Wayland read, and return stopped without protocol
+          drain, reconnect, request, candidate creation, or publication.
+        - >
+          Wayland ERR/HUP/NVAL is fatal display loss. If a read was prepared,
+          do not cancel after HUP; disconnect owns termination, matching the
+          pinned Foot behavior.
+        - >
+          socket2 ERR/HUP/NVAL closes it and sets Work.reconnect. Wayland read
+          intent is still completed or cancelled exactly.
+        - >
+          If Wayland POLLIN, call wl_display_read_events then bounded
+          wl_display_dispatch_pending. Otherwise cancel the prepared read.
+        - >
+          If Wayland POLLOUT was requested and stop/error did not win, retry
+          wl_display_flush only after read_events or cancel_read resolved the
+          prepared intent. Remove POLLOUT after flush succeeds.
+        - >
+          If socket2 POLLIN and stop did not win, perform one bounded event
+          drain after resolving the Wayland read intent.
+        - poll timeout returns Ready.deadline only during reconciliation
+      idle_invariant: >
+        Work.idle always reaches one infinite blocking ppoll after bounded
+        pending drains. No timer, frame loop, monitor polling, or recurring
+        zero-time poll exists; reconciliation alone performs its bounded
+        pre-request and post-request nonblocking checks.
+    reconciliation:
+      entry:
+        - Work.refresh from exact socket2 refresh events, changed layer configure, or wl_output change
+        - Work.reconnect from socket2 loss
+        - startup in checkpoint 6 enters Work.reconnect with no Current
+      attempt:
+        - >
+          Stop wins in every resident wait and request-socket poll. The
+          post-request zero-time check occurs before candidate allocation;
+          configure preparation retains its existing one-second Wayland bound.
+        - Drain bounded current Wayland callbacks, then bounded socket2 bytes when connected.
+        - If reconnecting, connect socket2; on transient failure proceed to the bounded wait.
+        - Request and parse one complete sorted j/monitors Snapshot.
+        - >
+          Drain current Wayland and socket2 once more. If either produces a
+          refresh/output change after the request began, discard the local
+          Snapshot and restart without candidate allocation.
+        - >
+          If Current exists, Snapshot.eql(Current.round.monitors), and current
+          outputs_changed is false, set Work.idle and perform zero image,
+          output-discovery, surface, or publication work.
+        - Allocate one stable candidate Native and openOutputs against the local Snapshot.
+        - >
+          Missing/extra candidate output names are transient cross-protocol
+          mismatch: disconnect/free candidate, retain Current, wait, and retry.
+        - Prepare and publish a complete candidate Round using the one process Image and an empty candidate Round.
+        - >
+          After successful candidate publication, move candidate pointer and
+          Round into Current. Then release the old Round on its old Native and
+          disconnect/free it. Old-release failure disconnects the old display
+          first but does not invalidate the already-current candidate.
+        - >
+          If resident Stop becomes ready while retiring the old Round, preserve
+          that first stop result, disconnect and clean the old Native, then
+          clean the newly Current Round and Native. Do not return to idle,
+          reconnect, request, or publish again. Resident socket2 and Stop remain
+          owned until their normal final cleanup positions.
+        - Clear Work to idle only after the ownership move and exact old cleanup.
+      wait_between_attempts: >
+        At most seven times, call the same stop/Wayland/socket2 wait with a
+        maximum 250 ms timeout and the shared remaining deadline. Drain ready
+        protocol sources before the next request. Stop returns immediately.
+      exhaustion: >
+        Attempt eight failure, attempt/wait bound, or the 2 s absolute deadline
+        is visible fatal cleanup. Current remains logically unchanged until
+        process cleanup; no fallback display, stale candidate, or retry daemon
+        survives.
+      independent_order_histories:
+        - Hyprland add snapshot first, then Wayland output appears
+        - Wayland output appears first, then Hyprland snapshot adds it
+        - Wayland global_remove first, then Hyprland snapshot removes it
+        - Hyprland removal snapshot first, then Wayland global_remove
+        - add/remove bursts collapse and converge to the final exact sets
+      same_snapshot_rules:
+        unchanged_and_no_output_marker: no work
+        unchanged_after_config_reload: no work
+        unchanged_with_output_marker: full candidate rediscovery and Round recreation
+        changed_facts_same_names: full candidate rediscovery and Round recreation
+    failure_meaning:
+      ignored:
+        - valid focus, workspace, window, mouse-like, and other unrelated socket2 events
+        - one malformed or overlong socket2 line
+        - unchanged Snapshot without an output marker
+      transient_within_reconciliation_only:
+        - socket2 unavailable, refused, reset, or EOF
+        - request socket temporarily unavailable or timed out
+        - Snapshot missing a complete candidate output
+        - candidate has an extra output not yet reflected by Snapshot
+        - retired current output still present in Snapshot
+      fatal:
+        - invalid/missing environment or oversized socket path
+        - malformed/oversized monitor reply or invalid JSON/monitor facts
+        - request permission or structural socket error
+        - Wayland display loss or protocol error
+        - required-global removal or invalid/duplicate/under-version candidate output
+        - image scaling, allocation, surface preparation, or publication failure after exact match
+        - reconciliation attempt, wait, poll-interrupt, or deadline exhaustion
+      no_partial_state: >
+        Transient failure owns no candidate Round. Candidate preparation failure
+        cleans the candidate only. Current changes only after complete
+        candidate publication.
+    cleanup:
+      stop:
+        - cancel a prepared Wayland read if one exists
+        - close request fd if an operation was interrupted
+        - discard and disconnect/free any unpublished candidate
+        - release Current Round with checkpoint-4 bounded healthy cleanup
+        - disconnect/free Current Native
+        - close resident socket2 once and clear resident EventLines
+        - destroy Image once
+        - close resident Stop.fd and restore Stop.prior_mask
+      handoff:
+        - candidate becomes Current without moving resident-owned state or fds
+        - release or disconnect the old Round and old Native Wayland display
+        - never close or alter Stop.fd, Stop.prior_mask, socket2, EventLines, Work, paths, or deadlines
+        - >
+          If stop is observed during old retirement, finish old Native cleanup,
+          then enter stop cleanup for the newly Current Native; the first stop
+          meaning remains authoritative over later cleanup failures.
+      wayland_loss:
+        - resolve/cancel read intent according to readiness state
+        - disconnect affected display before local mappings or handles are cleared
+        - retain unrelated candidate/current display only when it already owns complete published state
+      fatal: same exact owner order as stop, while preserving the first visible error
+    functions:
+      wallpaper:
+        - run(source, allocator, image, current, stop, event_fd, lines, paths) !void
+        - reconcile(source, allocator, image, current, stop_fd, event_fd, lines, paths, work, deadline) !void
+        - drainEvents(source, event_fd, lines, work) !void
+      native:
+        - openStop() !Stop
+        - closeStop(stop) void
+        - buildSocketPaths(environment, request_path, event_path) !void
+        - connectEvent(event_path, deadline) !fd
+        - connectRequest(request_path, stop_fd, event_fd, deadline) !fd
+        - writeRequest(fd, bytes) !usize
+        - readReply(fd, bytes) !usize
+        - closeRequest(fd) void
+        - waitSocket(fd, stop_fd, event_fd, write, deadline) !void
+        - drainWayland(native) !bool
+        - drainEvent(event_fd, bytes) !EventRead
+        - wait(native, stop_fd, event_fd_or_null, deadline_or_null) !Ready
+        - openOutputs(snapshot) !void
+        - takeOutputChange() bool
+        - closeEvent(event_fd) void
+      function_rule: >
+        Native arguments own only their named Wayland display state.
+        stop_fd, event_fd, paths, Work, EventLines, and deadlines are explicit
+        resident borrows. Request sockets are local to requestMonitors and
+        close before it returns. No fd transfer, generic fd set, source
+        registry, retry object, monitor service, or compositor abstraction is
+        introduced.
+      implementation_note: >
+        wallpaper.requestMonitors owns bounded partial write/read/probe control
+        flow over these concrete operations. Native and Transcript implement
+        the same operation surface; native does not duplicate request framing.
+    transcript_operations:
+      - environment(runtime_dir, instance_signature)
+      - open_stop(stop_fd, prior_mask, result)
+      - connect_event(event_path, event_fd, result)
+      - connect_request(request_path, request_fd, result)
+      - write_request(request_fd, offset, result)
+      - read_reply(request_fd, offset, result)
+      - probe_reply(request_fd, result)
+      - close_request(request_fd)
+      - read_event(event_fd, result, bytes)
+      - close_event(event_fd)
+      - open_wayland(display_id, result)
+      - dispatch_wayland(display_id, result, callbacks)
+      - prepare_wayland_read(display_id, result)
+      - cancel_wayland_read(display_id)
+      - read_wayland_events(display_id, result)
+      - output_change(display_id, kind, global_id)
+      - monotonic_time(nanoseconds)
+      - poll(display_id, stop_fd, event_fd_or_absent, timeout, stop_revents, wayland_revents, event_revents, result)
+      - allocate_candidate(display_id)
+      - close_wayland(display_id)
+      - free_candidate(display_id)
+      - close_stop(stop_fd)
+      - restore_signal_mask(prior_mask)
+      - existing checkpoint-4 prepare/publication/release operations
+    transcript_ownership:
+      resident:
+        - exact stop_fd and prior_mask opened once
+        - exact event_fd identity until explicit socket loss/reconnect or final cleanup
+        - EventLines, Work, paths, attempt, and deadline state
+      each_display: >
+        One distinct display_id owns only its Wayland operations and resources.
+        Transcript replacement changes Current.display_id without changing any
+        resident identity.
+      forbidden: >
+        No transfer_stop, transfer_event, adopt_fd, duplicate_fd, or implicit
+        Native-field operation exists.
+    deterministic_tests:
+      - exact socket paths and 107/108-byte endpoints
+      - missing/empty/NUL/slashed environment rejection before socket creation
+      - exact ten request bytes with every partial/EINTR/EAGAIN/zero/failure history
+      - reply fragmentation, exact 64 KiB plus EOF, one-byte overflow, short/error/timeout, and close once
+      - socket2 fragmented/coalesced/overlong input across reconnect boundaries
+      - every unrelated valid event performs zero request, candidate, image, surface, and publication operations
+      - stop alone and stop simultaneous with each readiness/error combination wins with exact read cancellation
+      - every successful prepare_read receives exactly one read_events or cancel_read
+      - Wayland pending callback and prepare-read bounds
+      - idle performs bounded drains then one infinite ppoll
+      - attempt 1 and 8 success; wait 0 and 7 endpoints; exact 2 s exhaustion
+      - ppoll SignalInterrupt recomputes remaining time and exhausts exactly
+      - all four independent add/remove orders converge without mutating old Current early
+      - unchanged Snapshot paths perform no candidate or surface work
+      - same Snapshot with output marker performs full candidate recreation
+      - candidate missing/extra output is transient and leaves zero candidate resources
+      - candidate malformed/duplicate/under-version output is fatal
+      - candidate preparation/publication failure retains old Current until fatal cleanup
+      - successful candidate publishes before Current move and old release
+      - old release display loss occurs after Current move and preserves new Current
+      - >
+        Successful Native handoff preserves the exact open stop_fd, prior_mask,
+        event_fd, EventLines storage, Work, paths, and deadline; only the old
+        display_id and its Wayland resources close.
+      - >
+        Same resident stop/event fd identities survive repeated candidate
+        failures and successful handoffs without duplicate, adopt, or transfer.
+      - >
+        Stop simultaneous with old-Round retirement first disconnects and
+        cleans old display_id, then cleans the newly Current display_id, then
+        closes event_fd and Stop exactly once; no idle or reconciliation
+        operation follows the first stop observation.
+      - socket2 loss reconnects, refreshes authoritatively, and resumes idle blocking
+      - every fd, read intent, candidate, Native, Round, Image, and signal mask cleans exactly once
+      - plain transcript tests import no libc, Wayland, Hyprland runtime, or live desktop
+      - native parity reaches every new operation without opening live compositor sockets
+    smith_histories:
+      - >
+        Generate bounded readiness combinations, interruptions, partial
+        request/reply progress, socket2 fragments, and stop positions. Assert
+        stop priority, exact close/read-intent pairing, attempt bounds, and no
+        busy iteration.
+      - >
+        Generate two independently ordered bounded Snapshot/output histories.
+        Assert Current changes only after exact set equality and complete
+        candidate publication, with at most one candidate and no leaked handle.
+      - >
+        Generate candidate failure, publication, handoff, old-retirement
+        failure, and stop positions while holding resident fd identities fixed.
+        Assert only Wayland display ownership changes and first stop always
+        reaches cleanup of the newly Current round.
+    authoritative_references:
+      - path: /home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md
+        lines: 8-30
+        proves: exact request/event socket paths, synchronous request lifetime, and EVENT>>DATA framing
+      - path: /home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md
+        lines: 45-82
+        proves: monitor add/remove and configreloaded event names; focus/workspace/window events are unrelated
+      - path: /home/home/personal/projects/dev_references/backends/hyprland/src/debug/HyprCtl.cpp
+        lines: 309-343, 2037-2070, 2300-2328
+        proves: monitors JSON request dispatch, j flag parsing, and .socket.sock ownership
+      - path: /home/home/personal/projects/dev_references/backends/hyprland/src/managers/EventManager.cpp
+        lines: 12-45
+        proves: .socket2.sock is a nonblocking Unix stream server with bounded sun_path
+      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+        lines: 1918-2030
+        proves: every successful prepare_read requires exactly one read_events or cancel_read
+      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+        lines: 2434-2467
+        proves: flush is nonblocking and EAGAIN requires writable polling
+      - path: /home/home/personal/projects/dev_references/terminals/foot/wayland.c
+        lines: 1728-1758, 2358-2430
+        proves: direct prepare/read/dispatch sequencing, HUP handling, and writable flush retry
+      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+        lines: 995-1050
+        proves: ppoll exposes SignalInterrupt while poll retries it with the original timeout
+      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+        lines: 400-475
+        proves: nonblocking read/write expose WouldBlock and retry EINTR internally
+      - path: /home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md
+        lines: 91-140
+        proves: fixed loop bounds and paired positive/negative assertions
+    negative_space:
+      - no product argv route, wallpaper schedule, rotation, randomness, image change, cache, config, or history
+      - no other compositor, SDL window, GPU renderer, frame loop, or periodic refresh
+      - no focus/workspace/window/mouse-triggered reconciliation
+      - no in-place mutation of Current output_snapshot for a changed monitor set
+      - no stop/socket2/path/deadline field in Native and no fd transfer between Native values
+      - no daemon supervisor, fallback process, generic reconnect owner, or hidden thread
+      - no live compositor receipt in checkpoint 5
     closes_when:
-      - stop wins
-      - reconnect is bounded
-      - independent Hyprland and Wayland hotplug orders converge within one shared bound
-      - idle blocks
-      - old Round survives until complete replacement
+      - stop wins every simultaneous readiness history and performs no later product work
+      - socket2 reconnect and monitor convergence share the exact 8-attempt/2-second bound
+      - independent Hyprland and Wayland add/remove orders converge through exact candidate discovery
+      - idle reaches one infinite blocking poll after bounded drains
+      - old Current remains owned until a complete candidate Round publishes
+      - changed monitor sets use a new Wayland connection and never reuse output_snapshot by count
+      - Native handoff preserves resident stop/socket2 identities and closes only old Wayland ownership
   - order: 6
     id: product_entry_and_reduction
+    status: pending_reduction_gate
     product_proof: wayspot-beta wallpaper IMAGE.png runs the complete native theorem
     files:
       - src/cmd.zig
@@ -1241,6 +1875,16 @@ phased_checkpoints:
       - build.zig
     character_budget: 3500
     reduction_gate: delete at least 15 percent of characters introduced in checkpoints 1 through 5
+    reduction_accounting:
+      checkpoint_1_through_5_current_characters: 54812
+      minimum_15_percent_deletion: 8222
+      state: pending
+      current_target_after_reduction: 38500
+      deletion_to_current_target_before_checkpoint_6_additions: 16312
+      deletion_to_current_target_if_full_3500_budget_is_added: 19812
+      rule: >
+        The 15 percent deletion is a minimum gate, not a replacement for the
+        unchanged 38500 Marathon 8 production target.
     closes_when:
       - one isolated native process passes coordinated single- and multi-monitor receipts
       - all comments and branches have a current product owner
@@ -1248,6 +1892,15 @@ phased_checkpoints:
 character_budget:
   production_maximum_before_reduction: 45500
   production_target_after_reduction: 38500
+  cumulative_pre_reduction:
+    baseline_commit: fbcce56
+    method: "production source before each first test; remove ASCII whitespace"
+    src_wallpaper_zig: 21126
+    src_wallpaper_native_zig: 33686
+    total: 54812
+    over_production_maximum_before_reduction: 9312
+    checkpoint_6_reduction_gate: pending
+    production_target_after_reduction: pending
   generated_protocol_code: measured_separately
   protocol_xml: measured_separately_as_pinned_external_input
   rule: >
