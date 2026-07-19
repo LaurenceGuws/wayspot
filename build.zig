@@ -25,6 +25,14 @@ pub fn build(b: *std.Build) void {
     wayspot_beta.linkLibrary(sdl.artifact("SDL3"));
     wayspot_beta.linkLibrary(text.library);
     wayspot_beta.linkSystemLibrary("dbus-1", .{});
+    addWaylandProtocol(
+        b,
+        wayspot_beta,
+        b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
+        "wlr-layer-shell-unstable-v1",
+    );
+    addWaylandProtocol(b, wayspot_beta, b.path("protocols/viewporter.xml"), "viewporter");
+    wayspot_beta.linkSystemLibrary("wayland-client", .{});
 
     const executable = b.addExecutable(.{
         .name = "wayspot-beta",

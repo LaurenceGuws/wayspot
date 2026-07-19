@@ -13,6 +13,8 @@ const notification_banner_sdl = @import("notification_banner_sdl.zig");
 const notification_bridge = @import("notification_bridge.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
+const wallpaper = @import("wallpaper.zig");
+const wallpaper_native = @import("wallpaper_native.zig");
 
 var notification_stop: std.atomic.Value(bool) = .init(false);
 
@@ -30,6 +32,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     const argv = arguments[0..argument_count];
     if (argument_count > 0) {
+        if (cmd.resolveWallpaper(argv) catch return 2) |meaning| {
+            return perform(init, meaning, &.{}, null, null);
+        }
         if (cmd.resolveNotifications(argv) catch return 2) |meaning| {
             return perform(init, meaning, &.{}, null, null);
         }
@@ -127,6 +132,7 @@ fn perform(
     home: ?[]const u8,
 ) !u8 {
     switch (meaning) {
+        .wallpaper => |path| try runWallpaper(init, path),
         .apps => |app| switch (app) {
             .list => |query| {
                 var stdout_buffer: [4096]u8 = undefined;
@@ -147,6 +153,31 @@ fn perform(
         },
     }
     return 0;
+}
+
+/// Owns one image and resident lifetime; teardown disconnects before local owners are freed.
+fn runWallpaper(init: std.process.Init, path: []const u8) !void {
+    const paths = try wallpaper_native.buildSocketPaths(
+        init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
+        init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse return error.HyprlandSignatureMissing,
+    );
+    var resident = wallpaper_native.Native{ .io = init.io };
+    const native = try resident.createNative(init.gpa);
+    var current = wallpaper.Current(wallpaper_native.Native){ .native = native, .round = .{} };
+    defer init.gpa.destroy(current.native);
+    var image = try wallpaper.loadImage(&resident, init.gpa, path);
+    defer image.deinit(init.gpa);
+    const stop = try wallpaper_native.openStop();
+    defer wallpaper_native.closeStop(stop);
+    var event_fd: std.posix.fd_t = -1;
+    defer {
+        current.native.disconnectAfterDisplayLoss();
+        current.round = .{};
+        if (event_fd >= 0) resident.closeEvent(&event_fd);
+    }
+    wallpaper.run(&resident, init.gpa, &image, &current, stop.fd, &event_fd, &paths) catch |err| {
+        if (err != error.Stopped) return err;
+    };
 }
 
 fn runNotifications(init: std.process.Init) !void {

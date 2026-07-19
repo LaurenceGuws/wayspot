@@ -8,6 +8,7 @@ pub const argument_capacity = 64;
 pub const query_capacity = apps.query_capacity;
 
 pub const Cmd = union(enum) {
+    wallpaper: []const u8,
     apps: union(enum) {
         list: []const u8,
         open: u16,
@@ -19,10 +20,16 @@ pub const Cmd = union(enum) {
 };
 
 comptime {
-    std.debug.assert(std.meta.fields(Cmd).len == 2);
+    std.debug.assert(std.meta.fields(Cmd).len == 3);
     std.debug.assert(std.meta.fields(@FieldType(Cmd, "apps")).len == 2);
     std.debug.assert(std.meta.fields(@FieldType(Cmd, "notifications")).len == 2);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
+}
+
+pub fn resolveWallpaper(argv: []const []const u8) !?Cmd {
+    if (argv.len == 0 or !std.mem.eql(u8, argv[0], "wallpaper")) return null;
+    if (argv.len != 2) return error.WallpaperArgumentsInvalid;
+    return .{ .wallpaper = argv[1] };
 }
 
 pub fn resolveNotifications(argv: []const []const u8) !?Cmd {
@@ -74,6 +81,20 @@ test "notification meanings resolve before applications exist" {
     try std.testing.expectError(
         error.NotificationArgumentsInvalid,
         resolveNotifications(&.{ "notifications", "unknown" }),
+    );
+}
+
+test "wallpaper borrows exactly one image path before applications exist" {
+    const path = "IMAGE.png";
+    const meaning = (try resolveWallpaper(&.{ "wallpaper", path })).?;
+    try std.testing.expectEqualStrings(path, meaning.wallpaper);
+    try std.testing.expectEqual(@intFromPtr(path.ptr), @intFromPtr(meaning.wallpaper.ptr));
+    try std.testing.expectEqual(@as(?Cmd, null), try resolveWallpaper(&.{"apps"}));
+    try std.testing.expectEqual(@as(?Cmd, null), try resolveWallpaper(&.{"notifications"}));
+    try std.testing.expectError(error.WallpaperArgumentsInvalid, resolveWallpaper(&.{"wallpaper"}));
+    try std.testing.expectError(
+        error.WallpaperArgumentsInvalid,
+        resolveWallpaper(&.{ "wallpaper", path, "extra" }),
     );
 }
 

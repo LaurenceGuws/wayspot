@@ -94,13 +94,14 @@ pub const Native = struct {
 
     /// Closes the resident-owned socket2 descriptor and restores its absent sentinel.
     pub fn closeEvent(_: *Native, event_fd: *std.posix.fd_t) void {
-        std.posix.close(event_fd.*);
+        _ = std.posix.system.close(event_fd.*);
         event_fd.* = -1;
     }
 
     /// Reads at most the caller's bounded socket2 buffer; EOF and errors remain visible.
-    pub fn readEvent(_: *Native, event_fd: std.posix.fd_t, bytes: []u8) !usize {
-        return std.posix.read(event_fd, bytes);
+    pub fn readEvent(native: *Native, event_fd: std.posix.fd_t, bytes: []u8) !usize {
+        const file: std.Io.File = .{ .handle = event_fd, .flags = .{ .nonblocking = true } };
+        return file.readStreaming(native.io, &.{bytes});
     }
 
     /// Opens one per-request Hyprland socket while stop and socket2 loss retain priority.
@@ -115,18 +116,20 @@ pub const Native = struct {
     }
 
     /// Writes one borrowed request suffix and exposes partial progress or failure.
-    pub fn writeRequest(_: *Native, fd: std.posix.fd_t, bytes: []const u8) !usize {
-        return std.posix.write(fd, bytes);
+    pub fn writeRequest(native: *Native, fd: std.posix.fd_t, bytes: []const u8) !usize {
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        return file.writeStreaming(native.io, &.{}, &.{bytes}, 1);
     }
 
     /// Reads into one borrowed bounded reply suffix and exposes EOF or failure.
-    pub fn readReply(_: *Native, fd: std.posix.fd_t, bytes: []u8) !usize {
-        return std.posix.read(fd, bytes);
+    pub fn readReply(native: *Native, fd: std.posix.fd_t, bytes: []u8) !usize {
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+        return file.readStreaming(native.io, &.{bytes});
     }
 
     /// Closes one per-call request descriptor exactly once.
     pub fn closeRequest(_: *Native, fd: std.posix.fd_t) void {
-        std.posix.close(fd);
+        _ = std.posix.system.close(fd);
     }
 
     pub fn openOutputs(native: *Native, snapshot: *const wallpaper.Snapshot) !void {
@@ -254,8 +257,8 @@ pub const Native = struct {
         while (surface.configure == null and count < wallpaper.wayland_configure_capacity) : (count += 1) {
             const current_time = native.now();
             if (current_time >= configure_deadline) break;
-            const ready = try native.wait(-1, -1, configure_deadline - current_time);
-            if (ready.wayland) _ = try native.drainWayland();
+            const ready = try native.wait(native, -1, -1, configure_deadline - current_time);
+            if (ready.wayland) _ = try native.drainWayland(native);
         }
         if (surface.closed) return error.SurfaceClosed;
         const configured = surface.configure orelse return error.SurfaceConfigureMissing;
@@ -270,7 +273,10 @@ pub const Native = struct {
         );
         const length = pixels.pixels.len * @sizeOf(u32);
         surface.shm_fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
-        try (std.Io.File{ .handle = surface.shm_fd.? }).setLength(native.io, length);
+        try (std.Io.File{
+            .handle = surface.shm_fd.?,
+            .flags = .{ .nonblocking = false },
+        }).setLength(native.io, length);
         surface.mapping = try std.posix.mmap(
             null,
             length,
@@ -396,12 +402,13 @@ pub const Native = struct {
             const elapsed = release_started.durationTo(std.Io.Clock.awake.now(native.io)).toMilliseconds();
             if (elapsed >= wallpaper.wayland_wait_milliseconds) break;
             const ready = try native.wait(
+                native,
                 stop_fd,
                 -1,
-                wallpaper.wayland_wait_milliseconds - elapsed,
+                @intCast(wallpaper.wayland_wait_milliseconds - elapsed),
             );
             if (ready.stop) return error.WaylandFlushStopped;
-            if (ready.wayland) _ = try native.drainWayland();
+            if (ready.wayland) _ = try native.drainWayland(native);
         }
         if (!surface.released) return error.SurfaceReleaseMissing;
         surface.destroyConnected();
@@ -447,12 +454,12 @@ pub const Native = struct {
     }
 
     /// Reports the sticky output/configure change marker owned by this display.
-    pub fn outputsChanged(native: *Native) bool {
+    pub fn outputsChanged(_: *Native, native: *Native) bool {
         return native.outputs_changed;
     }
 
     /// Dispatches already-read Wayland events and reports change; protocol failure is fatal.
-    pub fn drainWayland(native: *Native) !bool {
+    pub fn drainWayland(_: *Native, native: *Native) !bool {
         if (wl.wl_display_dispatch_pending(native.display.?) < 0 or native.failed) {
             return error.WaylandDispatchFailed;
         }
@@ -462,24 +469,45 @@ pub const Native = struct {
 
     /// Borrows resident fds for one bounded poll; stop wins and timeout zero still polls once.
     pub fn wait(
+        resident: *Native,
         native: *Native,
         stop_fd: std.posix.fd_t,
         event_fd: std.posix.fd_t,
         timeout_ms: ?u64,
     ) !wallpaper.Ready {
         const deadline = if (timeout_ms) |milliseconds|
-            try std.math.add(u64, native.now(), milliseconds)
+            try std.math.add(u64, resident.now(), milliseconds)
         else
             null;
+        if (native.display == null) {
+            var fds = [_]std.posix.pollfd{
+                .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+            _ = try resident.pollUntil(&fds, deadline, timeout_ms == 0);
+            if (fds[0].revents != 0) {
+                var record: [128]u8 = undefined;
+                const stop: std.Io.File = .{ .handle = stop_fd, .flags = .{ .nonblocking = true } };
+                if (fds[0].revents & std.posix.POLL.IN != 0 and
+                    try stop.readStreaming(resident.io, &.{&record}) != record.len)
+                {
+                    return error.StopRecordIncomplete;
+                }
+                return .{ .stop = true };
+            }
+            const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
+            if (fds[1].revents & failed != 0) return error.EventSocketLost;
+            return .{ .event = fds[1].revents & std.posix.POLL.IN != 0 };
+        }
         var dispatches: u8 = 0;
         var write_deadline: ?u64 = null;
         var ready: wallpaper.Ready = .{};
         for (0..wallpaper.publication_flush_capacity) |_| {
-            if (write_deadline) |end| if (native.now() >= end) return error.WaylandFlushTimeout;
+            if (write_deadline) |end| if (resident.now() >= end) return error.WaylandFlushTimeout;
             while (wl.wl_display_prepare_read(native.display.?) != 0) {
                 if (dispatches == 128) return error.WaylandDispatchExceeded;
                 dispatches += 1;
-                _ = try native.drainWayland();
+                _ = try resident.drainWayland(native);
             }
             var prepared = true;
             errdefer if (prepared) wl.wl_display_cancel_read(native.display.?);
@@ -487,13 +515,13 @@ pub const Native = struct {
             const write = flush < 0 and std.posix.errno(flush) == .AGAIN;
             if (flush < 0 and !write) return error.WaylandFlushFailed;
             if (write and write_deadline == null) {
-                write_deadline = try std.math.add(u64, native.now(), wallpaper.wayland_wait_milliseconds);
+                write_deadline = try std.math.add(u64, resident.now(), wallpaper.wayland_wait_milliseconds);
             }
             var fds = [_]std.posix.pollfd{
                 .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
                 .{
                     .fd = wl.wl_display_get_fd(native.display.?),
-                    .events = std.posix.POLL.IN | if (write) std.posix.POLL.OUT else 0,
+                    .events = std.posix.POLL.IN | if (write) std.posix.POLL.OUT else @as(i16, 0),
                     .revents = 0,
                 },
                 .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
@@ -502,14 +530,15 @@ pub const Native = struct {
                 if (deadline) |wait_end| @min(flush_end, wait_end) else flush_end
             else
                 deadline;
-            const count = try native.pollUntil(&fds, poll_deadline, timeout_ms == 0);
+            const count = try resident.pollUntil(&fds, poll_deadline, timeout_ms == 0);
             const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
             if (fds[0].revents != 0) {
                 wl.wl_display_cancel_read(native.display.?);
                 prepared = false;
                 var record: [128]u8 = undefined;
+                const stop: std.Io.File = .{ .handle = stop_fd, .flags = .{ .nonblocking = true } };
                 if (fds[0].revents & std.posix.POLL.IN != 0 and
-                    try std.posix.read(stop_fd, &record) != record.len)
+                    try stop.readStreaming(resident.io, &.{&record}) != record.len)
                 {
                     return error.StopRecordIncomplete;
                 }
@@ -610,7 +639,7 @@ pub const Native = struct {
             @intCast(result)
         else
             return error.SocketOpenFailed;
-        errdefer std.posix.close(fd);
+        errdefer _ = std.posix.system.close(fd);
         var address: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = @splat(0) };
         @memcpy(address.path[0..path.len], path);
         const length: std.posix.socklen_t = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + path.len + 1);
@@ -744,7 +773,7 @@ pub fn openStop() !Stop {
 
 /// Closes the signalfd and restores the prior signal mask.
 pub fn closeStop(stop: Stop) void {
-    std.posix.close(stop.fd);
+    _ = std.posix.system.close(stop.fd);
     std.posix.sigprocmask(std.posix.SIG.SETMASK, &stop.prior_mask, null);
 }
 
@@ -785,7 +814,7 @@ const Surface = struct {
 
     fn destroyLocal(surface: *Surface) void {
         if (surface.mapping) |mapping| std.posix.munmap(mapping);
-        if (surface.shm_fd) |fd| std.posix.close(fd);
+        if (surface.shm_fd) |fd| _ = std.posix.system.close(fd);
     }
 };
 
@@ -1000,6 +1029,12 @@ fn monitorIndex(snapshot: *const wallpaper.Snapshot, name: []const u8) ?u8 {
 fn contains(handles: []const wallpaper.SurfaceHandle, needle: wallpaper.SurfaceHandle) bool {
     for (handles) |handle| if (handle == needle) return true;
     return false;
+}
+
+test "absent display zero wait polls no Wayland descriptor" {
+    var native = Native{ .io = std.testing.io };
+    const ready = try native.wait(&native, -1, -1, 0);
+    try std.testing.expectEqual(wallpaper.Ready{}, ready);
 }
 
 fn surfaceParity(

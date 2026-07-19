@@ -2141,6 +2141,7 @@ phased_checkpoints:
           transcript histories, Smith properties, comments, and negative scans.
       - order: 3
         id: product_entry
+        state: reviewer_accepted_ready_to_commit
         gate: >
           Add Cmd/main/build wiring within 1700 production characters and
           prove notification/apps paths do not perform wallpaper intake.
@@ -2233,6 +2234,62 @@ phased_checkpoints:
         red by 5079 characters and remains pending. This checkpoint receipt is
         reviewer accepted, but is not checkpoint-6 or Marathon-8 closure;
         product entry and later scope remain unchanged.
+    reviewer_checkpoint_3_receipt:
+      source_scope:
+        - src/cmd.zig
+        - src/main.zig
+        - src/cli.zig
+        - src/wallpaper_native.zig
+        - build.zig
+      argv: "wayspot-beta wallpaper IMAGE.png"
+      behavior: >
+        Exact wallpaper resolution precedes notification resolution and all
+        desktop-file discovery. Cmd borrows the exact image path. The private
+        main leaf reads both environment values once, builds both paths,
+        decodes one image, owns Stop and socket2, starts with an empty Current
+        and absent event fd, treats Stopped as success, and disconnects the
+        current display before closing resident owners.
+      startup_defects_proven_and_fixed: >
+        Executable instantiation proved that initial zero-time waiting could
+        dereference an absent display and that Native had never been compiled
+        against the stable Resident/current-display call shape. Native now
+        polls only stop/socket2 while display is absent, and its concrete I/O
+        operations use Zig 0.16 File semantics reached by the product path.
+      tests:
+        added: 2
+        total: 524
+        proof: >
+          Exact borrowed wallpaper argv and every missing/extra form are
+          covered. Native zero-time waiting with absent display and both absent
+          borrowed fds returns idle without a Wayland descriptor. Existing
+          Transcript convergence, cleanup, picker, apps, and notification
+          histories remain unchanged.
+      production_nonwhitespace:
+        method: source before the first test declaration with ASCII whitespace removed
+        baseline_0e10c9c: 51669
+        entry_wiring:
+          cmd: 216
+          main: 1242
+          cli: 32
+          total: 1490
+          tripwire: 1700
+          headroom: 210
+        proven_native_startup_and_linkage_repairs: 369
+        current: 53528
+        whole_checkpoint_delta: 1859
+      runtime_not_live:
+        compositor_launched: false
+        invalid_argv: {status: 2, desktop_discovery: false, wallpaper_intake: false}
+        missing_environment: {status: 1, image_open: false, compositor_open: false}
+        missing_image: {status: 1, compositor_open: false}
+        executable_linkage: >
+          zig build resolves wallpaper_native from main and links SDL,
+          wayland-client, wlr-layer-shell-unstable-v1 private code, and
+          viewporter private code into wayspot-beta.
+      carried_gate: >
+        The whole checkpoint-6 mandatory final production ceiling of 46590 is
+        red by 6938 characters and remains pending. This receipt is not
+        checkpoint-6 or Marathon-8 closure.
     tests:
       unit:
         - exact wallpaper argv and every missing/extra argument rejection
