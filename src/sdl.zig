@@ -224,7 +224,8 @@ pub const Native = struct {
         const row_pixels = pixels.row(index);
         const row_rect = nativeRect(row_pixels);
         const color: [3]u8 = if (selected) .{ 130, 190, 255 } else .{ 210, 210, 215 };
-        if (!sdl.SDL_SetRenderDrawColor(renderer, if (selected) 48 else 24, if (selected) 55 else 24, if (selected) 72 else 30, 255)) {
+        const background: [3]u8 = if (selected) .{ 48, 55, 72 } else .{ 24, 24, 30 };
+        if (!sdl.SDL_SetRenderDrawColor(renderer, background[0], background[1], background[2], 255)) {
             return error.SdlDrawFailed;
         }
         if (!sdl.SDL_RenderFillRect(renderer, &row_rect)) return error.SdlDrawFailed;

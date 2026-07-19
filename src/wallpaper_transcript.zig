@@ -352,7 +352,12 @@ const Resident = struct {
         resident.record(.image_close);
     }
 
-    pub fn decode(resident: *Resident, allocator: std.mem.Allocator, _: wallpaper.ImageFormat, _: []const u8) !wallpaper.Image {
+    pub fn decode(
+        resident: *Resident,
+        allocator: std.mem.Allocator,
+        _: wallpaper.ImageFormat,
+        _: []const u8,
+    ) !wallpaper.Image {
         if (resident.image_failures > 0) {
             resident.image_failures -= 1;
             return error.ImageDecodeFailed;
@@ -360,10 +365,6 @@ const Resident = struct {
         const pixels = try allocator.alloc(u32, 2);
         @memset(pixels, 0xff203040);
         return .{ .width = 2, .height = 1, .pitch = 8, .pixels = pixels };
-    }
-
-    pub fn currentUsable(_: *Resident, native: *Transcript) bool {
-        return native.connected;
     }
 
     pub fn wait(
@@ -1116,7 +1117,11 @@ test "stop after publication replies error and every retirement failure keeps va
             },
             else => {},
         };
-        if (failure == null) try std.testing.expect(failed and !success) else try std.testing.expect(success and !failed);
+        if (failure == null) {
+            try std.testing.expect(failed and !success);
+        } else {
+            try std.testing.expect(success and !failed);
+        }
         if (current.round.monitors.count > 0) {
             try wallpaper.releaseRound(current.native, &current.round, false);
         }
@@ -1372,8 +1377,14 @@ test "partial preparation discards only new resources in reverse" {
         error.SimulatedFailure,
         wallpaper.prepareRound(&transcript, std.testing.allocator, &snapshot, &image),
     );
-    try std.testing.expectEqual(Operation{ .discard = .{ .index = 1, .generation = 2 } }, transcript.operations[transcript.count - 2]);
-    try std.testing.expectEqual(Operation{ .discard = .{ .index = 0, .generation = 1 } }, transcript.operations[transcript.count - 1]);
+    try std.testing.expectEqual(
+        Operation{ .discard = .{ .index = 1, .generation = 2 } },
+        transcript.operations[transcript.count - 2],
+    );
+    try std.testing.expectEqual(
+        Operation{ .discard = .{ .index = 0, .generation = 1 } },
+        transcript.operations[transcript.count - 1],
+    );
 }
 
 test "every preparation task failure leaves no prepared resource" {

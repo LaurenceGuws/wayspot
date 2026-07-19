@@ -1,4 +1,4 @@
-//! Builds the small set of PNG paths used by the first icon experiment.
+//! Builds the small set of PNG paths used by the application picker.
 
 const std = @import("std");
 

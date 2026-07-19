@@ -209,7 +209,7 @@ pub const Matches = struct {
     }
 };
 
-/// Finds one bounded match for GUI, CLI, and future shell adapters.
+/// Finds one bounded match for the GUI and CLI.
 pub fn find(app: App, query: []const u8) ?Match {
     std.debug.assert(query.len <= query_capacity);
     if (query.len == 0) return .{ .kind = .exact };

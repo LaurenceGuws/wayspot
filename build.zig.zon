@@ -21,9 +21,11 @@
         "build_libs.zig",
         "build.zig.zon",
         "assets",
+        "protocols",
         "src",
         "vendor/freetype",
         "vendor/sdl",
         "vendor/sdl_ttf",
+        "vendor/stb",
     },
 }

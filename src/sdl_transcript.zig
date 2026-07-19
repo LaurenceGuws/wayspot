@@ -589,8 +589,10 @@ test "missing history is empty and read failures clean SDL exactly" {
 fn retainedHistory() !notification_history.History {
     return notification_history.parse(
         std.testing.allocator,
-        "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\",\"summary\":\"first\",\"body\":\"old body\"}\n" ++
-            "{\"received_unix_seconds\":2,\"history_id\":2,\"app_name\":\"new\",\"summary\":\"second\",\"body\":\"new body\"}\n",
+        "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\"," ++
+            "\"summary\":\"first\",\"body\":\"old body\"}\n" ++
+            "{\"received_unix_seconds\":2,\"history_id\":2,\"app_name\":\"new\"," ++
+            "\"summary\":\"second\",\"body\":\"new body\"}\n",
         2,
     );
 }

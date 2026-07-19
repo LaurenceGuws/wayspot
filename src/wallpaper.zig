@@ -555,7 +555,10 @@ pub fn reconcile(
             if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
                 break :attempt_work null;
             }
-            if (!force_publication and snapshot.eql(&current.round.monitors) and !resident.outputsChanged(current.native)) {
+            if (!force_publication and
+                snapshot.eql(&current.round.monitors) and
+                !resident.outputsChanged(current.native))
+            {
                 work.* = .idle;
                 return .unchanged;
             }
@@ -856,14 +859,26 @@ fn rotateOnce(
         var published = false;
         defer if (!published) next.deinit(allocator);
         work.* = .refresh;
-        const outcome = reconcile(resident, allocator, &next, true, current, stop_fd, event_fd, paths, lines, work) catch |err| {
+        const outcome = reconcile(
+            resident,
+            allocator,
+            &next,
+            true,
+            current,
+            stop_fd,
+            event_fd,
+            paths,
+            lines,
+            work,
+        ) catch |err| {
             if (err == error.Stopped) {
                 if (direct) resident.replyRotation(false);
                 return err;
             }
             continue;
         };
-        if (outcome == .unchanged or current.round.monitors.count == 0 or !resident.currentUsable(current.native)) continue;
+        if (outcome == .unchanged) continue;
+        std.debug.assert(current.round.monitors.count > 0);
         image.deinit(allocator);
         image.* = next;
         catalog.published = index;
@@ -1495,7 +1510,8 @@ test "alternative selection draw bound covers every cursor and skipped index" {
         var catalog = Catalog{ .allocator = std.testing.allocator, .prng = .init(19) };
         defer catalog.deinit();
         for (0..file_count) |index| {
-            try catalog.paths.append(std.testing.allocator, try std.fmt.allocPrint(std.testing.allocator, "{d}.png", .{index}));
+            const name = try std.fmt.allocPrint(std.testing.allocator, "{d}.png", .{index});
+            try catalog.paths.append(std.testing.allocator, name);
             try catalog.order.append(std.testing.allocator, @intCast(index));
         }
         catalog.cursor = cursor;
@@ -1523,14 +1539,18 @@ test "rotation request framing is exact and unconditionally fuzz discoverable" {
     try std.testing.expectEqual(RotationRequest.rotate, classifyRotationRequest("rotate\n"));
     try std.testing.expectEqual(RotationRequest.incomplete, classifyRotationRequest("rotate"));
     try std.testing.expectEqual(RotationRequest.invalid, classifyRotationRequest("rotate\nextra"));
-    try std.testing.fuzz({}, fuzzRotationRequest, .{ .corpus = &.{ "", "r", "rotate\n", "rotate", "rotate\nextra", "\x00" } });
+    try std.testing.fuzz({}, fuzzRotationRequest, .{
+        .corpus = &.{ "", "r", "rotate\n", "rotate", "rotate\nextra", "\x00" },
+    });
 }
 
 fn fuzzRotationRequest(_: void, smith: *std.testing.Smith) !void {
     var bytes: [32]u8 = undefined;
     const input = bytes[0..smith.slice(&bytes)];
     switch (classifyRotationRequest(input)) {
-        .incomplete => try std.testing.expect(input.len < "rotate\n".len and std.mem.eql(u8, input, "rotate\n"[0..input.len])),
+        .incomplete => try std.testing.expect(
+            input.len < "rotate\n".len and std.mem.eql(u8, input, "rotate\n"[0..input.len]),
+        ),
         .rotate => try std.testing.expectEqualStrings("rotate\n", input),
         .invalid => {},
     }
@@ -1605,11 +1625,19 @@ test "catalog transcript sorts before shuffle and closes on every outcome" {
     for (a.paths.items, b.paths.items) |left, right| try std.testing.expectEqualStrings(left, right);
     try std.testing.expectEqualSlices(u16, a.order.items, b.order.items);
 
-    var stat_failure = CatalogTranscript{ .entries = &.{.{ .name = "a.png", .kind = .unknown, .stat_fails = true }} };
+    var stat_failure = CatalogTranscript{
+        .entries = &.{.{ .name = "a.png", .kind = .unknown, .stat_fails = true }},
+    };
     try std.testing.expectError(error.StatFailed, collectCatalog(&stat_failure, std.testing.allocator, "/root"));
     try std.testing.expect(stat_failure.closed);
-    var entropy_failure = CatalogTranscript{ .entries = &.{.{ .name = "a.png", .kind = .file }}, .entropy_fails = true };
-    try std.testing.expectError(error.EntropyUnavailable, collectCatalog(&entropy_failure, std.testing.allocator, "/root"));
+    var entropy_failure = CatalogTranscript{
+        .entries = &.{.{ .name = "a.png", .kind = .file }},
+        .entropy_fails = true,
+    };
+    try std.testing.expectError(
+        error.EntropyUnavailable,
+        collectCatalog(&entropy_failure, std.testing.allocator, "/root"),
+    );
     try std.testing.expect(entropy_failure.closed);
 }
 
@@ -1645,13 +1673,19 @@ test "catalog exact entry file and path bounds accept then reject without partia
     one.deinit();
     try std.testing.expect(entries_ok.closed);
     var entries_over = GeneratedCatalog{ .count = catalog_entry_capacity + 1, .accepted = 1 };
-    try std.testing.expectError(error.WallpaperEntryCapacityExceeded, collectCatalog(&entries_over, std.testing.allocator, "/r"));
+    try std.testing.expectError(
+        error.WallpaperEntryCapacityExceeded,
+        collectCatalog(&entries_over, std.testing.allocator, "/r"),
+    );
     try std.testing.expect(entries_over.closed);
     var files_ok = GeneratedCatalog{ .count = catalog_file_capacity, .accepted = catalog_file_capacity };
     var full = try collectCatalog(&files_ok, std.testing.allocator, "/r");
     full.deinit();
     var files_over = GeneratedCatalog{ .count = catalog_file_capacity + 1, .accepted = catalog_file_capacity + 1 };
-    try std.testing.expectError(error.WallpaperFileCapacityExceeded, collectCatalog(&files_over, std.testing.allocator, "/r"));
+    try std.testing.expectError(
+        error.WallpaperFileCapacityExceeded,
+        collectCatalog(&files_over, std.testing.allocator, "/r"),
+    );
     const exact = "a" ** catalog_path_capacity;
     var path_ok = CatalogTranscript{ .entries = &.{.{ .name = exact[0 .. exact.len - 4] ++ ".png", .kind = .file }} };
     var bounded = try collectCatalog(&path_ok, std.testing.allocator, "/r");

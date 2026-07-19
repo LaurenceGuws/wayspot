@@ -120,7 +120,10 @@ pub const Native = struct {
             std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
             0,
         );
-        const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.RotationSocketOpenFailed;
+        const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
+            @intCast(result)
+        else
+            return error.RotationSocketOpenFailed;
         errdefer _ = std.posix.system.close(fd);
         switch (std.posix.errno(std.posix.system.bind(fd, @ptrCast(&address.value), address.length))) {
             .SUCCESS => {},
@@ -150,7 +153,10 @@ pub const Native = struct {
                 null,
                 std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
             );
-            native.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS) @intCast(accepted) else return error.RotationAcceptFailed;
+            native.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS)
+                @intCast(accepted)
+            else
+                return error.RotationAcceptFailed;
             errdefer {
                 _ = std.posix.system.close(native.rotate_client);
                 native.rotate_client = -1;
@@ -604,10 +610,6 @@ pub const Native = struct {
         return changed;
     }
 
-    pub fn currentUsable(_: *Native, native: *Native) bool {
-        return native.display != null and !native.failed;
-    }
-
     /// Borrows resident fds for one bounded poll; stop wins and timeout zero still polls once.
     pub fn wait(
         resident: *Native,
@@ -827,7 +829,12 @@ pub const Native = struct {
         return fd;
     }
 
-    pub fn decode(_: *Native, allocator: std.mem.Allocator, format: wallpaper.ImageFormat, bytes: []const u8) !wallpaper.Image {
+    pub fn decode(
+        _: *Native,
+        allocator: std.mem.Allocator,
+        format: wallpaper.ImageFormat,
+        bytes: []const u8,
+    ) !wallpaper.Image {
         if (format == .jpeg) return decodeJpeg(allocator, bytes);
         const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse return error.ImageStreamFailed;
         const decoded = sdl.SDL_LoadPNG_IO(stream, true) orelse return error.ImageDecodeFailed;
@@ -935,7 +942,10 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
         std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
         0,
     );
-    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.RotationSocketOpenFailed;
+    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
+        @intCast(result)
+    else
+        return error.RotationSocketOpenFailed;
     defer _ = std.posix.system.close(fd);
     switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
         .SUCCESS => {},
@@ -992,8 +1002,12 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
 fn pollDirect(fd: std.posix.fd_t, events: i16) !void {
     var descriptors = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
     if (try std.posix.poll(&descriptors, 2000) == 0) return error.RotationTimedOut;
-    if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationSocketFailed;
-    if (events == std.posix.POLL.OUT and descriptors[0].revents & std.posix.POLL.HUP != 0) return error.RotationSocketFailed;
+    if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) {
+        return error.RotationSocketFailed;
+    }
+    if (events == std.posix.POLL.OUT and descriptors[0].revents & std.posix.POLL.HUP != 0) {
+        return error.RotationSocketFailed;
+    }
 }
 
 /// Builds both bounded Hyprland Unix paths; invalid components publish no partial paths.
@@ -1491,20 +1505,14 @@ test "request wait drains bytes before peer close and then observes EOF" {
     try std.testing.expectEqual(@as(usize, 0), try native.readReply(sockets[1], &bytes));
 }
 
-test "native PNG file decode and linear cover scaling" {
+test "native PNG decode and linear cover scaling" {
     const png =
         "\x89PNG\r\n\x1a\n" ++
         "\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
         "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xd0\x00\x00\x04\x81\x01\x80\x2c\x55\xce\xb0" ++
         "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "one.png", .data = png });
-    const path = try temporary.dir.realPathFileAlloc(std.testing.io, "one.png", std.testing.allocator);
-    defer std.testing.allocator.free(path);
-
     var native = Native{ .io = std.testing.io };
-    var image = try wallpaper.loadImage(&native, std.testing.allocator, path);
+    var image = try native.decode(std.testing.allocator, .png, png);
     defer image.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
@@ -1513,30 +1521,28 @@ test "native PNG file decode and linear cover scaling" {
     defer pixels.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 12), pixels.pitch);
     for (pixels.pixels) |pixel| try std.testing.expectEqual(@as(u32, 0xff800000), pixel);
-    try std.testing.expect(native.file == null);
 }
 
-test "native malformed PNG closes its file and publishes no image" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
+test "native malformed PNG publishes no image" {
     var png: [24]u8 = @splat(0);
     @memcpy(png[0..8], "\x89PNG\r\n\x1a\n");
     @memcpy(png[12..16], "IHDR");
     std.mem.writeInt(u32, png[16..20], 1, .big);
     std.mem.writeInt(u32, png[20..24], 1, .big);
-    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "broken.png", .data = &png });
-    const path = try temporary.dir.realPathFileAlloc(std.testing.io, "broken.png", std.testing.allocator);
-    defer std.testing.allocator.free(path);
     var native = Native{ .io = std.testing.io };
     try std.testing.expectError(
         error.ImageDecodeFailed,
-        wallpaper.loadImage(&native, std.testing.allocator, path),
+        native.decode(std.testing.allocator, .png, &png),
     );
-    try std.testing.expect(native.file == null);
 }
 
 test "native JPEG memory boundary decodes and frees one bounded image" {
-    const encoded = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8APg3Lr//Z";
+    const encoded =
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4R" ++
+        "DgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU" ++
+        "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAA" ++
+        "CP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP" ++
+        "/aAAwDAQACEQMRAD8APg3Lr//Z";
     var bytes: [285]u8 = undefined;
     try std.base64.standard.Decoder.decode(&bytes, encoded);
     var native = Native{ .io = std.testing.io };
@@ -1550,7 +1556,10 @@ test "native JPEG memory boundary decodes and frees one bounded image" {
 test "abstract rotation endpoint is exact single-instance kernel state" {
     const signature = "x" ** 62;
     const address = try abstractAddress(signature);
-    try std.testing.expectEqual(@as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 85), address.length);
+    try std.testing.expectEqual(
+        @as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 85),
+        address.length,
+    );
     try std.testing.expectEqual(@as(u8, 0), address.value.path[0]);
     try std.testing.expectEqualStrings("wayspot-beta-wallpaper:" ++ signature, address.value.path[1..][0..85]);
     var resident = Native{ .io = std.testing.io };
@@ -1609,7 +1618,10 @@ fn connectRotationTest(signature: []const u8) !std.posix.fd_t {
         std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
         0,
     );
-    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS) @intCast(result) else return error.TestSocketFailed;
+    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
+        @intCast(result)
+    else
+        return error.TestSocketFailed;
     errdefer _ = std.posix.system.close(fd);
     switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
         .SUCCESS => {},
@@ -1645,7 +1657,9 @@ test "native unsupported IO acquires no file" {
 
 test "bounded malformed image data publishes no partial image" {
     try std.testing.fuzz(wallpaper.ImageFormat.png, fuzzImage, .{ .corpus = &.{ "", "not png" } });
-    try std.testing.fuzz(wallpaper.ImageFormat.jpeg, fuzzImage, .{ .corpus = &.{ "", "\xff\xd8\xff\xd9", "not jpeg" } });
+    try std.testing.fuzz(wallpaper.ImageFormat.jpeg, fuzzImage, .{
+        .corpus = &.{ "", "\xff\xd8\xff\xd9", "not jpeg" },
+    });
 }
 
 fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {

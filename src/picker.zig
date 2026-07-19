@@ -392,7 +392,8 @@ fn scroll(state: *State, total: usize, rows: i8) void {
     if (total == 0) {
         state.selected = 0;
     } else {
-        state.selected = std.math.clamp(state.selected, state.first, @min(total - 1, state.first + visible_row_capacity - 1));
+        const last_visible = @min(total - 1, state.first + visible_row_capacity - 1);
+        state.selected = std.math.clamp(state.selected, state.first, last_visible);
     }
 }
 
