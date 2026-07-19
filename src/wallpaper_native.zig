@@ -19,14 +19,14 @@ pub const Native = struct {
     viewporter: ?*wl.wp_viewporter = null,
     layer_shell: ?*wl.zwlr_layer_shell_v1 = null,
     output_globals: [wallpaper.monitor_capacity]u32 = undefined,
+    output_global_count: u8 = 0,
+    outputs: [wallpaper.monitor_capacity]?*wl.wl_output = @splat(null),
     output_count: u8 = 0,
-    output: ?*wl.wl_output = null,
-    output_name: [wallpaper.monitor_name_capacity]u8 = undefined,
-    output_name_length: u8 = 0,
+    output_snapshot: ?wallpaper.Snapshot = null,
     probe: OutputProbe = .{},
     global_count: u8 = 0,
     failed: bool = false,
-    surface: Surface = .{},
+    surfaces: [wallpaper.surface_resource_capacity]Surface = @splat(.{}),
     next_surface_generation: u32 = 1,
 
     pub fn open(native: *Native, path: []const u8) !void {
@@ -52,7 +52,13 @@ pub const Native = struct {
         native.file = null;
     }
 
-    pub fn openOutput(native: *Native, name: []const u8) !void {
+    pub fn openOutputs(native: *Native, snapshot: *const wallpaper.Snapshot) !void {
+        if (native.display != null) {
+            if (native.output_snapshot == null or !native.output_snapshot.?.eql(snapshot)) {
+                return error.WaylandOutputChanged;
+            }
+            return;
+        }
         std.debug.assert(native.display == null);
         native.display = wl.wl_display_connect(null) orelse return error.WaylandConnectFailed;
         errdefer native.disconnect();
@@ -63,11 +69,11 @@ pub const Native = struct {
         }
         try native.roundtrip();
         if (native.compositor == null or native.shm == null or native.viewporter == null or
-            native.layer_shell == null or native.output_count == 0)
+            native.layer_shell == null or native.output_global_count == 0)
         {
             return error.WaylandGlobalMissing;
         }
-        for (native.output_globals[0..native.output_count]) |global| {
+        for (native.output_globals[0..native.output_global_count]) |global| {
             native.probe = .{};
             const proxy: *wl.wl_output = @ptrCast(wl.wl_registry_bind(
                 native.registry_proxy,
@@ -85,20 +91,20 @@ pub const Native = struct {
                 return error.WaylandOutputIncomplete;
             }
             const probe_name = native.probe.name_bytes[0..native.probe.name_length];
-            if (!std.mem.eql(u8, probe_name, name)) continue;
-            if (native.output != null) return error.WaylandOutputDuplicate;
-            native.output = proxy;
+            const index = monitorIndex(snapshot, probe_name) orelse continue;
+            if (native.outputs[index] != null) return error.WaylandOutputDuplicate;
+            native.outputs[index] = proxy;
+            native.output_count += 1;
             retained = true;
-            @memcpy(native.output_name[0..native.probe.name_length], probe_name);
-            native.output_name_length = native.probe.name_length;
         }
-        if (native.output == null) return error.WaylandOutputMissing;
+        if (native.output_count != snapshot.count) return error.WaylandOutputMissing;
+        native.output_snapshot = snapshot.*;
     }
 
     pub fn disconnect(native: *Native) void {
         if (native.display == null) return;
-        std.debug.assert(!native.surface.occupied);
-        if (native.output) |proxy| wl.wl_output_release(proxy);
+        for (&native.surfaces) |*surface| std.debug.assert(surface.state == .vacant);
+        for (native.outputs) |proxy| if (proxy) |output| wl.wl_output_release(output);
         if (native.layer_shell) |proxy| wl.zwlr_layer_shell_v1_destroy(proxy);
         if (native.viewporter) |proxy| wl.wp_viewporter_destroy(proxy);
         if (native.shm) |proxy| wl.wl_shm_destroy(proxy);
@@ -111,26 +117,35 @@ pub const Native = struct {
         native.shm = null;
         native.viewporter = null;
         native.layer_shell = null;
+        native.output_global_count = 0;
+        native.outputs = @splat(null);
         native.output_count = 0;
-        native.output = null;
-        native.output_name_length = 0;
+        native.output_snapshot = null;
     }
 
     pub fn prepare(
         native: *Native,
+        monitor_index: u8,
         monitor: *const wallpaper.Monitor,
         pixels: *const wallpaper.Image,
     ) !wallpaper.SurfaceHandle {
-        if (!std.mem.eql(u8, native.output_name[0..native.output_name_length], monitor.name())) {
+        const snapshot = native.output_snapshot orelse return error.WaylandOutputMissing;
+        if (monitor_index >= snapshot.count or native.outputs[monitor_index] == null) {
             return error.WaylandOutputMissing;
         }
-        if (native.surface.occupied) return error.SurfaceOccupied;
+        if (!snapshot.monitors[monitor_index].eql(monitor)) return error.WaylandOutputChanged;
         if (native.next_surface_generation == std.math.maxInt(u32)) return error.SurfaceGenerationExhausted;
-        const handle = wallpaper.SurfaceHandle{ .generation = native.next_surface_generation };
+        const surface_index = for (&native.surfaces, 0..) |*surface, index| {
+            if (surface.state == .vacant) break index;
+        } else return error.SurfaceCapacityExceeded;
+        const handle = wallpaper.SurfaceHandle{
+            .index = @intCast(surface_index),
+            .generation = native.next_surface_generation,
+        };
         native.next_surface_generation += 1;
-        native.surface = .{ .occupied = true, .generation = handle.generation };
-        errdefer native.discard(handle);
-        const surface = &native.surface;
+        const surface = &native.surfaces[surface_index];
+        surface.* = .{ .state = .prepared, .generation = handle.generation };
+        errdefer native.discardPrepared(handle);
         surface.surface = wl.wl_compositor_create_surface(native.compositor.?) orelse
             return error.SurfaceCreateFailed;
         surface.region = wl.wl_compositor_create_region(native.compositor.?) orelse
@@ -141,7 +156,7 @@ pub const Native = struct {
         surface.layer = wl.zwlr_layer_shell_v1_get_layer_surface(
             native.layer_shell.?,
             surface.surface.?,
-            native.output.?,
+            native.outputs[monitor_index].?,
             wl.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
             "wayspot-beta-wallpaper",
         ) orelse return error.SurfaceLayerFailed;
@@ -204,20 +219,104 @@ pub const Native = struct {
         if (wl.wl_buffer_add_listener(surface.buffer, &buffer_listener, surface) != 0) {
             return error.SurfaceBufferFailed;
         }
-        wl.wl_surface_attach(surface.surface.?, surface.buffer, 0, 0);
-        wl.wl_surface_damage_buffer(surface.surface.?, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-        wl.wl_surface_commit(surface.surface.?);
-        surface.committed = true;
-        if (wl.wl_display_flush(native.display.?) < 0) return error.WaylandFlushFailed;
         return handle;
     }
 
-    pub fn release(native: *Native, handle: wallpaper.SurfaceHandle) !void {
-        const surface = try native.checkedSurface(handle);
-        errdefer native.discard(handle);
+    pub fn validatePublication(
+        native: *Native,
+        old: []const wallpaper.SurfaceHandle,
+        next: []const wallpaper.SurfaceHandle,
+    ) !void {
+        if (old.len > wallpaper.monitor_capacity or next.len > wallpaper.monitor_capacity or
+            old.len + next.len == 0)
+        {
+            return error.RoundHandleCountInvalid;
+        }
+        for (old, 0..) |handle, index| {
+            if ((try native.checkedSurface(handle)).state != .published) return error.SurfaceStateInvalid;
+            if (contains(old[0..index], handle) or contains(next, handle)) return error.SurfaceHandleDuplicate;
+        }
+        for (next, 0..) |handle, index| {
+            if ((try native.checkedSurface(handle)).state != .prepared) return error.SurfaceStateInvalid;
+            if (contains(next[0..index], handle)) return error.SurfaceHandleDuplicate;
+        }
+    }
+
+    pub fn queueMap(native: *Native, handle: wallpaper.SurfaceHandle) void {
+        const surface = native.checkedSurface(handle) catch unreachable;
+        std.debug.assert(surface.state == .prepared);
+        wl.wl_surface_attach(surface.surface.?, surface.buffer, 0, 0);
+        wl.wl_surface_damage_buffer(surface.surface.?, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+        wl.wl_surface_commit(surface.surface.?);
+        surface.state = .queued;
+    }
+
+    pub fn queueUnmap(native: *Native, handle: wallpaper.SurfaceHandle) void {
+        const surface = native.checkedSurface(handle) catch unreachable;
+        std.debug.assert(surface.state == .published);
         wl.wl_surface_attach(surface.surface.?, null, 0, 0);
         wl.wl_surface_commit(surface.surface.?);
-        if (wl.wl_display_flush(native.display.?) < 0) return error.WaylandFlushFailed;
+        surface.state = .retiring;
+    }
+
+    pub fn flushPublication(native: *Native, stop_fd: std.posix.fd_t) !void {
+        const started = std.Io.Clock.awake.now(native.io);
+        var flush_count: u8 = 0;
+        var poll_count: u8 = 0;
+        while (flush_count < wallpaper.publication_flush_capacity) {
+            flush_count += 1;
+            const result = wl.wl_display_flush(native.display.?);
+            if (result >= 0) return;
+            const flush_error = std.posix.errno(result);
+            if (flush_error == .INTR) continue;
+            if (flush_error != .AGAIN) return error.WaylandFlushFailed;
+            while (poll_count < wallpaper.publication_poll_capacity) {
+                poll_count += 1;
+                const elapsed = started.durationTo(std.Io.Clock.awake.now(native.io)).toMilliseconds();
+                if (elapsed >= wallpaper.wayland_wait_milliseconds) return error.WaylandFlushTimeout;
+                var descriptors = [_]std.posix.pollfd{
+                    .{
+                        .fd = wl.wl_display_get_fd(native.display.?),
+                        .events = std.posix.POLL.OUT,
+                        .revents = 0,
+                    },
+                    .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+                };
+                const remaining = wallpaper.wayland_wait_milliseconds - elapsed;
+                const timeout = std.posix.timespec{
+                    .sec = @intCast(remaining / 1000),
+                    .nsec = @intCast((remaining % 1000) * std.time.ns_per_ms),
+                };
+                const ready = std.posix.ppoll(&descriptors, &timeout, null) catch |err| switch (err) {
+                    error.SignalInterrupt => continue,
+                    else => return err,
+                };
+                if (ready == 0) return error.WaylandFlushTimeout;
+                const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
+                if (descriptors[1].revents != 0) return error.WaylandFlushStopped;
+                if (descriptors[0].revents & failed != 0) return error.WaylandFlushFailed;
+                if (descriptors[0].revents & std.posix.POLL.OUT != 0) break;
+            } else return error.WaylandFlushAttemptsExceeded;
+        }
+        return error.WaylandFlushAttemptsExceeded;
+    }
+
+    pub fn finishPublication(
+        native: *Native,
+        old: []const wallpaper.SurfaceHandle,
+        next: []const wallpaper.SurfaceHandle,
+    ) void {
+        for (next) |handle| {
+            const surface = native.checkedSurface(handle) catch unreachable;
+            std.debug.assert(surface.state == .queued);
+            surface.state = .published;
+        }
+        for (old) |handle| std.debug.assert((native.checkedSurface(handle) catch unreachable).state == .retiring);
+    }
+
+    pub fn releaseRetired(native: *Native, handle: wallpaper.SurfaceHandle) !void {
+        const surface = try native.checkedSurface(handle);
+        if (surface.state != .retiring) return error.SurfaceStateInvalid;
         const release_started = std.Io.Clock.awake.now(native.io);
         var count: u8 = 0;
         while (!surface.released and count < wallpaper.wayland_release_capacity) : (count += 1) {
@@ -242,19 +341,38 @@ pub const Native = struct {
         surface.* = .{};
     }
 
-    fn discard(native: *Native, handle: wallpaper.SurfaceHandle) void {
+    pub fn discardPrepared(native: *Native, handle: wallpaper.SurfaceHandle) void {
         const surface = native.checkedSurface(handle) catch unreachable;
-        if (surface.committed) native.disconnectDisplayLoss();
+        std.debug.assert(surface.state == .prepared);
         if (native.display != null) surface.destroyProxies();
         surface.destroyLocal();
         surface.* = .{};
     }
 
+    pub fn disconnectAfterDisplayLoss(native: *Native) void {
+        if (native.display) |display| wl.wl_display_disconnect(display);
+        native.display = null;
+        native.registry_proxy = null;
+        native.compositor = null;
+        native.shm = null;
+        native.viewporter = null;
+        native.layer_shell = null;
+        native.outputs = @splat(null);
+        native.output_count = 0;
+        native.output_snapshot = null;
+        for (&native.surfaces) |*surface| {
+            surface.destroyLocal();
+            surface.* = .{};
+        }
+    }
+
     fn checkedSurface(native: *Native, handle: wallpaper.SurfaceHandle) !*Surface {
-        if (!native.surface.occupied or native.surface.generation != handle.generation) {
+        if (handle.index >= wallpaper.surface_resource_capacity) return error.SurfaceHandleInvalid;
+        const surface = &native.surfaces[handle.index];
+        if (surface.state == .vacant or surface.generation == 0 or surface.generation != handle.generation) {
             return error.SurfaceHandleInvalid;
         }
-        return &native.surface;
+        return surface;
     }
 
     fn roundtrip(native: *Native) !void {
@@ -298,17 +416,6 @@ pub const Native = struct {
             return error.WaylandDispatchFailed;
         }
         return true;
-    }
-
-    fn disconnectDisplayLoss(native: *Native) void {
-        wl.wl_display_disconnect(native.display.?);
-        native.display = null;
-        native.registry_proxy = null;
-        native.compositor = null;
-        native.shm = null;
-        native.viewporter = null;
-        native.layer_shell = null;
-        native.output = null;
     }
 
     pub fn decode(_: *Native, allocator: std.mem.Allocator, bytes: []const u8) !wallpaper.Image {
@@ -382,7 +489,7 @@ const OutputProbe = struct {
 };
 
 const Surface = struct {
-    occupied: bool = false,
+    state: enum { vacant, prepared, queued, published, retiring } = .vacant,
     generation: u32 = 0,
     surface: ?*wl.wl_surface = null,
     region: ?*wl.wl_region = null,
@@ -395,7 +502,6 @@ const Surface = struct {
     configure: ?wallpaper.Configure = null,
     configure_count: u8 = 0,
     closed: bool = false,
-    committed: bool = false,
     released: bool = false,
 
     fn destroyProxies(surface: *Surface) void {
@@ -457,12 +563,12 @@ fn registryGlobal(
             &wl.zwlr_layer_shell_v1_interface,
         )) native.failed = true;
     } else if (std.mem.eql(u8, interface_name, "wl_output")) {
-        if (version < 4 or native.output_count == wallpaper.monitor_capacity) {
+        if (version < 4 or native.output_global_count == wallpaper.monitor_capacity) {
             native.failed = true;
             return;
         }
-        native.output_globals[native.output_count] = name;
-        native.output_count += 1;
+        native.output_globals[native.output_global_count] = name;
+        native.output_global_count += 1;
     }
 }
 
@@ -597,11 +703,29 @@ fn rect(x: u32, y: u32, width: u32, height: u32) sdl.SDL_Rect {
     return .{ .x = @intCast(x), .y = @intCast(y), .w = @intCast(width), .h = @intCast(height) };
 }
 
-fn surfaceParity(native: *Native, monitor: *const wallpaper.Monitor, pixels: *const wallpaper.Image) !void {
-    try wallpaper.openOutput(native, monitor.name());
-    defer native.disconnect();
-    const handle = try wallpaper.prepareSurface(native, monitor, pixels);
-    try wallpaper.releaseSurface(native, handle);
+fn monitorIndex(snapshot: *const wallpaper.Snapshot, name: []const u8) ?u8 {
+    for (snapshot.slice(), 0..) |monitor, index| {
+        if (std.mem.eql(u8, monitor.name(), name)) return @intCast(index);
+    }
+    return null;
+}
+
+fn contains(handles: []const wallpaper.SurfaceHandle, needle: wallpaper.SurfaceHandle) bool {
+    for (handles) |handle| if (handle == needle) return true;
+    return false;
+}
+
+fn surfaceParity(
+    native: *Native,
+    allocator: std.mem.Allocator,
+    snapshot: *const wallpaper.Snapshot,
+    image: *const wallpaper.Image,
+    stop_fd: std.posix.fd_t,
+) !void {
+    var next = try wallpaper.prepareRound(native, allocator, snapshot, image);
+    var current: wallpaper.Round = .{};
+    try wallpaper.publishRound(native, &current, &next, stop_fd);
+    try wallpaper.releaseRound(native, &current, stop_fd);
 }
 
 test "native adapter reaches every one-surface operation without a display" {
@@ -624,11 +748,21 @@ test "output probe owns only one exact name and done identity" {
 
 test "surface handles reject absent stale and wrong generations" {
     var native = Native{ .io = std.testing.io };
-    native.surface = .{ .occupied = true, .generation = 7 };
-    _ = try native.checkedSurface(.{ .generation = 7 });
-    try std.testing.expectError(error.SurfaceHandleInvalid, native.checkedSurface(.{ .generation = 8 }));
-    native.surface = .{};
-    try std.testing.expectError(error.SurfaceHandleInvalid, native.checkedSurface(.{ .generation = 7 }));
+    native.surfaces[3] = .{ .state = .prepared, .generation = 7 };
+    _ = try native.checkedSurface(.{ .index = 3, .generation = 7 });
+    try std.testing.expectError(
+        error.SurfaceHandleInvalid,
+        native.checkedSurface(.{ .index = 3, .generation = 8 }),
+    );
+    try std.testing.expectError(
+        error.SurfaceHandleInvalid,
+        native.checkedSurface(.{ .index = 4, .generation = 7 }),
+    );
+    native.surfaces[3] = .{};
+    try std.testing.expectError(
+        error.SurfaceHandleInvalid,
+        native.checkedSurface(.{ .index = 3, .generation = 7 }),
+    );
 }
 
 test "configure histories are bounded" {

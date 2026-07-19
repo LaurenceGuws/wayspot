@@ -836,14 +836,392 @@ phased_checkpoints:
       - ordinary SDL XDG windows are absent
   - order: 4
     id: complete_round_theorem
+    status: implemented_uncommitted_for_review
     product_proof: every bounded current monitor receives one surface in one publication batch
     character_budget: 7500
+    files:
+      - path: src/wallpaper.zig
+        owns: fixed Round value and prepare/publish/release control flow
+      - path: src/wallpaper_native.zig
+        owns: one Wayland connection, exact matched output proxies, and concrete surface resources
+      - path: src/wallpaper_transcript.zig
+        owns: strict operation histories and injected external failures
+      - path: rewrite/08-wallpaper-monitor-surfaces.yml
+        owns: temporary theorem design and receipts
+    production_delta_plan:
+      src/wallpaper.zig: 1800
+      src/wallpaper_native.zig: 4800
+      headroom: 900
+      rule: >
+        Tests and scratchpad text do not count as production. No generated code,
+        compressed names, generic resource manager, or hidden C owner may move
+        cost outside this budget.
+    receipts:
+      baseline_commit: 60820e4
+      production_nonwhitespace_method: >
+        Remove ASCII whitespace from src/wallpaper.zig and
+        src/wallpaper_native.zig at baseline and working tree; transcript and
+        scratchpad are test/design proof, not production.
+      production_nonwhitespace:
+        src/wallpaper.zig: {baseline: 33000, current: 35304, delta: 2304}
+        src/wallpaper_native.zig: {baseline: 21945, current: 26230, delta: 4285}
+        total: {baseline: 54945, current: 61534, delta: 6589, ceiling: 7500, headroom: 911}
+      deterministic_tests: 512
+      retained_output_identity: >
+        Native and Transcript retain one exact Snapshot aligned with outputs.
+        Connected reuse requires Snapshot.eql; prepare checks the exact monitor
+        at its index before generation or resource mutation.
+      native_live_compositor: not_run_by_design
+    declarations: |
+      pub const SurfaceHandle = struct {
+          index: u8,
+          generation: u32,
+      };
+
+      pub const Round = struct {
+          monitors: Snapshot,
+          handles: [monitor_capacity]SurfaceHandle,
+      };
+
+      const SurfaceState = enum {
+          vacant,
+          prepared,
+          queued,
+          published,
+          retiring,
+      };
+
+      const FlushResult = enum {
+          success,
+          would_block,
+          interrupted,
+          failed,
+      };
+
+      const PublicationPollResult = enum {
+          writable,
+          stopped,
+          interrupted,
+          timed_out,
+          display_failed,
+          stop_failed,
+          failed,
+      };
+
+      // wallpaper_native.zig fields, not a reusable manager:
+      outputs: [monitor_capacity]?*wl_output,
+      output_count: u8,
+      surfaces: [surface_resource_capacity]Surface,
+      next_surface_generation: u32,
+    bounds:
+      monitor_capacity: 16
+      output_proxy_capacity: 16
+      surface_resource_capacity: 32
+      surface_resource_reason: >
+        Exactly one current Round plus one replacement Round may coexist.
+        This is not a reusable pool or configurable manager.
+      surface_index_type: u8
+      surface_generation_type: u32
+      surface_generation_rule: zero and maxInt are invalid; exhaustion fails before mutation
+      publication_map_commits: 16
+      publication_unmap_commits: 16
+      publication_batch_capacity: 1
+      publication_flush_attempt_capacity: 16
+      publication_poll_attempt_capacity: 16
+      publication_flush_deadline_milliseconds: 1000
+      configure_dispatches_per_surface: 16
+      release_dispatches_per_surface: 128
+      round_pixel_limit: 67108864
+      round_byte_limit: 268435456
+      compile_time_assertions:
+        - monitor_capacity fits SurfaceHandle.index
+        - surface_resource_capacity equals monitor_capacity times 2
+        - surface_resource_capacity fits SurfaceHandle.index
+        - Snapshot order and Round handle order have the same count
+    output_identity:
+      - >
+        Native binds registry outputs one at a time with the proven wl_output
+        v4 name/done sequence. It compares the completed bounded name against
+        the sorted Snapshot and stores the proxy directly at that monitor index.
+      - >
+        Native does not retain another output name or geometry catalog.
+        Snapshot is the sole monitor fact value; outputs is only an aligned
+        fixed array of concrete proxies.
+      - >
+        An unmatched proxy is released immediately. A second exact match,
+        absent expected match, incomplete name/done, excess global, or wrong
+        version releases every retained proxy and fails before surface
+        preparation.
+      - output_count must equal Snapshot.count before the first surface is prepared
+    ownership:
+      Round:
+        owns:
+          - one Snapshot value sorted by exact monitor name
+          - one checked SurfaceHandle at each corresponding monitor index
+        does_not_own:
+          - wl_output
+          - wl_surface
+          - layer surface
+          - viewport
+          - shm file, mapping, pool, buffer, or callback
+      Native:
+        owns:
+          - one Wayland display and registry on one thread
+          - exact matched wl_output proxies aligned with the active Snapshot
+          - 32 concrete Surface records behind checked handles
+        borrows:
+          - >
+            One stop fd only for the duration of flushPublication. The isolated
+            native theorem test owns it in checkpoint 4; the resident process
+            owns it when checkpoint 5 supplies the runtime call path.
+        handle_check: >
+          Every operation checks index in range, occupied state, and exact
+          nonzero generation. Absent, stale, wrong-state, duplicate, and
+          cross-Round handles fail before requests are queued.
+      Transcript:
+        owns: the same bounded concrete task history without native pointers
+      thread_rule: >
+        Round, Native, callbacks, preparation, publication, and cleanup remain
+        on one resident thread. No mutex, atomics, erased source, or handle
+        transfer exists.
+    functions:
+      wallpaper:
+        - prepareRound(source, allocator, snapshot, image) !Round
+        - publishRound(source, current, next) !void
+        - releaseRound(source, round) !void
+      native:
+        - openOutputs(snapshot) !void
+        - prepare(monitor_index, pixels) !SurfaceHandle
+        - validatePublication(old_handles, next_handles) !void
+        - queueMap(handle) void
+        - queueUnmap(handle) void
+        - flushPublication(stop_fd) !void
+        - finishPublication(old_handles, next_handles) void
+        - discardPrepared(handle) void
+        - releaseRetired(handle) !void
+        - disconnectAfterDisplayLoss() void
+      function_rule: >
+        These are direct operations on the one Native value. There is no
+        manager, slot API, generic collection, vtable, or allocation owner.
+    prepare_sequence:
+      - Open and prove every exact output before preparing any surface.
+      - >
+        For each sorted Monitor, derive target pixels with the proven
+        cover-center operation, prepare one surface against the output at the
+        same index, append its checked handle, and release the temporary target
+        pixels.
+      - >
+        Surface preparation performs the required role requests, empty initial
+        commit, configure dispatch, and ack. Those bounded configure
+        flush/dispatch operations may call wl_display_flush as required to
+        obtain configure. They occur before any final pixel-buffer commit and
+        are not part of the later semantic publication batch.
+      - >
+        Preparation allocates and fills shm and creates the buffer, but does
+        not attach the pixel buffer, damage it, or issue its final commit.
+        Therefore a partially prepared replacement has no mapped new surface.
+      - >
+        Any scale, allocation, configure, shm, or preparation failure discards
+        prepared handles in reverse monitor order. The current Round and its
+        published resources remain untouched.
+    publication_sequence:
+      - >
+        Validate every old and next handle, state, count, uniqueness, and
+        disjointness before queuing the first final request.
+      - Queue attach, damage_buffer, and commit for every next handle in sorted monitor order.
+      - >
+        Queue attach(null) and commit for every current handle in reverse
+        monitor order. Until flush, the compositor still presents the current
+        Round.
+      - >
+        Call flushPublication once for this semantic publication batch. It may
+        call wl_display_flush repeatedly within the exact attempt/deadline
+        bounds because EAGAIN means an unsent suffix remains queued. After
+        complete prevalidation, generated queueMap and queueUnmap calls are
+        infallible; no recoverable branch may add requests to this batch.
+      - >
+        flushPublication calls wl_display_flush first. Success means all
+        buffered requests were sent. EAGAIN polls the display fd for POLLOUT
+        and the borrowed stop fd for input, with stop and error readiness
+        checked before writable readiness, then retries wl_display_flush.
+      - >
+        Poll uses std.posix.ppoll with a monotonic absolute deadline recomputed
+        before every call. SignalInterrupt consumes one poll attempt and
+        retries only while both attempt and deadline bounds remain. No
+        Wayland prepare_read, read_events, dispatch, callback, or unrelated
+        request may interleave after the publication batch has been queued.
+      - >
+        Each wl_display_flush invocation consumes one flush attempt. Each
+        std.posix.ppoll invocation, including SignalInterrupt, consumes one
+        poll attempt. The absolute deadline is checked before both operations;
+        EAGAIN at the final flush attempt and interruption at the final poll
+        attempt fail without one extra call.
+      - >
+        The pinned wl_connection_flush retries sendmsg EINTR internally.
+        A caller-visible wl_display_flush EINTR still consumes one flush
+        attempt and retries directly without polling. EAGAIN consumes a flush
+        attempt and requires one bounded writable poll before another flush.
+      - >
+        Stop readiness, non-EAGAIN flush failure, poll failure, display
+        POLLERR/POLLHUP/POLLNVAL, stop-fd error readiness, timeout, or attempt
+        exhaustion is unknown-prefix fatal display loss. If stop and POLLOUT
+        are simultaneous, stop wins. Display POLLIN is not requested or read.
+      - >
+        Only successful completion of flushPublication swaps current to next
+        and clears the caller's next value. The old handles become retiring
+        and are released in reverse acquisition order after bounded
+        wl_buffer.release dispatch.
+      - >
+        One successful semantic publication batch only submits one ordered
+        request sequence. It is not physical cross-output atomicity and does
+        not promise one compositor frame across monitors.
+    old_round_semantics:
+      initial: current is an empty Round; successful publication installs the first complete Round
+      replacement_scope: >
+        Checkpoint 4 may replace only the same exact Snapshot. Monitor-set
+        change and independent protocol convergence remain checkpoint 5.
+      before_queue_failure: old Round remains published, valid, and byte-for-byte unchanged
+      preparation_failure: old Round remains published; all prepared new resources are discarded
+      validation_failure: no final map or unmap request is queued; old Round remains published
+      flush_failure: >
+        The logical Round pointer is not swapped. Any terminal
+        flushPublication result may follow one or more partial writes, so
+        physical old/new presentation cannot be claimed. Treat the display as
+        lost, disconnect first, invalidate and clean both Round resource sets
+        locally, and exit visibly.
+      post_flush_release_failure: >
+        The new Round has been published and owns current identity. Failure to
+        receive bounded old buffer releases is fatal display-loss cleanup:
+        disconnect first, then destroy/unmap local resources and exit.
+    cleanup:
+      prepared_not_committed:
+        order:
+          - destroy buffer
+          - destroy shm pool
+          - unmap shm
+          - close shm file
+          - destroy viewport
+          - destroy layer surface
+          - destroy wl_surface
+        round_order: reverse monitor acquisition
+      retired_after_successful_flush:
+        order:
+          - wait boundedly for wl_buffer.release with stop priority
+          - destroy buffer
+          - destroy shm pool
+          - unmap shm
+          - close shm file
+          - destroy viewport
+          - destroy layer surface
+          - destroy wl_surface
+        round_order: reverse monitor acquisition
+      healthy_stop:
+        rule: >
+          Queue every current null attach/commit, run one bounded semantic flush
+          operation for orderly unmap, wait boundedly for releases, then use
+          the retired cleanup order.
+      display_loss:
+        rule: >
+          Disconnect Wayland before destroying or unmapping any local resource
+          the compositor might still read. No callback wait occurs afterward.
+      outputs: release exact retained output proxies after all surfaces, then registry and display
+      exactly_once: every occupied Surface record reaches vacant once; stale handles then reject
+    failure_meaning:
+      duplicate_or_missing_output: no surface preparation begins
+      partial_preparation: no new pixel buffer was committed; replacement is discarded
+      invalid_handle_or_state: no publication request is queued
+      publication_flush_failure: fatal display loss; no Round swap and no physical atomicity claim
+      publication_stop_or_timeout: fatal display loss because an unknown request prefix may have been sent
+      release_timeout_or_dispatch_failure: fatal display loss after the successful logical swap
+      generation_exhaustion: visible failure before slot or Round mutation
+    publication_flush_references:
+      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+        lines: 2434-2467
+        proves: >
+          wl_display_flush is nonblocking, may send only a prefix, returns
+          EAGAIN while bytes remain queued, and requires polling the display fd
+          writable before retry.
+      - path: /home/home/personal/projects/dev_references/backends/wayland/src/connection.c
+        lines: 447-516
+        proves: >
+          wl_connection_flush advances the outgoing ring after each partial
+          sendmsg and retries sendmsg EINTR internally.
+      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+        lines: 2034-2121
+        proves: >
+          Wayland's bounded dispatch implementation recomputes a monotonic
+          deadline, polls POLLOUT after EAGAIN, and retries flush.
+      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+        lines: 995-1050
+        proves: >
+          std.posix.poll retries EINTR internally with its original timeout,
+          while std.posix.ppoll reports SignalInterrupt so Wayspot can
+          recompute one absolute deadline and retain exact attempt bounds.
+    transcript_operations:
+      - bind_output(monitor_index)
+      - output_name(monitor_index)
+      - output_done(monitor_index)
+      - release_unmatched_output
+      - prepare_surface(monitor_index, handle)
+      - discard_prepared(handle)
+      - validate_publication(old_count, next_count)
+      - queue_map(handle)
+      - queue_unmap(handle)
+      - flush_publication(result)
+      - publication_time(monotonic_nanoseconds)
+      - poll_publication(display_revents, stop_revents, result)
+      - finish_publication
+      - wait_buffer_release(handle)
+      - release_retired(handle)
+      - disconnect_display
+    deterministic_tests:
+      - exact one-monitor and sixteen-monitor output-to-handle mappings
+      - unmatched outputs release immediately; duplicate and missing expected outputs reject
+      - every output is proven before the first surface preparation
+      - partial preparation at every monitor index discards new handles in reverse order
+      - pixel scaling or allocation failure publishes no handle and leaves old Round unchanged
+      - absent, stale, wrong-generation, wrong-state, duplicate, and overlapping handles reject before queueing
+      - all next maps and old unmaps form exactly one semantic publication batch
+      - immediate flush success performs no publication poll and swaps Round once
+      - EAGAIN then display writable then flush success preserves one batch and swaps Round once
+      - repeated EAGAIN reaches the exact flush-attempt endpoint without exceeding it
+      - ppoll SignalInterrupt recomputes the deadline and reaches the exact poll-attempt endpoint
+      - poll timeout, error, HUP, NVAL, and exhausted attempts perform no Round swap
+      - stop readiness wins over simultaneous display writable readiness and performs no Round swap
+      - no Wayland read, dispatch, callback, or request insertion occurs between queued batch and flush success
+      - terminal flushPublication failure disconnects before local resource cleanup
+      - successful semantic batch swaps Round once; old release is reverse and exactly once
+      - release timeout after swap disconnects before local cleanup
+      - initial empty Round, same-Snapshot replacement, and healthy stop have exact histories
+      - every failure injection leaves each concrete resource either owned once or released once
+      - plain transcript tests import no Wayland or libc
+      - native parity reaches every new concrete operation without a live compositor
+    smith_histories:
+      - >
+        Generate monitor counts 1 through 16, old-empty or same-Snapshot
+        replacement, and one bounded failure position. Assert zero or one
+        semantic publication batch, bounded flush/poll attempts, no duplicate
+        live handle, and Round changes if and only if flushPublication succeeds.
+      - >
+        Generate checked/stale/wrong-state handle arrays. Assert rejection
+        precedes queue_map and queue_unmap and all operational histories remain
+        within the fixed two-Round capacity.
+    negative_space:
+      - no resident monitor event loop, hotplug reconciliation, reconnect, or general stop poll
+      - no wallpaper product route, rotation, schedule, randomness, cache, config, or history
+      - no output catalog, copied connector names, geometry/mode/scale callback state, or generic manager
+      - no dynamic surface collection, free list, hash map, vtable, erased handle, thread, mutex, or atomics
+      - no SDL window or SDL-owned Wayland surface
+      - no Wayland event read or dispatch while a queued publication batch is being flushed
+      - no claim of physical cross-output atomic display
     closes_when:
-      - failure before publish leaves zero mapped surfaces
+      - every sorted bounded Monitor maps to one checked handle and exact output proxy
+      - failure before publication leaves zero mapped new surfaces and preserves the old Round
       - duplicate/missing output and mid-preparation failure publish nothing
       - >
-        Every complete monitor commit is queued before one flush and Round
-        changes only after that flush succeeds.
+        Every complete monitor commit belongs to one semantic publication
+        batch and Round changes only after bounded flushPublication succeeds.
+      - stale handles, cleanup order, display loss, and generation exhaustion are executable
   - order: 5
     id: reconcile_and_sleep
     product_proof: add/remove/configure/socket-loss histories converge while unrelated events do no work

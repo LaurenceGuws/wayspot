@@ -19,6 +19,9 @@ pub const wayland_global_capacity = 128;
 pub const wayland_configure_capacity = 16;
 pub const wayland_release_capacity = 128;
 pub const wayland_wait_milliseconds = 1000;
+pub const surface_resource_capacity = monitor_capacity * 2;
+pub const publication_flush_capacity = 16;
+pub const publication_poll_capacity = 16;
 
 pub const Transform = enum(u3) {
     normal,
@@ -44,6 +47,12 @@ pub const Monitor = struct {
     pub fn name(monitor: *const Monitor) []const u8 {
         return monitor.name_bytes[0..monitor.name_len];
     }
+
+    pub fn eql(a: *const Monitor, b: *const Monitor) bool {
+        return std.mem.eql(u8, a.name(), b.name()) and a.x == b.x and a.y == b.y and
+            a.width == b.width and a.height == b.height and a.scale_100 == b.scale_100 and
+            a.transform == b.transform;
+    }
 };
 
 pub const Snapshot = struct {
@@ -57,13 +66,7 @@ pub const Snapshot = struct {
     pub fn eql(a: *const Snapshot, b: *const Snapshot) bool {
         if (a.count != b.count) return false;
         for (a.slice(), b.slice()) |left, right| {
-            if (!std.mem.eql(u8, left.name(), right.name()) or
-                left.x != right.x or left.y != right.y or
-                left.width != right.width or left.height != right.height or
-                left.scale_100 != right.scale_100 or left.transform != right.transform)
-            {
-                return false;
-            }
+            if (!left.eql(&right)) return false;
         }
         return true;
     }
@@ -248,22 +251,110 @@ pub const Image = struct {
 };
 
 pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
-pub const SurfaceHandle = packed struct { generation: u32 };
+pub const SurfaceHandle = packed struct { index: u8, generation: u32 };
 pub const Configure = struct { serial: u32, width: u32, height: u32 };
 
-pub fn openOutput(source: anytype, name: []const u8) !void {
-    if (name.len == 0 or name.len > monitor_name_capacity) return error.OutputNameInvalid;
-    try source.openOutput(name);
+pub const Round = struct {
+    monitors: Snapshot = .{},
+    handles: [monitor_capacity]SurfaceHandle = undefined,
+
+    pub fn handleSlice(round: *const Round) []const SurfaceHandle {
+        return round.handles[0..round.monitors.count];
+    }
+};
+
+comptime {
+    std.debug.assert(surface_resource_capacity == monitor_capacity * 2);
+    std.debug.assert(surface_resource_capacity <= std.math.maxInt(u8));
 }
 
-pub fn prepareSurface(source: anytype, monitor: *const Monitor, pixels: *const Image) !SurfaceHandle {
-    try validateImage(pixels);
-    if (pixels.width != monitor.width or pixels.height != monitor.height) return error.SurfacePixelsInvalid;
-    return source.prepare(monitor, pixels);
+pub fn openOutputs(source: anytype, snapshot: *const Snapshot) !void {
+    if (snapshot.count == 0 or snapshot.count > monitor_capacity) return error.OutputSnapshotInvalid;
+    try source.openOutputs(snapshot);
 }
 
-pub fn releaseSurface(source: anytype, handle: SurfaceHandle) !void {
-    try source.release(handle);
+pub fn prepareRound(
+    source: anytype,
+    allocator: std.mem.Allocator,
+    snapshot: *const Snapshot,
+    image: *const Image,
+) !Round {
+    try openOutputs(source, snapshot);
+    var round = Round{ .monitors = snapshot.* };
+    round.monitors.count = 0;
+    errdefer discardRound(source, &round);
+    for (snapshot.slice(), 0..) |*monitor, index| {
+        var pixels = try coverImage(source, allocator, image, monitor.width, monitor.height);
+        defer pixels.deinit(allocator);
+        round.handles[index] = try source.prepare(@intCast(index), monitor, &pixels);
+        round.monitors.count = @intCast(index + 1);
+    }
+    round.monitors = snapshot.*;
+    return round;
+}
+
+pub fn publishRound(source: anytype, current: *Round, next: *Round, stop: anytype) !void {
+    if (next.monitors.count == 0) return error.RoundEmpty;
+    if (current.monitors.count != 0 and !current.monitors.eql(&next.monitors)) {
+        return error.RoundSnapshotChanged;
+    }
+    try source.validatePublication(current.handleSlice(), next.handleSlice());
+    for (next.handleSlice()) |handle| source.queueMap(handle);
+    var old_index = current.monitors.count;
+    while (old_index > 0) {
+        old_index -= 1;
+        source.queueUnmap(current.handles[old_index]);
+    }
+    source.flushPublication(stop) catch |err| {
+        source.disconnectAfterDisplayLoss();
+        return err;
+    };
+    source.finishPublication(current.handleSlice(), next.handleSlice());
+    const old = current.*;
+    current.* = next.*;
+    next.* = .{};
+    var index = old.monitors.count;
+    while (index > 0) {
+        index -= 1;
+        source.releaseRetired(old.handles[index]) catch |err| {
+            source.disconnectAfterDisplayLoss();
+            return err;
+        };
+    }
+}
+
+pub fn releaseRound(source: anytype, current: *Round, stop: anytype) !void {
+    if (current.monitors.count == 0) return;
+    try source.validatePublication(current.handleSlice(), &.{});
+    var index = current.monitors.count;
+    while (index > 0) {
+        index -= 1;
+        source.queueUnmap(current.handles[index]);
+    }
+    source.flushPublication(stop) catch |err| {
+        source.disconnectAfterDisplayLoss();
+        return err;
+    };
+    source.finishPublication(current.handleSlice(), &.{});
+    const old = current.*;
+    current.* = .{};
+    index = old.monitors.count;
+    while (index > 0) {
+        index -= 1;
+        source.releaseRetired(old.handles[index]) catch |err| {
+            source.disconnectAfterDisplayLoss();
+            return err;
+        };
+    }
+}
+
+pub fn discardRound(source: anytype, round: *Round) void {
+    var index = round.monitors.count;
+    while (index > 0) {
+        index -= 1;
+        source.discardPrepared(round.handles[index]);
+    }
+    round.* = .{};
 }
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
