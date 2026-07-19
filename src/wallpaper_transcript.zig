@@ -1778,8 +1778,7 @@ fn runScheduleHistory(
 }
 
 test "product rotation intervals and exact deadline boundary are explicit" {
-    try std.testing.expectEqual(@as(u64, 900_000), wallpaper.beta_rotation_interval_milliseconds);
-    try std.testing.expectEqual(@as(u64, 3_600_000), wallpaper.production_rotation_interval_milliseconds);
+    try std.testing.expectEqual(@as(u64, 3_600_000), wallpaper.rotation_interval_milliseconds);
     const reply =
         \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
         \\"scale":1.00,"transform":0,"disabled":false}]

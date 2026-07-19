@@ -1,15 +1,15 @@
-//! Owns bounded beta CLI presentation.
+//! Owns bounded CLI presentation.
 
 const std = @import("std");
 const apps = @import("apps.zig");
 
 pub const help =
     \\usage:
-    \\  wayspot-beta
-    \\  wayspot-beta wallpaper ROOT
-    \\  wayspot-beta wallpaper rotate
-    \\  wayspot-beta apps [terms...]
-    \\  wayspot-beta <exact application name or desktop id>
+    \\  wayspot
+    \\  wayspot wallpaper ROOT
+    \\  wayspot wallpaper rotate
+    \\  wayspot apps [terms...]
+    \\  wayspot <exact application name or desktop id>
     \\
 ;
 

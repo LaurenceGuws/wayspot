@@ -68,14 +68,14 @@ pub const Native = struct {
         native.ttf_initialized = true;
     }
 
-    /// Creates the one beta window and its renderer together.
+    /// Creates the one picker window and its renderer together.
     pub fn create(native: *Native) !void {
         std.debug.assert(native.initialized);
         std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         comptime std.debug.assert(picker.visible_row_capacity == pixels.visible_rows);
         if (!sdl.SDL_CreateWindowAndRenderer(
-            "wayspot-beta",
+            "wayspot",
             pixels.window_width,
             pixels.window_height,
             sdl.SDL_WINDOW_HIGH_PIXEL_DENSITY,
@@ -190,7 +190,7 @@ pub const Native = struct {
         };
     }
 
-    /// Replaces the beta frame with the current terminated query.
+    /// Replaces the frame with the current terminated query.
     pub fn draw(native: *Native, frame: *const picker.Frame) !void {
         const renderer = native.renderer orelse unreachable;
         native.evict(frame);

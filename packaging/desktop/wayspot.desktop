@@ -2,7 +2,7 @@
 Type=Application
 Name=Wayspot
 Comment=Spotlight-style launcher for Hyprland
-Exec=wayspot --ui
+Exec=wayspot
 Icon=wayspot
 Terminal=false
 Categories=Utility;

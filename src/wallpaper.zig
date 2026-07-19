@@ -35,9 +35,8 @@ pub const reconcile_deadline_milliseconds = 2000;
 pub const event_drain_capacity = 8;
 /// One readiness result accepts at most 64KiB from socket2.
 pub const event_drain_byte_capacity = 64 * 1024;
-/// Binary composition selects exactly one automatic interval at compile time.
-pub const beta_rotation_interval_milliseconds: u64 = 15 * 60 * 1000;
-pub const production_rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
+/// The resident attempts one automatic rotation per hour.
+pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 
 /// Collapses resident work without retaining individual external events.
 pub const Work = enum { idle, refresh, reconnect, rotate };
@@ -809,7 +808,7 @@ test "rotation deadline accepts max endpoint and rejects one-step overflow" {
             return clock.value;
         }
     };
-    const interval = production_rotation_interval_milliseconds;
+    const interval = rotation_interval_milliseconds;
     var clock = Clock{ .value = std.math.maxInt(u64) - interval };
     try std.testing.expectEqual(std.math.maxInt(u64), try nextRotationDeadline(&clock, interval));
     try std.testing.expectEqual(std.math.maxInt(u64) - interval, clock.value);

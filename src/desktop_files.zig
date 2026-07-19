@@ -78,7 +78,7 @@ pub fn applyTryExec(io: std.Io, path_environment: ?[]const u8, list: *apps.List)
     }
 }
 
-/// Keeps terminal apps only when this beta can execute the configured terminal.
+/// Keeps terminal apps only when Wayspot can execute the configured terminal.
 pub fn applyTerminal(
     io: std.Io,
     path_environment: ?[]const u8,

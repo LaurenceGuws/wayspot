@@ -11,34 +11,34 @@ pub fn build(b: *std.Build) void {
     });
     const text = libs.text(b, target, optimize, sdl.artifact("SDL3"), sdl.path("include"));
 
-    const wayspot_beta = b.createModule(.{
+    const wayspot = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    wayspot_beta.addIncludePath(sdl.path("include"));
-    wayspot_beta.addIncludePath(b.path("vendor/stb"));
-    wayspot_beta.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
-    wayspot_beta.addIncludePath(text.include);
-    wayspot_beta.addAnonymousImport("NotoSans-Regular.ttf", .{
+    wayspot.addIncludePath(sdl.path("include"));
+    wayspot.addIncludePath(b.path("vendor/stb"));
+    wayspot.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
+    wayspot.addIncludePath(text.include);
+    wayspot.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
-    wayspot_beta.linkLibrary(sdl.artifact("SDL3"));
-    wayspot_beta.linkLibrary(text.library);
-    wayspot_beta.linkSystemLibrary("dbus-1", .{});
+    wayspot.linkLibrary(sdl.artifact("SDL3"));
+    wayspot.linkLibrary(text.library);
+    wayspot.linkSystemLibrary("dbus-1", .{});
     addWaylandProtocol(
         b,
-        wayspot_beta,
+        wayspot,
         b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
         "wlr-layer-shell-unstable-v1",
     );
-    addWaylandProtocol(b, wayspot_beta, b.path("protocols/viewporter.xml"), "viewporter");
-    wayspot_beta.linkSystemLibrary("wayland-client", .{});
+    addWaylandProtocol(b, wayspot, b.path("protocols/viewporter.xml"), "viewporter");
+    wayspot.linkSystemLibrary("wayland-client", .{});
 
     const executable = b.addExecutable(.{
-        .name = "wayspot-beta",
-        .root_module = wayspot_beta,
+        .name = "wayspot",
+        .root_module = wayspot,
     });
     executable.use_llvm = true;
     executable.use_lld = true;
@@ -272,7 +272,7 @@ pub fn build(b: *std.Build) void {
     notification_dbus_native_tests.use_llvm = true;
     notification_dbus_native_tests.use_lld = true;
     const run_notification_dbus_native_tests = b.addRunArtifact(notification_dbus_native_tests);
-    const test_step = b.step("test", "Run Wayspot beta tests");
+    const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
     test_step.dependOn(&run_desktop_files_tests.step);
@@ -299,7 +299,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);
-    const run_step = b.step("run", "Run Wayspot beta");
+    const run_step = b.step("run", "Run Wayspot");
     run_step.dependOn(&run.step);
 }
 

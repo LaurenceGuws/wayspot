@@ -1,4 +1,4 @@
-//! Owns the fixed beta picker's pixel rectangles and pointer hit testing.
+//! Owns the fixed picker's pixel rectangles and pointer hit testing.
 
 const std = @import("std");
 

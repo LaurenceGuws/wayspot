@@ -31,7 +31,7 @@ const Native = struct {
     /// Acquires SDL, one hidden window, its renderer, and two bounded text owners.
     pub fn start(native: *Native, bridge: *bridge_mod.Bridge) !void {
         std.debug.assert(!native.initialized);
-        if (!sdl.SDL_SetAppMetadata("wayspot notification", "beta", "wayspot-notification")) {
+        if (!sdl.SDL_SetAppMetadata("wayspot notification", "0.1.0", "wayspot-notification")) {
             return error.SdlMetadataFailed;
         }
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;

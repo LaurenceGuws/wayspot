@@ -1,6 +1,6 @@
 .{
     .name = .wayspot,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0x1bbfcaf57fa6a14e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

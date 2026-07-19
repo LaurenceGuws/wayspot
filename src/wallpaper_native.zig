@@ -374,7 +374,7 @@ pub const Native = struct {
             surface.surface.?,
             native.outputs[monitor_index].?,
             wl.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
-            "wayspot-beta-wallpaper",
+            "wayspot-wallpaper",
         ) orelse return error.SurfaceLayerFailed;
         if (wl.zwlr_layer_surface_v1_add_listener(surface.layer, &layer_listener, surface) != 0) {
             return error.SurfaceLayerFailed;
@@ -900,7 +900,7 @@ pub const Native = struct {
 const AbstractAddress = struct { value: std.posix.sockaddr.un, length: std.posix.socklen_t };
 
 fn abstractAddress(signature: []const u8) !AbstractAddress {
-    const prefix = "wayspot-beta-wallpaper:";
+    const prefix = "wayspot-wallpaper:";
     if (signature.len == 0 or !std.unicode.utf8ValidateSlice(signature) or
         std.mem.indexOfAny(u8, signature, "\x00/") != null or
         prefix.len + signature.len > 107)
@@ -936,6 +936,7 @@ fn requireUid(actual: c_uint, expected: c_uint) !void {
 }
 
 pub fn requestRotation(io: std.Io, signature: []const u8) !void {
+    const started = std.Io.Clock.awake.now(io);
     const address = try abstractAddress(signature);
     const result = std.posix.system.socket(
         std.posix.AF.UNIX,
@@ -950,7 +951,7 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
     switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
         .SUCCESS => {},
         .INPROGRESS => {
-            try pollDirect(fd, std.posix.POLL.OUT);
+            try pollDirect(io, fd, std.posix.POLL.OUT, started);
             var socket_error: c_int = 0;
             var length: std.posix.socklen_t = @sizeOf(c_int);
             if (std.posix.errno(std.posix.system.getsockopt(
@@ -975,7 +976,7 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
     for (0..16) |_| {
         written += file.writeStreaming(io, &.{}, &.{"rotate\n"[written..]}, 1) catch |err| switch (err) {
             error.WouldBlock => {
-                try pollDirect(fd, std.posix.POLL.OUT);
+                try pollDirect(io, fd, std.posix.POLL.OUT, started);
                 continue;
             },
             else => return err,
@@ -988,7 +989,7 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
     for (0..16) |_| {
         used += file.readStreaming(io, &.{reply[used..]}) catch |err| switch (err) {
             error.WouldBlock => {
-                try pollDirect(fd, std.posix.POLL.IN);
+                try pollDirect(io, fd, std.posix.POLL.IN, started);
                 continue;
             },
             error.EndOfStream => break,
@@ -999,9 +1000,19 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
     if (!std.mem.eql(u8, reply[0..used], "ok\n")) return error.RotationRejected;
 }
 
-fn pollDirect(fd: std.posix.fd_t, events: i16) !void {
+const rotation_request_timeout_milliseconds = 30_000;
+
+fn requestMillisecondsRemaining(elapsed: i64) !i32 {
+    if (elapsed >= rotation_request_timeout_milliseconds) return error.RotationTimedOut;
+    return @intCast(rotation_request_timeout_milliseconds - elapsed);
+}
+
+fn pollDirect(io: std.Io, fd: std.posix.fd_t, events: i16, started: std.Io.Timestamp) !void {
     var descriptors = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-    if (try std.posix.poll(&descriptors, 2000) == 0) return error.RotationTimedOut;
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    if (try std.posix.poll(&descriptors, try requestMillisecondsRemaining(elapsed)) == 0) {
+        return error.RotationTimedOut;
+    }
     if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) {
         return error.RotationSocketFailed;
     }
@@ -1557,11 +1568,11 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
     const signature = "x" ** 62;
     const address = try abstractAddress(signature);
     try std.testing.expectEqual(
-        @as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 85),
+        @as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 80),
         address.length,
     );
     try std.testing.expectEqual(@as(u8, 0), address.value.path[0]);
-    try std.testing.expectEqualStrings("wayspot-beta-wallpaper:" ++ signature, address.value.path[1..][0..85]);
+    try std.testing.expectEqualStrings("wayspot-wallpaper:" ++ signature, address.value.path[1..][0..80]);
     var resident = Native{ .io = std.testing.io };
     try resident.openRotation(signature);
     defer resident.closeRotation();
@@ -1625,11 +1636,18 @@ fn connectRotationTest(signature: []const u8) !std.posix.fd_t {
     errdefer _ = std.posix.system.close(fd);
     switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
         .SUCCESS => {},
-        .INPROGRESS => try pollDirect(fd, std.posix.POLL.OUT),
+        .INPROGRESS => try pollDirect(std.testing.io, fd, std.posix.POLL.OUT, std.Io.Clock.awake.now(std.testing.io)),
         else => return error.TestSocketFailed,
     }
     try authenticatePeer(fd, std.os.linux.geteuid());
     return fd;
+}
+
+test "rotation request has one exact total wait bound" {
+    try std.testing.expectEqual(@as(i32, 30_000), try requestMillisecondsRemaining(0));
+    try std.testing.expectEqual(@as(i32, 1), try requestMillisecondsRemaining(29_999));
+    try std.testing.expectError(error.RotationTimedOut, requestMillisecondsRemaining(30_000));
+    try std.testing.expectError(error.RotationTimedOut, requestMillisecondsRemaining(30_001));
 }
 
 test "socket credential transcript rejects either wrong uid before protocol bytes" {

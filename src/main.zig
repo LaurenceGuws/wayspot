@@ -1,4 +1,4 @@
-//! Starts one native Wayspot beta picker process.
+//! Starts one native Wayspot process.
 
 const std = @import("std");
 const apps = @import("apps.zig");
@@ -204,7 +204,7 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
         stop.fd,
         &event_fd,
         &paths,
-        wallpaper.beta_rotation_interval_milliseconds,
+        wallpaper.rotation_interval_milliseconds,
     ) catch |err| {
         if (err != error.Stopped) return err;
     };

@@ -160,7 +160,7 @@ pub const Native = struct {
         defer c.dbus_message_unref(reply);
         var iter: c.DBusMessageIter = undefined;
         c.dbus_message_iter_init_append(reply, &iter);
-        const values = [_][*:0]const u8{ "wayspot", "wayspot", "beta", "1.3" };
+        const values = [_][*:0]const u8{ "wayspot", "wayspot", "0.1.0", "1.3" };
         for (values) |value| {
             var pointer = value;
             if (c.dbus_message_iter_append_basic(&iter, c.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0) {
