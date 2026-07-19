@@ -283,8 +283,8 @@ const ResidentOperation = union(enum) {
 };
 
 const Resident = struct {
-    operations: [128]ResidentOperation = undefined,
-    count: u8 = 0,
+    operations: [2048]ResidentOperation = undefined,
+    count: u16 = 0,
     waits: []const wallpaper.Ready,
     replies: []const []const u8,
     wait_index: u8 = 0,
@@ -302,6 +302,8 @@ const Resident = struct {
     request_failures: u8 = 0,
     reconnect_failures: u8 = 0,
     clock: u64 = 0,
+    clock_steps: []const u64 = &.{},
+    clock_step_index: u16 = 0,
     next_display: u8 = 2,
     stop_identity: u8 = 7,
     event_identity: u8 = 9,
@@ -311,6 +313,7 @@ const Resident = struct {
     output_index: u8 = 0,
     event_reads: []const []const u8 = &.{"workspace>>1\n"},
     event_read_index: u8 = 0,
+    event_losses: u8 = 0,
     wayland_changes: []const bool = &.{false},
     wayland_change_index: u8 = 0,
     stop_release_id: ?u8 = null,
@@ -379,7 +382,11 @@ const Resident = struct {
             .timeout = timeout,
         } });
         if (timeout) |milliseconds| if (milliseconds != 0) {
-            resident.clock += milliseconds;
+            const advance = if (resident.clock_step_index < resident.clock_steps.len) step: {
+                defer resident.clock_step_index += 1;
+                break :step resident.clock_steps[resident.clock_step_index];
+            } else milliseconds;
+            resident.clock += advance;
         };
         if (resident.wait_index == resident.waits.len) return .{};
         defer resident.wait_index += 1;
@@ -453,6 +460,10 @@ const Resident = struct {
     pub fn readEvent(resident: *Resident, event_fd: u8, bytes: []u8) anyerror!usize {
         std.debug.assert(event_fd == resident.event_identity);
         resident.record(.read_event);
+        if (resident.event_losses > 0) {
+            resident.event_losses -= 1;
+            return error.EventSocketLost;
+        }
         if (resident.event_read_index == resident.event_reads.len) return error.WouldBlock;
         const source = resident.event_reads[resident.event_read_index];
         resident.event_read_index += 1;
@@ -1029,6 +1040,7 @@ test "direct rotate acknowledges only after forced complete replacement" {
         resident.stop_identity,
         &event_fd,
         &paths,
+        10,
     ));
     var received: ?usize = null;
     var retired: ?usize = null;
@@ -1085,6 +1097,7 @@ test "stop after publication replies error and every retirement failure keeps va
             resident.stop_identity,
             &event_fd,
             &paths,
+            10,
         );
         if (failure == null) {
             try std.testing.expectError(error.Stopped, result);
@@ -1147,6 +1160,7 @@ test "one file and invalid alternatives never select published or replace Curren
             resident.stop_identity,
             &event_fd,
             &paths,
+            10,
         ));
         try std.testing.expectEqual(@as(u8, 2), current.native.id);
         var success = false;
@@ -1188,6 +1202,7 @@ test "stop and rotate readiness together sends no reply and stop propagates" {
         resident.stop_identity,
         &event_fd,
         &paths,
+        10,
     ));
     for (resident.operations[0..resident.count]) |operation| switch (operation) {
         .rotate_reply => return error.UnexpectedRotationReply,
@@ -1675,4 +1690,249 @@ fn fuzzRequest(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqualStrings(reply, bytes[0..count]);
     try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
     try std.testing.expect(resident.socket_waits <= 2);
+}
+
+const ScheduleSummary = struct {
+    image_opens: u16 = 0,
+    direct_successes: u16 = 0,
+    direct_failures: u16 = 0,
+    reconnects: u16 = 0,
+    timed_waits: [128]u64 = undefined,
+    timed_wait_count: u8 = 0,
+    final_clock: u64 = 0,
+};
+
+fn runScheduleHistory(
+    waits: []const wallpaper.Ready,
+    clock_steps: []const u64,
+    replies: []const []const u8,
+    image_failures: u8,
+    event_losses: u8,
+    event_reads: []const []const u8,
+    comptime interval_milliseconds: u64,
+) !ScheduleSummary {
+    var resident = Resident{
+        .waits = waits,
+        .replies = replies,
+        .clock_steps = clock_steps,
+        .image_failures = image_failures,
+        .event_losses = event_losses,
+        .event_reads = event_reads,
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(81) };
+    defer catalog.deinit();
+    for ([_][]const u8{ "a.png", "b.png", "c.png", "d.png" }) |name| {
+        try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, name));
+    }
+    try catalog.shuffle();
+    catalog.published = catalog.order.items[0];
+    catalog.cursor = 1;
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.runRotation(
+        &resident,
+        std.testing.allocator,
+        &catalog,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        interval_milliseconds,
+    ));
+    var summary: ScheduleSummary = .{ .final_clock = resident.clock };
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .image_open => summary.image_opens += 1,
+        .rotate_reply => |success| if (success) {
+            summary.direct_successes += 1;
+        } else {
+            summary.direct_failures += 1;
+        },
+        .reconnect => summary.reconnects += 1,
+        .wait => |wait| if (wait.timeout) |timeout| if (timeout > 0) {
+            std.debug.assert(summary.timed_wait_count < summary.timed_waits.len);
+            summary.timed_waits[summary.timed_wait_count] = timeout;
+            summary.timed_wait_count += 1;
+        },
+        else => {},
+    };
+    if (current.round.monitors.count > 0) try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+    return summary;
+}
+
+test "product rotation intervals and exact deadline boundary are explicit" {
+    try std.testing.expectEqual(@as(u64, 900_000), wallpaper.beta_rotation_interval_milliseconds);
+    try std.testing.expectEqual(@as(u64, 3_600_000), wallpaper.production_rotation_interval_milliseconds);
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const summary = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .event = true }, .{}, .{}, .{}, .{ .stop = true } },
+        &.{ 9, 1 },
+        &.{ reply, reply },
+        0,
+        0,
+        &.{"workspace>>2\n"},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), summary.image_opens);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 1, 10 }, summary.timed_waits[0..summary.timed_wait_count]);
+    try std.testing.expectEqual(@as(u64, 20), summary.final_clock);
+}
+
+test "stop wins at deadline and direct success wins collision then resets" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const stopped = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .stop = true } },
+        &.{10},
+        &.{reply},
+        0,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 0), stopped.image_opens);
+    try std.testing.expectEqual(@as(u64, 10), stopped.final_clock);
+
+    const direct = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .rotate = true }, .{}, .{}, .{ .stop = true } },
+        &.{10},
+        &.{ reply, reply },
+        0,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), direct.image_opens);
+    try std.testing.expectEqual(@as(u16, 1), direct.direct_successes);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 10 }, direct.timed_waits[0..direct.timed_wait_count]);
+}
+
+test "failed direct preserves deadline and failed schedule waits one full interval" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const direct = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .rotate = true }, .{}, .{}, .{}, .{}, .{}, .{ .stop = true } },
+        &.{ 4, 6 },
+        &.{ reply, reply, reply },
+        3,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), direct.direct_failures);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 6, 10 }, direct.timed_waits[0..direct.timed_wait_count]);
+
+    const scheduled = try runScheduleHistory(
+        &.{ .{}, .{}, .{}, .{}, .{}, .{ .stop = true } },
+        &.{10},
+        &.{ reply, reply },
+        3,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 3), scheduled.image_opens);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 10 }, scheduled.timed_waits[0..scheduled.timed_wait_count]);
+}
+
+test "delayed wake reconnect and focus storms never catch up" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const delayed = try runScheduleHistory(
+        &.{ .{}, .{}, .{}, .{}, .{}, .{ .stop = true } },
+        &.{100},
+        &.{ reply, reply },
+        0,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), delayed.image_opens);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 10 }, delayed.timed_waits[0..delayed.timed_wait_count]);
+
+    const focus_storm = try runScheduleHistory(
+        &.{
+            .{}, .{}, .{ .event = true }, .{ .event = true }, .{ .event = true },
+            .{}, .{}, .{ .stop = true },
+        },
+        &.{ 2, 3, 5 },
+        &.{ reply, reply },
+        0,
+        0,
+        &.{ "workspace>>2\n", "focusedmon>>DP-1,1\n", "activewindow>>kitty,title\n" },
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), focus_storm.image_opens);
+
+    const reconnect_storm = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .event = true }, .{}, .{}, .{}, .{}, .{}, .{ .stop = true } },
+        &.{ 5, 5 },
+        &.{ reply, reply, reply },
+        0,
+        1,
+        &.{},
+        10,
+    );
+    try std.testing.expectEqual(@as(u16, 1), reconnect_storm.image_opens);
+    try std.testing.expect(reconnect_storm.reconnects >= 2);
+}
+
+test "overnight history performs one round per interval" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const rounds = 32;
+    var waits: [2 + rounds * 3 + 1]wallpaper.Ready = @splat(.{});
+    waits[waits.len - 1] = .{ .stop = true };
+    var replies: [rounds + 1][]const u8 = @splat(reply);
+    const summary = try runScheduleHistory(&waits, &.{}, &replies, 0, 0, &.{}, 10);
+    try std.testing.expectEqual(@as(u16, rounds), summary.image_opens);
+    try std.testing.expectEqual(@as(u8, rounds + 1), summary.timed_wait_count);
+    try std.testing.expectEqual(@as(u64, (rounds + 1) * 10), summary.final_clock);
+}
+
+test "schedule histories remain bounded under Smith readiness and time" {
+    if (@inComptime()) {
+        try std.testing.fuzz({}, fuzzSchedule, .{});
+        return;
+    }
+    var smith = std.testing.Smith{ .in = "" };
+    try fuzzSchedule({}, &smith);
+}
+
+fn fuzzSchedule(_: void, smith: *std.testing.Smith) !void {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const direct = smith.value(bool);
+    const fail = smith.value(bool);
+    const advance = smith.valueRangeAtMost(u64, 0, 100);
+    const summary = try runScheduleHistory(
+        &.{ .{}, .{}, .{ .rotate = direct }, .{}, .{}, .{ .stop = true } },
+        &.{advance},
+        &.{ reply, reply },
+        if (fail) 3 else 0,
+        0,
+        &.{},
+        10,
+    );
+    try std.testing.expect(summary.image_opens <= 3);
+    try std.testing.expect(summary.direct_successes + summary.direct_failures <= 1);
 }

@@ -195,7 +195,17 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
         current.round = .{};
         if (event_fd >= 0) resident.closeEvent(&event_fd);
     }
-    wallpaper.runRotation(&resident, init.gpa, &catalog, &selected, &current, stop.fd, &event_fd, &paths) catch |err| {
+    wallpaper.runRotation(
+        &resident,
+        init.gpa,
+        &catalog,
+        &selected,
+        &current,
+        stop.fd,
+        &event_fd,
+        &paths,
+        wallpaper.beta_rotation_interval_milliseconds,
+    ) catch |err| {
         if (err != error.Stopped) return err;
     };
 }

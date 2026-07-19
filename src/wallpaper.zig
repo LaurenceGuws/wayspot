@@ -35,6 +35,9 @@ pub const reconcile_deadline_milliseconds = 2000;
 pub const event_drain_capacity = 8;
 /// One readiness result accepts at most 64KiB from socket2.
 pub const event_drain_byte_capacity = 64 * 1024;
+/// Binary composition selects exactly one automatic interval at compile time.
+pub const beta_rotation_interval_milliseconds: u64 = 15 * 60 * 1000;
+pub const production_rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 
 /// Collapses resident work without retaining individual external events.
 pub const Work = enum { idle, refresh, reconnect, rotate };
@@ -726,64 +729,155 @@ pub fn runRotation(
     stop_fd: anytype,
     event_fd: anytype,
     paths: *const SocketPaths,
+    comptime interval_milliseconds: u64,
 ) !void {
+    comptime std.debug.assert(interval_milliseconds > 0);
     var lines: EventLines = .{};
     var work: Work = .reconnect;
+    var deadline: ?u64 = null;
     while (true) {
         if (work == .idle) {
-            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
-            continue;
+            const now = resident.now();
+            const timeout = if (deadline) |end| end -| now else null;
+            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, timeout);
         }
         if (work != .rotate) {
-            _ = try reconcile(resident, allocator, image, false, current, stop_fd, event_fd, paths, &lines, &work);
-            continue;
-        }
-        const complete = resident.receiveRotation() catch {
-            resident.replyRotation(false);
-            work = .idle;
-            continue;
-        };
-        if (!complete) {
-            work = .idle;
-            continue;
-        }
-        var attempted: [catalog_file_capacity]bool = @splat(false);
-        var alternatives: usize = 0;
-        var rotated = false;
-        const selection_limit = alternativeSelectionLimit(catalog.paths.items.len);
-        for (0..selection_limit) |_| {
-            if (alternatives == catalog.paths.items.len - 1) break;
-            const path = try catalog.next();
-            const index = catalog.last.?;
-            if (index == catalog.published.? or attempted[index]) continue;
-            attempted[index] = true;
-            alternatives += 1;
-            var next = loadImage(resident, allocator, path) catch continue;
-            var published = false;
-            defer if (!published) next.deinit(allocator);
-            work = .refresh;
-            const outcome = reconcile(resident, allocator, &next, true, current, stop_fd, event_fd, paths, &lines, &work) catch |err| {
-                if (err == error.Stopped) {
-                    resident.replyRotation(false);
-                    return err;
+            if (work != .idle) {
+                const outcome = try reconcile(
+                    resident,
+                    allocator,
+                    image,
+                    false,
+                    current,
+                    stop_fd,
+                    event_fd,
+                    paths,
+                    &lines,
+                    &work,
+                );
+                if (deadline == null and outcome != .unchanged) {
+                    deadline = try nextRotationDeadline(resident, interval_milliseconds);
                 }
                 continue;
-            };
-            if (outcome == .unchanged or current.round.monitors.count == 0 or !resident.currentUsable(current.native)) continue;
-            image.deinit(allocator);
-            image.* = next;
-            catalog.published = index;
-            published = true;
-            rotated = true;
-            resident.replyRotation(true);
-            break;
+            }
+            if (deadline == null or resident.now() < deadline.?) continue;
+            _ = try rotateOnce(
+                resident,
+                allocator,
+                catalog,
+                image,
+                current,
+                stop_fd,
+                event_fd,
+                paths,
+                &lines,
+                &work,
+                false,
+            );
+            deadline = try nextRotationDeadline(resident, interval_milliseconds);
+            continue;
         }
-        std.debug.assert(rotated or alternatives == catalog.paths.items.len - 1);
-        if (!rotated) {
+        const rotated = try rotateOnce(
+            resident,
+            allocator,
+            catalog,
+            image,
+            current,
+            stop_fd,
+            event_fd,
+            paths,
+            &lines,
+            &work,
+            true,
+        );
+        if (rotated) deadline = try nextRotationDeadline(resident, interval_milliseconds);
+    }
+}
+
+fn nextRotationDeadline(resident: anytype, interval_milliseconds: u64) !u64 {
+    return std.math.add(u64, resident.now(), interval_milliseconds);
+}
+
+test "rotation deadline accepts max endpoint and rejects one-step overflow" {
+    const Clock = struct {
+        value: u64,
+
+        fn now(clock: *const @This()) u64 {
+            return clock.value;
+        }
+    };
+    const interval = production_rotation_interval_milliseconds;
+    var clock = Clock{ .value = std.math.maxInt(u64) - interval };
+    try std.testing.expectEqual(std.math.maxInt(u64), try nextRotationDeadline(&clock, interval));
+    try std.testing.expectEqual(std.math.maxInt(u64) - interval, clock.value);
+
+    clock.value += 1;
+    const before = clock.value;
+    try std.testing.expectError(error.Overflow, nextRotationDeadline(&clock, interval));
+    try std.testing.expectEqual(before, clock.value);
+}
+
+fn rotateOnce(
+    resident: anytype,
+    allocator: std.mem.Allocator,
+    catalog: *Catalog,
+    image: *Image,
+    current: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    paths: *const SocketPaths,
+    lines: *EventLines,
+    work: *Work,
+    direct: bool,
+) !bool {
+    if (direct) {
+        const complete = resident.receiveRotation() catch {
             resident.replyRotation(false);
-            work = .refresh;
+            work.* = .idle;
+            return false;
+        };
+        if (!complete) {
+            work.* = .idle;
+            return false;
         }
     }
+    var attempted: [catalog_file_capacity]bool = @splat(false);
+    var alternatives: usize = 0;
+    var rotated = false;
+    const selection_limit = alternativeSelectionLimit(catalog.paths.items.len);
+    for (0..selection_limit) |_| {
+        if (alternatives == catalog.paths.items.len - 1) break;
+        const path = try catalog.next();
+        const index = catalog.last.?;
+        if (index == catalog.published.? or attempted[index]) continue;
+        attempted[index] = true;
+        alternatives += 1;
+        var next = loadImage(resident, allocator, path) catch continue;
+        var published = false;
+        defer if (!published) next.deinit(allocator);
+        work.* = .refresh;
+        const outcome = reconcile(resident, allocator, &next, true, current, stop_fd, event_fd, paths, lines, work) catch |err| {
+            if (err == error.Stopped) {
+                if (direct) resident.replyRotation(false);
+                return err;
+            }
+            continue;
+        };
+        if (outcome == .unchanged or current.round.monitors.count == 0 or !resident.currentUsable(current.native)) continue;
+        image.deinit(allocator);
+        image.* = next;
+        catalog.published = index;
+        published = true;
+        rotated = true;
+        if (direct) resident.replyRotation(true);
+        break;
+    }
+    std.debug.assert(rotated or alternatives == catalog.paths.items.len - 1);
+    if (!rotated) {
+        if (direct) resident.replyRotation(false);
+        work.* = .refresh;
+    }
+    return rotated;
 }
 
 // Classifies one borrowed-fd wait and drains only the descriptors reported ready.
@@ -818,7 +912,7 @@ fn waitForWork(
         socket_lost = true;
         return true;
     } or changed;
-    if (ready.rotate) {
+    if (ready.rotate and work.* == .idle) {
         work.* = .rotate;
         changed = true;
     }
