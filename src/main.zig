@@ -6,11 +6,7 @@ const cli = @import("cli.zig");
 const cmd = @import("cmd.zig");
 const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
-const notification_dbus = @import("notification_dbus.zig");
-const notification_dbus_native = @import("notification_dbus_native.zig");
-const notification_history = @import("notification_history.zig");
-const notification_banner_sdl = @import("notification_banner_sdl.zig");
-const notification_bridge = @import("notification_bridge.zig");
+const notification = @import("notification.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
 const wallpaper = @import("wallpaper.zig");
@@ -114,8 +110,8 @@ const HistoryReader = struct {
     process: *const std.process.Init,
     home: []const u8,
 
-    pub fn readHistory(reader: *HistoryReader) !notification_history.History {
-        return notification_history.inspect(
+    pub fn readHistory(reader: *HistoryReader) !notification.History {
+        return notification.inspect(
             reader.process.gpa,
             reader.process.io,
             reader.process.environ_map.get("XDG_STATE_HOME"),
@@ -154,7 +150,7 @@ fn perform(
                 try launch.spawn(&process, &applications[index], terminal, cwd);
             },
         },
-        .notifications => |notification| switch (notification) {
+        .notifications => |notification_command| switch (notification_command) {
             .run => try runNotifications(init),
             .history => try printNotificationHistory(init),
         },
@@ -224,75 +220,29 @@ fn runNotifications(init: std.process.Init) !void {
     std.posix.sigaction(.TERM, &action, &old_terminate);
     defer std.posix.sigaction(.TERM, &old_terminate, null);
 
-    var bridge: notification_bridge.Bridge = undefined;
-    bridge.init(init.io);
-    defer bridge.deinit(init.gpa);
-    var native: notification_dbus_native.Native = .{ .stop = &notification_stop };
-    var worker = try init.io.concurrent(notificationWorker, .{
-        &native,
-        &bridge,
+    try notification.run(
         init.gpa,
         init.io,
         init.environ_map.get("XDG_STATE_HOME"),
         init.environ_map.get("HOME"),
-    });
-
-    const banner_result = notification_banner_sdl.run(&bridge, init.gpa);
-    if (banner_result) {
-        notification_stop.store(true, .release);
-    } else |_| {
-        notification_stop.store(true, .release);
-        bridge.bannerFailed();
-    }
-    const worker_result = worker.await(init.io);
-    try banner_result;
-    try worker_result;
+        &notification_stop,
+    );
 }
 
 fn printNotificationHistory(init: std.process.Init) !void {
-    var history = try notification_history.inspect(
+    var history = try notification.inspect(
         init.gpa,
         init.io,
         init.environ_map.get("XDG_STATE_HOME"),
         init.environ_map.get("HOME"),
     );
     defer history.deinit(init.gpa);
-    const bytes = try notification_history.format(init.gpa, &history);
+    const bytes = try notification.format(init.gpa, &history);
     defer init.gpa.free(bytes);
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout_writer.interface.writeAll(bytes);
     try stdout_writer.interface.flush();
-}
-
-fn notificationWorker(
-    native: *notification_dbus_native.Native,
-    bridge: *notification_bridge.Bridge,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    state_home: ?[]const u8,
-    home: ?[]const u8,
-) !void {
-    notification_dbus.openAndOwn(native) catch |err| {
-        bridge.workerFailed();
-        return err;
-    };
-    defer native.close();
-    var history = notification_history.Owner.init(allocator, io, state_home, home) catch |err| {
-        bridge.workerFailed();
-        return err;
-    };
-    defer history.deinit();
-    notification_dbus.serveOwnedWithBannerAndHistory(
-        native,
-        bridge,
-        &history,
-        allocator,
-    ) catch |err| {
-        bridge.workerFailed();
-        return err;
-    };
-    try bridge.workerStopped();
 }
 
 fn stopNotification(_: std.posix.SIG) callconv(.c) void {

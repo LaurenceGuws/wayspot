@@ -3,7 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps.zig");
-const notification_history = @import("notification_history.zig");
+const notification = @import("notification.zig");
 
 pub const query_capacity = apps.query_capacity;
 pub const visible_row_capacity = 14;
@@ -20,7 +20,7 @@ pub const Table = enum {
 pub const Row = union(enum) {
     table: Table,
     app: u16,
-    notification: *const notification_history.Record,
+    notification: *const notification.Record,
 };
 
 const Rows = union(Table) {
@@ -29,7 +29,7 @@ const Rows = union(Table) {
         applications: []const apps.App,
         matches: apps.Matches,
     },
-    notifications: notification_history.History,
+    notifications: notification.History,
 
     fn initApps(applications: []const apps.App, query: []const u8) !Rows {
         if (applications.len > apps.app_capacity) return error.TooManyApplications;
@@ -500,7 +500,7 @@ test "root rows are static ordered and prefix filtered" {
 }
 
 test "notification rows borrow retained records newest first" {
-    var history = try notification_history.parse(
+    var history = try notification.parse(
         std.testing.allocator,
         "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\",\"summary\":\"one\",\"body\":\"a\"}\n" ++
             "{\"received_unix_seconds\":2,\"history_id\":2,\"app_name\":\"new\",\"summary\":\"two\",\"body\":\"b\"}\n",
@@ -581,7 +581,7 @@ fn fuzzRoutes(_: void, smith: *std.testing.Smith) !void {
         try query.append(text);
         try state.setQuery(&history_reader, query);
         const total = state.rows.count();
-        try std.testing.expect(total <= notification_history.record_capacity);
+        try std.testing.expect(total <= notification.record_capacity);
         if (total == 0) continue;
 
         state.selected = smith.valueRangeLessThan(u16, 0, @intCast(total));
@@ -627,9 +627,9 @@ fn fuzzQuery(_: void, smith: *std.testing.Smith) !void {
 
 const TestHistoryReader = struct {
     reads: usize = 0,
-    failure: ?notification_history.Error = null,
+    failure: ?notification.Error = null,
 
-    fn readHistory(reader: *TestHistoryReader) !notification_history.History {
+    fn readHistory(reader: *TestHistoryReader) !notification.History {
         reader.reads += 1;
         if (reader.failure) |failure| return failure;
         return .{};

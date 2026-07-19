@@ -49,8 +49,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/picker.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
+    addNotificationLibraries(b, picker_tests.root_module, sdl, text);
+    picker_tests.use_llvm = true;
+    picker_tests.use_lld = true;
     const run_picker_tests = b.addRunArtifact(picker_tests);
     const apps_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -73,8 +77,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/sdl_transcript.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
+    addNotificationLibraries(b, transcript_tests.root_module, sdl, text);
+    transcript_tests.use_llvm = true;
+    transcript_tests.use_lld = true;
     const run_transcript_tests = b.addRunArtifact(transcript_tests);
     const launch_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -183,6 +191,7 @@ pub fn build(b: *std.Build) void {
     sdl_tests.root_module.addIncludePath(text.include);
     sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     sdl_tests.root_module.linkLibrary(text.library);
+    sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
     sdl_tests.use_llvm = true;
     sdl_tests.use_lld = true;
     const run_sdl_tests = b.addRunArtifact(sdl_tests);
@@ -199,79 +208,20 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/notification.zig"),
             .target = target,
             .optimize = optimize,
-        }),
-    });
-    const run_notification_tests = b.addRunArtifact(notification_tests);
-    const notification_dbus_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_dbus.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_notification_dbus_tests = b.addRunArtifact(notification_dbus_tests);
-    const notification_history_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_history.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_notification_history_tests = b.addRunArtifact(notification_history_tests);
-    const notification_banner_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_banner.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_notification_banner_tests = b.addRunArtifact(notification_banner_tests);
-    const notification_banner_run_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_banner_run.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_notification_banner_run_tests = b.addRunArtifact(notification_banner_run_tests);
-    const notification_bridge_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_bridge.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_notification_bridge_tests = b.addRunArtifact(notification_bridge_tests);
-    const notification_banner_sdl_check = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_banner_sdl.zig"),
-            .target = target,
-            .optimize = optimize,
             .link_libc = true,
         }),
     });
-    notification_banner_sdl_check.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
+    notification_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
-    notification_banner_sdl_check.root_module.addIncludePath(sdl.path("include"));
-    notification_banner_sdl_check.root_module.addIncludePath(text.include);
-    notification_banner_sdl_check.root_module.linkLibrary(sdl.artifact("SDL3"));
-    notification_banner_sdl_check.root_module.linkLibrary(text.library);
-    notification_banner_sdl_check.use_llvm = true;
-    notification_banner_sdl_check.use_lld = true;
-    const run_notification_banner_sdl_check = b.addRunArtifact(notification_banner_sdl_check);
-    const notification_dbus_native_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification_dbus_native.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    notification_dbus_native_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    notification_dbus_native_tests.use_llvm = true;
-    notification_dbus_native_tests.use_lld = true;
-    const run_notification_dbus_native_tests = b.addRunArtifact(notification_dbus_native_tests);
+    notification_tests.root_module.addIncludePath(sdl.path("include"));
+    notification_tests.root_module.addIncludePath(text.include);
+    notification_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    notification_tests.root_module.linkLibrary(text.library);
+    notification_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    notification_tests.use_llvm = true;
+    notification_tests.use_lld = true;
+    const run_notification_tests = b.addRunArtifact(notification_tests);
     const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
@@ -289,13 +239,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
-    test_step.dependOn(&run_notification_dbus_tests.step);
-    test_step.dependOn(&run_notification_history_tests.step);
-    test_step.dependOn(&run_notification_banner_tests.step);
-    test_step.dependOn(&run_notification_banner_run_tests.step);
-    test_step.dependOn(&run_notification_bridge_tests.step);
-    test_step.dependOn(&run_notification_banner_sdl_check.step);
-    test_step.dependOn(&run_notification_dbus_native_tests.step);
 
     const run = b.addRunArtifact(executable);
     if (b.args) |args| run.addArgs(args);
@@ -312,4 +255,20 @@ fn addWaylandProtocol(b: *std.Build, module: *std.Build.Module, xml: std.Build.L
     const code = code_command.addOutputFileArg(b.fmt("{s}.c", .{name}));
     module.addIncludePath(header.dirname());
     module.addCSourceFile(.{ .file = code });
+}
+
+fn addNotificationLibraries(
+    b: *std.Build,
+    module: *std.Build.Module,
+    sdl: *std.Build.Dependency,
+    text: libs.Text,
+) void {
+    module.addAnonymousImport("NotoSans-Regular.ttf", .{
+        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
+    });
+    module.addIncludePath(sdl.path("include"));
+    module.addIncludePath(text.include);
+    module.linkLibrary(sdl.artifact("SDL3"));
+    module.linkLibrary(text.library);
+    module.linkSystemLibrary("dbus-1", .{});
 }

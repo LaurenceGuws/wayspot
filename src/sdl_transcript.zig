@@ -3,7 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps.zig");
-const notification_history = @import("notification_history.zig");
+const notification = @import("notification.zig");
 const picker = @import("picker.zig");
 
 const step_capacity = 32;
@@ -63,7 +63,7 @@ const Step = union(enum) {
 const Transcript = struct {
     steps: []const Step,
     applications: []const apps.App,
-    retained: ?notification_history.History = null,
+    retained: ?notification.History = null,
     history_reads: usize = 0,
     index: usize = 0,
     mismatch: bool = false,
@@ -154,7 +154,7 @@ const Transcript = struct {
         };
     }
 
-    pub fn readHistory(transcript: *Transcript) !notification_history.History {
+    pub fn readHistory(transcript: *Transcript) !notification.History {
         transcript.history_reads += 1;
         return switch (transcript.next() orelse return error.TranscriptMismatch) {
             .read_history => |result| switch (result) {
@@ -238,7 +238,7 @@ fn simulateApps(steps: []const Step, applications: []const apps.App) !?usize {
 fn simulateHistory(
     steps: []const Step,
     applications: []const apps.App,
-    retained: ?notification_history.History,
+    retained: ?notification.History,
 ) !?usize {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
     var transcript = Transcript{
@@ -586,8 +586,8 @@ test "missing history is empty and read failures clean SDL exactly" {
     }
 }
 
-fn retainedHistory() !notification_history.History {
-    return notification_history.parse(
+fn retainedHistory() !notification.History {
+    return notification.parse(
         std.testing.allocator,
         "{\"received_unix_seconds\":1,\"history_id\":1,\"app_name\":\"old\"," ++
             "\"summary\":\"first\",\"body\":\"old body\"}\n" ++
