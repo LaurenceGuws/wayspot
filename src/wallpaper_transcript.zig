@@ -267,6 +267,7 @@ const Transcript = struct {
 const ResidentOperation = union(enum) {
     now: u64,
     wait: struct { display: u8, stop_fd: u8, event_fd: u8, timeout: ?u64 },
+    reconnect,
     request,
     read_event,
     create: u8,
@@ -289,6 +290,8 @@ const Resident = struct {
     block_read: bool = false,
     socket_waits: u8 = 0,
     request_closes: u8 = 0,
+    request_failures: u8 = 0,
+    reconnect_failures: u8 = 0,
     clock: u64 = 0,
     next_display: u8 = 2,
     stop_identity: u8 = 7,
@@ -315,7 +318,7 @@ const Resident = struct {
         timeout: ?u64,
     ) !wallpaper.Ready {
         std.debug.assert(stop_fd == resident.stop_identity);
-        std.debug.assert(event_fd == resident.event_identity);
+        std.debug.assert(event_fd == 0 or event_fd == resident.event_identity);
         resident.record(.{ .wait = .{
             .display = native.id,
             .stop_fd = stop_fd,
@@ -340,6 +343,10 @@ const Resident = struct {
         std.debug.assert(stop_fd == resident.stop_identity);
         std.debug.assert(event_fd == resident.event_identity);
         resident.record(.request);
+        if (resident.request_failures > 0) {
+            resident.request_failures -= 1;
+            return error.ConnectionTimedOut;
+        }
         if (resident.reply_index == resident.replies.len) return error.ConnectionTimedOut;
         resident.reply_done = false;
         return 11;
@@ -401,6 +408,12 @@ const Resident = struct {
 
     pub fn reconnectEvent(resident: *Resident, event_fd: *u8, _: []const u8, stop_fd: u8, _: u64) !void {
         std.debug.assert(stop_fd == resident.stop_identity);
+        std.debug.assert(event_fd.* == 0);
+        resident.record(.reconnect);
+        if (resident.reconnect_failures > 0) {
+            resident.reconnect_failures -= 1;
+            return error.ConnectionRefused;
+        }
         event_fd.* = resident.event_identity;
     }
 
@@ -561,6 +574,171 @@ test "reconciliation swaps only Wayland ownership and preserves resident fds" {
         else => {},
     };
     try std.testing.expect(saw_old_destroy);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "successful event reconnect survives transient request retries and preserves refresh" {
+    var resident = Resident{
+        .waits = &.{.{ .wayland = true }},
+        .replies = &.{},
+        .request_failures = wallpaper.reconcile_attempt_capacity,
+        .wayland_changes = &.{true},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd: u8 = 0;
+    var work: wallpaper.Work = .reconnect;
+    var paths = pathsValue();
+    try std.testing.expectError(error.ConnectionTimedOut, wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    ));
+    var reconnects: u8 = 0;
+    var requests: u8 = 0;
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .reconnect => reconnects += 1,
+        .request => requests += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u8, 1), reconnects);
+    try std.testing.expectEqual(wallpaper.reconcile_attempt_capacity, requests);
+    try std.testing.expectEqual(resident.event_identity, event_fd);
+    try std.testing.expectEqual(wallpaper.Work.refresh, work);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "successful event reconnect is reused after transient candidate mismatch" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{ reply, reply },
+        .candidate_outputs = &.{ .missing, .exact },
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd: u8 = 0;
+    var work: wallpaper.Work = .reconnect;
+    var paths = pathsValue();
+    try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    );
+    var reconnects: u8 = 0;
+    for (resident.operations[0..resident.count]) |operation| {
+        if (operation == .reconnect) reconnects += 1;
+    }
+    try std.testing.expectEqual(@as(u8, 1), reconnects);
+    try std.testing.expectEqual(@as(u8, 2), resident.candidate_index);
+    try std.testing.expectEqual(resident.event_identity, event_fd);
+    try std.testing.expectEqual(wallpaper.Work.idle, work);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "failed event reconnect keeps absent ownership and reconnect work" {
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{},
+        .reconnect_failures = wallpaper.reconcile_attempt_capacity,
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd: u8 = 0;
+    var work: wallpaper.Work = .reconnect;
+    var paths = pathsValue();
+    try std.testing.expectError(error.ConnectionRefused, wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    ));
+    var reconnects: u8 = 0;
+    for (resident.operations[0..resident.count]) |operation| {
+        if (operation == .reconnect) reconnects += 1;
+    }
+    try std.testing.expectEqual(wallpaper.reconcile_attempt_capacity, reconnects);
+    try std.testing.expectEqual(@as(u8, 0), event_fd);
+    try std.testing.expectEqual(wallpaper.Work.reconnect, work);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "pre-drain event loss reconnects before requesting a snapshot" {
+    const reply =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{.{ .event = true }},
+        .replies = &.{reply},
+        .event_reads = &.{""},
+        .candidate_outputs = &.{.exact},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var work: wallpaper.Work = .refresh;
+    var paths = pathsValue();
+    try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    );
+    var reconnects: u8 = 0;
+    var requests: u8 = 0;
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .reconnect => reconnects += 1,
+        .request => requests += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u8, 1), reconnects);
+    try std.testing.expectEqual(@as(u8, 1), requests);
+    try std.testing.expectEqual(resident.event_identity, event_fd);
+    try std.testing.expectEqual(wallpaper.Work.idle, work);
     try wallpaper.releaseRound(current.native, &current.round, false);
     resident.destroyNative(std.testing.allocator, current.native);
 }
@@ -736,7 +914,7 @@ test "unchanged round reaches one infinite idle wait and stop wins" {
     var round: wallpaper.Round = .{};
     try wallpaper.publishRound(native, &round, &next, false);
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
-    var event_fd = resident.event_identity;
+    var event_fd: u8 = 0;
     var paths = pathsValue();
     try std.testing.expectError(error.Stopped, wallpaper.run(
         &resident,

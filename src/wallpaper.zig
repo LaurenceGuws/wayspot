@@ -423,11 +423,15 @@ pub fn reconcile(
     const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
     for (0..reconcile_attempt_capacity) |attempt| {
         const failure: ?anyerror = attempt_work: {
+            var reconnect = work.* == .reconnect;
             _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
-            if (work.* == .reconnect) {
+            reconnect = reconnect or work.* == .reconnect;
+            if (reconnect) {
                 resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
+                    work.* = .reconnect;
                     break :attempt_work err;
                 };
+                if (work.* == .reconnect) work.* = .refresh;
             }
             var reply: [monitor_response_capacity]u8 = undefined;
             const count = requestMonitors(
