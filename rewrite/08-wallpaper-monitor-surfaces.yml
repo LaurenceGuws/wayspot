@@ -1324,7 +1324,7 @@ phased_checkpoints:
       Ready:
         declaration: >
           packed struct { stop: bool, wayland: bool,
-          event: bool, deadline: bool }
+          event: bool }
         meaning: one poll result after error bits have been classified
       Current:
         declaration: "struct { native: *Native, round: Round }"
@@ -1587,7 +1587,7 @@ phased_checkpoints:
         - >
           If socket2 POLLIN and stop did not win, perform one bounded event
           drain after resolving the Wayland read intent.
-        - poll timeout returns Ready.deadline only during reconciliation
+        - poll timeout returns no readiness; the caller owns its absolute reconciliation deadline
       idle_invariant: >
         Work.idle always reaches one infinite blocking ppoll after bounded
         pending drains. No timer, frame loop, monitor polling, or recurring
@@ -1867,26 +1867,378 @@ phased_checkpoints:
       - Native handoff preserves resident stop/socket2 identities and closes only old Wayland ownership
   - order: 6
     id: product_entry_and_reduction
-    status: pending_reduction_gate
+    status: design_ready_for_reviewer
     product_proof: wayspot-beta wallpaper IMAGE.png runs the complete native theorem
     files:
-      - src/cmd.zig
-      - src/main.zig
-      - build.zig
+      - path: src/cmd.zig
+        owns: exact borrowed wallpaper argv meaning and nothing from the runtime
+      - path: src/main.zig
+        owns: one wallpaper process lifetime and exhaustive Cmd performance
+      - path: src/cli.zig
+        owns: exact visible wallpaper usage alongside existing beta usage
+      - path: src/wallpaper.zig
+        owns: retained pure facts, parsing, image/round meaning, and direct resident control
+      - path: src/wallpaper_native.zig
+        owns: retained concrete file, SDL, Wayland, Hyprland socket, poll, and stop operations
+      - path: src/wallpaper_transcript.zig
+        owns: retained strict histories; it contributes no production reduction credit
+      - path: build.zig
+        owns: executable linkage for Wayland client and both generated protocol implementations
+      - path: rewrite/08-wallpaper-monitor-surfaces.yml
+        owns: temporary reduction and product-entry receipts
     character_budget: 3500
-    reduction_gate: delete at least 15 percent of characters introduced in checkpoints 1 through 5
+    product_entry:
+      argv_grammar:
+        accepted: "wayspot-beta wallpaper IMAGE.png"
+        argument_count_after_argv0: 2
+        image_path: borrowed exact argv bytes; validation remains in wallpaper.loadImage
+        rejected:
+          - wallpaper
+          - wallpaper IMAGE.png extra
+          - any operation, schedule, rotation, directory, URL, or second image
+      Cmd:
+        declaration: "wallpaper: []const u8"
+        reason: >
+          This checkpoint has one wallpaper meaning, so another operation
+          union would name no choice. Cmd borrows argv storage through
+          performance and owns no image, environment, fd, Native, or Round.
+        resolution: >
+          Resolve exact wallpaper argv before desktop-file discovery. Invalid
+          wallpaper argv returns the existing invalid-command status and help;
+          no app scan, image read, socket, SDL task, or Wayland connection
+          occurs.
+      performance: >
+        main's existing exhaustive performer calls one private runWallpaper
+        leaf. Existing zero-argument picker startup, apps argv meanings, and
+        notification meanings remain byte/control-flow unchanged.
+    dependency_direction:
+      - cmd imports only std and existing app vocabulary; it does not import wallpaper or native code
+      - main imports wallpaper and wallpaper_native only to perform the wallpaper Cmd
+      - wallpaper imports std only and remains the shared Native/Transcript theorem
+      - wallpaper_native imports wallpaper and native dependencies
+      - build links native dependencies into the executable; tests do not stand in for product linkage
+    lifecycle:
+      order:
+        - resolve the exact borrowed image path before application discovery
+        - read XDG_RUNTIME_DIR and HYPRLAND_INSTANCE_SIGNATURE once from process Init
+        - build and validate both fixed Hyprland socket paths once
+        - allocate one stable disconnected Native
+        - load and decode the PNG once through that Native into one process-lifetime Image
+        - open one Stop, retaining its exact prior signal mask
+        - initialize resident event fd to the explicit absent value
+        - create one empty Current Round around the stable Native
+        - >
+          Enter Work.reconnect. With an empty Round, wait omits the absent
+          Wayland fd, socket2 connects before j/monitors, and the first complete
+          snapshot prepares/publishes directly on that stable Native.
+        - converge and publish one complete Round, then block in the approved resident loop
+      ownership:
+        image: runWallpaper owns and deinitializes exactly once after every later owner
+        paths: runWallpaper stack owns; every socket operation borrows
+        stop: runWallpaper owns from openStop through closeStop and exact mask restoration
+        event_fd: runWallpaper owns; reconnect mutates the one slot and exit closes it only when present
+        current_native: >
+          runWallpaper owns the stable pointer. Reconciliation may replace its
+          pointed-to Wayland owner only through the approved candidate handoff.
+        current_round: owned with current_native; no handle outlives that Native
+      cleanup:
+        - first stop observation performs no new request, candidate, surface, or publication work
+        - >
+          Stop or fatal resident failure disconnects the current Wayland
+          display first, releases local maps/fds, resets Current.round, and
+          destroys Current.native exactly once.
+        - close socket2 once when present
+        - close Stop and restore its exact prior mask once
+        - deinitialize Image once
+        - return stop as success; invalid argv and every operating failure remain visible and nonzero
+      no_owner:
+        - no daemon supervisor, detached process, child, thread, mutex, or process lock
+        - no config, cache, history, rotation schedule, randomness, or second image
+    errors:
+      invalid_command: existing help and status 2; no wallpaper intake
+      missing_environment: visible before Stop, socket, or Wayland ownership
+      image_failure: visible before Stop, socket2, or Wayland ownership
+      stop: graceful successful process exit after disconnect-first cleanup
+      convergence_failure: visible nonzero; old/current ownership follows the exact checkpoint-5 failure path
+      cleanup_failure: >
+        Preserve the first operating error. Cleanup never attempts healthy
+        Wayland requests after stop or unknown display prefix.
+    build:
+      executable_module:
+        - add both pinned protocol client headers and private C implementations through addWaylandProtocol
+        - link wayland-client
+        - retain existing static SDL linkage used for PNG decode/scale
+      tests: retain their current independent Wayland/protocol linkage
+      assertion: >
+        A clean `zig build` resolves wallpaper_native from main and links every
+        Wayland, layer-shell, viewporter, SDL, libc, and generated protocol
+        symbol into wayspot-beta.
+    reduction_gate: >
+      After adding the entry, final checkpoint-1-through-6 production must be
+      at least 8222 non-whitespace characters smaller than the 54812-character
+      checkpoint-1-through-5 baseline. Entry code is not exempt from the gate.
     reduction_accounting:
+      baseline_commit: 59f3696
+      marathon_start_commit: fbcce56
+      measurement_command: >
+        For src/wallpaper.zig, src/wallpaper_native.zig, src/cmd.zig,
+        src/main.zig, and src/cli.zig, stop before the first `test "` when
+        present, remove ASCII whitespace, and subtract the same file at
+        fbcce56. Generated
+        C/protocol code, wallpaper_transcript.zig, tests, build.zig, and this
+        scratchpad are reported separately and never count as deleted
+        production. At 59f3696 cmd/main/cli contribute zero Marathon 8 delta.
       checkpoint_1_through_5_current_characters: 54812
       minimum_15_percent_deletion: 8222
       state: pending
+      entry_addition_tripwire: 1700
+      required_existing_reduction_if_entry_uses_tripwire: 9922
+      maximum_final_characters: 46590
       current_target_after_reduction: 38500
       deletion_to_current_target_before_checkpoint_6_additions: 16312
-      deletion_to_current_target_if_full_3500_budget_is_added: 19812
+      deletion_to_current_target_if_entry_uses_1700: 18012
+      target_assessment: >
+        38500 is not currently credible without deleting or hiding accepted
+        direct Wayland/Hyprland ownership. The audit found an honest route to
+        the mandatory 46590 ceiling, not to 38500. Keep 38500 visible as the
+        original target and stop for reviewer judgment after the mandatory
+        reduction rather than manufacturing a pass.
       rule: >
         The 15 percent deletion is a minimum gate, not a replacement for the
         unchanged 38500 Marathon 8 production target.
+    reduction_audit:
+      retained_shape:
+        - >
+          Native's file/SDL tasks and display/resident tasks are sequential,
+          have disjoint live fields during residence, and share the strict
+          concrete Native/Transcript theorem. Splitting them adds an owner and
+          wrappers without removing runtime ambiguity; retain one Native.
+        - >
+          No stale one-surface production path exists. Checkpoint 3 evolved
+          into the current Surface/handle/round path. Same-snapshot
+          replacement, stale-handle, configure, release, and reverse-cleanup
+          theorems remain required.
+        - >
+          Transcript/native parallel operations are deliberate simulation and
+          parity, not duplicate production. Tests and Transcript may become
+          smaller only as a consequence of a smaller operation vocabulary;
+          their deletion earns zero production credit.
+      measured_regions:
+        wayland_waits:
+          current_characters: 4755
+          exact_source:
+            - "Native.wait: 2099"
+            - "Native.waitSocket: 759"
+            - "Native.pollUntil: 647"
+            - "Native.dispatch: 1250"
+          delete:
+            - Native.dispatch in full
+            - its duplicate flush, prepare-read, poll, read-events, and dispatch loop
+            - Ready.deadline, which no caller reads
+            - persistent flush_attempts/flush_deadline if one wait owns each bounded flush retry
+          replacement_ceiling: 2250
+          net_reduction_floor: 2505
+          preserved: >
+            One direct poll helper still has zero-time semantics, 16 bounded
+            EINTR retries, stop priority, exact prepare_read pairing, and no
+            dispatch during publication flush. Initial configure uses the same
+            wait/drain path as residence with absent borrowed stop/event fds.
+        publication_and_cleanup:
+          current_characters: 9927
+          exact_source:
+            - "wallpaper open/prepare/publish/release/discard Round: 2396"
+            - "Native validate/map/unmap/flush/finish/release/discard/display-loss: 5262"
+            - "Native healthy disconnect: 921"
+            - "Surface resource helpers: 1348"
+          delete:
+            - duplicate publishRound/releaseRound transition bodies
+            - duplicate reverse release loops and display-loss catches
+            - duplicate healthy/display-loss field clearing
+            - repeated proxy/local destruction assignments in releaseRetired and discardPrepared
+            - redundant output_count and temporary Surface.region retained fields
+          replacement_ceiling: 5400
+          net_reduction_floor: 4527
+          preserved: >
+            One direct round transition distinguishes publish, healthy stop,
+            and unknown-prefix loss explicitly. It retains whole-transition
+            prevalidation, one semantic publication batch, checked generations,
+            reverse release, disconnect-first loss, and every failure theorem.
+        resident_convergence:
+          current_characters: 5546
+          exact_source:
+            - "reconcile: 2636"
+            - "requestMonitors: 1079"
+            - "run/waitAttempt/waitForWork/transient: 1831"
+          delete:
+            - repeated resident/native/stop/event/path argument forwarding
+            - duplicate transient-attempt tails after reconnect, request, and candidate discovery
+            - separate startup refresh path; startup is the real reconnect path
+            - trivial source request read/write/close forwarding where one exact request task remains simulatable
+          replacement_ceiling: 3100
+          net_reduction_floor: 2446
+          preserved: >
+            Control remains shallow and bounded: one resident loop, one
+            eight-attempt reconciliation loop, one per-call request socket,
+            pre/post zero-time drains, old Current retention, candidate
+            failure atomicity, and stop priority. Empty-round startup polls
+            stop/socket2 without an absent Wayland fd and publishes on the
+            initial stable Native; later replacement retains the candidate
+            handoff. No generic retry owner or erased interface is introduced.
+        event_collapse:
+          current_characters: 1749
+          exact_source:
+            - "Event/Feed/EventLines: 997"
+            - "drainEvents: 707"
+            - "associated checkpoint-5 bounds/comments: 45"
+          delete:
+            - Feed.events array and slice when residence only consumes whether any refresh occurred
+            - duplicated per-event refresh assignment
+          replacement_ceiling: 1200
+          net_reduction_floor: 549
+          preserved: >
+            Event classification remains closed and tests still observe exact
+            malformed/ignore/refresh records, fragmentation, coalescing,
+            overlong discard, later valid lines, and batch bounds.
+        small_native_operations:
+          current_characters: 3332
+          exact_source:
+            - "Native fields: 771"
+            - "file/clock/candidate/event/request forwarding operations: 2561"
+          delete:
+            - fields made redundant by the shared wait and cleanup paths
+            - wrappers with no ownership, bound, error translation, or Transcript operation
+            - duplicate checked sentinels already asserted by the sole caller and callee
+          replacement_ceiling: 2800
+          net_reduction_floor: 532
+          preserved: >
+            Every remaining operation names a real external task and has an
+            exact Transcript counterpart. File/image fields remain null during
+            residence; stop/socket2/path/deadline never move into Native.
+      planned_total:
+        current_regions: 25309
+        replacement_ceiling: 14750
+        net_reduction_floor: 10559
+        entry_addition_tripwire: 1700
+        projected_final_maximum: 45953
+        mandatory_headroom: 637
+        warning: >
+          These are reviewer tripwires, not permission to compress names,
+          remove assertions/comments, move code into C/tests/generated output,
+          or weaken a theorem. If any replacement cannot meet its ceiling
+          directly, stop that reduction checkpoint and report the miss.
+    reviewer_checkpoints:
+      - order: 1
+        id: wait_and_cleanup_reduction
+        state: reviewer_accepted_ready_to_commit
+        gate: >
+          Reduce only shared Wayland wait/publication/cleanup paths. Run every
+          existing theorem and report operation-history changes before entry.
+      - order: 2
+        id: convergence_and_event_reduction
+        gate: >
+          Reduce resident and event control while preserving all current
+          transcript histories, Smith properties, comments, and negative scans.
+      - order: 3
+        id: product_entry
+        gate: >
+          Add Cmd/main/build wiring within 1700 production characters and
+          prove notification/apps paths do not perform wallpaper intake.
+      - order: 4
+        id: final_shape_gate
+        gate: >
+          Recount from fbcce56. Final production must be at most 46590 and no
+          accepted theorem or source contract may be absent. Report the
+          unchanged 38500 target separately as met or honestly missed.
+    reviewer_checkpoint_1_receipt:
+      source_scope:
+        - src/wallpaper.zig
+        - src/wallpaper_native.zig
+      transcript_changed: false
+      operation_history:
+        semantic_publication: unchanged
+        healthy_release: unchanged
+        display_loss: unchanged
+        wait: >
+          Native configure and resident waits now share prepare-read, bounded
+          flush, ppoll, read/cancel, and drain control. A writable EAGAIN retry
+          remains inside one wait call instead of persisting counters in Native.
+      production_nonwhitespace:
+        method: source before the first test declaration with ASCII whitespace removed
+        baseline_59f3696: 54812
+        current: 52275
+        reduction: 2537
+        whole_marathon_delta_from_fbcce56: 52275
+      audited_region_recount:
+        note: >
+          The approved audit recorded 4755 and 9927. Recounting its named
+          59f3696 ranges gives 4751 and 9825: pollUntil was four characters
+          overstated and Surface was 102 characters overstated. The approved
+          replacement ceilings remain unchanged.
+        wayland_waits: {baseline: 4751, current: 3842, reduction: 909, ceiling: 2250, over: 1592}
+        publication_and_cleanup: {baseline: 9825, current: 8164, reduction: 1661, ceiling: 5400, over: 2764}
+        combined: {baseline: 14576, current: 12006, reduction: 2570, ceiling: 7650, over: 4356}
+      reviewer_acceptance: >
+        The reviewer accepts checkpoint 1 because its 2537-character
+        production deletion is direct and every behavior and gate remains
+        preserved, despite both audited regions missing their original
+        replacement estimates.
+      carried_gate: >
+        The whole checkpoint-6 mandatory final production ceiling of 46590
+        remains red and pending. Checkpoint-1 acceptance carries that gate
+        forward and is not checkpoint-6 or Marathon-8 closure; targets and
+        later scope remain unchanged.
+    tests:
+      unit:
+        - exact wallpaper argv and every missing/extra argument rejection
+        - wallpaper resolution precedes app discovery and borrows exact path bytes
+        - Cmd exhaustiveness includes wallpaper exactly once
+        - help names the one exact wallpaper form without internal runtime vocabulary
+        - all retained parser, image, round, event, and bound endpoint tests remain
+      simulation:
+        - startup begins reconnect with absent socket2 and publishes only after exact convergence
+        - stop before connect, during request, during candidate preparation, after publication, and while idle
+        - every startup/runtime failure leaves image, stop, event fd, Current, and Round cleaned exactly once
+        - existing independent protocol order, stale snapshot, configure, handoff, and cleanup histories remain
+      smith:
+        - all existing structured monitor/event/request/round histories remain
+        - generated stop and failure positions include the product startup and final cleanup order
+      native:
+        - native parity reaches every operation after vocabulary reduction
+        - clean executable linkage resolves every generated protocol and Wayland symbol
+        - isolated invalid-env and invalid-image invocations fail without a live compositor or desktop mutation
+      gates:
+        - zig fmt --check
+        - zig build test --summary all
+        - zig build
+        - YAML parse
+        - git diff --check
+        - bounded negative scan for removed fields/functions and forbidden architecture
+        - exact production-character recount from fbcce56 and 59f3696
+    live_receipt:
+      status: deferred_until_operator_coordination
+      protocol:
+        - operator chooses one PNG and a quiet test window
+        - record and stop the currently installed wallpaper owner only with operator approval
+        - run wayspot-beta wallpaper IMAGE.png attached
+        - prove one surface and valid image on every current monitor
+        - change focus, workspace, pointer, and windows; assert no image round work
+        - perform coordinated monitor/configure change and prove bounded complete replacement
+        - send SIGTERM and prove prompt exact cleanup with no surviving wayspot-beta wallpaper process
+        - restore the operator's prior wallpaper owner
+      forbidden: no live launch, daemon replacement, Hyprland reload, or process kill during deterministic implementation
+    negative_space:
+      - no wallpaper default image, directory, config, cache, history, rotation, schedule, or randomness
+      - no CLI alias, legacy flag, completion, GUI route, picker row, or app fallback for wallpaper
+      - no other compositor, SDL window, GPU renderer, frame loop, or periodic monitor poll
+      - no generic Process, Runtime, Context, Manager, Service, Provider, Registry, or Retry type
+      - no test-only production branch, fixture, generated owner, hidden C lifecycle, or compressed control flow
+      - no source deletion credited from tests, Transcript, comments, assertions, protocol XML, or generated C
     closes_when:
-      - one isolated native process passes coordinated single- and multi-monitor receipts
+      - exact product argv links and reaches the complete native resident path
+      - final production is at most 46590 characters from the fbcce56 baseline
+      - every checkpoint-1-through-5 theorem and source contract remains green
+      - deterministic and isolated native gates pass without compositor mutation
+      - one coordinated single- and multi-monitor live receipt is approved and later passes
       - all comments and branches have a current product owner
 
 character_budget:

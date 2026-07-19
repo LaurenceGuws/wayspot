@@ -40,7 +40,6 @@ pub const Ready = packed struct {
     stop: bool = false,
     wayland: bool = false,
     event: bool = false,
-    deadline: bool = false,
 };
 /// Owns one bounded Unix socket path without allocation; callers borrow `slice()`.
 pub const SocketPath = struct {
@@ -363,34 +362,20 @@ pub fn publishRound(source: anytype, current: *Round, next: *Round, stop: anytyp
     if (current.monitors.count != 0 and !current.monitors.eql(&next.monitors)) {
         return error.RoundSnapshotChanged;
     }
-    try source.validatePublication(current.handleSlice(), next.handleSlice());
-    for (next.handleSlice()) |handle| source.queueMap(handle);
-    var old_index = current.monitors.count;
-    while (old_index > 0) {
-        old_index -= 1;
-        source.queueUnmap(current.handles[old_index]);
-    }
-    source.flushPublication(stop) catch |err| {
-        source.disconnectAfterDisplayLoss();
-        return err;
-    };
-    source.finishPublication(current.handleSlice(), next.handleSlice());
-    const old = current.*;
-    current.* = next.*;
-    next.* = .{};
-    var index = old.monitors.count;
-    while (index > 0) {
-        index -= 1;
-        source.releaseRetired(old.handles[index], stop) catch |err| {
-            source.disconnectAfterDisplayLoss();
-            return err;
-        };
-    }
+    try transitionRound(source, current, next, stop);
 }
 
 pub fn releaseRound(source: anytype, current: *Round, stop: anytype) !void {
     if (current.monitors.count == 0) return;
-    try source.validatePublication(current.handleSlice(), &.{});
+    var next: Round = .{};
+    try transitionRound(source, current, &next, stop);
+}
+
+fn transitionRound(source: anytype, current: *Round, next: *Round, stop: anytype) !void {
+    const old_handles = current.handleSlice();
+    const next_handles = next.handleSlice();
+    try source.validatePublication(old_handles, next_handles);
+    for (next_handles) |handle| source.queueMap(handle);
     var index = current.monitors.count;
     while (index > 0) {
         index -= 1;
@@ -400,9 +385,10 @@ pub fn releaseRound(source: anytype, current: *Round, stop: anytype) !void {
         source.disconnectAfterDisplayLoss();
         return err;
     };
-    source.finishPublication(current.handleSlice(), &.{});
+    source.finishPublication(old_handles, next_handles);
     const old = current.*;
-    current.* = .{};
+    current.* = next.*;
+    next.* = .{};
     index = old.monitors.count;
     while (index > 0) {
         index -= 1;
