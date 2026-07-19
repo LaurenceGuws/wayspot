@@ -340,34 +340,51 @@ marathons:
       - socket, image, and native surface cleanup is exact
 
   - order: 9
-    id: wallpaper_rotation_lifecycle
-    name: Wallpaper rotation and lifecycle
-    scratchpad: rewrite/09-wallpaper-rotation-lifecycle.yml
+    id: wayspot_0_1_freeze
+    name: Wayspot 0.1 freeze
+    scratchpad: rewrite/09-wayspot-0.1-freeze.yml
     depends_on:
       - wallpaper_monitor_surfaces
     outcome: >
-      Rotate wallpapers predictably for the full desktop session without focus
-      events changing a round or process restarts repeating a sequence.
+      Freeze a confident Wayspot 0.1 with the fast apps picker, notifications,
+      and predictable wallpaper rotation, then retire the rejected installed
+      binaries without claiming parity with them.
     includes:
+      - deterministic offline wallpaper catalog and duplicate report
+      - bounded PNG and JPEG wallpaper discovery from the catalog
       - fresh process-start randomness
       - bounded per-monitor and per-round selection
       - scheduled rotation and direct rotate action
       - focus-event rejection
       - reconnect, cancellation, stop, and overnight process behavior
+      - removal of beta product names
+      - version bump from 0.0.0 to 0.1.0 at freeze
+      - Hyprland rollout for picker, notifications, and wallpaper
+      - retirement of rejected installed binaries after complete proof
     excludes:
+      - old-code feature parity
+      - wallpaper file moves, deletion, or duplicate removal before catalog review
+      - WebP, video, and unknown wallpaper formats
+      - sunglasses
+      - shell completion
       - flock
       - fallback process manager
       - unbounded retry or sleep
       - focus-driven refresh
     proof:
+      - deterministic catalog output and duplicate groups
       - deterministic random-source and time simulations
       - focus, workspace, monitor, socket-loss, and stop event histories
       - non-repetition and exact-round assertions
+      - existing apps and notification gates remain green
       - idle CPU and memory measurements
       - direct rotate and overnight receipts
     closes_when:
+      - the catalog schema and real library report are operator-approved
       - focus movement cannot alter the current wallpaper round
       - restart sequences differ and the process survives an overnight session
+      - Wayspot 0.1 owns every live accepted invocation
+      - rejected installed binaries and beta product names no longer exist
 
   - order: 10
     id: sunglasses_cli_overlay
