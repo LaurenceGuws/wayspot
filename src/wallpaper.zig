@@ -537,6 +537,7 @@ pub fn requestMonitors(
                 try source.waitSocket(fd, stop_fd, event_fd, false, deadline);
                 continue;
             },
+            error.ConnectionResetByPeer => if (completeJsonArray(reply[0..offset])) return offset else return err,
             else => return err,
         };
         if (offset == reply.len and count != 0) return error.MonitorResponseTooLong;
@@ -544,6 +545,47 @@ pub fn requestMonitors(
         offset += count;
     }
     return error.RequestReadAttemptsExceeded;
+}
+
+// A reset is an end marker only after one complete top-level JSON array is already buffered.
+fn completeJsonArray(bytes: []const u8) bool {
+    var depth: usize = 0;
+    var string = false;
+    var escaped = false;
+    var started = false;
+    for (bytes) |byte| {
+        if (!started) {
+            if (std.ascii.isWhitespace(byte)) continue;
+            if (byte != '[') return false;
+            started = true;
+            depth = 1;
+            continue;
+        }
+        if (depth == 0) {
+            if (!std.ascii.isWhitespace(byte)) return false;
+            continue;
+        }
+        if (string) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                string = false;
+            }
+            continue;
+        }
+        switch (byte) {
+            '"' => string = true,
+            '[', '{' => depth += 1,
+            ']', '}' => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return started and depth == 0 and !string;
 }
 
 /// Blocks one resident thread until stop or fatal error while borrowing resident fds and image.
@@ -892,6 +934,27 @@ test "monitor response bytes and JSON are bounded" {
         parseMonitors(std.testing.allocator, "[1]"),
     );
     if (parseMonitors(std.testing.allocator, "[") catch null) |_| return error.ExpectedMalformedJson;
+}
+
+test "complete JSON array framing covers containers strings escapes and truncation" {
+    const cases = [_]struct { bytes: []const u8, complete: bool }{
+        .{ .bytes = "[]", .complete = true },
+        .{ .bytes = " \t\r\n[]\n\r\t ", .complete = true },
+        .{ .bytes = "[{\"items\":[{},[1,2],{\"more\":[]}]}]", .complete = true },
+        .{ .bytes = "[\"] } still string\",\"{ [ also string\"]", .complete = true },
+        .{ .bytes = "[\"quote: \\\" slash: \\\\\"]", .complete = true },
+        .{ .bytes = "[", .complete = false },
+        .{ .bytes = "[{\"items\":[1,2]}", .complete = false },
+        .{ .bytes = "[\"unterminated", .complete = false },
+        .{ .bytes = "[\"trailing escape\\", .complete = false },
+        .{ .bytes = "{}", .complete = false },
+        .{ .bytes = "[]x", .complete = false },
+        .{ .bytes = "", .complete = false },
+        .{ .bytes = " \t\r\n", .complete = false },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.complete, completeJsonArray(case.bytes));
+    }
 }
 
 test "event fragments coalesce and classify without payload state" {

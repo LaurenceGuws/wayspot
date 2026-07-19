@@ -124,7 +124,10 @@ pub const Native = struct {
     /// Reads into one borrowed bounded reply suffix and exposes EOF or failure.
     pub fn readReply(native: *Native, fd: std.posix.fd_t, bytes: []u8) !usize {
         const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        return file.readStreaming(native.io, &.{bytes});
+        return file.readStreaming(native.io, &.{bytes}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
     }
 
     /// Closes one per-call request descriptor exactly once.
@@ -586,6 +589,7 @@ pub const Native = struct {
         if (try native.pollUntil(&fds, deadline, false) == 0) return error.ConnectionTimedOut;
         if (fds[0].revents != 0) return error.Stopped;
         if (fds[2].revents != 0) return error.EventSocketLost;
+        if (!write and fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) return;
         if (fds[1].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0) {
             return error.ConnectionResetByPeer;
         }
@@ -1179,6 +1183,30 @@ test "zero-time poll observes readiness with absent borrowed descriptors" {
     try std.testing.expectEqual(@as(i16, 0), fds[0].revents);
     try std.testing.expect(fds[1].revents & std.posix.POLL.IN != 0);
     try std.testing.expectEqual(@as(i16, 0), fds[2].revents);
+}
+
+test "request wait drains bytes before peer close and then observes EOF" {
+    var sockets: [2]std.posix.fd_t = undefined;
+    const result = std.posix.system.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        0,
+        &sockets,
+    );
+    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
+    const writer = std.Io.File{ .handle = sockets[0], .flags = .{ .nonblocking = true } };
+    defer _ = std.posix.system.close(sockets[1]);
+    try writer.writeStreamingAll(std.testing.io, "[]");
+    writer.close(std.testing.io);
+    sockets[0] = -1;
+
+    var native: Native = .{ .io = std.testing.io };
+    try native.waitSocket(sockets[1], -1, -1, false, native.now() + 100);
+    var bytes: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try native.readReply(sockets[1], &bytes));
+    try std.testing.expectEqualStrings("[]", &bytes);
+    try native.waitSocket(sockets[1], -1, -1, false, native.now() + 100);
+    try std.testing.expectEqual(@as(usize, 0), try native.readReply(sockets[1], &bytes));
 }
 
 test "native PNG file decode and linear cover scaling" {

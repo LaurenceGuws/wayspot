@@ -288,6 +288,7 @@ const Resident = struct {
     reply_chunk: u16 = std.math.maxInt(u16),
     block_write: bool = false,
     block_read: bool = false,
+    reset_after_reply: bool = false,
     socket_waits: u8 = 0,
     request_closes: u8 = 0,
     request_failures: u8 = 0,
@@ -371,6 +372,7 @@ const Resident = struct {
         std.debug.assert(fd == 11);
         if (resident.reply_done) {
             resident.reply_index += 1;
+            if (resident.reset_after_reply) return error.ConnectionResetByPeer;
             return 0;
         }
         const reply = resident.replies[resident.reply_index];
@@ -998,6 +1000,78 @@ test "request wire handles partial would-block EOF and closes once" {
     try std.testing.expectEqualStrings(reply, bytes[0..count]);
     try std.testing.expectEqual(@as(u8, 2), resident.socket_waits);
     try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+}
+
+test "request reset accepts only an already complete JSON array" {
+    const complete =
+        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{complete},
+        .reply_chunk = 7,
+        .reset_after_reply = true,
+    };
+    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
+    const count = try wallpaper.requestMonitors(
+        &resident,
+        "/run/hypr/x/.socket.sock",
+        resident.stop_identity,
+        resident.event_identity,
+        &bytes,
+        2000,
+    );
+    try std.testing.expectEqualStrings(complete, bytes[0..count]);
+    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+
+    resident = .{
+        .waits = &.{},
+        .replies = &.{complete[0 .. complete.len - 1]},
+        .reset_after_reply = true,
+    };
+    try std.testing.expectError(error.ConnectionResetByPeer, wallpaper.requestMonitors(
+        &resident,
+        "/run/hypr/x/.socket.sock",
+        resident.stop_identity,
+        resident.event_identity,
+        &bytes,
+        2000,
+    ));
+    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+}
+
+test "balanced malformed reset frame reaches parser but no candidate or publication" {
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{"[}"},
+        .reset_after_reply = true,
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var lines: wallpaper.EventLines = .{};
+    var event_fd = resident.event_identity;
+    var work: wallpaper.Work = .refresh;
+    var paths = pathsValue();
+    if (wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    )) |_| return error.ExpectedMalformedJson else |_| {}
+    try std.testing.expectEqual(@as(u8, 0), resident.candidate_index);
+    try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
+    try std.testing.expectEqual(@as(u8, 1), current.native.id);
+    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
+    resident.destroyNative(std.testing.allocator, current.native);
 }
 
 test "generated request progress remains bounded and closes once" {
