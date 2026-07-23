@@ -49,20 +49,22 @@ pub fn build(b: *std.Build) void {
     wayspot.linkLibrary(sdl.artifact("SDL3"));
     wayspot.linkLibrary(text.library);
     wayspot.linkSystemLibrary("dbus-1", .{});
-    const layer = waylandProtocol(
+    const layer_xml = b.path("protocols/wlr-layer-shell-unstable-v1.xml");
+    const layer_header = waylandHeader(
         b,
-        b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
+        layer_xml,
         "wlr-layer-shell-unstable-v1",
     );
-    const viewport = waylandProtocol(b, b.path("protocols/viewporter.xml"), "viewporter");
+    const layer_code = waylandCode(b, layer_xml, "wlr-layer-shell-unstable-v1");
+    const viewport_header = waylandHeader(b, b.path("protocols/viewporter.xml"), "viewporter");
     const wayland_protocol_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    wayland_protocol_module.addIncludePath(layer.header.dirname());
-    wayland_protocol_module.addIncludePath(layer.code.dirname());
-    wayland_protocol_module.addIncludePath(viewport.header.dirname());
+    wayland_protocol_module.addIncludePath(layer_header.dirname());
+    wayland_protocol_module.addIncludePath(layer_code.dirname());
+    wayland_protocol_module.addIncludePath(viewport_header.dirname());
     wayland_protocol_module.addIncludePath(b.path("src"));
     wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland_protocol.c") });
     wayland_protocol_module.linkSystemLibrary("wayland-client", .{});
@@ -291,23 +293,20 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run.step);
 }
 
-const WaylandProtocol = struct {
-    header: std.Build.LazyPath,
-    code: std.Build.LazyPath,
-};
-
-fn waylandProtocol(
+fn waylandHeader(
     b: *std.Build,
     xml: std.Build.LazyPath,
     name: []const u8,
-) WaylandProtocol {
-    const header_command = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
-    header_command.addFileArg(xml);
-    const header = header_command.addOutputFileArg(b.fmt("{s}-client.h", .{name}));
-    const code_command = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
-    code_command.addFileArg(xml);
-    const code = code_command.addOutputFileArg(b.fmt("{s}.c", .{name}));
-    return .{ .header = header, .code = code };
+) std.Build.LazyPath {
+    const command = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+    command.addFileArg(xml);
+    return command.addOutputFileArg(b.fmt("{s}-client.h", .{name}));
+}
+
+fn waylandCode(b: *std.Build, xml: std.Build.LazyPath, name: []const u8) std.Build.LazyPath {
+    const command = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+    command.addFileArg(xml);
+    return command.addOutputFileArg(b.fmt("{s}.c", .{name}));
 }
 
 fn addNotificationLibraries(
