@@ -282,6 +282,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
+    const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });
+    run_bash_completion_test.addArtifactArg2(executable, .{});
+    test_step.dependOn(&run_bash_completion_test.step);
 
     const run = b.addRunArtifact(executable);
     if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {

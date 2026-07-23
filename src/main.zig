@@ -28,6 +28,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     const argv = arguments[0..argument_count];
     if (argument_count > 0) {
+        if (cmd.resolveCompletion(argv) catch return 2) |meaning| {
+            return perform(init, meaning, &.{}, null, null);
+        }
         if (cmd.resolveWallpaper(argv) catch return 2) |meaning| {
             return perform(init, meaning, &.{}, null, null);
         }
@@ -128,6 +131,12 @@ fn perform(
     home: ?[]const u8,
 ) !u8 {
     switch (meaning) {
+        .completion => {
+            var stdout_buffer: [4096]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+            try cli.writeBash(&stdout_writer.interface);
+            try stdout_writer.interface.flush();
+        },
         .wallpaper => |wallpaper_command| switch (wallpaper_command) {
             .run => |root| try runWallpaper(init, root),
             .rotate => try wallpaper_native.requestRotation(

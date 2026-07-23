@@ -6,8 +6,12 @@ const apps = @import("apps.zig");
 
 pub const argument_capacity = 64;
 pub const query_capacity = apps.query_capacity;
+pub const modes = [_][]const u8{ "apps", "notifications", "wallpaper" };
+pub const notification_operations = [_][]const u8{"history"};
+pub const wallpaper_operations = [_][]const u8{"rotate"};
 
 pub const Cmd = union(enum) {
+    completion: enum { bash },
     wallpaper: union(enum) { run: []const u8, rotate },
     apps: union(enum) {
         list: []const u8,
@@ -20,11 +24,18 @@ pub const Cmd = union(enum) {
 };
 
 comptime {
-    std.debug.assert(std.meta.fieldNames(Cmd).len == 3);
+    std.debug.assert(std.meta.fieldNames(Cmd).len == 4);
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "wallpaper")).len == 2);
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "apps")).len == 2);
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "notifications")).len == 2);
+    std.debug.assert(modes.len == 3);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
+}
+
+pub fn resolveCompletion(argv: []const []const u8) !?Cmd {
+    if (argv.len == 0 or !std.mem.eql(u8, argv[0], "completion")) return null;
+    if (argv.len == 2 and std.mem.eql(u8, argv[1], "bash")) return .{ .completion = .bash };
+    return error.CompletionArgumentsInvalid;
 }
 
 pub fn resolveWallpaper(argv: []const []const u8) !?Cmd {
@@ -83,6 +94,22 @@ test "notification meanings resolve before applications exist" {
     try std.testing.expectError(
         error.NotificationArgumentsInvalid,
         resolveNotifications(&.{ "notifications", "unknown" }),
+    );
+}
+
+test "Bash completion resolves before applications exist" {
+    try std.testing.expectEqual(
+        .bash,
+        (try resolveCompletion(&.{ "completion", "bash" })).?.completion,
+    );
+    try std.testing.expectEqual(@as(?Cmd, null), try resolveCompletion(&.{"apps"}));
+    try std.testing.expectError(
+        error.CompletionArgumentsInvalid,
+        resolveCompletion(&.{"completion"}),
+    );
+    try std.testing.expectError(
+        error.CompletionArgumentsInvalid,
+        resolveCompletion(&.{ "completion", "unknown" }),
     );
 }
 

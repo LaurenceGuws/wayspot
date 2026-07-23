@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const apps = @import("apps.zig");
+const cmd = @import("cmd.zig");
 
 pub const help =
     \\usage:
@@ -10,6 +11,7 @@ pub const help =
     \\  wayspot wallpaper rotate
     \\  wayspot apps [terms...]
     \\  wayspot <exact application name or desktop id>
+    \\  source <(wayspot completion bash)
     \\
 ;
 
@@ -20,6 +22,61 @@ pub fn writeApps(output: anytype, applications: []const apps.App, query: []const
         std.debug.assert(name.len <= apps.name_capacity);
         try output.writeAll(name);
         try output.writeAll("\n");
+    }
+}
+
+pub fn writeBash(output: anytype) !void {
+    try output.writeAll(
+        \\_wayspot_completion() {
+        \\    COMPREPLY=()
+        \\    [[ ${COMP_CWORD-} =~ ^[0-9]+$ ]] || return 0
+        \\    (( COMP_CWORD < ${#COMP_WORDS[@]} )) || return 0
+        \\    local current=${COMP_WORDS[COMP_CWORD]}
+        \\    local -a directories
+        \\    if (( COMP_CWORD == 1 )); then
+        \\        mapfile -t COMPREPLY < <(compgen -W '
+    );
+    try writeWords(output, &cmd.modes);
+    try output.writeAll(
+        \\' -- "$current")
+        \\        return
+        \\    fi
+        \\    case ${COMP_WORDS[1]-} in
+        \\        apps)
+        \\            mapfile -t COMPREPLY < <(
+        \\                command wayspot apps "${COMP_WORDS[@]:2:COMP_CWORD-2}" "$current" 2>/dev/null
+        \\            )
+        \\            ;;
+        \\        notifications)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W '
+    );
+    try writeWords(output, &cmd.notification_operations);
+    try output.writeAll(
+        \\' -- "$current")
+        \\            ;;
+        \\        wallpaper)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W '
+    );
+    try writeWords(output, &cmd.wallpaper_operations);
+    try output.writeAll(
+        \\' -- "$current")
+        \\            mapfile -t directories < <(compgen -d -- "$current")
+        \\            COMPREPLY+=("${directories[@]}")
+        \\            compopt -o filenames 2>/dev/null || true
+        \\            ;;
+        \\    esac
+        \\}
+        \\complete -F _wayspot_completion wayspot
+        \\
+    );
+}
+
+fn writeWords(output: anytype, words: []const []const u8) !void {
+    for (words, 0..) |word, index| {
+        if (index > 0) try output.writeAll(" ");
+        try output.writeAll(word);
     }
 }
 
@@ -73,6 +130,47 @@ test "help and output failures are exact" {
     var usage = Transcript{ .expected = help };
     try usage.writeAll(help);
     try std.testing.expect(usage.done());
+}
+
+test "Bash definition uses current Cmd words without exposing an engine command" {
+    const expected =
+        \\_wayspot_completion() {
+        \\    COMPREPLY=()
+        \\    [[ ${COMP_CWORD-} =~ ^[0-9]+$ ]] || return 0
+        \\    (( COMP_CWORD < ${#COMP_WORDS[@]} )) || return 0
+        \\    local current=${COMP_WORDS[COMP_CWORD]}
+        \\    local -a directories
+        \\    if (( COMP_CWORD == 1 )); then
+        \\        mapfile -t COMPREPLY < <(compgen -W 'apps notifications wallpaper' -- "$current")
+        \\        return
+        \\    fi
+        \\    case ${COMP_WORDS[1]-} in
+        \\        apps)
+        \\            mapfile -t COMPREPLY < <(
+        \\                command wayspot apps "${COMP_WORDS[@]:2:COMP_CWORD-2}" "$current" 2>/dev/null
+        \\            )
+        \\            ;;
+        \\        notifications)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'history' -- "$current")
+        \\            ;;
+        \\        wallpaper)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'rotate' -- "$current")
+        \\            mapfile -t directories < <(compgen -d -- "$current")
+        \\            COMPREPLY+=("${directories[@]}")
+        \\            compopt -o filenames 2>/dev/null || true
+        \\            ;;
+        \\    esac
+        \\}
+        \\complete -F _wayspot_completion wayspot
+        \\
+    ;
+    var output = Transcript{ .expected = expected };
+    try writeBash(&output);
+    try std.testing.expect(output.done());
+    try std.testing.expect(std.mem.indexOf(u8, expected, "complete bash") == null);
+    try std.testing.expect(std.mem.indexOf(u8, expected, "eval") == null);
 }
 
 fn testApp(id: []const u8, name: []const u8) apps.App {
