@@ -2,14 +2,8 @@
 
 const std = @import("std");
 const wallpaper = @import("wallpaper.zig");
-const sdl = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
-const wl = @cImport({
-    @cInclude("wayland-client.h");
-    @cInclude("wlr-layer-shell-unstable-v1-client.h");
-    @cInclude("viewporter-client.h");
-});
+const sdl = @import("sdl_c");
+const wl = @import("wayland_c");
 
 extern fn wayspot_jpeg_decode(
     bytes: [*]const u8,
@@ -331,8 +325,8 @@ pub const Native = struct {
         if (native.display == null) return;
         for (&native.surfaces) |*surface| std.debug.assert(surface.state == .vacant);
         for (native.outputs) |proxy| if (proxy) |output| wl.wl_output_release(output);
-        if (native.layer_shell) |proxy| wl.zwlr_layer_shell_v1_destroy(proxy);
-        if (native.viewporter) |proxy| wl.wp_viewporter_destroy(proxy);
+        if (native.layer_shell) |proxy| wl.wayspot_layer_shell_destroy(proxy);
+        if (native.viewporter) |proxy| wl.wayspot_viewporter_destroy(proxy);
         if (native.shm) |proxy| wl.wl_shm_destroy(proxy);
         if (native.compositor) |proxy| wl.wl_compositor_destroy(proxy);
         if (native.registry_proxy) |proxy| wl.wl_registry_destroy(proxy);
@@ -369,31 +363,31 @@ pub const Native = struct {
             return error.SurfaceRegionFailed;
         wl.wl_surface_set_input_region(surface.surface.?, region);
         wl.wl_region_destroy(region);
-        surface.layer = wl.zwlr_layer_shell_v1_get_layer_surface(
+        surface.layer = wl.wayspot_layer_shell_get_surface(
             native.layer_shell.?,
             surface.surface.?,
             native.outputs[monitor_index].?,
-            wl.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
+            wl.WAYSPOT_LAYER_BACKGROUND,
             "wayspot-wallpaper",
         ) orelse return error.SurfaceLayerFailed;
-        if (wl.zwlr_layer_surface_v1_add_listener(surface.layer, &layer_listener, surface) != 0) {
+        if (wl.wayspot_layer_surface_add_listener(surface.layer, &layer_listener, surface) != 0) {
             return error.SurfaceLayerFailed;
         }
         const layer = surface.layer.?;
-        wl.zwlr_layer_surface_v1_set_size(layer, 0, 0);
-        wl.zwlr_layer_surface_v1_set_anchor(
+        wl.wayspot_layer_surface_set_size(layer, 0, 0);
+        wl.wayspot_layer_surface_set_anchor(
             layer,
-            wl.ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-                wl.ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-                wl.ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
-                wl.ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
+            wl.WAYSPOT_ANCHOR_TOP |
+                wl.WAYSPOT_ANCHOR_BOTTOM |
+                wl.WAYSPOT_ANCHOR_LEFT |
+                wl.WAYSPOT_ANCHOR_RIGHT,
         );
-        wl.zwlr_layer_surface_v1_set_exclusive_zone(layer, -1);
-        wl.zwlr_layer_surface_v1_set_keyboard_interactivity(
+        wl.wayspot_layer_surface_set_exclusive_zone(layer, -1);
+        wl.wayspot_layer_surface_set_keyboard(
             layer,
-            wl.ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE,
+            wl.WAYSPOT_KEYBOARD_NONE,
         );
-        surface.viewport = wl.wp_viewporter_get_viewport(native.viewporter.?, surface.surface.?) orelse
+        surface.viewport = wl.wayspot_viewporter_get_viewport(native.viewporter.?, surface.surface.?) orelse
             return error.SurfaceViewportFailed;
         wl.wl_surface_commit(surface.surface.?);
         const configure_deadline = try std.math.add(u64, native.now(), wallpaper.wayland_wait_milliseconds);
@@ -407,10 +401,10 @@ pub const Native = struct {
         if (surface.closed) return error.SurfaceClosed;
         const configured = surface.configure orelse return error.SurfaceConfigureMissing;
         _ = try wallpaper.surfacePixelCount(configured.width, configured.height);
-        wl.zwlr_layer_surface_v1_ack_configure(layer, configured.serial);
+        wl.wayspot_layer_surface_ack_configure(layer, configured.serial);
         surface.configured_width = configured.width;
         surface.configured_height = configured.height;
-        wl.wp_viewport_set_destination(
+        wl.wayspot_viewport_set_destination(
             surface.viewport.?,
             @intCast(configured.width),
             @intCast(configured.height),
@@ -812,7 +806,7 @@ pub const Native = struct {
                     @ptrCast(&value),
                     &value_len,
                 )) != .SUCCESS or value_len != @sizeOf(c_int)) return error.SocketConnectFailed;
-                if (value != 0) switch (@as(std.posix.E, @enumFromInt(value))) {
+                if (value != 0) switch (@as(std.posix.E, @fromBackingInt(@intCast(value)))) {
                     .CONNREFUSED, .NOENT, .AGAIN => return error.ConnectionRefused,
                     .CONNRESET => return error.ConnectionResetByPeer,
                     .TIMEDOUT => return error.ConnectionTimedOut,
@@ -961,7 +955,7 @@ pub fn requestRotation(io: std.Io, signature: []const u8) !void {
                 @ptrCast(&socket_error),
                 &length,
             )) != .SUCCESS or length != @sizeOf(c_int)) return error.RotationSocketConnectFailed;
-            if (socket_error != 0) return switch (@as(std.posix.E, @enumFromInt(socket_error))) {
+            if (socket_error != 0) return switch (@as(std.posix.E, @fromBackingInt(@intCast(socket_error)))) {
                 .CONNREFUSED => error.WallpaperResidentUnavailable,
                 .TIMEDOUT => error.RotationTimedOut,
                 else => error.RotationSocketConnectFailed,
@@ -1088,8 +1082,8 @@ const Surface = struct {
 
     fn destroyConnected(surface: *Surface) void {
         if (surface.buffer) |proxy| wl.wl_buffer_destroy(proxy);
-        if (surface.viewport) |proxy| wl.wp_viewport_destroy(proxy);
-        if (surface.layer) |proxy| wl.zwlr_layer_surface_v1_destroy(proxy);
+        if (surface.viewport) |proxy| wl.wayspot_viewport_destroy(proxy);
+        if (surface.layer) |proxy| wl.wayspot_layer_surface_destroy(proxy);
         if (surface.surface) |proxy| wl.wl_surface_destroy(proxy);
         surface.* = .{};
     }
@@ -1123,7 +1117,7 @@ fn registryGlobal(
             native.failed = true;
         } else native.shm_global = name;
     } else if (std.mem.eql(u8, interface_name, "wp_viewporter")) {
-        if (!bindGlobal(&native.viewporter, registry, name, version, 1, &wl.wp_viewporter_interface)) {
+        if (!bindGlobal(&native.viewporter, registry, name, version, 1, wl.wayspot_viewporter_interface())) {
             native.failed = true;
         } else native.viewporter_global = name;
     } else if (std.mem.eql(u8, interface_name, "zwlr_layer_shell_v1")) {
@@ -1133,7 +1127,7 @@ fn registryGlobal(
             name,
             version,
             3,
-            &wl.zwlr_layer_shell_v1_interface,
+            wl.wayspot_layer_shell_interface(),
         )) native.failed = true else native.layer_shell_global = name;
     } else if (std.mem.eql(u8, interface_name, "wl_output")) {
         if (version < 4 or native.output_global_count == wallpaper.monitor_capacity) {
@@ -1236,7 +1230,7 @@ fn outputName(data: ?*anyopaque, _: ?*wl.wl_output, name: [*c]const u8) callconv
 
 fn outputDescription(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
 
-const layer_listener = wl.zwlr_layer_surface_v1_listener{
+const layer_listener = wl.wayspot_layer_listener{
     .configure = layerConfigure,
     .closed = layerClosed,
 };
@@ -1257,7 +1251,7 @@ fn layerConfigure(
     }
     surface.configure_count += 1;
     if (surface.state == .published) {
-        if (layer) |proxy| wl.zwlr_layer_surface_v1_ack_configure(proxy, serial);
+        if (layer) |proxy| wl.wayspot_layer_surface_ack_configure(proxy, serial);
         if (width != surface.configured_width or height != surface.configured_height) {
             if (owner) |native| native.outputs_changed = true;
         }
@@ -1565,8 +1559,8 @@ test "native JPEG memory boundary decodes and frees one bounded image" {
 }
 
 test "abstract rotation endpoint is exact single-instance kernel state" {
-    const signature = "x" ** 62;
-    const address = try abstractAddress(signature);
+    const signature: [62]u8 = @splat('x');
+    const address = try abstractAddress(&signature);
     try std.testing.expectEqual(
         @as(std.posix.socklen_t, @offsetOf(std.posix.sockaddr.un, "path") + 1 + 80),
         address.length,
@@ -1574,11 +1568,11 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
     try std.testing.expectEqual(@as(u8, 0), address.value.path[0]);
     try std.testing.expectEqualStrings("wayspot-wallpaper:" ++ signature, address.value.path[1..][0..80]);
     var resident = Native{ .io = std.testing.io };
-    try resident.openRotation(signature);
+    try resident.openRotation(&signature);
     defer resident.closeRotation();
     var duplicate = Native{ .io = std.testing.io };
-    try std.testing.expectError(error.RotationNameInUse, duplicate.openRotation(signature));
-    var requester = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, signature });
+    try std.testing.expectError(error.RotationNameInUse, duplicate.openRotation(&signature));
+    var requester = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, &signature });
     while (true) {
         const ready = try resident.wait(&resident, -1, -1, 100);
         if (ready.rotate and try resident.receiveRotation()) break;
@@ -1586,7 +1580,7 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
     resident.replyRotation(true);
     try requester.await(std.testing.io);
     resident.closeRotation();
-    try duplicate.openRotation(signature);
+    try duplicate.openRotation(&signature);
     duplicate.closeRotation();
 }
 

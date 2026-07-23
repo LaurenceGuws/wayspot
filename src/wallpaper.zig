@@ -1218,7 +1218,7 @@ test "transform tags match the pinned Hyprland wire values" {
     const transforms = std.enums.values(Transform);
     try std.testing.expectEqual(@as(usize, 8), transforms.len);
     for (transforms, 0..) |transform, value| {
-        try std.testing.expectEqual(value, @intFromEnum(transform));
+        try std.testing.expectEqual(value, @backingInt(transform));
     }
 }
 
@@ -1785,12 +1785,12 @@ test "catalog exact entry file and path bounds accept then reject without partia
         error.WallpaperFileCapacityExceeded,
         collectCatalog(&files_over, std.testing.allocator, "/r"),
     );
-    const exact = "a" ** catalog_path_capacity;
+    const exact: [catalog_path_capacity]u8 = @splat('a');
     var path_ok = CatalogTranscript{ .entries = &.{.{ .name = exact[0 .. exact.len - 4] ++ ".png", .kind = .file }} };
     var bounded = try collectCatalog(&path_ok, std.testing.allocator, "/r");
     bounded.deinit();
-    const over = "a" ** (catalog_path_capacity + 1);
-    var path_over = CatalogTranscript{ .entries = &.{.{ .name = over, .kind = .file }} };
+    const over: [catalog_path_capacity + 1]u8 = @splat('a');
+    var path_over = CatalogTranscript{ .entries = &.{.{ .name = &over, .kind = .file }} };
     try std.testing.expectError(error.WallpaperPathInvalid, collectCatalog(&path_over, std.testing.allocator, "/r"));
 }
 
@@ -1929,7 +1929,7 @@ test "decode dimension format convert and scale failures publish no pixels" {
     );
     try transcript.done();
 
-    var source_pixels = [_]u32{0xff000000} ** 12;
+    var source_pixels: [12]u32 = @splat(0xff000000);
     const image = Image{ .width = 4, .height = 3, .pitch = 16, .pixels = &source_pixels };
     const scale_steps = [_]ImageStep{.{ .scale = false }};
     transcript = .{ .steps = &scale_steps };

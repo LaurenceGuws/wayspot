@@ -1857,8 +1857,8 @@ test "flush EAGAIN writable success retains one semantic batch" {
 }
 
 test "flush and poll attempt endpoints are exact" {
-    const again = [_]Flush{.again} ** wallpaper.publication_flush_capacity;
-    const writable = [_]Poll{.writable} ** wallpaper.publication_poll_capacity;
+    const again: [wallpaper.publication_flush_capacity]Flush = @splat(.again);
+    const writable: [wallpaper.publication_poll_capacity]Poll = @splat(.writable);
     var transcript = Transcript{ .flushes = &again, .polls = &writable };
     var current: wallpaper.Round = .{};
     var next = try preparedRound(&transcript);
@@ -1871,11 +1871,12 @@ test "flush and poll attempt endpoints are exact" {
 }
 
 test "flush timeout stop and attempt exhaustion disconnect before swap" {
+    const interrupted: [wallpaper.publication_poll_capacity]Poll = @splat(.interrupted);
     const histories = [_]struct { polls: []const Poll, stopped: bool, expected: anyerror }{
         .{ .polls = &.{.timeout}, .stopped = false, .expected = error.WaylandFlushTimeout },
         .{ .polls = &.{.writable}, .stopped = true, .expected = error.WaylandFlushStopped },
         .{
-            .polls = &([_]Poll{.interrupted} ** wallpaper.publication_poll_capacity),
+            .polls = &interrupted,
             .stopped = false,
             .expected = error.WaylandFlushAttemptsExceeded,
         },

@@ -307,19 +307,24 @@ test "invalid launch rows are removed before picker publication" {
     try apply(&list, null, "/home/user");
     try std.testing.expectEqual(@as(usize, 1), list.count);
     try std.testing.expectEqualStrings("Good", list.slice()[0].name);
-    try std.testing.expectEqual(@as(usize, 1), list.report.decisions[@intFromEnum(apps.Decision.invalid_exec)]);
+    try std.testing.expectEqual(@as(usize, 1), list.report.decisions[@backingInt(apps.Decision.invalid_exec)]);
 }
 
 test "argument and byte bounds are exact and failure atomic" {
-    const many = ("a " ** argument_capacity) ++ "a";
+    var many: [argument_capacity * 2 + 1]u8 = undefined;
+    for (0..argument_capacity) |index| {
+        many[index * 2] = 'a';
+        many[index * 2 + 1] = ' ';
+    }
+    many[many.len - 1] = 'a';
     var plan: Plan = .{};
-    const app_many = testApp("App", many, null, false);
+    const app_many = testApp("App", &many, null, false);
     try std.testing.expectError(error.TooManyArguments, plan.init(&app_many, null, "/home/user"));
     try std.testing.expectEqual(@as(usize, 0), plan.count);
     try std.testing.expectEqual(@as(usize, 0), plan.used);
 
-    const exact = "x" ** storage_capacity;
-    const app_exact = testApp("App", exact, null, false);
+    const exact: [storage_capacity]u8 = @splat('x');
+    const app_exact = testApp("App", &exact, null, false);
     try plan.init(&app_exact, null, "/home/user");
     try std.testing.expectEqual(storage_capacity, plan.used);
     const app_over = testApp("App", exact ++ "x", null, false);
@@ -373,6 +378,6 @@ fn testApp(name: []const u8, exec: []const u8, path: ?[]const u8, terminal: bool
         .not_show_in = null,
         .path = path,
         .terminal = terminal,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }

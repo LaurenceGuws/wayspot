@@ -10,6 +10,28 @@ pub fn build(b: *std.Build) void {
         .preferred_linkage = .static,
     });
     const text = libs.text(b, target, optimize, sdl.artifact("SDL3"), sdl.path("include"));
+    const headers = b.addWriteFiles();
+    const sdl_header = headers.add(
+        "wayspot-sdl.h",
+        "#include <SDL3/SDL.h>\n#include <SDL3_ttf/SDL_ttf.h>\n",
+    );
+    const sdl_translate = b.addTranslateC(.{
+        .root_source_file = sdl_header,
+        .target = target,
+        .optimize = optimize,
+    });
+    sdl_translate.addIncludePath(sdl.path("include"));
+    sdl_translate.addIncludePath(text.include);
+    const sdl_c = sdl_translate.createModule();
+
+    const dbus_header = headers.add("wayspot-dbus.h", "#include <dbus/dbus.h>\n");
+    const dbus_translate = b.addTranslateC(.{
+        .root_source_file = dbus_header,
+        .target = target,
+        .optimize = optimize,
+    });
+    dbus_translate.linkSystemLibrary("dbus-1", .{});
+    const dbus_c = dbus_translate.createModule();
 
     const wayspot = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -27,21 +49,46 @@ pub fn build(b: *std.Build) void {
     wayspot.linkLibrary(sdl.artifact("SDL3"));
     wayspot.linkLibrary(text.library);
     wayspot.linkSystemLibrary("dbus-1", .{});
-    addWaylandProtocol(
+    const layer = waylandProtocol(
         b,
-        wayspot,
         b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
         "wlr-layer-shell-unstable-v1",
     );
-    addWaylandProtocol(b, wayspot, b.path("protocols/viewporter.xml"), "viewporter");
-    wayspot.linkSystemLibrary("wayland-client", .{});
+    const viewport = waylandProtocol(b, b.path("protocols/viewporter.xml"), "viewporter");
+    const wayland_protocol_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    wayland_protocol_module.addIncludePath(layer.header.dirname());
+    wayland_protocol_module.addIncludePath(layer.code.dirname());
+    wayland_protocol_module.addIncludePath(viewport.header.dirname());
+    wayland_protocol_module.addIncludePath(b.path("src"));
+    wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland_protocol.c") });
+    wayland_protocol_module.linkSystemLibrary("wayland-client", .{});
+    const wayland_protocol = b.addLibrary(.{
+        .name = "wayspot_wayland_protocol",
+        .linkage = .static,
+        .root_module = wayland_protocol_module,
+    });
+    wayspot.linkLibrary(wayland_protocol);
+    const wayland_translate = b.addTranslateC(.{
+        .root_source_file = b.path("src/wayland_protocol.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wayland_translate.linkSystemLibrary("wayland-client", .{});
+    const wayland_c = wayland_translate.createModule();
+    wayspot.addImport("sdl_c", sdl_c);
+    wayspot.addImport("dbus_c", dbus_c);
+    wayspot.addImport("wayland_c", wayland_c);
 
     const executable = b.addExecutable(.{
         .name = "wayspot",
         .root_module = wayspot,
     });
-    executable.use_llvm = true;
-    executable.use_lld = true;
+    executable.use_llvm = false;
+    executable.use_lld = false;
     b.installArtifact(executable);
 
     const picker_tests = b.addTest(.{
@@ -52,9 +99,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, picker_tests.root_module, sdl, text);
-    picker_tests.use_llvm = true;
-    picker_tests.use_lld = true;
+    addNotificationLibraries(b, picker_tests.root_module, sdl, text, sdl_c, dbus_c);
+    picker_tests.use_llvm = false;
+    picker_tests.use_lld = false;
     const run_picker_tests = b.addRunArtifact(picker_tests);
     const apps_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -80,9 +127,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, transcript_tests.root_module, sdl, text);
-    transcript_tests.use_llvm = true;
-    transcript_tests.use_lld = true;
+    addNotificationLibraries(b, transcript_tests.root_module, sdl, text, sdl_c, dbus_c);
+    transcript_tests.use_llvm = false;
+    transcript_tests.use_lld = false;
     const run_transcript_tests = b.addRunArtifact(transcript_tests);
     const launch_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -152,21 +199,11 @@ pub fn build(b: *std.Build) void {
     wallpaper_native_tests.root_module.addIncludePath(b.path("vendor/stb"));
     wallpaper_native_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
     wallpaper_native_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    addWaylandProtocol(
-        b,
-        wallpaper_native_tests.root_module,
-        b.path("protocols/wlr-layer-shell-unstable-v1.xml"),
-        "wlr-layer-shell-unstable-v1",
-    );
-    addWaylandProtocol(
-        b,
-        wallpaper_native_tests.root_module,
-        b.path("protocols/viewporter.xml"),
-        "viewporter",
-    );
-    wallpaper_native_tests.root_module.linkSystemLibrary("wayland-client", .{});
-    wallpaper_native_tests.use_llvm = true;
-    wallpaper_native_tests.use_lld = true;
+    wallpaper_native_tests.root_module.linkLibrary(wayland_protocol);
+    wallpaper_native_tests.root_module.addImport("sdl_c", sdl_c);
+    wallpaper_native_tests.root_module.addImport("wayland_c", wayland_c);
+    wallpaper_native_tests.use_llvm = false;
+    wallpaper_native_tests.use_lld = false;
     const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
     const sdl_event_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -192,8 +229,10 @@ pub fn build(b: *std.Build) void {
     sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     sdl_tests.root_module.linkLibrary(text.library);
     sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    sdl_tests.use_llvm = true;
-    sdl_tests.use_lld = true;
+    sdl_tests.root_module.addImport("sdl_c", sdl_c);
+    sdl_tests.root_module.addImport("dbus_c", dbus_c);
+    sdl_tests.use_llvm = false;
+    sdl_tests.use_lld = false;
     const run_sdl_tests = b.addRunArtifact(sdl_tests);
     const sdl_pixels_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -219,8 +258,10 @@ pub fn build(b: *std.Build) void {
     notification_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     notification_tests.root_module.linkLibrary(text.library);
     notification_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    notification_tests.use_llvm = true;
-    notification_tests.use_lld = true;
+    notification_tests.root_module.addImport("sdl_c", sdl_c);
+    notification_tests.root_module.addImport("dbus_c", dbus_c);
+    notification_tests.use_llvm = false;
+    notification_tests.use_lld = false;
     const run_notification_tests = b.addRunArtifact(notification_tests);
     const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&run_picker_tests.step);
@@ -241,20 +282,32 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_notification_tests.step);
 
     const run = b.addRunArtifact(executable);
-    if (b.args) |args| run.addArgs(args);
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
+    }
     const run_step = b.step("run", "Run Wayspot");
     run_step.dependOn(&run.step);
 }
 
-fn addWaylandProtocol(b: *std.Build, module: *std.Build.Module, xml: std.Build.LazyPath, name: []const u8) void {
+const WaylandProtocol = struct {
+    header: std.Build.LazyPath,
+    code: std.Build.LazyPath,
+};
+
+fn waylandProtocol(
+    b: *std.Build,
+    xml: std.Build.LazyPath,
+    name: []const u8,
+) WaylandProtocol {
     const header_command = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
     header_command.addFileArg(xml);
     const header = header_command.addOutputFileArg(b.fmt("{s}-client.h", .{name}));
     const code_command = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
     code_command.addFileArg(xml);
     const code = code_command.addOutputFileArg(b.fmt("{s}.c", .{name}));
-    module.addIncludePath(header.dirname());
-    module.addCSourceFile(.{ .file = code });
+    return .{ .header = header, .code = code };
 }
 
 fn addNotificationLibraries(
@@ -262,6 +315,8 @@ fn addNotificationLibraries(
     module: *std.Build.Module,
     sdl: *std.Build.Dependency,
     text: libs.Text,
+    sdl_c: *std.Build.Module,
+    dbus_c: *std.Build.Module,
 ) void {
     module.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
@@ -271,4 +326,6 @@ fn addNotificationLibraries(
     module.linkLibrary(sdl.artifact("SDL3"));
     module.linkLibrary(text.library);
     module.linkSystemLibrary("dbus-1", .{});
+    module.addImport("sdl_c", sdl_c);
+    module.addImport("dbus_c", dbus_c);
 }

@@ -20,10 +20,10 @@ pub const Cmd = union(enum) {
 };
 
 comptime {
-    std.debug.assert(std.meta.fields(Cmd).len == 3);
-    std.debug.assert(std.meta.fields(@FieldType(Cmd, "wallpaper")).len == 2);
-    std.debug.assert(std.meta.fields(@FieldType(Cmd, "apps")).len == 2);
-    std.debug.assert(std.meta.fields(@FieldType(Cmd, "notifications")).len == 2);
+    std.debug.assert(std.meta.fieldNames(Cmd).len == 3);
+    std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "wallpaper")).len == 2);
+    std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "apps")).len == 2);
+    std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "notifications")).len == 2);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
 }
 
@@ -106,14 +106,14 @@ test "apps list borrows one exact bounded query" {
     const command = try resolveApps(&.{ "apps", "terminal", "editor" }, &.{}, &bytes);
     try std.testing.expectEqualStrings("terminal editor", command.apps.list);
 
-    const exact = "x" ** query_capacity;
-    const boundary = try resolveApps(&.{ "apps", exact }, &.{}, &bytes);
-    try std.testing.expectEqualStrings(exact, boundary.apps.list);
+    const exact: [query_capacity]u8 = @splat('x');
+    const boundary = try resolveApps(&.{ "apps", &exact }, &.{}, &bytes);
+    try std.testing.expectEqualStrings(&exact, boundary.apps.list);
 
     const before = bytes;
     try std.testing.expectError(
         error.QueryTooLong,
-        resolveApps(&.{ "apps", exact, "" }, &.{}, &bytes),
+        resolveApps(&.{ "apps", &exact, "" }, &.{}, &bytes),
     );
     try std.testing.expectEqualSlices(u8, &before, &bytes);
 }
@@ -146,7 +146,7 @@ test "invalid UTF-8 and argument overflow publish no command or query" {
     );
     try std.testing.expectEqualSlices(u8, &before, &bytes);
 
-    const too_many = [_][]const u8{"x"} ** (argument_capacity + 1);
+    const too_many: [argument_capacity + 1][]const u8 = @splat("x");
     try std.testing.expectError(
         error.TooManyArguments,
         resolveApps(&too_many, &.{}, &bytes),
@@ -156,14 +156,14 @@ test "invalid UTF-8 and argument overflow publish no command or query" {
 }
 
 test "exact argument capacity is accepted and the next argument is rejected" {
-    var exact = [_][]const u8{""} ** argument_capacity;
+    var exact: [argument_capacity][]const u8 = @splat("");
     exact[0] = "apps";
     var bytes: [query_capacity]u8 = undefined;
     const command = try resolveApps(&exact, &.{}, &bytes);
     try std.testing.expect(command == .apps);
     try std.testing.expectEqual(argument_capacity - 2, command.apps.list.len);
 
-    const too_many = [_][]const u8{""} ** (argument_capacity + 1);
+    const too_many: [argument_capacity + 1][]const u8 = @splat("");
     try std.testing.expectError(
         error.TooManyArguments,
         resolveApps(&too_many, &.{}, &bytes),
@@ -228,6 +228,6 @@ fn testApp(id: []const u8, name: []const u8) apps.App {
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }

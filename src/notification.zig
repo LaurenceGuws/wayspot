@@ -2,13 +2,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const sdl = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3_ttf/SDL_ttf.h");
-});
-const dbus = @cImport({
-    @cInclude("dbus/dbus.h");
-});
+const sdl = @import("sdl_c");
+const dbus = @import("dbus_c");
 
 pub const app_name_capacity = 256;
 pub const app_icon_capacity = 1024;
@@ -266,14 +261,14 @@ const UiResources = struct {
     count: u8 = 0,
 
     fn acquired(resources: *UiResources, resource: UiResource) void {
-        std.debug.assert(resources.count == @intFromEnum(resource));
+        std.debug.assert(resources.count == @backingInt(resource));
         resources.count += 1;
     }
 
     fn release(resources: *UiResources) ?UiResource {
         if (resources.count == 0) return null;
         resources.count -= 1;
-        return @enumFromInt(resources.count);
+        return @fromBackingInt(@intCast(resources.count));
     }
 };
 
@@ -383,7 +378,8 @@ fn setBannerText(item: ?*sdl.TTF_Text, text: []const u8) !void {
 fn wakeUi() bool {
     const event_type = wake_event.load(.acquire);
     if (event_type == wake_unset) return false;
-    var event: sdl.SDL_Event = @bitCast(@as([@sizeOf(sdl.SDL_Event)]u8, @splat(0)));
+    var event: sdl.SDL_Event = undefined;
+    @memset(std.mem.asBytes(&event), 0);
     event.type = event_type;
     return sdl.SDL_PushEvent(&event);
 }
@@ -3147,7 +3143,7 @@ const Dbus = struct {
         var iter: dbus.DBusMessageIter = undefined;
         dbus.dbus_message_iter_init_append(signal, &iter);
         var notification_id: dbus.dbus_uint32_t = id;
-        var close_reason: dbus.dbus_uint32_t = @intFromEnum(reason);
+        var close_reason: dbus.dbus_uint32_t = @backingInt(reason);
         if (dbus.dbus_message_iter_append_basic(&iter, dbus.DBUS_TYPE_UINT32, &notification_id) == 0 or
             dbus.dbus_message_iter_append_basic(&iter, dbus.DBUS_TYPE_UINT32, &close_reason) == 0)
         {
@@ -3397,7 +3393,7 @@ fn actionError(actions: []const []const u8) !?ReplyError {
         return error.OutOfMemory;
     }
     for (actions) |action| {
-        const terminated = try std.testing.allocator.dupeZ(u8, action);
+        const terminated = try std.testing.allocator.dupeSentinel(u8, action, 0);
         defer std.testing.allocator.free(terminated);
         var pointer: [*:0]const u8 = terminated;
         if (dbus.dbus_message_iter_append_basic(&array, dbus.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0) {
@@ -3434,7 +3430,7 @@ fn hintError(keys: []const []const u8) !?ReplyError {
 }
 
 fn appendHint(array: *dbus.DBusMessageIter, key: []const u8) !void {
-    const terminated = try std.testing.allocator.dupeZ(u8, key);
+    const terminated = try std.testing.allocator.dupeSentinel(u8, key, 0);
     defer std.testing.allocator.free(terminated);
     var pointer: [*:0]const u8 = terminated;
     var entry: dbus.DBusMessageIter = undefined;

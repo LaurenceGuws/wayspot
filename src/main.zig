@@ -263,11 +263,11 @@ fn logApplications(files: *const desktop_files.Files, applications: *const apps.
         },
     );
     for (std.enums.values(apps.Decision)) |decision| {
-        const count = applications.report.decisions[@intFromEnum(decision)];
+        const count = applications.report.decisions[@backingInt(decision)];
         if (count > 0) std.log.info("desktop decision={s} count={d}", .{ @tagName(decision), count });
     }
     for (std.enums.values(apps.Issue)) |issue| {
-        const count = applications.report.issues[@intFromEnum(issue)];
+        const count = applications.report.issues[@backingInt(issue)];
         if (count > 0) std.log.info("desktop issue={s} count={d}", .{ @tagName(issue), count });
     }
 }

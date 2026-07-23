@@ -611,7 +611,7 @@ fn testApp(name: []const u8) apps.App {
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }
 
@@ -640,7 +640,7 @@ test "transcript rejects unconsumed and unexpected operations" {
 }
 
 test "transcript rejects its first over-bound history" {
-    const steps = [_]Step{.{ .init = .fail }} ** (step_capacity + 1);
+    const steps: [step_capacity + 1]Step = @splat(.{ .init = .fail });
     try std.testing.expectError(error.TranscriptTooLong, simulate(&steps));
 }
 

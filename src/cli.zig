@@ -89,6 +89,6 @@ fn testApp(id: []const u8, name: []const u8) apps.App {
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }

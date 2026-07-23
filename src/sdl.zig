@@ -7,10 +7,7 @@ const image = @import("image.zig");
 const picker = @import("picker.zig");
 const sdl_event = @import("sdl_event.zig");
 const pixels = @import("sdl_pixels.zig");
-const sdl = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3_ttf/SDL_ttf.h");
-});
+const sdl = @import("sdl_c");
 const font_bytes = @embedFile("NotoSans-Regular.ttf");
 
 /// Native is the production realization of the picker's exact SDL operations.
@@ -565,8 +562,10 @@ test "native app and icon lookup preserve the exact checked row index" {
 
 test "notification display is one bounded complete UTF-8 line" {
     try std.testing.expectEqualStrings("line", displayText("line\nprivate"));
-    try std.testing.expectEqual(@as(usize, 256), displayText("x" ** 300).len);
-    const prefix = ("x" ** 255) ++ "λtail";
+    const long: [300]u8 = @splat('x');
+    try std.testing.expectEqual(@as(usize, 256), displayText(&long).len);
+    const x: [255]u8 = @splat('x');
+    const prefix = x ++ "λtail";
     try std.testing.expectEqual(@as(usize, 255), displayText(prefix).len);
 }
 
@@ -611,6 +610,6 @@ fn testApp(name: []const u8) apps.App {
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }

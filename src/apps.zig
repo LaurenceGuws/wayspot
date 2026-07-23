@@ -122,7 +122,7 @@ pub const Entry = struct {
     no_display: bool = false,
     dbus_activatable: bool = false,
     terminal: bool = false,
-    issues: std.EnumSet(Issue) = .initEmpty(),
+    issues: std.EnumSet(Issue) = .empty,
 
     pub fn decide(entry: *const Entry, current_desktop: ?[]const u8) Decision {
         const entry_type = entry.type orelse return .missing_type;
@@ -362,8 +362,8 @@ fn before(left: App, left_match: Match, right: App, right_match: Match) bool {
 }
 
 fn matchBefore(left: Match, right: Match) bool {
-    if (@intFromEnum(left.kind) != @intFromEnum(right.kind)) {
-        return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+    if (@backingInt(left.kind) != @backingInt(right.kind)) {
+        return @backingInt(left.kind) < @backingInt(right.kind);
     }
     if (left.edits != right.edits) return left.edits < right.edits;
     if (left.start != right.start) return left.start < right.start;
@@ -378,8 +378,8 @@ fn choose(best: *?Match, found: ?Match) void {
 pub const LoadReport = struct {
     malformed: usize = 0,
     duplicates: usize = 0,
-    decisions: [std.meta.fields(Decision).len]usize = @splat(0),
-    issues: [std.meta.fields(Issue).len]usize = @splat(0),
+    decisions: [std.meta.fieldNames(Decision).len]usize = @splat(0),
+    issues: [std.meta.fieldNames(Issue).len]usize = @splat(0),
 };
 
 test "shared lookup matches fields and resolves only exact identities" {
@@ -422,7 +422,7 @@ fn lookupApp(
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }
 
@@ -467,8 +467,8 @@ pub const List = struct {
         list.allocator.free(list.items[index].storage);
         list.count -= 1;
         std.mem.copyForwards(App, list.items[index..list.count], list.items[index + 1 ..][0 .. list.count - index]);
-        list.report.decisions[@intFromEnum(Decision.publish)] -= 1;
-        list.report.decisions[@intFromEnum(decision)] += 1;
+        list.report.decisions[@backingInt(Decision.publish)] -= 1;
+        list.report.decisions[@backingInt(decision)] += 1;
     }
 };
 
@@ -492,9 +492,9 @@ pub fn load(
             continue;
         };
         const decision = entry.decide(current_desktop);
-        list.report.decisions[@intFromEnum(decision)] += 1;
+        list.report.decisions[@backingInt(decision)] += 1;
         for (std.enums.values(Issue)) |issue| {
-            if (entry.issues.contains(issue)) list.report.issues[@intFromEnum(issue)] += 1;
+            if (entry.issues.contains(issue)) list.report.issues[@backingInt(issue)] += 1;
         }
         if (decision != .publish) continue;
         std.debug.assert(list.count < app_capacity);
@@ -822,9 +822,10 @@ test "missing icon retains a publishable application" {
 }
 
 test "invalid optional icon is explicit without discarding the app" {
+    const icon: [icon_capacity + 1]u8 = @splat('x');
     const entry = try parse(
         "[Desktop Entry]\nType=Application\nName=Kitty\nExec=kitty\nIcon=" ++
-            ("x" ** (icon_capacity + 1)),
+            icon,
     );
     try std.testing.expectEqual(Decision.publish, entry.decide("Hyprland"));
     try std.testing.expectEqual(null, entry.icon);
@@ -975,8 +976,8 @@ test "parser ignores other groups and requires exactly one Desktop Entry group" 
 }
 
 test "required and optional fields prove exact bounds" {
-    const exact_name = "n" ** name_capacity;
-    const exact_icon = "i" ** icon_capacity;
+    const exact_name: [name_capacity]u8 = @splat('n');
+    const exact_icon: [icon_capacity]u8 = @splat('i');
     const entry = try parse(
         "[Desktop Entry]\nType=Application\nName=" ++ exact_name ++
             "\nExec=app\nIcon=" ++ exact_icon,
@@ -1045,7 +1046,7 @@ test "load preserves precedence and counts every non-published reason" {
     try std.testing.expectEqualStrings("good", list.slice()[0].icon.?);
     try std.testing.expectEqual(@as(usize, 1), list.report.duplicates);
     try std.testing.expectEqual(@as(usize, 1), list.report.malformed);
-    try std.testing.expectEqual(@as(usize, 1), list.report.decisions[@intFromEnum(Decision.hidden)]);
+    try std.testing.expectEqual(@as(usize, 1), list.report.decisions[@backingInt(Decision.hidden)]);
 }
 
 test "load orders published apps by name then desktop id" {

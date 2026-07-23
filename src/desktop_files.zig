@@ -297,7 +297,7 @@ test "TryExec removal commits only after bounded availability checks" {
     try std.testing.expectEqualStrings("Plain", list.slice()[0].name);
     try std.testing.expectEqual(
         @as(usize, 1),
-        list.report.decisions[@intFromEnum(apps.Decision.unavailable_try_exec)],
+        list.report.decisions[@backingInt(apps.Decision.unavailable_try_exec)],
     );
 }
 
@@ -316,6 +316,6 @@ test "terminal applications require the supported executable" {
     try std.testing.expectEqual(@as(usize, 0), list.count);
     try std.testing.expectEqual(
         @as(usize, 1),
-        list.report.decisions[@intFromEnum(apps.Decision.unavailable_terminal)],
+        list.report.decisions[@backingInt(apps.Decision.unavailable_terminal)],
     );
 }

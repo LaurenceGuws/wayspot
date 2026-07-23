@@ -107,9 +107,9 @@ pub fn tableName(table: Table) [:0]const u8 {
 }
 
 comptime {
-    std.debug.assert(std.meta.fields(Table).len == 3);
-    std.debug.assert(std.meta.fields(Row).len == 3);
-    std.debug.assert(std.meta.fields(Rows).len == 3);
+    std.debug.assert(std.meta.fieldNames(Table).len == 3);
+    std.debug.assert(std.meta.fieldNames(Row).len == 3);
+    std.debug.assert(std.meta.fieldNames(Rows).len == 3);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
     std.debug.assert(root_rows.len == 2);
     std.debug.assert(root_rows[0].table == .apps);
@@ -399,7 +399,8 @@ fn scroll(state: *State, total: usize, rows: i8) void {
 
 test "query accepts its exact bound and rejects the next byte without mutation" {
     var query: Query = .{};
-    try query.append(&([_]u8{'a'} ** query_capacity));
+    const input: [query_capacity]u8 = @splat('a');
+    try query.append(&input);
     try std.testing.expectError(error.QueryTooLong, query.append("b"));
     try std.testing.expectEqual(query_capacity, query.len);
     try std.testing.expectEqual(@as(u8, 0), query.bytes[query_capacity]);
@@ -413,7 +414,7 @@ test "query rejects invalid UTF-8 without mutation" {
 }
 
 test "text event owns its exact bound" {
-    const input = [_]u8{'a'} ** query_capacity;
+    const input: [query_capacity]u8 = @splat('a');
     const text = try Text.init(&input);
     try std.testing.expectEqualSlices(u8, &input, text.slice());
     try std.testing.expectError(error.TextTooLong, Text.init(&(input ++ [_]u8{'b'})));
@@ -650,6 +651,6 @@ fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) a
         .not_show_in = null,
         .path = null,
         .terminal = false,
-        .issues = .initEmpty(),
+        .issues = .empty,
     };
 }
