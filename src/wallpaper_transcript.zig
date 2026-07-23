@@ -33,7 +33,7 @@ const Operation = union(enum) {
 
 const Flush = enum { success, again, interrupted, failed };
 const Poll = enum { writable, interrupted, timeout, stopped, failed };
-const Outputs = enum { exact, missing, duplicate };
+const Outputs = enum { exact, missing, duplicate, changed };
 const State = enum { vacant, prepared, queued, published, retiring };
 
 const Resource = struct {
@@ -60,8 +60,10 @@ const Transcript = struct {
     stop_on_release: bool = false,
     release_failure: ?u8 = null,
     release_count: u8 = 0,
+    open_error: ?anyerror = null,
 
     pub fn openOutputs(transcript: *Transcript, snapshot: *const wallpaper.Snapshot) !void {
+        if (transcript.open_error) |err| return err;
         if (transcript.connected) {
             if (transcript.output_snapshot == null or !transcript.output_snapshot.?.eql(snapshot)) {
                 return error.WaylandOutputChanged;
@@ -76,6 +78,7 @@ const Transcript = struct {
             .exact => {},
             .missing => return error.WaylandOutputMissing,
             .duplicate => return error.WaylandOutputDuplicate,
+            .changed => return error.WaylandOutputChanged,
         }
         try transcript.step(.outputs_complete);
         transcript.outputs = snapshot.count;
@@ -276,6 +279,7 @@ const ResidentOperation = union(enum) {
     read_event,
     create: u8,
     destroy: u8,
+    display_loss: u8,
     rotate_receive,
     rotate_reply: bool,
     image_open,
@@ -308,12 +312,15 @@ const Resident = struct {
     stop_identity: u8 = 7,
     event_identity: u8 = 9,
     candidate_outputs: []const Outputs = &.{.exact},
+    candidate_errors: []const ?anyerror = &.{null},
     candidate_index: u8 = 0,
     output_changes: []const bool = &.{false},
     output_index: u8 = 0,
     event_reads: []const []const u8 = &.{"workspace>>1\n"},
     event_read_index: u8 = 0,
     event_losses: u8 = 0,
+    display_failures: []const anyerror = &.{},
+    display_failure_index: u8 = 0,
     wayland_changes: []const bool = &.{false},
     wayland_change_index: u8 = 0,
     stop_release_id: ?u8 = null,
@@ -382,6 +389,10 @@ const Resident = struct {
             .event_fd = event_fd,
             .timeout = timeout,
         } });
+        if (native.connected and resident.display_failure_index < resident.display_failures.len) {
+            defer resident.display_failure_index += 1;
+            return resident.display_failures[resident.display_failure_index];
+        }
         if (timeout) |milliseconds| if (milliseconds != 0) {
             const advance = if (resident.clock_step_index < resident.clock_steps.len) step: {
                 defer resident.clock_step_index += 1;
@@ -513,7 +524,16 @@ const Resident = struct {
             )
         ];
         resident.candidate_index += 1;
-        native.* = .{ .id = resident.next_display, .output_result = output };
+        native.* = .{
+            .id = resident.next_display,
+            .output_result = output,
+            .open_error = resident.candidate_errors[
+                @min(
+                    resident.candidate_index - 1,
+                    resident.candidate_errors.len - 1,
+                )
+            ],
+        };
         if (resident.stop_release_id == native.id) native.stop_on_release = true;
         if (native.id == 2) if (resident.retirement_fail_offset) |offset| {
             native.release_failure = offset;
@@ -525,8 +545,13 @@ const Resident = struct {
 
     pub fn destroyNative(resident: *Resident, allocator: std.mem.Allocator, native: *Transcript) void {
         const id = native.id;
+        var lost = false;
+        for (native.operations[0..native.count]) |operation| if (operation == .disconnect_loss) {
+            lost = true;
+        };
         native.disconnectAfterDisplayLoss();
         allocator.destroy(native);
+        if (lost) resident.record(.{ .display_loss = id });
         resident.record(.{ .destroy = id });
     }
 
@@ -1256,6 +1281,336 @@ test "independent snapshot and output order retries without changing current ear
     try std.testing.expectEqual(@as(i32, 2), current.round.monitors.monitors[0].x);
     try std.testing.expectEqual(@as(u8, 2), resident.candidate_index);
     try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "Hyprland and Wayland may report one removed output in either order" {
+    const old_snapshot = snapshotValue(2);
+    const old_json =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false},
+        \\ {"name":"A1","width":2,"height":2,"x":1,"y":0,"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const next_json =
+        \\[{"name":"A1","width":2,"height":2,"x":1,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    for ([_]struct {
+        replies: []const []const u8,
+        outputs: []const Outputs,
+        changes: []const bool,
+    }{
+        .{ .replies = &.{ next_json, next_json }, .outputs = &.{ .changed, .exact }, .changes = &.{false} },
+        .{ .replies = &.{ old_json, next_json }, .outputs = &.{ .missing, .exact }, .changes = &.{ true, false } },
+    }) |history| {
+        var resident = Resident{
+            .waits = &.{},
+            .replies = history.replies,
+            .candidate_outputs = history.outputs,
+            .output_changes = history.changes,
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        try native.openOutputs(&old_snapshot);
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var next = try wallpaper.prepareRound(native, std.testing.allocator, &old_snapshot, &image);
+        var round: wallpaper.Round = .{};
+        try wallpaper.publishRound(native, &round, &next, false);
+        var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+        var lines: wallpaper.EventLines = .{};
+        var event_fd = resident.event_identity;
+        var work: wallpaper.Work = .refresh;
+        var paths = pathsValue();
+        _ = try wallpaper.reconcile(
+            &resident,
+            std.testing.allocator,
+            &image,
+            false,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+            &lines,
+            &work,
+        );
+        try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
+        try std.testing.expectEqualStrings("A1", current.round.monitors.monitors[0].name());
+        try std.testing.expectEqual(@as(u8, 2), resident.candidate_index);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "reconcile exhaustion and zero enabled outputs wait and recover" {
+    const reply =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var empty_replies: [wallpaper.reconcile_attempt_capacity + 1][]const u8 = @splat("[]");
+    empty_replies[empty_replies.len - 1] = reply;
+    var mismatch_replies: [wallpaper.reconcile_attempt_capacity + 1][]const u8 = @splat(reply);
+    var mismatch_outputs: [wallpaper.reconcile_attempt_capacity + 1]Outputs = @splat(.changed);
+    mismatch_outputs[mismatch_outputs.len - 1] = .exact;
+    for ([_]struct { failures: u8, replies: []const []const u8, outputs: []const Outputs }{
+        .{ .failures = wallpaper.reconcile_attempt_capacity, .replies = &.{reply}, .outputs = &.{.exact} },
+        .{ .failures = 0, .replies = &empty_replies, .outputs = &.{.exact} },
+        .{ .failures = 0, .replies = &mismatch_replies, .outputs = &mismatch_outputs },
+    }) |history| {
+        var waits: [27]wallpaper.Ready = @splat(.{});
+        waits[waits.len - 1] = .{ .stop = true };
+        var resident = Resident{
+            .waits = &waits,
+            .replies = history.replies,
+            .request_failures = history.failures,
+            .candidate_outputs = history.outputs,
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var event_fd: u8 = 0;
+        var paths = pathsValue();
+        try std.testing.expectError(error.Stopped, wallpaper.run(
+            &resident,
+            std.testing.allocator,
+            &image,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+        ));
+        try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
+        try std.testing.expect(resident.reply_index >= 1);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "topology retry preserves selected image and rotation deadline" {
+    const reply =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{ .{}, .{}, .{ .event = true }, .{}, .{}, .{}, .{}, .{}, .{ .stop = true } },
+        .replies = &.{ reply, reply, reply },
+        .clock_steps = &.{ 3, 0 },
+        .event_reads = &.{"monitorremoved>>A0\n"},
+        .candidate_outputs = &.{ .exact, .changed, .exact },
+        .output_changes = &.{true},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    const selected_pixels = image.pixels.ptr;
+    var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(91) };
+    defer catalog.deinit();
+    for ([_][]const u8{ "a.png", "b.png" }) |name| {
+        try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, name));
+    }
+    try catalog.shuffle();
+    catalog.published = catalog.order.items[0];
+    catalog.cursor = 1;
+    const selected_index = catalog.published;
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.runRotation(
+        &resident,
+        std.testing.allocator,
+        &catalog,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        10,
+    ));
+    try std.testing.expectEqual(selected_pixels, image.pixels.ptr);
+    try std.testing.expectEqual(selected_index, catalog.published);
+    var waits: [3]u64 = undefined;
+    var wait_count: u8 = 0;
+    var image_opens: u8 = 0;
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .wait => |wait| if (wait.timeout) |timeout| if (timeout > 0) {
+            waits[wait_count] = timeout;
+            wait_count += 1;
+        },
+        .image_open => image_opens += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(u8, 0), image_opens);
+    try std.testing.expectEqualSlices(u64, &.{ 10, 250, 7 }, waits[0..wait_count]);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "every unusable current display failure invalidates once and reconnects" {
+    const snapshot = snapshotValue(1);
+    const reply =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    for ([_]anyerror{
+        error.WaylandDisplayLost,
+        error.WaylandDispatchFailed,
+        error.WaylandFlushFailed,
+        error.WaylandFlushTimeout,
+        error.WaylandDispatchExceeded,
+        error.WaylandFlushAttemptsExceeded,
+    }) |failure| {
+        var resident = Resident{
+            .waits = &.{ .{}, .{}, .{}, .{}, .{ .stop = true } },
+            .replies = &.{reply},
+            .display_failures = &.{failure},
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        try native.openOutputs(&snapshot);
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var next = try wallpaper.prepareRound(native, std.testing.allocator, &snapshot, &image);
+        var round: wallpaper.Round = .{};
+        try wallpaper.publishRound(native, &round, &next, false);
+        var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+        var event_fd: u8 = 0;
+        var paths = pathsValue();
+        try std.testing.expectError(error.Stopped, wallpaper.run(
+            &resident,
+            std.testing.allocator,
+            &image,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+        ));
+        try std.testing.expectEqual(@as(u8, 2), current.native.id);
+        try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
+        try std.testing.expectEqual(@as(u8, 1), resident.display_failure_index);
+        try std.testing.expectEqual(@as(u8, 1), resident.reply_index);
+        try std.testing.expectEqual(@as(u8, @intCast(resident.waits.len)), resident.wait_index);
+        var losses: u8 = 0;
+        for (resident.operations[0..resident.count]) |operation| switch (operation) {
+            .display_loss => |id| {
+                try std.testing.expectEqual(@as(u8, 1), id);
+                losses += 1;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(u8, 1), losses);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+}
+
+test "candidate Wayland setup disagreement retries but internal failure propagates" {
+    const snapshot = snapshotValue(1);
+    const reply =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,
+        \\"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    for ([_]anyerror{
+        error.WaylandConnectFailed,
+        error.WaylandRegistryFailed,
+        error.WaylandRoundtripFailed,
+        error.WaylandGlobalMissing,
+        error.WaylandOutputInvalid,
+        error.WaylandOutputIncomplete,
+    }) |failure| {
+        var resident = Resident{
+            .waits = &.{},
+            .replies = &.{ reply, reply },
+            .candidate_errors = &.{ failure, null },
+        };
+        const native = try std.testing.allocator.create(Transcript);
+        native.* = .{ .id = 1 };
+        var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+        var image = try imageValue();
+        defer image.deinit(std.testing.allocator);
+        var lines: wallpaper.EventLines = .{};
+        var event_fd = resident.event_identity;
+        var work: wallpaper.Work = .refresh;
+        var paths = pathsValue();
+        _ = try wallpaper.reconcile(
+            &resident,
+            std.testing.allocator,
+            &image,
+            false,
+            &current,
+            resident.stop_identity,
+            &event_fd,
+            &paths,
+            &lines,
+            &work,
+        );
+        try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
+        try std.testing.expectEqual(@as(u8, 2), resident.candidate_index);
+        try std.testing.expectEqual(@as(u8, 2), resident.reply_index);
+        try wallpaper.releaseRound(current.native, &current.round, false);
+        resident.destroyNative(std.testing.allocator, current.native);
+    }
+
+    var resident = Resident{
+        .waits = &.{},
+        .replies = &.{},
+        .display_failures = &.{error.SurfaceStateInvalid},
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    try native.openOutputs(&snapshot);
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var next = try wallpaper.prepareRound(native, std.testing.allocator, &snapshot, &image);
+    var round: wallpaper.Round = .{};
+    try wallpaper.publishRound(native, &round, &next, false);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.SurfaceStateInvalid, wallpaper.run(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+    ));
+    try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
+    try std.testing.expect(current.native.connected);
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .display_loss => return error.InternalFailureInvalidatedDisplay,
+        else => {},
+    };
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "stop during topology recovery is the only normal exit" {
+    var resident = Resident{
+        .waits = &.{ .{}, .{ .stop = true } },
+        .replies = &.{},
+        .request_failures = wallpaper.reconcile_attempt_capacity,
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
+    var image = try imageValue();
+    defer image.deinit(std.testing.allocator);
+    var event_fd: u8 = 0;
+    var paths = pathsValue();
+    try std.testing.expectError(error.Stopped, wallpaper.run(
+        &resident,
+        std.testing.allocator,
+        &image,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+    ));
+    try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
+    try std.testing.expectEqual(@as(u8, wallpaper.reconcile_attempt_capacity - 1), resident.request_failures);
     resident.destroyNative(std.testing.allocator, current.native);
 }
 

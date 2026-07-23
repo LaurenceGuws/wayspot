@@ -531,7 +531,7 @@ pub fn reconcile(
     for (0..reconcile_attempt_capacity) |attempt| {
         const failure: ?anyerror = attempt_work: {
             var reconnect = work.* == .reconnect;
-            _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0);
+            _ = try waitCurrent(resident, current, stop_fd, event_fd, lines, work, 0);
             if (work.* == .rotate) return .unchanged;
             reconnect = reconnect or work.* == .reconnect;
             if (reconnect) {
@@ -551,7 +551,7 @@ pub fn reconcile(
                 deadline,
             ) catch |err| break :attempt_work err;
             const snapshot = try parseMonitors(allocator, reply[0..count]);
-            if (try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, 0)) {
+            if (try waitCurrent(resident, current, stop_fd, event_fd, lines, work, 0)) {
                 break :attempt_work null;
             }
             if (!force_publication and
@@ -608,7 +608,7 @@ pub fn reconcile(
         } else if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
         const now = resident.now();
         if (now >= deadline) return error.ReconcileTimeout;
-        _ = try waitForWork(resident, current.native, stop_fd, event_fd, lines, work, @min(
+        _ = try waitCurrent(resident, current, stop_fd, event_fd, lines, work, @min(
             reconcile_wait_milliseconds,
             deadline - now,
         ));
@@ -714,9 +714,37 @@ pub fn run(
     var work: Work = .reconnect;
     while (true) {
         if (work == .idle) {
-            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, null);
+            _ = waitCurrent(resident, current, stop_fd, event_fd, &lines, &work, null) catch |err| {
+                if (!recoverableTopology(err)) return err;
+                continue;
+            };
         } else {
-            _ = try reconcile(resident, allocator, image, false, current, stop_fd, event_fd, paths, &lines, &work);
+            _ = reconcile(
+                resident,
+                allocator,
+                image,
+                false,
+                current,
+                stop_fd,
+                event_fd,
+                paths,
+                &lines,
+                &work,
+            ) catch |err| {
+                if (!recoverableTopology(err)) return err;
+                _ = waitCurrent(
+                    resident,
+                    current,
+                    stop_fd,
+                    event_fd,
+                    &lines,
+                    &work,
+                    reconcile_wait_milliseconds,
+                ) catch |wait_err| {
+                    if (!recoverableTopology(wait_err)) return wait_err;
+                    continue;
+                };
+            };
         }
     }
 }
@@ -741,11 +769,14 @@ pub fn runRotation(
         if (work == .idle) {
             const now = resident.now();
             const timeout = if (deadline) |end| end -| now else null;
-            _ = try waitForWork(resident, current.native, stop_fd, event_fd, &lines, &work, timeout);
+            _ = waitCurrent(resident, current, stop_fd, event_fd, &lines, &work, timeout) catch |err| {
+                if (!recoverableTopology(err)) return err;
+                continue;
+            };
         }
         if (work != .rotate) {
             if (work != .idle) {
-                const outcome = try reconcile(
+                const outcome = reconcile(
                     resident,
                     allocator,
                     image,
@@ -756,7 +787,22 @@ pub fn runRotation(
                     paths,
                     &lines,
                     &work,
-                );
+                ) catch |err| {
+                    if (!recoverableTopology(err)) return err;
+                    _ = waitCurrent(
+                        resident,
+                        current,
+                        stop_fd,
+                        event_fd,
+                        &lines,
+                        &work,
+                        reconcile_wait_milliseconds,
+                    ) catch |wait_err| {
+                        if (!recoverableTopology(wait_err)) return wait_err;
+                        continue;
+                    };
+                    continue;
+                };
                 if (deadline == null and outcome != .unchanged) {
                     deadline = try nextRotationDeadline(resident, interval_milliseconds);
                 }
@@ -933,6 +979,51 @@ fn waitForWork(
     return changed;
 }
 
+// A lost display invalidates its surfaces once. The same native allocation remains a
+// disconnected stop/event wait owner until normal reconciliation publishes a replacement.
+fn waitCurrent(
+    resident: anytype,
+    current: anytype,
+    stop_fd: anytype,
+    event_fd: anytype,
+    lines: *EventLines,
+    work: *Work,
+    timeout: ?u64,
+) !bool {
+    return waitForWork(resident, current.native, stop_fd, event_fd, lines, work, timeout) catch |err| {
+        if (currentDisplayUnusable(err)) {
+            current.native.disconnectAfterDisplayLoss();
+            current.round = .{};
+            if (work.* != .reconnect) work.* = .refresh;
+        }
+        return err;
+    };
+}
+
+// Topology disagreement ends one bounded attempt, never the resident.
+fn recoverableTopology(err: anyerror) bool {
+    return transient(err) or currentDisplayUnusable(err) or switch (err) {
+        error.ReconcileExhausted,
+        error.ReconcileTimeout,
+        => true,
+        else => false,
+    };
+}
+
+// These wait failures mean the current Wayland connection cannot safely be reused.
+fn currentDisplayUnusable(err: anyerror) bool {
+    return switch (err) {
+        error.WaylandDisplayLost,
+        error.WaylandDispatchFailed,
+        error.WaylandFlushFailed,
+        error.WaylandFlushTimeout,
+        error.WaylandDispatchExceeded,
+        error.WaylandFlushAttemptsExceeded,
+        => true,
+        else => false,
+    };
+}
+
 // Names only protocol-order failures that another complete snapshot may resolve.
 fn transient(err: anyerror) bool {
     return switch (err) {
@@ -941,8 +1032,17 @@ fn transient(err: anyerror) bool {
         error.ConnectionTimedOut,
         error.ConnectionInterrupted,
         error.EventSocketLost,
+        error.NoEnabledMonitors,
+        error.OutputSnapshotInvalid,
+        error.WaylandConnectFailed,
+        error.WaylandRegistryFailed,
+        error.WaylandRoundtripFailed,
+        error.WaylandGlobalMissing,
+        error.WaylandOutputDuplicate,
         error.WaylandOutputMissing,
         error.WaylandOutputChanged,
+        error.WaylandOutputInvalid,
+        error.WaylandOutputIncomplete,
         => true,
         else => false,
     };

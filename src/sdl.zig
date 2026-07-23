@@ -105,7 +105,7 @@ pub const Native = struct {
             native.texts[native.text_count] = sdl.TTF_CreateText(
                 native.text_engine,
                 native.font,
-                "",
+                null,
                 0,
             ) orelse return error.TtfTextCreateFailed;
             native.text_count += 1;
@@ -338,7 +338,7 @@ pub const Native = struct {
             native.texts[native.text_count] = sdl.TTF_CreateText(
                 native.text_engine,
                 native.font,
-                "",
+                null,
                 0,
             ) orelse return error.TtfTextCreateFailed;
             native.text_count += 1;
@@ -374,7 +374,7 @@ pub const Native = struct {
     ) !void {
         std.debug.assert(index < native.text_count);
         const item = native.texts[index];
-        if (!sdl.TTF_SetTextString(item, text.ptr, text.len)) return error.TtfTextSetFailed;
+        if (!sdl.TTF_SetTextString(item, textPointer(text), text.len)) return error.TtfTextSetFailed;
         if (!sdl.TTF_SetTextColor(item, color[0], color[1], color[2], 255)) {
             return error.TtfTextColorFailed;
         }
@@ -537,6 +537,10 @@ fn displayText(text: []const u8) []const u8 {
     return text[0..end];
 }
 
+fn textPointer(text: []const u8) ?[*]const u8 {
+    return if (text.len == 0) null else text.ptr;
+}
+
 test "native app and icon lookup preserve the exact checked row index" {
     const applications = [_]apps.App{
         testApp("Zero"),
@@ -564,6 +568,33 @@ test "notification display is one bounded complete UTF-8 line" {
     try std.testing.expectEqual(@as(usize, 256), displayText("x" ** 300).len);
     const prefix = ("x" ** 255) ++ "λtail";
     try std.testing.expectEqual(@as(usize, 255), displayText(prefix).len);
+}
+
+test "empty picker text clears SDL_ttf without borrowing a strlen pointer" {
+    try std.testing.expect(sdl.TTF_Init());
+    defer sdl.TTF_Quit();
+    const stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse return error.FontStreamFailed;
+    defer std.debug.assert(sdl.SDL_CloseIO(stream));
+    const font = sdl.TTF_OpenFontIO(stream, false, 16) orelse return error.FontOpenFailed;
+    defer sdl.TTF_CloseFont(font);
+    const item = sdl.TTF_CreateText(null, font, null, 0) orelse return error.TextCreateFailed;
+    defer sdl.TTF_DestroyText(item);
+    const prior = [_]u8{ 'p', 'r', 'i', 'o', 'r' };
+    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(&prior), prior.len));
+    var width: c_int = 0;
+    var height: c_int = 0;
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expect(width > 0);
+    const empty = prior[0..0];
+    try std.testing.expect(textPointer(empty) == null);
+    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(empty), empty.len));
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expectEqual(@as(c_int, 0), width);
+    const exact = [_]u8{ 'o', 'k' };
+    try std.testing.expect(textPointer(&exact).? == exact[0..].ptr);
+    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(&exact), exact.len));
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expect(width > 0);
 }
 
 fn testApp(name: []const u8) apps.App {

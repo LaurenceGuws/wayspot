@@ -327,10 +327,10 @@ const Banner = struct {
         banner.engine = sdl.TTF_CreateRendererTextEngine(banner.renderer) orelse
             return error.TtfTextEngineCreateFailed;
         banner.resources.acquired(.engine);
-        banner.summary = sdl.TTF_CreateText(banner.engine, banner.font, "", 0) orelse
+        banner.summary = sdl.TTF_CreateText(banner.engine, banner.font, null, 0) orelse
             return error.TtfTextCreateFailed;
         banner.resources.acquired(.summary);
-        banner.body = sdl.TTF_CreateText(banner.engine, banner.font, "", 0) orelse
+        banner.body = sdl.TTF_CreateText(banner.engine, banner.font, null, 0) orelse
             return error.TtfTextCreateFailed;
         banner.resources.acquired(.body);
         if (!sdl.TTF_SetTextWrapWidth(banner.body, banner_width - 32)) return error.TtfTextWrapFailed;
@@ -358,8 +358,8 @@ const Banner = struct {
         const renderer = banner.renderer orelse unreachable;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
-        if (!sdl.TTF_SetTextString(banner.summary, item.summary.ptr, item.summary.len) or
-            !sdl.TTF_SetTextString(banner.body, item.body.ptr, item.body.len)) return error.TtfTextSetFailed;
+        try setBannerText(banner.summary, item.summary);
+        try setBannerText(banner.body, item.body);
         if (!sdl.TTF_SetTextColor(banner.summary, 235, 235, 240, 255) or
             !sdl.TTF_SetTextColor(banner.body, 190, 192, 202, 255)) return error.TtfTextColorFailed;
         const summary_clip = sdl.SDL_Rect{ .x = 16, .y = 12, .w = banner_width - 32, .h = 24 };
@@ -373,6 +373,12 @@ const Banner = struct {
         if (!sdl.SDL_ShowWindow(banner.window)) return error.SdlShowFailed;
     }
 };
+
+fn setBannerText(item: ?*sdl.TTF_Text, text: []const u8) !void {
+    if (!sdl.TTF_SetTextString(item, if (text.len == 0) null else text.ptr, text.len)) {
+        return error.TtfTextSetFailed;
+    }
+}
 
 fn wakeUi() bool {
     const event_type = wake_event.load(.acquire);
@@ -1544,6 +1550,30 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
     try transcript.observe(.{ .draw = hidden.key.? });
     try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&hidden, .{ .hidden = one })) });
     try transcript.done();
+}
+
+test "empty banner field clears SDL_ttf without borrowing a strlen pointer" {
+    try std.testing.expect(sdl.TTF_Init());
+    defer sdl.TTF_Quit();
+    const stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse return error.FontStreamFailed;
+    defer std.debug.assert(sdl.SDL_CloseIO(stream));
+    const font = sdl.TTF_OpenFontIO(stream, false, banner_font_size) orelse return error.FontOpenFailed;
+    defer sdl.TTF_CloseFont(font);
+    const item = sdl.TTF_CreateText(null, font, null, 0) orelse return error.TextCreateFailed;
+    defer sdl.TTF_DestroyText(item);
+    const prior = [_]u8{ 'p', 'r', 'i', 'o', 'r' };
+    try setBannerText(item, &prior);
+    var width: c_int = 0;
+    var height: c_int = 0;
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expect(width > 0);
+    try setBannerText(item, prior[0..0]);
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expectEqual(@as(c_int, 0), width);
+    const exact = [_]u8{ 'o', 'k' };
+    try setBannerText(item, &exact);
+    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
+    try std.testing.expect(width > 0);
 }
 
 test "strict UI cleanup transcript reverses every partial acquisition" {
