@@ -183,7 +183,7 @@ pub const Monitor = struct {
     y: i32,
     width: u32,
     height: u32,
-    scale_100: u16,
+    scale: f64,
     transform: Transform,
 
     pub fn name(monitor: *const Monitor) []const u8 {
@@ -192,7 +192,7 @@ pub const Monitor = struct {
 
     pub fn eql(a: *const Monitor, b: *const Monitor) bool {
         return std.mem.eql(u8, a.name(), b.name()) and a.x == b.x and a.y == b.y and
-            a.width == b.width and a.height == b.height and a.scale_100 == b.scale_100 and
+            a.width == b.width and a.height == b.height and a.scale == b.scale and
             a.transform == b.transform;
     }
 };
@@ -273,7 +273,7 @@ fn parseMonitor(object: std.json.ObjectMap) !Monitor {
         .y = try signedField(object, "y"),
         .width = width,
         .height = height,
-        .scale_100 = try parseScale(try numberField(object, "scale")),
+        .scale = try parseScale(try numberField(object, "scale")),
         .transform = std.enums.fromInt(Transform, try unsignedField(object, "transform")) orelse
             return error.MonitorTransformInvalid,
     };
@@ -314,18 +314,24 @@ fn signedField(object: std.json.ObjectMap, name: []const u8) !i32 {
     return std.fmt.parseInt(i32, try numberField(object, name), 10) catch error.MonitorIntegerInvalid;
 }
 
-fn parseScale(bytes: []const u8) !u16 {
-    const dot = std.mem.indexOfScalar(u8, bytes, '.') orelse return error.MonitorScaleInvalid;
-    if (dot == 0 or dot + 3 != bytes.len) return error.MonitorScaleInvalid;
-    if (bytes[0] == '0' and dot != 1) return error.MonitorScaleInvalid;
-    for (bytes[0..dot]) |byte| if (!std.ascii.isDigit(byte)) return error.MonitorScaleInvalid;
-    if (!std.ascii.isDigit(bytes[dot + 1]) or !std.ascii.isDigit(bytes[dot + 2])) {
+fn parseScale(bytes: []const u8) !f64 {
+    if (bytes.len == 0 or bytes.len > 16 or !std.ascii.isDigit(bytes[0]) or
+        bytes[0] == '0' and bytes.len > 1 and bytes[1] != '.')
+    {
         return error.MonitorScaleInvalid;
     }
-    const whole = std.fmt.parseInt(u16, bytes[0..dot], 10) catch return error.MonitorScaleInvalid;
-    if (whole > 10) return error.MonitorScaleInvalid;
-    const scale = whole * 100 + (bytes[dot + 1] - '0') * 10 + bytes[dot + 2] - '0';
-    if (scale == 0 or scale > 1000) return error.MonitorScaleInvalid;
+    var dot_seen = false;
+    for (bytes) |byte| switch (byte) {
+        '0'...'9' => {},
+        '.' => {
+            if (dot_seen) return error.MonitorScaleInvalid;
+            dot_seen = true;
+        },
+        else => return error.MonitorScaleInvalid,
+    };
+    if (bytes[bytes.len - 1] == '.') return error.MonitorScaleInvalid;
+    const scale = std.fmt.parseFloat(f64, bytes) catch return error.MonitorScaleInvalid;
+    if (scale <= 0 or scale > 10) return error.MonitorScaleInvalid;
     return scale;
 }
 
@@ -1183,7 +1189,7 @@ test "monitor response retains exact facts and ignores extensions" {
     try std.testing.expectEqual(@as(u8, 2), snapshot.count);
     try std.testing.expectEqualStrings("DP-1", snapshot.monitors[0].name());
     try std.testing.expectEqual(@as(i32, -1920), snapshot.monitors[0].x);
-    try std.testing.expectEqual(@as(u16, 125), snapshot.monitors[0].scale_100);
+    try std.testing.expectEqual(@as(f64, 1.25), snapshot.monitors[0].scale);
     try std.testing.expectEqual(Transform.rotate_270, snapshot.monitors[1].transform);
 }
 
@@ -1201,17 +1207,30 @@ test "snapshot equality covers every retained fact" {
     try std.testing.expect(!first.eql(&changed));
 }
 
-test "scale accepts only pinned two-decimal spelling" {
-    try std.testing.expectEqual(@as(u16, 1), try parseScale("0.01"));
-    try std.testing.expectEqual(@as(u16, 100), try parseScale("1.00"));
-    try std.testing.expectEqual(@as(u16, 125), try parseScale("1.25"));
-    try std.testing.expectEqual(@as(u16, 1000), try parseScale("10.00"));
+test "scale accepts bounded Hyprland decimal spellings" {
+    try std.testing.expectEqual(@as(f64, 0.01), try parseScale("0.01"));
+    try std.testing.expectEqual(@as(f64, 1), try parseScale("1"));
+    try std.testing.expectEqual(@as(f64, 1.6), try parseScale("1.6"));
+    try std.testing.expectEqual(@as(f64, 1.6), try parseScale("1.60"));
+    try std.testing.expectEqual(@as(f64, 10), try parseScale("10.00"));
     inline for (.{
-        "0.00", "1",        "1.0",   "01.00",    "+1.00", "-1.00", "1.000", "1e0", "1e999",
-        "NaN",  "Infinity", "10.01", "65535.00",
+        "",   "0",    ".5",  "0.00", "01.00", "+1.00",             "-1.00",
+        "1.", "1..0", "1e0", "NaN",  "10.01", "12345678901234567",
     }) |invalid| {
         try std.testing.expectError(error.MonitorScaleInvalid, parseScale(invalid));
     }
+}
+
+test "Hyprland 0.56 monitor scale spellings form one snapshot" {
+    const snapshot = try parseMonitors(std.testing.allocator,
+        \\[{"name":"HDMI-A-1","width":3840,"height":2160,"x":1920,"y":0,
+        \\"scale":1.6,"transform":0,"disabled":false},
+        \\{"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,
+        \\"scale":1,"transform":0,"disabled":false}]
+    );
+    try std.testing.expectEqual(@as(u8, 2), snapshot.count);
+    try std.testing.expectEqual(@as(f64, 1), snapshot.monitors[0].scale);
+    try std.testing.expectEqual(@as(f64, 1.6), snapshot.monitors[1].scale);
 }
 
 test "transform tags match the pinned Hyprland wire values" {

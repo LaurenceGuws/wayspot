@@ -1969,7 +1969,7 @@ fn snapshotValue(count: u8) wallpaper.Snapshot {
             .y = 0,
             .width = 2,
             .height = 2,
-            .scale_100 = 100,
+            .scale = 1,
             .transform = .normal,
         };
         monitor.name_bytes[0] = 'A';

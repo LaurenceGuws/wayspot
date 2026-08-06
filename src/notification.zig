@@ -120,7 +120,6 @@ const Mailbox = struct {
     closed: ?Closed = null,
     worker_stopped: bool = false,
     worker_error: ?anyerror = null,
-    ui_error: ?anyerror = null,
     ui_ready: bool = false,
 
     fn init(io: std.Io, allocator: std.mem.Allocator) Mailbox {
@@ -139,32 +138,32 @@ const Mailbox = struct {
         mailbox.* = undefined;
     }
 
-    fn publish(mailbox: *Mailbox, value: Presentation) !void {
+    fn publish(mailbox: *Mailbox, value: Presentation) void {
         mailbox.mutex.lockUncancelable(mailbox.io);
         const replaced = mailbox.desired;
         mailbox.desired = .{ .shown = value };
         mailbox.changed.signal(mailbox.io);
         const wake_failed = mailbox.ui_ready and !wakeUi();
+        if (wake_failed) mailbox.ui_ready = false;
         mailbox.mutex.unlock(mailbox.io);
         if (replaced) |old| {
             var owned = old;
             owned.deinit(mailbox.allocator);
         }
-        if (wake_failed) return error.SdlWakeFailed;
     }
 
-    fn hide(mailbox: *Mailbox, key: Key) !void {
+    fn hide(mailbox: *Mailbox, key: Key) void {
         mailbox.mutex.lockUncancelable(mailbox.io);
         const replaced = mailbox.desired;
         mailbox.desired = .{ .hidden = key };
         mailbox.changed.signal(mailbox.io);
         const wake_failed = mailbox.ui_ready and !wakeUi();
+        if (wake_failed) mailbox.ui_ready = false;
         mailbox.mutex.unlock(mailbox.io);
         if (replaced) |value| {
             var owned = value;
             owned.deinit(mailbox.allocator);
         }
-        if (wake_failed) return error.SdlWakeFailed;
     }
 
     fn waitDesired(mailbox: *Mailbox) !?Desired {
@@ -230,21 +229,14 @@ const Mailbox = struct {
         mailbox.worker_error = failure;
         mailbox.changed.signal(mailbox.io);
         const wake_failed = mailbox.ui_ready and !wakeUi();
-        if (wake_failed and mailbox.worker_error == null) mailbox.worker_error = error.SdlWakeFailed;
+        if (wake_failed) mailbox.ui_ready = false;
         mailbox.mutex.unlock(mailbox.io);
     }
 
-    fn uiFailed(mailbox: *Mailbox, err: anyerror) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        std.debug.assert(mailbox.ui_error == null);
-        mailbox.ui_error = err;
-        mailbox.mutex.unlock(mailbox.io);
-    }
-
-    fn uiFailure(mailbox: *Mailbox) ?anyerror {
+    fn workerFailure(mailbox: *Mailbox) ?anyerror {
         mailbox.mutex.lockUncancelable(mailbox.io);
         defer mailbox.mutex.unlock(mailbox.io);
-        return mailbox.ui_error;
+        return mailbox.worker_error;
     }
 };
 
@@ -454,106 +446,114 @@ fn decideUi(state: *UiState, signal: UiSignal) UiDecision {
 
 fn runUi(mailbox: *Mailbox, allocator: std.mem.Allocator) !void {
     while (try mailbox.waitDesired()) |first| {
-        var state: UiState = .{};
-        var visible = switch (first) {
-            .hidden => |key| {
-                std.debug.assert(decideUi(&state, .{ .hidden = key }) == .none);
-                continue;
-            },
-            .shown => |presentation| blk: {
-                std.debug.assert(decideUi(&state, .{ .shown = .{
-                    .id = presentation.id,
-                    .generation = presentation.generation,
-                } }) == .initialize);
-                break :blk presentation;
-            },
+        runBanner(mailbox, allocator, first) catch |err| {
+            if (mailbox.workerFailure()) |worker_error| return worker_error;
+            std.log.err("notification banner failed: {s}", .{@errorName(err)});
+            continue;
         };
-        defer visible.deinit(allocator);
-        var banner: Banner = .{};
-        try banner.init(mailbox);
-        defer banner.deinit(mailbox);
+    }
+}
 
-        switch (mailbox.takeUiUpdate()) {
-            .desired => |desired| switch (desired) {
-                .shown => |newest| {
-                    visible.deinit(allocator);
-                    visible = newest;
-                    std.debug.assert(decideUi(&state, .{ .shown = .{
-                        .id = newest.id,
-                        .generation = newest.generation,
-                    } }) == .none);
-                },
-                .hidden => |key| {
-                    std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
-                    continue;
-                },
+fn runBanner(mailbox: *Mailbox, allocator: std.mem.Allocator, first: Desired) !void {
+    var state: UiState = .{};
+    var visible = switch (first) {
+        .hidden => |key| {
+            std.debug.assert(decideUi(&state, .{ .hidden = key }) == .none);
+            return;
+        },
+        .shown => |presentation| blk: {
+            std.debug.assert(decideUi(&state, .{ .shown = .{
+                .id = presentation.id,
+                .generation = presentation.generation,
+            } }) == .initialize);
+            break :blk presentation;
+        },
+    };
+    defer visible.deinit(allocator);
+    var banner: Banner = .{};
+    try banner.init(mailbox);
+    defer banner.deinit(mailbox);
+
+    switch (mailbox.takeUiUpdate()) {
+        .desired => |desired| switch (desired) {
+            .shown => |newest| {
+                visible.deinit(allocator);
+                visible = newest;
+                std.debug.assert(decideUi(&state, .{ .shown = .{
+                    .id = newest.id,
+                    .generation = newest.generation,
+                } }) == .none);
             },
-            .stop => {
-                std.debug.assert(decideUi(&state, .stop) == .stop);
+            .hidden => |key| {
+                std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
                 return;
             },
-            .failed => |err| {
-                const decision = decideUi(&state, .{ .failed = err });
-                return decision.failed;
-            },
-            .none => {},
-        }
-        std.debug.assert(state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw);
-        try banner.draw(&visible);
-        session: while (true) {
-            const now = sdl.SDL_GetTicks();
-            var event: sdl.SDL_Event = undefined;
-            if (!sdl.SDL_WaitEventTimeout(&event, state.remaining(now))) {
-                if (sdl.SDL_GetTicks() >= state.deadline) {
-                    mailbox.reportClosed(state.close(.expired).?);
-                    break :session;
-                }
-                continue;
-            }
-            if (event.type == wake_event.load(.acquire)) {
-                switch (mailbox.takeUiUpdate()) {
-                    .desired => |desired| switch (desired) {
-                        .shown => |newest| {
-                            visible.deinit(allocator);
-                            visible = newest;
-                            std.debug.assert(decideUi(&state, .{ .shown = .{
-                                .id = newest.id,
-                                .generation = newest.generation,
-                            } }) == .draw);
-                            std.debug.assert(
-                                state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw,
-                            );
-                            try banner.draw(&visible);
-                        },
-                        .hidden => |key| {
-                            std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
-                            break :session;
-                        },
-                    },
-                    .stop => {
-                        std.debug.assert(decideUi(&state, .stop) == .stop);
-                        return;
-                    },
-                    .failed => |err| {
-                        const decision = decideUi(&state, .{ .failed = err });
-                        return decision.failed;
-                    },
-                    .none => {},
-                }
-            } else if (event.type == sdl.SDL_EVENT_MOUSE_BUTTON_DOWN and
-                event.button.button == sdl.SDL_BUTTON_LEFT)
-            {
-                mailbox.reportClosed(state.close(.dismissed).?);
+        },
+        .stop => {
+            std.debug.assert(decideUi(&state, .stop) == .stop);
+            return;
+        },
+        .failed => |err| {
+            const decision = decideUi(&state, .{ .failed = err });
+            return decision.failed;
+        },
+        .none => {},
+    }
+    std.debug.assert(state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw);
+    try banner.draw(&visible);
+    session: while (true) {
+        const now = sdl.SDL_GetTicks();
+        var event: sdl.SDL_Event = undefined;
+        if (!sdl.SDL_WaitEventTimeout(&event, state.remaining(now))) {
+            if (sdl.SDL_GetTicks() >= state.deadline) {
+                mailbox.reportClosed(state.close(.expired).?);
                 break :session;
-            } else switch (event.type) {
-                sdl.SDL_EVENT_WINDOW_EXPOSED,
-                sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
-                sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
-                sdl.SDL_EVENT_RENDER_TARGETS_RESET,
-                => try banner.draw(&visible),
-                sdl.SDL_EVENT_RENDER_DEVICE_LOST => return error.SdlDeviceLost,
-                else => {},
             }
+            continue;
+        }
+        if (event.type == wake_event.load(.acquire)) {
+            switch (mailbox.takeUiUpdate()) {
+                .desired => |desired| switch (desired) {
+                    .shown => |newest| {
+                        visible.deinit(allocator);
+                        visible = newest;
+                        std.debug.assert(decideUi(&state, .{ .shown = .{
+                            .id = newest.id,
+                            .generation = newest.generation,
+                        } }) == .draw);
+                        std.debug.assert(
+                            state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw,
+                        );
+                        try banner.draw(&visible);
+                    },
+                    .hidden => |key| {
+                        std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
+                        break :session;
+                    },
+                },
+                .stop => {
+                    std.debug.assert(decideUi(&state, .stop) == .stop);
+                    return;
+                },
+                .failed => |err| {
+                    const decision = decideUi(&state, .{ .failed = err });
+                    return decision.failed;
+                },
+                .none => {},
+            }
+        } else if (event.type == sdl.SDL_EVENT_MOUSE_BUTTON_DOWN and
+            event.button.button == sdl.SDL_BUTTON_LEFT)
+        {
+            mailbox.reportClosed(state.close(.dismissed).?);
+            break :session;
+        } else switch (event.type) {
+            sdl.SDL_EVENT_WINDOW_EXPOSED,
+            sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+            sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+            sdl.SDL_EVENT_RENDER_TARGETS_RESET,
+            => try banner.draw(&visible),
+            sdl.SDL_EVENT_RENDER_DEVICE_LOST => return error.SdlDeviceLost,
+            else => {},
         }
     }
 }
@@ -1662,8 +1662,8 @@ test "mailbox keeps only newest before init during init and while visible" {
     var three = try sampleNotification(std.testing.allocator, 3, "three");
     defer three.deinit(std.testing.allocator);
 
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &two));
+    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
+    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
     var before = switch ((try mailbox.waitDesired()).?) {
         .shown => |value| value,
         .hidden => return error.ExpectedPresentation,
@@ -1671,8 +1671,8 @@ test "mailbox keeps only newest before init during init and while visible" {
     defer before.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 2), before.id);
 
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &two));
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &three));
+    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
+    mailbox.publish(try Presentation.init(std.testing.allocator, &three));
     var during = switch (mailbox.takeUiUpdate()) {
         .desired => |desired| switch (desired) {
             .shown => |value| value,
@@ -1683,7 +1683,7 @@ test "mailbox keeps only newest before init during init and while visible" {
     defer during.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 3), during.id);
 
-    try mailbox.hide(.{ .id = 2, .generation = 2 });
+    mailbox.hide(.{ .id = 2, .generation = 2 });
     const hidden = mailbox.takeUiUpdate().desired.hidden;
     try std.testing.expectEqual(@as(u32, 2), hidden.id);
     mailbox.reportClosed(.{ .key = .{ .id = 3, .generation = 3 }, .reason = .dismissed });
@@ -1700,9 +1700,9 @@ test "latest desired state converges show close show and close show close" {
     const one_key = Key{ .id = one.id, .generation = one.generation };
     const two_key = Key{ .id = two.id, .generation = two.generation };
 
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    try mailbox.hide(one_key);
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &two));
+    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
+    mailbox.hide(one_key);
+    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
     var shown = switch (mailbox.takeUiUpdate().desired) {
         .shown => |value| value,
         .hidden => return error.ExpectedPresentation,
@@ -1710,32 +1710,32 @@ test "latest desired state converges show close show and close show close" {
     defer shown.deinit(std.testing.allocator);
     try std.testing.expectEqual(two_key, Key{ .id = shown.id, .generation = shown.generation });
 
-    try mailbox.hide(two_key);
-    try mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    try mailbox.hide(one_key);
+    mailbox.hide(two_key);
+    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
+    mailbox.hide(one_key);
     try std.testing.expectEqual(one_key, mailbox.takeUiUpdate().desired.hidden);
 }
 
-test "mailbox returns exact worker and UI failures" {
+test "mailbox returns the worker failure" {
     var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
     defer mailbox.deinit();
     mailbox.workerDone(error.BusLost);
     try std.testing.expectError(error.BusLost, mailbox.waitDesired());
-    mailbox.uiFailed(error.SdlDrawFailed);
-    try std.testing.expectEqual(error.SdlDrawFailed, mailbox.uiFailure().?);
 }
 
-test "failed SDL wake keeps the latest desired presentation" {
+test "failed SDL wake keeps the latest desired presentation without failing intake" {
     var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
     defer mailbox.deinit();
+    const old_wake = wake_event.load(.acquire);
+    defer wake_event.store(old_wake, .release);
+    wake_event.store(wake_unset, .release);
     mailbox.ui_ready = true;
     var value = try sampleNotification(std.testing.allocator, 1, "owned");
     defer value.deinit(std.testing.allocator);
-    try std.testing.expectError(
-        error.SdlWakeFailed,
-        mailbox.publish(try Presentation.init(std.testing.allocator, &value)),
-    );
+    mailbox.publish(try Presentation.init(std.testing.allocator, &value));
     try std.testing.expectEqualStrings("owned", mailbox.desired.?.shown.summary);
+    try std.testing.expect(!mailbox.ui_ready);
+    try std.testing.expect(mailbox.worker_error == null);
 }
 
 test "presentation timeout has exact default persistent and maximum bounds" {
@@ -1801,7 +1801,7 @@ fn fuzzIntake(_: void, smith: *std.testing.Smith) !void {
                     sampleRequestValue(replaces_id, text[0..smith.slice(&text)]),
                     @as(i64, smith.value(u32)),
                 ) catch continue;
-                try mailbox.publish(accepted.presentation);
+                mailbox.publish(accepted.presentation);
                 accepted = undefined;
             },
             1 => {
@@ -2758,22 +2758,39 @@ test "strict worker intake transcript proves zero one sixty-four and sixty-five 
     }
 }
 
-test "strict worker transcript preserves external and sticky persistence failures" {
+test "strict worker transcript reconnects external failures and preserves sticky persistence failures" {
     inline for (.{ error.BusLost, error.NameLost }) |external| {
-        var batch: IntakeBatch = .{};
         var transcript = WorkerTranscript{ .expected = &.{
             .{ .connection = .open },
             .{ .connection = .own },
             .{ .failure = external },
             .{ .connection = .close },
+            .flush,
+            .{ .connection = .open },
+            .{ .connection = .own },
+            .stop,
+            .{ .connection = .close },
         } };
         var external_connection: WorkerConnection = .{};
         try transcript.observe(.{ .connection = external_connection.opened() });
         try transcript.observe(.{ .connection = external_connection.owned() });
-        try transcript.observe(.{ .failure = batch.external(external).fail });
+        try std.testing.expectEqual(reconnect_wait_milliseconds, reconnectWait(external).?);
+        try transcript.observe(.{ .failure = external });
         try transcript.observe(.{ .connection = external_connection.closed() });
+        try transcript.observe(.flush);
+        var replacement_connection: WorkerConnection = .{};
+        try transcript.observe(.{ .connection = replacement_connection.opened() });
+        try transcript.observe(.{ .connection = replacement_connection.owned() });
+        try transcript.observe(.stop);
+        try transcript.observe(.{ .connection = replacement_connection.closed() });
         try transcript.done();
     }
+    try std.testing.expectEqual(
+        reconnect_wait_milliseconds,
+        reconnectWait(error.SessionBusUnavailable).?,
+    );
+    try std.testing.expect(reconnectWait(error.NameOwned) == null);
+    try std.testing.expect(reconnectWait(error.HistoryWriteFailed) == null);
     var transcript = WorkerTranscript{ .expected = &.{
         .flush,
         .{ .failure = error.HistoryWriteFailed },
@@ -2866,7 +2883,7 @@ const Worker = struct {
         try worker.dbus_owner.replyNotify(id);
         std.debug.assert(order.replied() == .reply);
         owns_presentation = false;
-        try worker.mailbox.publish(accepted.presentation);
+        worker.mailbox.publish(accepted.presentation);
         std.debug.assert(order.published() == .publish);
         accepted = undefined;
         if (displaced) |closed| {
@@ -2879,7 +2896,7 @@ const Worker = struct {
     fn close(worker: *Worker, id: u32) !void {
         if (activeKey(worker.owner.history.active, id)) |key| {
             std.debug.assert(worker.owner.close(key));
-            try worker.mailbox.hide(key);
+            worker.mailbox.hide(key);
             try worker.dbus_owner.signalClosed(id, .requested);
         }
         try worker.dbus_owner.replyClose();
@@ -2915,7 +2932,6 @@ const Worker = struct {
             var batch: IntakeBatch = .{};
             while (true) {
                 try worker.drainUi();
-                if (worker.mailbox.uiFailure()) |err| return err;
                 const action: BatchAction = switch (try worker.dbus_owner.next(
                     if (batch.count == 0) wait_milliseconds else 0,
                 )) {
@@ -2972,7 +2988,24 @@ fn runWorker(args: WorkerArgs) !void {
         .mailbox = args.mailbox,
         .dbus_owner = &native,
     };
-    worker.run() catch |err| {
+    const failure: ?anyerror = resident: while (true) {
+        worker.run() catch |err| {
+            const reconnect_wait = reconnectWait(err) orelse break :resident err;
+            if (owner.history.active) |active| {
+                const key = Key{ .id = active.notification_id, .generation = active.generation };
+                std.debug.assert(owner.close(key));
+                args.mailbox.hide(key);
+            }
+            owner.flush() catch |flush_error| break :resident flush_error;
+            if (args.stop.load(.acquire)) break :resident null;
+            std.Io.sleep(args.io, .fromMilliseconds(reconnect_wait), .awake) catch |sleep_error| {
+                break :resident sleep_error;
+            };
+            continue;
+        };
+        break :resident null;
+    };
+    if (failure) |err| {
         const final_error = switch (workerFailureAction(&owner.durability)) {
             .return_error => err,
             .flush_once => blk: {
@@ -2982,8 +3015,15 @@ fn runWorker(args: WorkerArgs) !void {
         };
         args.mailbox.workerDone(final_error);
         return final_error;
-    };
+    }
     args.mailbox.workerDone(null);
+}
+
+fn reconnectWait(err: anyerror) ?i64 {
+    return switch (err) {
+        error.BusLost, error.NameLost, error.SessionBusUnavailable => reconnect_wait_milliseconds,
+        else => null,
+    };
 }
 
 pub fn run(
@@ -3004,12 +3044,7 @@ pub fn run(
         .mailbox = &mailbox,
     }});
     const ui_result = runUi(&mailbox, allocator);
-    if (ui_result) {
-        stop.store(true, .release);
-    } else |err| {
-        mailbox.uiFailed(err);
-        stop.store(true, .release);
-    }
+    stop.store(true, .release);
     const worker_result = thread.await(io);
     try ui_result;
     try worker_result;
@@ -3021,6 +3056,7 @@ const dbus_path = "/org/freedesktop/Notifications";
 const dbus_interface = "org.freedesktop.Notifications";
 const message_capacity = 64 * 1024;
 const wait_milliseconds: i32 = 100;
+const reconnect_wait_milliseconds: i64 = 250;
 const send_turn_capacity = 8;
 const send_wait_milliseconds = 25;
 

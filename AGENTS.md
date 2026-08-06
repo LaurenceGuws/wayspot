@@ -56,7 +56,8 @@ not define Wayspot product scope.
   `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/` (wiki commit
   `a9d781e8c978681e5c8119c2accc11fc7c155028`)
 - Hyprland source:
-  `/home/home/personal/projects/dev_references/backends/hyprland/`
+  `/home/home/personal/projects/dev_references/backends/hyprland/` (official
+  `v0.56.2`, commit `efb50993780079460b0cbed1363e2166a2de1d9f`)
 - Hyprland IPC:
   `/home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md`
 - D-Bus source and specification:
