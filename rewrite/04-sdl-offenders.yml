@@ -2,7 +2,7 @@
 # This file ranks current behavior; it does not add product scope.
 
 source:
-  wiki: /home/home/personal/projects/dev_references/sdlwiki_md/SDL3
+  wiki: /home/home/personal/dev_references/sdlwiki_md/SDL3
   implementation: vendor/sdl
   audited:
     - SDL_RenderDebugText

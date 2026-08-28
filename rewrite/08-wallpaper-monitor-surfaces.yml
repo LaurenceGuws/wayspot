@@ -1131,23 +1131,23 @@ phased_checkpoints:
       release_timeout_or_dispatch_failure: fatal display loss after the successful logical swap
       generation_exhaustion: visible failure before slot or Round mutation
     publication_flush_references:
-      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+      - path: /home/home/personal/dev_references/backends/wayland/src/wayland-client.c
         lines: 2434-2467
         proves: >
           wl_display_flush is nonblocking, may send only a prefix, returns
           EAGAIN while bytes remain queued, and requires polling the display fd
           writable before retry.
-      - path: /home/home/personal/projects/dev_references/backends/wayland/src/connection.c
+      - path: /home/home/personal/dev_references/backends/wayland/src/connection.c
         lines: 447-516
         proves: >
           wl_connection_flush advances the outgoing ring after each partial
           sendmsg and retries sendmsg EINTR internally.
-      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+      - path: /home/home/personal/dev_references/backends/wayland/src/wayland-client.c
         lines: 2034-2121
         proves: >
           Wayland's bounded dispatch implementation recomputes a monotonic
           deadline, polls POLLOUT after EAGAIN, and retries flush.
-      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+      - path: /home/home/personal/dev_references/zig_maturity/zig/lib/std/posix.zig
         lines: 995-1050
         proves: >
           std.posix.poll retries EINTR internally with its original timeout,
@@ -1815,34 +1815,34 @@ phased_checkpoints:
         Assert only Wayland display ownership changes and first stop always
         reaches cleanup of the newly Current round.
     authoritative_references:
-      - path: /home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md
+      - path: /home/home/personal/dev_references/backends/hyprland-wiki/content/IPC/_index.md
         lines: 8-30
         proves: exact request/event socket paths, synchronous request lifetime, and EVENT>>DATA framing
-      - path: /home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md
+      - path: /home/home/personal/dev_references/backends/hyprland-wiki/content/IPC/_index.md
         lines: 45-82
         proves: monitor add/remove and configreloaded event names; focus/workspace/window events are unrelated
-      - path: /home/home/personal/projects/dev_references/backends/hyprland/src/debug/HyprCtl.cpp
+      - path: /home/home/personal/dev_references/backends/hyprland/src/debug/HyprCtl.cpp
         lines: 309-343, 2037-2070, 2300-2328
         proves: monitors JSON request dispatch, j flag parsing, and .socket.sock ownership
-      - path: /home/home/personal/projects/dev_references/backends/hyprland/src/managers/EventManager.cpp
+      - path: /home/home/personal/dev_references/backends/hyprland/src/managers/EventManager.cpp
         lines: 12-45
         proves: .socket2.sock is a nonblocking Unix stream server with bounded sun_path
-      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+      - path: /home/home/personal/dev_references/backends/wayland/src/wayland-client.c
         lines: 1918-2030
         proves: every successful prepare_read requires exactly one read_events or cancel_read
-      - path: /home/home/personal/projects/dev_references/backends/wayland/src/wayland-client.c
+      - path: /home/home/personal/dev_references/backends/wayland/src/wayland-client.c
         lines: 2434-2467
         proves: flush is nonblocking and EAGAIN requires writable polling
-      - path: /home/home/personal/projects/dev_references/terminals/foot/wayland.c
+      - path: /home/home/personal/dev_references/terminals/foot/wayland.c
         lines: 1728-1758, 2358-2430
         proves: direct prepare/read/dispatch sequencing, HUP handling, and writable flush retry
-      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+      - path: /home/home/personal/dev_references/zig_maturity/zig/lib/std/posix.zig
         lines: 995-1050
         proves: ppoll exposes SignalInterrupt while poll retries it with the original timeout
-      - path: /home/home/personal/projects/dev_references/zig_maturity/zig/lib/std/posix.zig
+      - path: /home/home/personal/dev_references/zig_maturity/zig/lib/std/posix.zig
         lines: 400-475
         proves: nonblocking read/write expose WouldBlock and retry EINTR internally
-      - path: /home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md
+      - path: /home/home/personal/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md
         lines: 91-140
         proves: fixed loop bounds and paired positive/negative assertions
     negative_space:

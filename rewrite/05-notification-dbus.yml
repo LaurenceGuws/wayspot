@@ -6,18 +6,18 @@ state: implemented_for_review
 
 references:
   zig_io:
-    path: /home/home/personal/projects/qagent/zig-0.16-release-notes.txt
+    path: /home/home/personal/qagent/zig-0.16-release-notes.txt
     sections:
       - I/O as an Interface
       - Cancelation
       - Fuzzer / Smith
   dbus:
-    path: /home/home/personal/projects/dev_references/backends/dbus
+    path: /home/home/personal/dev_references/backends/dbus
     commit: f64ae3cafdcf31606401171bb0e8fe3fccc761c2
     specification: doc/dbus-specification.xml
     native_example: tools/dbus-echo.c
   notifications:
-    path: /home/home/personal/projects/dev_references/backends/xdg-specs
+    path: /home/home/personal/dev_references/backends/xdg-specs
     commit: d77a8e95d4a0ccf6f330a02b2a6e8e0085c39579
     specification: notification/notification-spec.xml
 

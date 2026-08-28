@@ -33,11 +33,11 @@ references_read:
   - src/sdl.zig
   - src/launch.zig
   - src/notification_history.zig
-  - /home/home/personal/projects/dev_references/terminals/ghostty/src/terminal/parse_table.zig
-  - /home/home/personal/projects/dev_references/terminals/ghostty/src/terminal/Parser.zig
-  - /home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md
-  - /home/home/personal/projects/dev_references/terminals/foot
-  - /home/home/personal/projects/qagent/qagent/src
+  - /home/home/personal/dev_references/terminals/ghostty/src/terminal/parse_table.zig
+  - /home/home/personal/dev_references/terminals/ghostty/src/terminal/Parser.zig
+  - /home/home/personal/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md
+  - /home/home/personal/dev_references/terminals/foot
+  - /home/home/personal/qagent/qagent/src
 
 reference_lessons:
   ghostty:

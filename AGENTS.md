@@ -34,37 +34,37 @@ not define Wayspot product scope.
 ## Local references
 
 - TigerBeetle style:
-  `/home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md`
+  `/home/home/personal/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md`
 - TigerBeetle source:
-  `/home/home/personal/projects/dev_references/zig_maturity/tigerbeetle/src/`
+  `/home/home/personal/dev_references/zig_maturity/tigerbeetle/src/`
 - Foot source:
-  `/home/home/personal/projects/dev_references/terminals/foot/`
+  `/home/home/personal/dev_references/terminals/foot/`
 - QAgent source:
-  `/home/home/personal/projects/qagent/qagent/src/`
+  `/home/home/personal/qagent/qagent/src/`
 - Zig 0.16 documentation:
-  `/home/home/personal/projects/official_docs/ziglang.org/download/0.16.0/`
+  `/home/home/personal/official_docs/ziglang.org/download/0.16.0/`
 - Zig 0.16 source:
-  `/home/home/personal/projects/dev_references/zig_maturity/zig/`
+  `/home/home/personal/dev_references/zig_maturity/zig/`
 - Zig 0.16 release notes:
-  `/home/home/personal/projects/qagent/zig-0.16-release-notes.txt`
+  `/home/home/personal/qagent/zig-0.16-release-notes.txt`
 - SDL built source:
   `vendor/sdl/` (official `release-3.4.12`, commit
   `f87239e71e42da91ca317a12eefb82cfbf3393eb`)
 - SDL shared source clone:
-  `/home/home/personal/projects/dev_references/backends/sdl/`
+  `/home/home/personal/dev_references/backends/sdl/`
 - SDL documentation:
-  `/home/home/personal/projects/dev_references/sdlwiki_md/SDL3/` (wiki commit
+  `/home/home/personal/dev_references/sdlwiki_md/SDL3/` (wiki commit
   `a9d781e8c978681e5c8119c2accc11fc7c155028`)
 - Hyprland source:
-  `/home/home/personal/projects/dev_references/backends/hyprland/` (official
+  `/home/home/personal/dev_references/backends/hyprland/` (official
   `v0.56.2`, commit `efb50993780079460b0cbed1363e2166a2de1d9f`)
 - Hyprland IPC:
-  `/home/home/personal/projects/dev_references/backends/hyprland-wiki/content/IPC/_index.md`
+  `/home/home/personal/dev_references/backends/hyprland-wiki/content/IPC/_index.md`
 - D-Bus source and specification:
-  `/home/home/personal/projects/dev_references/backends/dbus/` (commit
+  `/home/home/personal/dev_references/backends/dbus/` (commit
   `f64ae3cafdcf31606401171bb0e8fe3fccc761c2`)
 - Desktop notification specification:
-  `/home/home/personal/projects/dev_references/backends/xdg-specs/notification/notification-spec.xml`
+  `/home/home/personal/dev_references/backends/xdg-specs/notification/notification-spec.xml`
   (repository commit `d77a8e95d4a0ccf6f330a02b2a6e8e0085c39579`)
 
 ## Workflow
