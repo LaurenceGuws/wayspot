@@ -3,7 +3,7 @@ const libs = @import("build_libs.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = optimizeOption(b);
     const sdl = b.dependency("sdl", .{
         .target = target,
         .optimize = optimize,
@@ -310,6 +310,20 @@ fn waylandCode(b: *std.Build, xml: std.Build.LazyPath, name: []const u8) std.Bui
     const command = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
     command.addFileArg(xml);
     return command.addOutputFileArg(b.fmt("{s}.c", .{name}));
+}
+
+fn optimizeOption(b: *std.Build) std.builtin.OptimizeMode {
+    if (b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size (default: ReleaseSafe)",
+    )) |mode| return mode;
+
+    return switch (b.graph.release_mode) {
+        .off, .any, .safe => .safe,
+        .fast => .fast,
+        .small => .small,
+    };
 }
 
 fn addNotificationLibraries(
