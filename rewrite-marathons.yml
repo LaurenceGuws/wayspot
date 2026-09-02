@@ -1,5 +1,5 @@
-# Durable rewrite index. Each marathon gets one temporary planning scratchpad.
-# DOMAIN.yml owns product scope. AGENTS.md owns the source-shape bars and workflow.
+# Historical rewrite record. Preserve for design archaeology; do not use as current workflow authority.
+# README.md owns product story, DESIGN.md durable constraints, and DOMAIN.yml current scope.
 
 rewrite:
   goal: >

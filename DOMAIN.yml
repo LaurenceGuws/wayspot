@@ -1,9 +1,25 @@
 product:
   name: wayspot
   mission: >
-    A small Hyprland and Wayland desktop environment busybox. Wayspot gives a
-    bare Hyprland session the focused tools normally supplied by a traditional
-    desktop environment.
+    Make application launching on Hyprland feel immediate, then provide a small
+    set of pleasant desktop utilities without compromising that fast path.
+
+principles:
+  picker_latency:
+    priority: primary
+    invariant: >
+      The zero-argument application picker remains a direct fresh-process path;
+      unrelated product modes do not add work to its startup critical path.
+  derived_state:
+    invariant: >
+      External desktop facts are discovered from their current authorities when
+      needed rather than persisted as Wayspot-owned indexes or caches.
+    product_owned_persistence:
+      - retained notification history
+  resident_cost:
+    invariant: >
+      Features that require residency keep idle CPU, memory, retained state,
+      and lifecycle complexity bounded and measured.
 
 scope:
   binary: wayspot
@@ -16,46 +32,38 @@ scope:
     gui:
       purpose: interactive desktop picker
     cli:
-      purpose: direct access to the same product actions
+      purpose: direct access to current product actions
     bash:
       entry: source <(wayspot completion bash)
-      behavior:
-        - complete modes at wayspot
-        - complete one matching mode prefix
-        - complete the selected mode's next choices
 
   modes:
     apps:
       default: true
-      purpose: find and open installed applications
+      purpose: discover, find, and open currently installed applications
       resident_process: false
+      persistent_derived_state: false
     notifications:
       purpose: receive, show, close, and retain desktop notifications
       retention: 30 days
       resident_process: true
+      persistent_product_state:
+        - notification history
     wallpaper:
-      purpose: show and rotate monitor wallpapers
+      purpose: discover, show, and rotate monitor wallpapers
       resident_process: true
+      persistent_derived_state: false
       invariants:
         - monitor focus never changes the current wallpaper round
         - each process start receives a fresh random sequence
         - the process remains alive while the desktop session is alive
-    sunglasses:
-      purpose: interactively dim, filter, and overlay an image per monitor
-      resident_process: true
-      gui:
-        - select a monitor
-        - adjust bounded values directly
-        - toggle effects on and off
-        - select an image path
-      cli: exposes the same accepted values and actions
 
   process_lifecycle:
     - each resident process owns and asserts its lifecycle
-    - no flock process
+    - no resident launcher process
     - no fallback process manager
 
 excluded:
-  - architecture inferred from deleted source
+  - persistent application or icon indexes
   - generic framework or plugin systems
+  - generic compositor abstraction
   - support for compositors other than Hyprland
