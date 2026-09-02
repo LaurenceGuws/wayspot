@@ -1,7 +1,7 @@
 # Maintainer: Laurence Gouws
 
 pkgname=wayspot-git
-pkgver=0.1.2.r601.g7717b6b
+pkgver=0.1.2.r602.g5fa868f
 pkgrel=1
 pkgdesc='Fast application picker and small Hyprland desktop tools'
 arch=('x86_64')
@@ -46,7 +46,7 @@ prepare() {
     "/\.harfbuzz_source = \.{/,/        },/c\\        .harfbuzz_source = .{ .path = \"../harfbuzz-${_harfbuzz_commit}\" }," \
     build.zig.zon
   sed -i \
-    "/\.sdl_linux_deps = \.{/,/            },/c\\            .sdl_linux_deps = .{ .path = \"../../../sdl_linux_deps\", .lazy = true }," \
+    '10,14c\        .sdl_linux_deps = .{ .path = "../../../sdl_linux_deps", .lazy = true },' \
     vendor/sdl/build.zig.zon
 }
 
