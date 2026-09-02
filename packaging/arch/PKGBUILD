@@ -1,0 +1,74 @@
+# Maintainer: Laurence Gouws
+
+pkgname=wayspot-git
+pkgver=0.1.2.r601.g7717b6b
+pkgrel=1
+pkgdesc='Fast application picker and small Hyprland desktop tools'
+arch=('x86_64')
+url='https://github.com/LaurenceGuws/wayspot'
+license=('MIT')
+depends=('dbus' 'glibc' 'wayland')
+makedepends=('git' 'zig-master-bin')
+provides=('wayspot')
+conflicts=('wayspot')
+
+_freetype_commit='6d9fc45fc4bca8aef0b8f65592520673638c3334'
+_harfbuzz_commit='ab6aa4f449457be45e8e0218f7a8de271fb19967'
+_sdl_linux_deps_commit='fd349940b9dbaa0f221703b05df826d745d7ce2a'
+
+source=(
+  'wayspot::git+https://github.com/LaurenceGuws/wayspot.git'
+  "freetype-${_freetype_commit}.tar.gz::https://github.com/freetype/freetype/archive/${_freetype_commit}.tar.gz"
+  "harfbuzz-${_harfbuzz_commit}.tar.gz::https://github.com/harfbuzz/harfbuzz/archive/${_harfbuzz_commit}.tar.gz"
+  "sdl_linux_deps::git+https://github.com/castholm/SDL_linux_deps.git#commit=${_sdl_linux_deps_commit}"
+)
+sha256sums=(
+  'SKIP'
+  '33461e970851d95e105aef9f3ea038219be30bd4195bd73c49aaba2404def53f'
+  '5f552aac925aebe5348a9703b56cc897c7d931d706c11214ed2e4e1ea20ea520'
+  'SKIP'
+)
+
+pkgver() {
+  cd wayspot
+  git describe --long --tags --always | sed -E 's/^v//; s/([^-]*-g)/r\1/; s/-/./g'
+}
+
+prepare() {
+  cd wayspot
+
+  # makepkg owns downloads. Keep Zig's build phase offline by pointing the
+  # package graph at the exact source trees already materialized by makepkg.
+  sed -i \
+    "/\.freetype_source = \.{/,/        },/c\\        .freetype_source = .{ .path = \"../freetype-${_freetype_commit}\" }," \
+    build.zig.zon
+  sed -i \
+    "/\.harfbuzz_source = \.{/,/        },/c\\        .harfbuzz_source = .{ .path = \"../harfbuzz-${_harfbuzz_commit}\" }," \
+    build.zig.zon
+  sed -i \
+    "/\.sdl_linux_deps = \.{/,/            },/c\\            .sdl_linux_deps = .{ .path = \"../../../sdl_linux_deps\", .lazy = true }," \
+    vendor/sdl/build.zig.zon
+}
+
+build() {
+  cd wayspot
+  zig build --release=safe
+  ./zig-out/bin/wayspot completion bash > "$srcdir/wayspot.bash"
+}
+
+check() {
+  cd wayspot
+  zig build test --release=safe --summary all
+}
+
+package() {
+  cd wayspot
+  install -Dm755 zig-out/bin/wayspot "$pkgdir/usr/bin/wayspot"
+  install -Dm644 packaging/desktop/wayspot.desktop \
+    "$pkgdir/usr/share/applications/wayspot.desktop"
+  install -Dm644 assets/icons/wayspot.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/wayspot.svg"
+  install -Dm644 "$srcdir/wayspot.bash" \
+    "$pkgdir/usr/share/bash-completion/completions/wayspot"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/wayspot/LICENSE"
+}

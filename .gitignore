@@ -16,3 +16,6 @@ packaging/arch/wayspot-git/
 packaging/arch/*.pkg.tar.zst
 packaging/arch/*.pkg.tar.zst.sig
 /zig-0.16-release-notes.txt
+packaging/arch/wayspot/
+packaging/arch/sdl_linux_deps/
+packaging/arch/*.tar.gz

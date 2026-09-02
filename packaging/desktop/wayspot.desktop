@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Wayspot
-Comment=Spotlight-style launcher for Hyprland
+Comment=Fast application picker and Hyprland desktop tools
 Exec=wayspot
 Icon=wayspot
 Terminal=false

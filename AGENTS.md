@@ -41,35 +41,17 @@ External boundaries such as SDL, Hyprland, Wayland, D-Bus, the filesystem, and
 process launch deserve deterministic tests where practical. The depth of a test
 suite should remain proportional to the product behavior it protects.
 
-## Local references
+## References
 
-Primary source-shape references:
+Upstream documentation and source are reference material, not Wayspot authority.
+When a task needs low-level precedent, TigerBeetle is a useful defensive-design
+reference and Foot is a useful small-runtime reference. Prefer repository-local
+vendored sources where present, otherwise use an available upstream checkout or
+the upstream project itself. Do not encode one developer machine's filesystem
+layout into Wayspot's product or contributor contract.
 
-- TigerBeetle style:
-  `/home/home/personal/dev_references/zig_maturity/tigerbeetle/docs/TIGER_STYLE.md`
-- TigerBeetle source:
-  `/home/home/personal/dev_references/zig_maturity/tigerbeetle/src/`
-- Foot source:
-  `/home/home/personal/dev_references/terminals/foot/`
-- QAgent source:
-  `/home/home/personal/qagent/qagent/src/`
-
-External implementation references:
-
-- Zig source: `/home/home/personal/dev_references/zig_maturity/zig/`
-- SDL built source: `vendor/sdl/`
-- SDL docs: `/home/home/personal/dev_references/sdlwiki_md/SDL3/`
-- Hyprland source: `/home/home/personal/dev_references/backends/hyprland/`
-- Hyprland IPC:
-  `/home/home/personal/dev_references/backends/hyprland-wiki/content/IPC/_index.md`
-- D-Bus source/spec:
-  `/home/home/personal/dev_references/backends/dbus/`
-- Desktop notification spec:
-  `/home/home/personal/dev_references/backends/xdg-specs/notification/notification-spec.xml`
-
-The current Home checkout uses Zig `0.17.0-dev.1454+5faa79730` through the
-workspace-local `.zig/zig` link. The link is machine-local and ignored by Git;
-check the live compiler before relying on it.
+SDL source used by the build is vendored under `vendor/sdl/`. Protocol XML used
+by the Wayland resident lives under `protocols/`.
 
 ## Working loop
 

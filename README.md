@@ -124,6 +124,24 @@ windows does not change the current wallpaper round.
 source <(wayspot completion bash)
 ```
 
+## Installing on Arch Linux
+
+An AUR-style VCS package is maintained in [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD).
+It installs the binary, desktop entry, icon, Bash completion, and MIT license.
+Until Zig 0.17 stabilizes, the package deliberately builds with `zig-master-bin`
+because Wayspot uses the current Zig 0.17 development toolchain.
+
+With an AUR helper, `zig-master-bin` is resolved as a build dependency. For a
+manual build, install `zig-master-bin` first, then from the packaging directory:
+
+```bash
+makepkg -si
+```
+
+The package is named `wayspot-git` and provides/conflicts with `wayspot`, leaving
+a clean path for a versioned `wayspot` package once the compiler baseline and a
+release tag are stable.
+
 ## Building
 
 Wayspot is currently developed against Zig `0.17.0-dev.1454+5faa79730` on
@@ -185,3 +203,8 @@ current reality is already fast enough, persistent indexes are a liability. If
 SDL starts fast enough, a launcher daemon is a liability. If a resident utility
 is cheap and pleasant, it can quietly disappear into the desktop and stop
 asking for attention.
+
+## License
+
+Wayspot is released under the [MIT License](LICENSE), a small gift to the Linux
+ecosystem from Captain and crew.
