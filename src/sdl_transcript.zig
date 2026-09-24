@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps.zig");
 const notification = @import("notification.zig");
+const navigator = @import("navigator.zig");
 const picker = @import("picker.zig");
 
 const step_capacity = 32;
@@ -19,11 +20,17 @@ const Wait = union(enum) {
     fail,
 };
 
+const ExpectedWindowRow = struct {
+    stable_id: []const u8,
+    app_index: ?u16 = null,
+};
+
 const Draw = struct {
     table: picker.Table = .apps,
     query: []const u8,
     rows: ExpectedRows = .none,
     selected_row: usize = 0,
+    window_status: picker.WindowStatus = .dormant,
     result: Result = .ok,
 };
 
@@ -31,6 +38,7 @@ const ExpectedRows = union(enum) {
     none,
     root: []const picker.Table,
     apps: []const u16,
+    windows: []const ExpectedWindowRow,
     notifications: []const NotificationRow,
 };
 
@@ -48,6 +56,18 @@ const HistoryRead = enum {
     allocation,
 };
 
+const NavigatorProcess = union(enum) {
+    desktop: struct {
+        bytes: []const u8 = navigator_desktop_fixture,
+        result: Result = .ok,
+    },
+    focus: struct {
+        stable_id: []const u8,
+        bytes: []const u8 = navigator_focus_fixture,
+        result: Result = .ok,
+    },
+};
+
 const Step = union(enum) {
     init: Result,
     create: Result,
@@ -55,6 +75,7 @@ const Step = union(enum) {
     wait: Wait,
     draw: Draw,
     read_history: HistoryRead,
+    navigator_process: NavigatorProcess,
     stop_text: Result,
     destroy,
     quit,
@@ -127,11 +148,13 @@ const Transcript = struct {
             .none => if (frame.row_count != 0) return error.TranscriptMismatch,
             .root => |tables| try transcript.expectTables(frame, tables),
             .apps => |indexes| try transcript.expectApps(frame, indexes),
+            .windows => |windows| try transcript.expectWindows(frame, windows),
             .notifications => |records| try expectNotifications(frame, records),
         }
         if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
             return error.TranscriptMismatch;
         }
+        if (frame.window_status != expected.window_status) return error.TranscriptMismatch;
         if (expected.result == .fail) return error.SdlDrawFailed;
     }
 
@@ -151,6 +174,60 @@ const Transcript = struct {
                 if (actual >= transcript.applications.len) return error.TranscriptMismatch;
             },
             else => return error.TranscriptMismatch,
+        };
+    }
+
+    fn expectWindows(
+        transcript: *Transcript,
+        frame: *const picker.Frame,
+        windows: []const ExpectedWindowRow,
+    ) !void {
+        if (windows.len != frame.row_count) return error.TranscriptMismatch;
+        for (frame.rowSlice(), windows) |row, expected| switch (row) {
+            .window => |actual| {
+                if (!std.mem.eql(u8, actual.window.stable_id.slice(), expected.stable_id)) {
+                    return error.TranscriptMismatch;
+                }
+                if (actual.app_index != expected.app_index) return error.TranscriptMismatch;
+                if (actual.app_index) |index| {
+                    if (index >= transcript.applications.len) return error.TranscriptMismatch;
+                }
+            },
+            else => return error.TranscriptMismatch,
+        };
+    }
+
+    pub fn run(
+        transcript: *Transcript,
+        allocator: std.mem.Allocator,
+        request: navigator.Request,
+    ) !navigator.ProcessResult {
+        const process = switch (transcript.next() orelse return error.TranscriptMismatch) {
+            .navigator_process => |process| process,
+            else => return error.TranscriptMismatch,
+        };
+        const Selected = struct { bytes: []const u8, result: Result };
+        const selected: Selected = switch (process) {
+            .desktop => |desktop| switch (request) {
+                .desktop => .{ .bytes = desktop.bytes, .result = desktop.result },
+                .focus => return error.TranscriptMismatch,
+            },
+            .focus => |focus| switch (request) {
+                .desktop => return error.TranscriptMismatch,
+                .focus => |stable_id| blk: {
+                    if (!std.mem.eql(u8, stable_id, focus.stable_id)) {
+                        return error.TranscriptMismatch;
+                    }
+                    break :blk .{ .bytes = focus.bytes, .result = focus.result };
+                },
+            },
+        };
+        const stdout = try allocator.dupe(u8, selected.bytes);
+        errdefer allocator.free(stdout);
+        return .{
+            .stdout = stdout,
+            .stderr = try allocator.dupe(u8, ""),
+            .succeeded = selected.result == .ok,
         };
     }
 
@@ -250,12 +327,30 @@ fn simulateHistory(
     const result = picker.run(
         &transcript,
         &transcript,
+        &transcript,
         std.testing.allocator,
+        999,
         applications,
     );
     try transcript.done();
     return result;
 }
+
+const navigator_desktop_fixture =
+    \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{
+    \\  "focus":{"monitor_id":"0","workspace_id":"1","window_id":"self"},
+    \\  "windows":[
+    \\    {"stable_id":"zen","app_id":"zen","title":"Browser","pid":20,"mapped":true,"accepts_input":true,"active":false,"focus_rank":1,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":6,"y":4,"width":1910,"height":1072},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"tiled"},
+    \\    {"stable_id":"kitty","app_id":"kitty","title":"Terminal","pid":10,"mapped":true,"accepts_input":true,"active":false,"focus_rank":2,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":-1910,"y":4,"width":1910,"height":1072},"viewport":{"state":"offscreen","edges":["left"]},"presentation":"occluded","mode":"tiled"},
+    \\    {"stable_id":"files","app_id":"org.kde.dolphin","title":"Downloads","pid":30,"mapped":true,"accepts_input":true,"active":false,"focus_rank":3,"workspace_ids":["2"],"monitor_id":"1","geometry":{"x":1920,"y":0,"width":960,"height":1080},"viewport":{"state":"visible","edges":[]},"presentation":"workspace-inactive","mode":"tiled"},
+    \\    {"stable_id":"self","app_id":"wayspot","title":"wayspot","pid":999,"mapped":true,"accepts_input":true,"active":true,"focus_rank":0,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":600,"y":300,"width":720,"height":480},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"floating"}
+    \\  ]
+    \\}}
+;
+
+const navigator_focus_fixture =
+    \\{"schema":"wmio/v1","ok":true,"operation":"focus","data":{"stable_id":"kitty"}}
+;
 
 test "text input starts before wait and cleanup is exact" {
     try simulate(&.{
@@ -266,6 +361,189 @@ test "text input starts before wait and cleanup is exact" {
         .{ .wait = .{ .event = .{ .text = try picker.Text.init("abc") } } },
         .{ .draw = .{ .query = "abc" } },
         .{ .wait = .{ .event = .quit } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+}
+
+test "Tab lazily opens a global MRU window finder and exact Enter focuses selection" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .down } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .selected_row = 1,
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .navigator_process = .{ .focus = .{ .stable_id = "kitty" } } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+}
+
+test "typing in window finder filters windows instead of returning to applications" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("term") } } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "term",
+            .rows = .{ .windows = &.{.{ .stable_id = "kitty" }} },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .navigator_process = .{ .focus = .{ .stable_id = "kitty" } } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+}
+
+test "Tab toggles window finder back to a fresh application finder" {
+    const applications = [_]apps.App{testApp("Alpha")};
+    _ = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} } } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .draw = .{
+            .query = "",
+            .rows = .{ .apps = &.{0} },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .escape } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+}
+
+test "WMIO discovery failure leaves a bounded window mode and Tab recovers apps" {
+    const applications = [_]apps.App{testApp("Alpha")};
+    _ = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} } } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_process = .{ .desktop = .{ .result = .fail } } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .window_status = .unavailable,
+        } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .draw = .{
+            .query = "",
+            .rows = .{ .apps = &.{0} },
+            .window_status = .unavailable,
+        } },
+        .{ .wait = .{ .event = .escape } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+}
+
+test "stale exact window focus remains visible instead of activating another target" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .down } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .selected_row = 1,
+            .window_status = .ready,
+        } },
+        .{ .wait = .{ .event = .enter } },
+        .{ .navigator_process = .{ .focus = .{
+            .stable_id = "kitty",
+            .bytes = "{\"schema\":\"wmio/v1\",\"ok\":true,\"operation\":\"focus\",\"data\":{\"stable_id\":\"zen\"}}",
+        } } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .rows = .{ .windows = &.{
+                .{ .stable_id = "zen" },
+                .{ .stable_id = "kitty" },
+                .{ .stable_id = "files" },
+            } },
+            .selected_row = 1,
+            .window_status = .focus_failed,
+        } },
+        .{ .wait = .{ .event = .escape } },
         .{ .stop_text = .ok },
         .destroy,
         .quit,

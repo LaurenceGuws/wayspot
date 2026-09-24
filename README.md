@@ -70,6 +70,32 @@ Applications are discovered directly from the current XDG application
 directories. Ordinary typing filters the current list; selecting a row launches
 the application and exits the picker.
 
+The same picker can find current windows without becoming a resident taskbar.
+Press `Tab` after the first frame appears to switch from applications to a
+window finder. That transition reads one fresh bounded `wmio desktop` snapshot;
+`Tab` switches back to applications. Window rows are global across current
+workspaces and monitors, keep recent-focus order when WMIO provides it, and show
+workspace as location metadata rather than a navigation hierarchy. `Up` and
+`Down` select, typing filters the current finder, `Enter` focuses the exact
+selected WMIO stable ID and closes the picker, and `Escape` closes from either
+mode.
+
+Window rows reuse the icon of one exact matching desktop application when that
+identity is unambiguous, then show the current window title and workspace. When
+a workspace has multiple windows, the row also shows a deterministic geometry
+ordinal such as `2/5`: this is the window's left-to-right position on that
+workspace, with top-to-bottom and stable identity only as tie-breakers. The
+finder itself remains recent-focus ordered. Existing WMIO viewport facts add a
+compact `<`, `>`, `<|`, or `|>` marker when a window is offscreen or clipped.
+A window without a safe application match remains usable as text instead of
+borrowing a guessed icon. WMIO remains the authority for monitor, workspace,
+window, viewport, presentation, and focus semantics. Wayspot owns only the
+invocation-local snapshot view, filtering, selection, and rendering. It does
+not call `hyprctl`, keep a window cache, start a watcher, or make the first
+useful application-picker frame wait for WMIO. If WMIO is unavailable or a
+selected target becomes stale, the picker remains responsive and reports that
+state in window mode.
+
 The same application data is available from the CLI:
 
 ```bash

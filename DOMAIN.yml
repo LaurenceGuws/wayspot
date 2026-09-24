@@ -42,6 +42,24 @@ scope:
       purpose: discover, find, and open currently installed applications
       resident_process: false
       persistent_derived_state: false
+      window_finder:
+        surface: same picker rows, mutually exclusive with application results
+        activation: Tab after the first useful application frame
+        primary_input: keyboard
+        scope: global current windows across workspaces and monitors
+        hierarchy: flat; workspace and monitor are location metadata
+        ordering: recent-focus facts from WMIO with deterministic fallback
+        location_metadata:
+          - workspace id
+          - workspace-local geometry ordinal when multiple windows share a workspace
+          - compact WMIO viewport direction when offscreen or clipped
+        filtering: current window identity, title, workspace, and monitor metadata
+        icon_identity: one exact unambiguous desktop-application id match only
+        authority: WMIO
+        discovery: one fresh bounded desktop snapshot per activation
+        mutation: exact stable-id focus through WMIO
+        resident_process: false
+        persistent_derived_state: false
     notifications:
       purpose: receive, show, close, and retain desktop notifications
       retention: 30 days

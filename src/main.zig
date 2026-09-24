@@ -7,6 +7,7 @@ const cmd = @import("cmd.zig");
 const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
 const notification = @import("notification.zig");
+const navigator = @import("navigator.zig");
 const picker = @import("picker.zig");
 const sdl = @import("sdl.zig");
 const wallpaper = @import("wallpaper.zig");
@@ -103,7 +104,15 @@ fn runPicker(
         .home = home,
     };
     var history_reader = HistoryReader{ .process = &init, .home = home };
-    if (try picker.run(&native, &history_reader, init.gpa, applications.slice())) |index| {
+    var navigator_native: navigator.Native = .{ .io = init.io };
+    if (try picker.run(
+        &native,
+        &history_reader,
+        &navigator_native,
+        init.gpa,
+        @intCast(std.os.linux.getpid()),
+        applications.slice(),
+    )) |index| {
         var process = launch.Native{ .io = init.io };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }

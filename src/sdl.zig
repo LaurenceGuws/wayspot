@@ -4,6 +4,7 @@ const std = @import("std");
 const apps = @import("apps.zig");
 const icon_path = @import("icon.zig");
 const image = @import("image.zig");
+const navigator = @import("navigator.zig");
 const picker = @import("picker.zig");
 const sdl_event = @import("sdl_event.zig");
 const pixels = @import("sdl_pixels.zig");
@@ -168,6 +169,7 @@ pub const Native = struct {
             sdl.SDL_EVENT_KEY_DOWN => switch (event.key.key) {
                 sdl.SDLK_ESCAPE => .escape,
                 sdl.SDLK_BACKSPACE => .backspace,
+                sdl.SDLK_TAB => .tab,
                 sdl.SDLK_UP => .up,
                 sdl.SDLK_DOWN => .down,
                 sdl.SDLK_RETURN => .enter,
@@ -193,13 +195,20 @@ pub const Native = struct {
         native.evict(frame);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
+
         const query_pane = nativeRect(pixels.query);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 30, 31, 39, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderFillRect(renderer, &query_pane)) return error.SdlDrawFailed;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
         const query: []const u8 = if (frame.query.len == 0) switch (frame.table) {
             .root => "Choose a mode",
-            .apps => "Search applications",
+            .apps => "Search applications   ·   Tab: windows",
+            .windows => switch (frame.window_status) {
+                .dormant, .ready => "Search windows   ·   Tab: applications",
+                .empty => "No windows   ·   Tab: applications",
+                .unavailable => "Windows unavailable   ·   Tab: applications",
+                .focus_failed => "Window moved or disappeared   ·   Tab: applications",
+            },
             .notifications => "Notification history",
         } else frame.query;
         try native.drawText(0, query, .{ 235, 235, 240 }, 20, 14);
@@ -240,16 +249,27 @@ pub const Native = struct {
             ),
             .app => |app_index| {
                 const app = try native.application(app_index);
-                if (native.icon(app_index)) |item| switch (item.texture) {
-                    .missing, .rejected => {},
-                    .loaded => |texture| {
-                        const target = nativeRect(pixels.icon(index));
-                        if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) {
-                            return error.SdlDrawFailed;
-                        }
-                    },
-                };
+                try native.drawAppIcon(app_index, index);
                 try native.drawText(text_index, app.name, color, 44, pixels.textY(index));
+            },
+            .window => |window_row| {
+                if (window_row.app_index) |app_index| try native.drawAppIcon(app_index, index);
+                const title = try native.windowTitle(window_row);
+                try native.drawClippedText(text_index, title, color, .{
+                    .x = 44,
+                    .y = @intFromFloat(row_pixels.y),
+                    .w = 510,
+                    .h = @intFromFloat(row_pixels.h),
+                });
+                const secondary: [3]u8 = if (selected) .{ 185, 200, 220 } else .{ 145, 150, 160 };
+                var meta_buffer: [128]u8 = undefined;
+                const metadata = try formatWindowMetadata(window_row, &meta_buffer);
+                try native.drawClippedText(text_index, metadata, secondary, .{
+                    .x = 570,
+                    .y = @intFromFloat(row_pixels.y),
+                    .w = 126,
+                    .h = @intFromFloat(row_pixels.h),
+                });
             },
             .notification => |record| {
                 const secondary: [3]u8 = if (selected) .{ 180, 190, 205 } else .{ 135, 140, 150 };
@@ -304,6 +324,28 @@ pub const Native = struct {
         native.ttf_initialized = false;
         sdl.SDL_Quit();
         native.initialized = false;
+    }
+
+    fn drawAppIcon(native: *Native, app_index: u16, row_index: usize) !void {
+        if (native.icon(app_index)) |item| switch (item.texture) {
+            .missing, .rejected => {},
+            .loaded => |texture| {
+                const renderer = native.renderer orelse unreachable;
+                const target = nativeRect(pixels.icon(row_index));
+                if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) {
+                    return error.SdlDrawFailed;
+                }
+            },
+        };
+    }
+
+    fn windowTitle(native: *const Native, row: picker.WindowRow) ![]const u8 {
+        const title = row.window.title.slice();
+        const app_id = row.window.app_id.slice();
+        if (title.len > 0 and !std.ascii.eqlIgnoreCase(title, app_id)) return title;
+        if (row.app_index) |app_index| return (try native.application(app_index)).name;
+        if (app_id.len > 0) return app_id;
+        return row.window.stable_id.slice();
     }
 
     fn application(native: *const Native, app_index: u16) !*const apps.App {
@@ -515,9 +557,53 @@ fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
     return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
 }
 
+fn formatWindowMetadata(row: picker.WindowRow, output: []u8) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(output);
+    if (row.window.workspace_id) |workspace_id| {
+        try writer.print("WS {s}", .{workspace_id.slice()});
+    } else {
+        try writer.writeAll("WS ?");
+    }
+    if (row.workspace_position) |position| {
+        if (position.total > 1) {
+            try writer.print(" · {d}/{d}", .{ position.ordinal, position.total });
+        }
+    }
+    const direction = viewportDirection(row.window);
+    if (direction.len > 0) try writer.print(" {s}", .{direction});
+    return writer.buffered();
+}
+
+fn viewportDirection(window: *const navigator.Window) []const u8 {
+    return switch (window.viewport) {
+        .visible, .unknown => "",
+        .partial => if (window.edges.left)
+            "<|"
+        else if (window.edges.right)
+            "|>"
+        else if (window.edges.top)
+            "^|"
+        else if (window.edges.bottom)
+            "|v"
+        else
+            "",
+        .offscreen => if (window.edges.left)
+            "<"
+        else if (window.edges.right)
+            ">"
+        else if (window.edges.top)
+            "^"
+        else if (window.edges.bottom)
+            "v"
+        else
+            "",
+    };
+}
+
 fn rowApp(row: picker.Row) ?u16 {
     return switch (row) {
         .app => |index| index,
+        .window => |window| window.app_index,
         .table, .notification => null,
     };
 }
@@ -536,6 +622,78 @@ fn displayText(text: []const u8) []const u8 {
 
 fn textPointer(text: []const u8) ?[*]const u8 {
     return if (text.len == 0) null else text.ptr;
+}
+
+test "window metadata combines workspace spatial identity and viewport direction" {
+    var window = navigator.Window{
+        .stable_id = try navigator.StableId.exact("kitty-a"),
+        .app_id = try navigator.AppId.display("kitty"),
+        .title = try navigator.Title.display("~"),
+        .workspace_id = try navigator.WorkspaceId.exact("2"),
+        .monitor_id = null,
+        .geometry = .{ .x = -100, .y = 0, .width = 100, .height = 100 },
+        .viewport = .offscreen,
+        .edges = .{ .left = true },
+        .presentation = .occluded,
+        .focus_rank = 1,
+        .active = false,
+        .floating = false,
+        .fullscreen = false,
+    };
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "WS 2 · 2/5 <",
+        try formatWindowMetadata(.{
+            .window = &window,
+            .app_index = null,
+            .workspace_position = .{ .ordinal = 2, .total = 5 },
+        }, &output),
+    );
+    window.viewport = .partial;
+    window.edges = .{ .right = true };
+    try std.testing.expectEqualStrings(
+        "WS 2 · 2/5 |>",
+        try formatWindowMetadata(.{
+            .window = &window,
+            .app_index = null,
+            .workspace_position = .{ .ordinal = 2, .total = 5 },
+        }, &output),
+    );
+}
+
+test "single window metadata stays quiet" {
+    var window = navigator.Window{
+        .stable_id = try navigator.StableId.exact("only"),
+        .app_id = try navigator.AppId.display("kitty"),
+        .title = try navigator.Title.display("~"),
+        .workspace_id = try navigator.WorkspaceId.exact("9"),
+        .monitor_id = null,
+        .geometry = .{ .x = 0, .y = 0, .width = 100, .height = 100 },
+        .viewport = .visible,
+        .edges = .{},
+        .presentation = .presented,
+        .focus_rank = 0,
+        .active = true,
+        .floating = false,
+        .fullscreen = false,
+    };
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "WS 9",
+        try formatWindowMetadata(.{
+            .window = &window,
+            .app_index = null,
+            .workspace_position = .{ .ordinal = 1, .total = 1 },
+        }, &output),
+    );
+}
+
+test "native key events expose the window finder mode toggle" {
+    var native: Native = undefined;
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.type = sdl.SDL_EVENT_KEY_DOWN;
+    event.key.key = sdl.SDLK_TAB;
+    try std.testing.expectEqual(picker.Event.tab, try native.translate(event));
 }
 
 test "native app and icon lookup preserve the exact checked row index" {

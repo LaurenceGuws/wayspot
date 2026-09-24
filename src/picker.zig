@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps.zig");
 const notification = @import("notification.zig");
+const navigator = @import("navigator.zig");
 
 pub const query_capacity = apps.query_capacity;
 pub const visible_row_capacity = 14;
@@ -14,12 +15,20 @@ const events_before_draw_capacity = 1024;
 pub const Table = enum {
     root,
     apps,
+    windows,
     notifications,
+};
+
+pub const WindowRow = struct {
+    window: *const navigator.Window,
+    app_index: ?u16,
+    workspace_position: ?navigator.WorkspacePosition,
 };
 
 pub const Row = union(enum) {
     table: Table,
     app: u16,
+    window: WindowRow,
     notification: *const notification.Record,
 };
 
@@ -28,6 +37,11 @@ const Rows = union(Table) {
     apps: struct {
         applications: []const apps.App,
         matches: apps.Matches,
+    },
+    windows: struct {
+        applications: []const apps.App,
+        snapshot: *const navigator.Snapshot,
+        matches: navigator.Matches,
     },
     notifications: notification.History,
 
@@ -42,9 +56,21 @@ const Rows = union(Table) {
         return .{ .apps = .{ .applications = applications, .matches = matches } };
     }
 
+    fn initWindows(
+        applications: []const apps.App,
+        snapshot: *const navigator.Snapshot,
+        query: []const u8,
+    ) !Rows {
+        return .{ .windows = .{
+            .applications = applications,
+            .snapshot = snapshot,
+            .matches = try navigator.Matches.init(snapshot, query),
+        } };
+    }
+
     fn deinit(rows: *Rows, allocator: std.mem.Allocator) void {
         switch (rows.*) {
-            .root, .apps => {},
+            .root, .apps, .windows => {},
             .notifications => |*history| history.deinit(allocator),
         }
     }
@@ -64,6 +90,7 @@ const Rows = union(Table) {
         return switch (rows.*) {
             .root => |matched| @popCount(matched),
             .apps => |app_rows| app_rows.matches.count,
+            .windows => |window_rows| window_rows.matches.count,
             .notifications => |history| history.count,
         };
     }
@@ -85,6 +112,17 @@ const Rows = union(Table) {
                 if (app_index >= app_rows.applications.len) return null;
                 return .{ .app = @intCast(app_index) };
             },
+            .windows => |window_rows| {
+                if (index >= window_rows.matches.count) return null;
+                const window_index = window_rows.matches.indexes[index];
+                if (window_index >= window_rows.snapshot.count) return null;
+                const window = &window_rows.snapshot.windows[window_index];
+                return .{ .window = .{
+                    .window = window,
+                    .app_index = windowApplication(window_rows.applications, window.app_id.slice()),
+                    .workspace_position = window_rows.snapshot.workspacePosition(window_index),
+                } };
+            },
             .notifications => |*history| {
                 if (index >= history.count) return null;
                 return .{ .notification = &history.records[history.count - 1 - index].? };
@@ -102,14 +140,33 @@ pub fn tableName(table: Table) [:0]const u8 {
     return switch (table) {
         .root => "/",
         .apps => "apps",
+        .windows => "windows",
         .notifications => "notifications",
     };
 }
 
+fn windowApplication(applications: []const apps.App, app_id: []const u8) ?u16 {
+    var found: ?u16 = null;
+    for (applications, 0..) |app, index| {
+        if (!desktopIdMatchesAppId(app.id, app_id)) continue;
+        if (found != null) return null;
+        found = @intCast(index);
+    }
+    return found;
+}
+
+fn desktopIdMatchesAppId(desktop_id: []const u8, app_id: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(desktop_id, app_id)) return true;
+    const suffix = ".desktop";
+    if (desktop_id.len != app_id.len + suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(desktop_id[0..app_id.len], app_id) and
+        std.mem.eql(u8, desktop_id[app_id.len..], suffix);
+}
+
 comptime {
-    std.debug.assert(std.meta.fieldNames(Table).len == 3);
-    std.debug.assert(std.meta.fieldNames(Row).len == 3);
-    std.debug.assert(std.meta.fieldNames(Rows).len == 3);
+    std.debug.assert(std.meta.fieldNames(Table).len == 4);
+    std.debug.assert(std.meta.fieldNames(Row).len == 4);
+    std.debug.assert(std.meta.fieldNames(Rows).len == 4);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
     std.debug.assert(root_rows.len == 2);
     std.debug.assert(root_rows[0].table == .apps);
@@ -138,6 +195,7 @@ pub const Event = union(enum) {
     quit,
     escape,
     backspace,
+    tab,
     up,
     down,
     enter,
@@ -160,6 +218,19 @@ pub const Events = struct {
     }
 };
 
+pub const Finder = enum {
+    applications,
+    windows,
+};
+
+pub const WindowStatus = enum {
+    dormant,
+    ready,
+    empty,
+    unavailable,
+    focus_failed,
+};
+
 pub const Frame = struct {
     table: Table = .apps,
     query: [:0]const u8,
@@ -168,6 +239,7 @@ pub const Frame = struct {
     selected_row: usize = 0,
     first: usize = 0,
     total_count: usize = 0,
+    window_status: WindowStatus = .dormant,
 
     pub fn rowSlice(frame: *const Frame) []const Row {
         return frame.rows[0..frame.row_count];
@@ -213,11 +285,14 @@ fn textContinuation(byte: u8) bool {
 pub fn run(
     operations: anytype,
     history_reader: anytype,
+    navigator_operations: anytype,
     allocator: std.mem.Allocator,
+    self_pid: i64,
     applications: []const apps.App,
 ) !?usize {
     var state: State = .{
         .allocator = allocator,
+        .self_pid = self_pid,
         .applications = applications,
     };
     defer state.rows.deinit(allocator);
@@ -230,22 +305,28 @@ pub fn run(
 
     try operations.startText();
 
-    const result = eventLoop(operations, history_reader, &state);
+    const result = eventLoop(operations, history_reader, navigator_operations, &state);
     try operations.stopText();
     return result;
 }
 
 const State = struct {
     allocator: std.mem.Allocator,
+    self_pid: i64 = -1,
     applications: []const apps.App,
     query: Query = .{},
     rows: Rows = .{ .apps = .{ .applications = &.{}, .matches = .{} } },
     selected: usize = 0,
     first: usize = 0,
+    finder: Finder = .applications,
+    window_status: WindowStatus = .dormant,
+    window_snapshot: navigator.Snapshot = .{},
 
     fn setQuery(state: *State, history_reader: anytype, query: Query) !void {
         const text = query.text();
-        const rows = if (text.len == 0 or text[0] != '/')
+        const rows = if (state.finder == .windows)
+            try Rows.initWindows(state.applications, &state.window_snapshot, text)
+        else if (text.len == 0 or text[0] != '/')
             try Rows.initApps(state.applications, text)
         else if (std.mem.eql(u8, text, "/apps"))
             try Rows.initApps(state.applications, "")
@@ -262,24 +343,85 @@ const State = struct {
         state.first = 0;
     }
 
-    fn selectRow(state: *State, history_reader: anytype) !?usize {
+    fn selectApplicationRow(state: *State, history_reader: anytype) !?usize {
         const selected = state.rows.row(state.selected) orelse return null;
         return switch (selected) {
             .table => |table| {
                 var query: Query = .{};
-                std.debug.assert(table != .root);
+                std.debug.assert(table != .root and table != .windows);
                 try query.append("/");
                 try query.append(tableName(table));
                 try state.setQuery(history_reader, query);
                 return null;
             },
             .app => |index| @intCast(index),
+            .window => error.WindowRowUnexpected,
             .notification => null,
         };
     }
+
+    fn enterApplications(state: *State, history_reader: anytype) !void {
+        state.finder = .applications;
+        const query: Query = .{};
+        try state.setQuery(history_reader, query);
+    }
+
+    fn enterWindows(state: *State, operations: anytype) !void {
+        state.finder = .windows;
+        state.window_snapshot = .{};
+        state.window_status = .dormant;
+        const snapshot = navigator.load(
+            operations,
+            state.allocator,
+            state.self_pid,
+        ) catch |failure| switch (failure) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                state.window_status = .unavailable;
+                const query: Query = .{};
+                try state.setQueryNoHistory(query);
+                return;
+            },
+        };
+        state.window_snapshot = snapshot;
+        state.window_status = if (snapshot.count == 0) .empty else .ready;
+        const query: Query = .{};
+        try state.setQueryNoHistory(query);
+    }
+
+    fn setQueryNoHistory(state: *State, query: Query) !void {
+        std.debug.assert(state.finder == .windows);
+        const rows = try Rows.initWindows(state.applications, &state.window_snapshot, query.text());
+        state.rows.deinit(state.allocator);
+        state.query = query;
+        state.rows = rows;
+        state.selected = 0;
+        state.first = 0;
+    }
+
+    fn focusSelectedWindow(state: *State, operations: anytype) !bool {
+        const selected = state.rows.row(state.selected) orelse return false;
+        const window = switch (selected) {
+            .window => |row| row.window,
+            else => return error.WindowRowExpected,
+        };
+        navigator.focus(operations, state.allocator, window.stable_id.slice()) catch |failure| switch (failure) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                state.window_status = .focus_failed;
+                return false;
+            },
+        };
+        return true;
+    }
 };
 
-fn eventLoop(operations: anytype, history_reader: anytype, state: *State) !?usize {
+fn eventLoop(
+    operations: anytype,
+    history_reader: anytype,
+    navigator_operations: anytype,
+    state: *State,
+) !?usize {
     state.rows = try Rows.initApps(state.applications, "");
     var frame = makeFrame(state);
     try operations.draw(&frame);
@@ -292,6 +434,13 @@ fn eventLoop(operations: anytype, history_reader: anytype, state: *State) !?usiz
         for (events.slice()) |event| {
             switch (event) {
                 .quit, .escape => return null,
+                .tab => {
+                    if (state.finder == .windows) {
+                        try state.enterApplications(history_reader);
+                    } else {
+                        try state.enterWindows(navigator_operations);
+                    }
+                },
                 .backspace => {
                     var query = state.query;
                     query.delete();
@@ -306,7 +455,9 @@ fn eventLoop(operations: anytype, history_reader: anytype, state: *State) !?usiz
                     keepSelectedVisible(state);
                 },
                 .enter => {
-                    if (try state.selectRow(history_reader)) |index| {
+                    if (state.finder == .windows) {
+                        if (try state.focusSelectedWindow(navigator_operations)) return null;
+                    } else if (try state.selectApplicationRow(history_reader)) |index| {
                         return index;
                     }
                 },
@@ -326,7 +477,9 @@ fn eventLoop(operations: anytype, history_reader: anytype, state: *State) !?usiz
                         row,
                         state.rows.count(),
                     ) orelse continue;
-                    if (try state.selectRow(history_reader)) |index| {
+                    if (state.finder == .windows) {
+                        if (try state.focusSelectedWindow(navigator_operations)) return null;
+                    } else if (try state.selectApplicationRow(history_reader)) |index| {
                         return index;
                     }
                 },
@@ -357,6 +510,7 @@ fn makeFrame(state: *const State) Frame {
         .query = state.query.text(),
         .first = @min(state.first, total),
         .total_count = total,
+        .window_status = state.window_status,
     };
     while (frame.first + frame.row_count < frame.total_count) {
         if (frame.row_count == visible_row_capacity) break;
@@ -395,6 +549,77 @@ fn scroll(state: *State, total: usize, rows: i8) void {
         const last_visible = @min(total - 1, state.first + visible_row_capacity - 1);
         state.selected = std.math.clamp(state.selected, state.first, last_visible);
     }
+}
+
+test "window rows expose workspace-local geometry identity without changing finder order" {
+    var snapshot: navigator.Snapshot = .{};
+    const workspace_two = try navigator.WorkspaceId.exact("2");
+    const workspace_three = try navigator.WorkspaceId.exact("3");
+    const base = navigator.Window{
+        .stable_id = try navigator.StableId.exact("right"),
+        .app_id = try navigator.AppId.display("kitty"),
+        .title = try navigator.Title.display("~"),
+        .workspace_id = workspace_two,
+        .monitor_id = null,
+        .geometry = .{ .x = 200, .y = 0, .width = 100, .height = 100 },
+        .viewport = .visible,
+        .edges = .{},
+        .presentation = .presented,
+        .focus_rank = 0,
+        .active = true,
+        .floating = false,
+        .fullscreen = false,
+    };
+    snapshot.windows[0] = base;
+    snapshot.windows[1] = base;
+    snapshot.windows[1].stable_id = try navigator.StableId.exact("left");
+    snapshot.windows[1].geometry.x = 0;
+    snapshot.windows[1].focus_rank = 1;
+    snapshot.windows[1].active = false;
+    snapshot.windows[2] = base;
+    snapshot.windows[2].stable_id = try navigator.StableId.exact("other");
+    snapshot.windows[2].workspace_id = workspace_three;
+    snapshot.windows[2].geometry.x = 50;
+    snapshot.windows[2].focus_rank = 2;
+    snapshot.windows[2].active = false;
+    snapshot.count = 3;
+
+    const applications = [_]apps.App{testAppId("kitty.desktop", "kitty")};
+    const rows = try Rows.initWindows(&applications, &snapshot, "");
+    try std.testing.expectEqualStrings("right", rows.row(0).?.window.window.stable_id.slice());
+    try std.testing.expectEqual(
+        navigator.WorkspacePosition{ .ordinal = 2, .total = 2 },
+        rows.row(0).?.window.workspace_position.?,
+    );
+    try std.testing.expectEqualStrings("left", rows.row(1).?.window.window.stable_id.slice());
+    try std.testing.expectEqual(
+        navigator.WorkspacePosition{ .ordinal = 1, .total = 2 },
+        rows.row(1).?.window.workspace_position.?,
+    );
+    try std.testing.expectEqual(
+        navigator.WorkspacePosition{ .ordinal = 1, .total = 1 },
+        rows.row(2).?.window.workspace_position.?,
+    );
+}
+
+test "window app identity reuses only one exact desktop id" {
+    const applications = [_]apps.App{
+        testAppId("kitty.desktop", "kitty"),
+        testAppId("zen.desktop", "Zen Browser"),
+        testAppId("org.kde.dolphin.desktop", "Dolphin"),
+    };
+    try std.testing.expectEqual(@as(?u16, 0), windowApplication(&applications, "kitty"));
+    try std.testing.expectEqual(@as(?u16, 1), windowApplication(&applications, "ZEN"));
+    try std.testing.expectEqual(@as(?u16, 2), windowApplication(&applications, "org.kde.dolphin"));
+    try std.testing.expectEqual(@as(?u16, null), windowApplication(&applications, "dolphin"));
+}
+
+test "ambiguous window app identity refuses to guess an icon" {
+    const applications = [_]apps.App{
+        testAppId("kitty", "Kitty One"),
+        testAppId("kitty.desktop", "Kitty Two"),
+    };
+    try std.testing.expectEqual(@as(?u16, null), windowApplication(&applications, "kitty"));
 }
 
 test "query accepts its exact bound and rejects the next byte without mutation" {
@@ -588,13 +813,14 @@ fn fuzzRoutes(_: void, smith: *std.testing.Smith) !void {
         state.selected = smith.valueRangeLessThan(u16, 0, @intCast(total));
         const selected = state.rows.row(state.selected).?;
         const before = std.meta.activeTag(state.rows);
-        const result = try state.selectRow(&history_reader);
+        const result = try state.selectApplicationRow(&history_reader);
         switch (selected) {
             .table => |table| {
                 try std.testing.expectEqual(@as(?usize, null), result);
                 try std.testing.expectEqual(table, std.meta.activeTag(state.rows));
             },
             .app => |index| try std.testing.expectEqual(@as(?usize, index), result),
+            .window => return error.UnexpectedWindowRow,
             .notification => {
                 try std.testing.expectEqual(@as(?usize, null), result);
                 try std.testing.expectEqual(before, std.meta.activeTag(state.rows));
@@ -638,12 +864,19 @@ const TestHistoryReader = struct {
 };
 
 fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) apps.App {
+    var app = testAppId("test.desktop", name);
+    app.generic_name = generic_name;
+    app.keywords = keywords;
+    return app;
+}
+
+fn testAppId(id: []const u8, name: []const u8) apps.App {
     return .{
         .storage = @constCast(""),
-        .id = "test.desktop",
+        .id = id,
         .name = name,
-        .generic_name = generic_name,
-        .keywords = keywords,
+        .generic_name = null,
+        .keywords = null,
         .icon = null,
         .exec = "test",
         .try_exec = null,

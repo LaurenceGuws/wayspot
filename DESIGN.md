@@ -20,6 +20,8 @@ Changes touching startup should preserve these properties:
 - application discovery has no dependency on notification or wallpaper state;
 - input is enabled before the picker waits for user interaction;
 - the first useful frame is presented before nonessential icon work;
+- optional window finding starts no WMIO process and parses no desktop state
+  until the person explicitly switches to it after the first frame;
 - queued user input takes priority over decorative background work;
 - startup latency is measured when the critical path changes.
 
@@ -37,7 +39,7 @@ Examples of external facts:
 
 - installed applications and their desktop entries;
 - icon files and themes;
-- monitor topology and compositor facts;
+- monitor, workspace, window, viewport, and focus facts exposed by WMIO;
 - wallpaper files in a configured directory.
 
 These should normally be read from their real authorities when needed. Wayspot
@@ -85,6 +87,18 @@ Wayspot currently contains three product modes:
 1. `apps` - the default application picker and direct CLI app access;
 2. `notifications` - freedesktop notification ownership and retained history;
 3. `wallpaper` - per-monitor background surfaces and rotation.
+
+The application picker may switch on demand into a global window finder that
+strengthens its original job without becoming a taskbar. Window mode reads one
+fresh bounded WMIO snapshot only after explicit activation, keeps no resident
+watcher or persistent window shadow, treats workspace/monitor as location
+metadata rather than nested navigation, and sends exact focus actions back
+through WMIO. Its default ordering may use backend-neutral focus recency from
+WMIO. Workspace-local geometry may be rendered separately as a deterministic
+position such as `2/5` without changing that navigation order, while
+layout-specific commands such as Hyprland scrolling remain outside Wayspot.
+This remains part of the picker rather than becoming a fourth resident product
+mode.
 
 That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
