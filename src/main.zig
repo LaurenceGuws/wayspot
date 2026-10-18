@@ -192,9 +192,17 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
     const native = try resident.createNative(init.gpa);
     var current = wallpaper.Current(wallpaper_native.Native){ .native = native, .round = .{} };
     defer init.gpa.destroy(current.native);
-    var image: ?wallpaper.Image = null;
+    var image: ?wallpaper.EncodedImage = null;
     for (0..catalog.paths.items.len) |_| {
-        image = wallpaper.loadImage(&resident, init.gpa, try catalog.next()) catch continue;
+        var candidate = wallpaper.readEncodedImage(&resident, init.gpa, try catalog.next()) catch continue;
+        // Reject unusable files before choosing the initial round. Publication
+        // will decode again, but only encoded bytes remain resident afterwards.
+        var decoded = wallpaper.decodeImage(&resident, init.gpa, &candidate) catch {
+            candidate.deinit(init.gpa);
+            continue;
+        };
+        decoded.deinit(init.gpa);
+        image = candidate;
         break;
     }
     if (image == null) return error.WallpaperCatalogUnusable;

@@ -1365,7 +1365,7 @@ fn reconcileParity(
     _ = try wallpaper.reconcile(
         native,
         allocator,
-        image,
+        .{ .decoded = image },
         false,
         current,
         stop_fd,

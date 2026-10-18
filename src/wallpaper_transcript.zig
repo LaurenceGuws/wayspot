@@ -326,6 +326,7 @@ const Resident = struct {
     stop_release_id: ?u8 = null,
     retirement_fail_offset: ?u8 = null,
     image_failures: u8 = 0,
+    image_decodes: u16 = 0,
 
     pub fn now(resident: *Resident) u64 {
         resident.record(.{ .now = resident.clock });
@@ -363,9 +364,12 @@ const Resident = struct {
         resident: *Resident,
         allocator: std.mem.Allocator,
         _: wallpaper.ImageFormat,
-        _: []const u8,
+        bytes: []const u8,
     ) !wallpaper.Image {
-        if (resident.image_failures > 0) {
+        resident.image_decodes += 1;
+        // The retained fixture has a trailing sentinel. Failure injection
+        // targets fresh rotation files, not redecoding the selected wallpaper.
+        if (bytes.len == 24 and resident.image_failures > 0) {
             resident.image_failures -= 1;
             return error.ImageDecodeFailed;
         }
@@ -646,7 +650,7 @@ test "reconciliation swaps only Wayland ownership and preserves resident fds" {
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -693,7 +697,7 @@ test "successful event reconnect survives transient request retries and preserve
     try std.testing.expectError(error.ConnectionTimedOut, wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -738,7 +742,7 @@ test "successful event reconnect is reused after transient candidate mismatch" {
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -777,7 +781,7 @@ test "failed event reconnect keeps absent ownership and reconnect work" {
     try std.testing.expectError(error.ConnectionRefused, wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -819,7 +823,7 @@ test "pre-drain event loss reconnects before requesting a snapshot" {
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -892,7 +896,7 @@ test "both zero-time checks discard stale snapshots before candidate allocation"
         _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
-            &image,
+            .{ .decoded = &image },
             false,
             &current,
             resident.stop_identity,
@@ -944,7 +948,7 @@ test "changed configure with unchanged snapshot recreates candidate" {
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -983,7 +987,7 @@ test "stop during old retirement remains sticky through new current cleanup" {
     try std.testing.expectError(error.Stopped, wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -998,7 +1002,7 @@ test "stop during old retirement remains sticky through new current cleanup" {
     resident.destroyNative(std.testing.allocator, current.native);
 }
 
-test "unchanged round reaches one infinite idle wait and stop wins" {
+test "published round waits one rotation interval and stop wins" {
     const snapshot = snapshotValue(1);
     const reply =
         \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
@@ -1019,17 +1023,16 @@ test "unchanged round reaches one infinite idle wait and stop wins" {
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
     var event_fd: u8 = 0;
     var paths = pathsValue();
-    try std.testing.expectError(error.Stopped, wallpaper.run(
+    try std.testing.expectError(error.Stopped, runResident(
         &resident,
         std.testing.allocator,
-        &image,
         &current,
         resident.stop_identity,
         &event_fd,
         &paths,
     ));
     const last = resident.operations[resident.count - 1].wait;
-    try std.testing.expectEqual(@as(?u64, null), last.timeout);
+    try std.testing.expectEqual(@as(?u64, wallpaper.rotation_interval_milliseconds), last.timeout);
     try wallpaper.releaseRound(current.native, &current.round, false);
     resident.destroyNative(std.testing.allocator, current.native);
 }
@@ -1046,7 +1049,7 @@ test "direct rotate acknowledges only after forced complete replacement" {
     const native = try std.testing.allocator.create(Transcript);
     native.* = .{ .id = 1 };
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var image = try imageValue();
+    var image = try encodedImageValue();
     defer image.deinit(std.testing.allocator);
     var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(4) };
     defer catalog.deinit();
@@ -1103,7 +1106,7 @@ test "stop after publication replies error and every retirement failure keeps va
         const native = try std.testing.allocator.create(Transcript);
         native.* = .{ .id = 1 };
         var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-        var image = try imageValue();
+        var image = try encodedImageValue();
         defer image.deinit(std.testing.allocator);
         var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(5) };
         defer catalog.deinit();
@@ -1168,7 +1171,7 @@ test "one file and invalid alternatives never select published or replace Curren
         const native = try std.testing.allocator.create(Transcript);
         native.* = .{ .id = 1 };
         var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-        var image = try imageValue();
+        var image = try encodedImageValue();
         defer image.deinit(std.testing.allocator);
         var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(6) };
         defer catalog.deinit();
@@ -1214,7 +1217,7 @@ test "stop and rotate readiness together sends no reply and stop propagates" {
     const native = try std.testing.allocator.create(Transcript);
     native.* = .{ .id = 1 };
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var image = try imageValue();
+    var image = try encodedImageValue();
     defer image.deinit(std.testing.allocator);
     var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(7) };
     defer catalog.deinit();
@@ -1268,7 +1271,7 @@ test "independent snapshot and output order retries without changing current ear
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -1324,7 +1327,7 @@ test "Hyprland and Wayland may report one removed output in either order" {
         _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
-            &image,
+            .{ .decoded = &image },
             false,
             &current,
             resident.stop_identity,
@@ -1371,10 +1374,9 @@ test "reconcile exhaustion and zero enabled outputs wait and recover" {
         defer image.deinit(std.testing.allocator);
         var event_fd: u8 = 0;
         var paths = pathsValue();
-        try std.testing.expectError(error.Stopped, wallpaper.run(
+        try std.testing.expectError(error.Stopped, runResident(
             &resident,
             std.testing.allocator,
-            &image,
             &current,
             resident.stop_identity,
             &event_fd,
@@ -1403,9 +1405,9 @@ test "topology retry preserves selected image and rotation deadline" {
     const native = try std.testing.allocator.create(Transcript);
     native.* = .{ .id = 1 };
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var image = try imageValue();
+    var image = try encodedImageValue();
     defer image.deinit(std.testing.allocator);
-    const selected_pixels = image.pixels.ptr;
+    const selected_bytes = image.bytes.ptr;
     var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(91) };
     defer catalog.deinit();
     for ([_][]const u8{ "a.png", "b.png" }) |name| {
@@ -1428,7 +1430,7 @@ test "topology retry preserves selected image and rotation deadline" {
         &paths,
         10,
     ));
-    try std.testing.expectEqual(selected_pixels, image.pixels.ptr);
+    try std.testing.expectEqual(selected_bytes, image.bytes.ptr);
     try std.testing.expectEqual(selected_index, catalog.published);
     var waits: [3]u64 = undefined;
     var wait_count: u8 = 0;
@@ -1443,6 +1445,71 @@ test "topology retry preserves selected image and rotation deadline" {
     };
     try std.testing.expectEqual(@as(u8, 0), image_opens);
     try std.testing.expectEqualSlices(u64, &.{ 10, 250, 7 }, waits[0..wait_count]);
+    try wallpaper.releaseRound(current.native, &current.round, false);
+    resident.destroyNative(std.testing.allocator, current.native);
+}
+
+test "unchanged round skips decoding and topology change uses retained bytes without file IO" {
+    const existing =
+        \\[{"name":"A0","width":2,"height":2,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    const moved =
+        \\[{"name":"A0","width":2,"height":2,"x":1,"y":0,"scale":1.00,"transform":0,"disabled":false}]
+    ;
+    var resident = Resident{
+        .waits = &.{ .{}, .{}, .{}, .{} },
+        .replies = &.{ existing, moved },
+    };
+    const native = try std.testing.allocator.create(Transcript);
+    native.* = .{ .id = 1 };
+    const snapshot = snapshotValue(1);
+    var initial = try imageValue();
+    defer initial.deinit(std.testing.allocator);
+    var next = try wallpaper.prepareRound(native, std.testing.allocator, &snapshot, &initial);
+    var round: wallpaper.Round = .{};
+    try wallpaper.publishRound(native, &round, &next, false);
+    var current = wallpaper.Current(Transcript){ .native = native, .round = round };
+    var selected = try encodedImageValue();
+    defer selected.deinit(std.testing.allocator);
+    const original_bytes = selected.bytes.ptr;
+    var lines: wallpaper.EventLines = .{};
+    var work: wallpaper.Work = .refresh;
+    var event_fd = resident.event_identity;
+    var paths = pathsValue();
+    try std.testing.expectEqual(wallpaper.ReconcileOutcome.unchanged, try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        .{ .encoded = &selected },
+        false,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    ));
+    try std.testing.expectEqual(@as(u16, 0), resident.image_decodes);
+    try std.testing.expectEqual(wallpaper.Work.idle, work);
+
+    work = .refresh;
+    try std.testing.expectEqual(wallpaper.ReconcileOutcome.published, try wallpaper.reconcile(
+        &resident,
+        std.testing.allocator,
+        .{ .encoded = &selected },
+        false,
+        &current,
+        resident.stop_identity,
+        &event_fd,
+        &paths,
+        &lines,
+        &work,
+    ));
+    try std.testing.expectEqual(@as(u16, 1), resident.image_decodes);
+    try std.testing.expectEqual(original_bytes, selected.bytes.ptr);
+    for (resident.operations[0..resident.count]) |operation| switch (operation) {
+        .image_open => return error.UnexpectedImageReopen,
+        else => {},
+    };
     try wallpaper.releaseRound(current.native, &current.round, false);
     resident.destroyNative(std.testing.allocator, current.native);
 }
@@ -1477,10 +1544,9 @@ test "every unusable current display failure invalidates once and reconnects" {
         var current = wallpaper.Current(Transcript){ .native = native, .round = round };
         var event_fd: u8 = 0;
         var paths = pathsValue();
-        try std.testing.expectError(error.Stopped, wallpaper.run(
+        try std.testing.expectError(error.Stopped, runResident(
             &resident,
             std.testing.allocator,
-            &image,
             &current,
             resident.stop_identity,
             &event_fd,
@@ -1536,7 +1602,7 @@ test "candidate Wayland setup disagreement retries but internal failure propagat
         _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
-            &image,
+            .{ .decoded = &image },
             false,
             &current,
             resident.stop_identity,
@@ -1568,10 +1634,9 @@ test "candidate Wayland setup disagreement retries but internal failure propagat
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
     var event_fd: u8 = 0;
     var paths = pathsValue();
-    try std.testing.expectError(error.SurfaceStateInvalid, wallpaper.run(
+    try std.testing.expectError(error.SurfaceStateInvalid, runResident(
         &resident,
         std.testing.allocator,
-        &image,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -1600,10 +1665,9 @@ test "stop during topology recovery is the only normal exit" {
     defer image.deinit(std.testing.allocator);
     var event_fd: u8 = 0;
     var paths = pathsValue();
-    try std.testing.expectError(error.Stopped, wallpaper.run(
+    try std.testing.expectError(error.Stopped, runResident(
         &resident,
         std.testing.allocator,
-        &image,
         &current,
         resident.stop_identity,
         &event_fd,
@@ -1698,7 +1762,7 @@ test "balanced malformed reset frame reaches parser but no candidate or publicat
     if (wallpaper.reconcile(
         &resident,
         std.testing.allocator,
-        &image,
+        .{ .decoded = &image },
         false,
         &current,
         resident.stop_identity,
@@ -1994,6 +2058,30 @@ fn pathsValue() wallpaper.SocketPaths {
     return paths;
 }
 
+// Exercise the single production resident loop for topology and display recovery.
+fn runResident(
+    resident: *Resident,
+    allocator: std.mem.Allocator,
+    current: *wallpaper.Current(Transcript),
+    stop_fd: u8,
+    event_fd: *u8,
+    paths: *const wallpaper.SocketPaths,
+) !void {
+    var catalog = wallpaper.Catalog{ .allocator = allocator, .prng = .init(42) };
+    defer catalog.deinit();
+    try catalog.paths.append(allocator, try allocator.dupe(u8, "selected.png"));
+    try catalog.shuffle();
+    catalog.published = 0;
+    var selected = try encodedImageValue();
+    defer selected.deinit(allocator);
+    return wallpaper.runRotation(resident, allocator, &catalog, &selected, current, stop_fd, event_fd, paths, wallpaper.rotation_interval_milliseconds);
+}
+
+fn encodedImageValue() !wallpaper.EncodedImage {
+    const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x02\x00\x00\x00\x01R";
+    return .{ .format = .png, .bytes = try std.testing.allocator.dupe(u8, png) };
+}
+
 fn imageValue() !wallpaper.Image {
     const pixels = try std.testing.allocator.alloc(u32, 4);
     @memset(pixels, 0xff123456);
@@ -2089,7 +2177,7 @@ fn runScheduleHistory(
     const native = try std.testing.allocator.create(Transcript);
     native.* = .{ .id = 1 };
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var image = try imageValue();
+    var image = try encodedImageValue();
     defer image.deinit(std.testing.allocator);
     var catalog = wallpaper.Catalog{ .allocator = std.testing.allocator, .prng = .init(81) };
     defer catalog.deinit();

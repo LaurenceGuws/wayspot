@@ -426,6 +426,27 @@ pub const Image = struct {
     }
 };
 
+/// Retains the selected wallpaper's original bytes, not a decoded pixel grid.
+/// A new Wayland surface round may need to be rebuilt after the source file
+/// disappears, so the resident cannot keep only the path. Decoding is scoped
+/// to publication and the encoded bytes survive until the next rotation.
+pub const EncodedImage = struct {
+    format: ImageFormat,
+    bytes: []u8,
+
+    pub fn deinit(image: *EncodedImage, allocator: std.mem.Allocator) void {
+        allocator.free(image.bytes);
+        image.* = undefined;
+    }
+};
+
+/// Rotation candidates already have decoded pixels; the retained resident
+/// image is decoded lazily, only when a changed round needs publication.
+pub const ImageSource = union(enum) {
+    decoded: *const Image,
+    encoded: *const EncodedImage,
+};
+
 pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
 pub const SurfaceHandle = packed struct { index: u8, generation: u32 };
 pub const Configure = struct { serial: u32, width: u32, height: u32 };
@@ -524,7 +545,7 @@ pub fn discardRound(source: anytype, round: *Round) void {
 pub fn reconcile(
     resident: anytype,
     allocator: std.mem.Allocator,
-    image: *const Image,
+    image: ImageSource,
     force_publication: bool,
     current: anytype,
     stop_fd: anytype,
@@ -534,6 +555,8 @@ pub fn reconcile(
     work: *Work,
 ) !ReconcileOutcome {
     const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
+    var decoded: ?Image = null;
+    defer if (decoded) |*pixels| pixels.deinit(allocator);
     for (0..reconcile_attempt_capacity) |attempt| {
         const failure: ?anyerror = attempt_work: {
             var reconnect = work.* == .reconnect;
@@ -567,6 +590,13 @@ pub fn reconcile(
                 work.* = .idle;
                 return .unchanged;
             }
+            const pixels: *const Image = switch (image) {
+                .decoded => |value| value,
+                .encoded => |value| blk: {
+                    if (decoded == null) decoded = try decodeImage(resident, allocator, value);
+                    break :blk &decoded.?;
+                },
+            };
             const candidate = try resident.createNative(allocator);
             var candidate_round: Round = .{};
             var candidate_owned = true;
@@ -574,7 +604,7 @@ pub fn reconcile(
                 discardRound(candidate, &candidate_round);
                 resident.destroyNative(allocator, candidate);
             };
-            candidate_round = prepareRound(candidate, allocator, &snapshot, image) catch |err| {
+            candidate_round = prepareRound(candidate, allocator, &snapshot, pixels) catch |err| {
                 break :attempt_work err;
             };
             var published: Round = .{};
@@ -706,61 +736,12 @@ fn completeJsonArray(bytes: []const u8) bool {
     return started and depth == 0 and !string;
 }
 
-/// Blocks one resident thread until stop or fatal error while borrowing resident fds and image.
-pub fn run(
-    resident: anytype,
-    allocator: std.mem.Allocator,
-    image: *const Image,
-    current: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    paths: *const SocketPaths,
-) !void {
-    var lines: EventLines = .{};
-    var work: Work = .reconnect;
-    while (true) {
-        if (work == .idle) {
-            _ = waitCurrent(resident, current, stop_fd, event_fd, &lines, &work, null) catch |err| {
-                if (!recoverableTopology(err)) return err;
-                continue;
-            };
-        } else {
-            _ = reconcile(
-                resident,
-                allocator,
-                image,
-                false,
-                current,
-                stop_fd,
-                event_fd,
-                paths,
-                &lines,
-                &work,
-            ) catch |err| {
-                if (!recoverableTopology(err)) return err;
-                _ = waitCurrent(
-                    resident,
-                    current,
-                    stop_fd,
-                    event_fd,
-                    &lines,
-                    &work,
-                    reconcile_wait_milliseconds,
-                ) catch |wait_err| {
-                    if (!recoverableTopology(wait_err)) return wait_err;
-                    continue;
-                };
-            };
-        }
-    }
-}
-
 /// Owns direct-request image replacement; acknowledgement follows complete publication only.
 pub fn runRotation(
     resident: anytype,
     allocator: std.mem.Allocator,
     catalog: *Catalog,
-    image: *Image,
+    image: *EncodedImage,
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
@@ -785,7 +766,7 @@ pub fn runRotation(
                 const outcome = reconcile(
                     resident,
                     allocator,
-                    image,
+                    .{ .encoded = image },
                     false,
                     current,
                     stop_fd,
@@ -875,7 +856,7 @@ fn rotateOnce(
     resident: anytype,
     allocator: std.mem.Allocator,
     catalog: *Catalog,
-    image: *Image,
+    image: *EncodedImage,
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
@@ -906,14 +887,18 @@ fn rotateOnce(
         if (index == catalog.published.? or attempted[index]) continue;
         attempted[index] = true;
         alternatives += 1;
-        var next = loadImage(resident, allocator, path) catch continue;
+        var next = readEncodedImage(resident, allocator, path) catch continue;
         var published = false;
         defer if (!published) next.deinit(allocator);
+        // Reject bad candidates before setting refresh work. A failed image
+        // must not disturb the selected round or its rotation deadline.
+        var pixels = decodeImage(resident, allocator, &next) catch continue;
+        defer pixels.deinit(allocator);
         work.* = .refresh;
         const outcome = reconcile(
             resident,
             allocator,
-            &next,
+            .{ .decoded = &pixels },
             true,
             current,
             stop_fd,
@@ -1055,22 +1040,31 @@ fn transient(err: anyerror) bool {
 }
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
+    var encoded = try readEncodedImage(source, allocator, path);
+    defer encoded.deinit(allocator);
+    return decodeImage(source, allocator, &encoded);
+}
+
+/// Read once so the resident can survive changes to the image directory.
+pub fn readEncodedImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !EncodedImage {
     try validateImagePath(path);
     const format = try imageFormat(path);
-    const bytes = bytes: {
-        try source.open(path);
-        defer source.close();
-        const stat = try source.stat();
-        if (stat.kind != .file) return error.ImageNotRegularFile;
-        if (stat.size > image_file_capacity) return error.ImageFileTooLarge;
-        const bytes = try allocator.alloc(u8, @intCast(stat.size));
-        errdefer allocator.free(bytes);
-        if (try source.read(bytes) != bytes.len) return error.ImageReadIncomplete;
-        break :bytes bytes;
-    };
-    defer allocator.free(bytes);
-    const dimensions = if (format == .png) try inspectPng(bytes) else null;
-    var image = try source.decode(allocator, format, bytes);
+    try source.open(path);
+    defer source.close();
+    const stat = try source.stat();
+    if (stat.kind != .file) return error.ImageNotRegularFile;
+    if (stat.size > image_file_capacity) return error.ImageFileTooLarge;
+    const bytes = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(bytes);
+    if (try source.read(bytes) != bytes.len) return error.ImageReadIncomplete;
+    return .{ .format = format, .bytes = bytes };
+}
+
+/// Decode only while constructing surfaces; validate decoded dimensions against
+/// the PNG header and our bounded image contract before exposing any pixels.
+pub fn decodeImage(source: anytype, allocator: std.mem.Allocator, encoded: *const EncodedImage) !Image {
+    const dimensions = if (encoded.format == .png) try inspectPng(encoded.bytes) else null;
+    var image = try source.decode(allocator, encoded.format, encoded.bytes);
     errdefer image.deinit(allocator);
     try validateImage(&image);
     if (dimensions) |value| if (image.width != value.width or image.height != value.height) {
