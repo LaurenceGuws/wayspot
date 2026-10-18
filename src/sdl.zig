@@ -8,13 +8,12 @@ const navigator = @import("navigator.zig");
 const picker = @import("picker.zig");
 const sdl_event = @import("sdl_event.zig");
 const pixels = @import("sdl_pixels.zig");
+const text_draw = @import("text_draw.zig");
 const sdl = @import("sdl_c");
-const font_bytes = @embedFile("NotoSans-Regular.ttf");
 
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
     const font_size = 16;
-    const text_capacity = picker.visible_row_capacity + 1;
 
     const Icon = struct {
         const Rejection = enum {
@@ -40,17 +39,12 @@ pub const Native = struct {
     home: []const u8,
     window: ?*sdl.SDL_Window = null,
     renderer: ?*sdl.SDL_Renderer = null,
-    font_stream: ?*sdl.SDL_IOStream = null,
-    font: ?*sdl.TTF_Font = null,
-    text_engine: ?*sdl.TTF_TextEngine = null,
-    texts: [text_capacity]*sdl.TTF_Text = undefined,
-    text_count: usize = 0,
+    text: ?text_draw.Painter = null,
     icons: [picker.visible_row_capacity]Icon = undefined,
     icon_count: usize = 0,
     pending_icons: bool = false,
     events_pending: bool = false,
     initialized: bool = false,
-    ttf_initialized: bool = false,
     text_started: bool = false,
 
     /// Initializes exactly the SDL video subsystem.
@@ -58,12 +52,6 @@ pub const Native = struct {
         std.debug.assert(!native.initialized);
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         native.initialized = true;
-        errdefer {
-            sdl.SDL_Quit();
-            native.initialized = false;
-        }
-        if (!sdl.TTF_Init()) return error.TtfInitFailed;
-        native.ttf_initialized = true;
     }
 
     /// Creates the one picker window and its renderer together.
@@ -93,21 +81,7 @@ pub const Native = struct {
             pixels.window_height,
             sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )) return error.SdlLogicalPresentationFailed;
-        native.font_stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse
-            return error.TtfFontStreamCreateFailed;
-        native.font = sdl.TTF_OpenFontIO(native.font_stream, false, font_size) orelse
-            return error.TtfFontOpenFailed;
-        native.text_engine = sdl.TTF_CreateRendererTextEngine(native.renderer) orelse
-            return error.TtfTextEngineCreateFailed;
-        while (native.text_count < native.texts.len) {
-            native.texts[native.text_count] = sdl.TTF_CreateText(
-                native.text_engine,
-                native.font,
-                null,
-                0,
-            ) orelse return error.TtfTextCreateFailed;
-            native.text_count += 1;
-        }
+        native.text = try text_draw.Painter.init(native.allocator, native.renderer.?, font_size);
     }
 
     /// Enables UTF-8 text events before the picker can wait for input.
@@ -162,7 +136,7 @@ pub const Native = struct {
             => .redraw,
             sdl.SDL_EVENT_RENDER_DEVICE_RESET => reset: {
                 native.clearIcons();
-                try native.resetText();
+                native.resetText();
                 break :reset .redraw;
             },
             sdl.SDL_EVENT_RENDER_DEVICE_LOST => error.SdlRenderDeviceLost,
@@ -211,7 +185,7 @@ pub const Native = struct {
             },
             .notifications => "Notification history",
         } else frame.query;
-        try native.drawText(0, query, .{ 235, 235, 240 }, 20, 14);
+        try native.drawText(query, .{ 235, 235, 240 }, 20, 14);
         for (frame.rowSlice(), 0..) |row, index| {
             try native.drawRow(row, index, index == frame.selected_row);
         }
@@ -238,10 +212,8 @@ pub const Native = struct {
         if (!sdl.SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], 255)) {
             return error.SdlDrawFailed;
         }
-        const text_index = textIndex(index);
         switch (row) {
             .table => |table| try native.drawText(
-                text_index,
                 picker.tableName(table),
                 color,
                 20,
@@ -250,12 +222,12 @@ pub const Native = struct {
             .app => |app_index| {
                 const app = try native.application(app_index);
                 try native.drawAppIcon(app_index, index);
-                try native.drawText(text_index, app.name, color, 44, pixels.textY(index));
+                try native.drawText(app.name, color, 44, pixels.textY(index));
             },
             .window => |window_row| {
                 if (window_row.app_index) |app_index| try native.drawAppIcon(app_index, index);
                 const title = try native.windowTitle(window_row);
-                try native.drawClippedText(text_index, title, color, .{
+                try native.drawClippedText(title, color, .{
                     .x = 44,
                     .y = @intFromFloat(row_pixels.y),
                     .w = 510,
@@ -264,7 +236,7 @@ pub const Native = struct {
                 const secondary: [3]u8 = if (selected) .{ 185, 200, 220 } else .{ 145, 150, 160 };
                 var meta_buffer: [128]u8 = undefined;
                 const metadata = try formatWindowMetadata(window_row, &meta_buffer);
-                try native.drawClippedText(text_index, metadata, secondary, .{
+                try native.drawClippedText(metadata, secondary, .{
                     .x = 570,
                     .y = @intFromFloat(row_pixels.y),
                     .w = 126,
@@ -278,7 +250,6 @@ pub const Native = struct {
                 const width = [_]c_int{ 150, 250, 270 };
                 for (fields, x, width, 0..) |text, left, field_width, field| {
                     try native.drawClippedText(
-                        text_index,
                         displayText(text),
                         if (field == 1) color else secondary,
                         .{
@@ -319,9 +290,6 @@ pub const Native = struct {
         std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         std.debug.assert(!native.text_started);
-        std.debug.assert(native.ttf_initialized);
-        sdl.TTF_Quit();
-        native.ttf_initialized = false;
         sdl.SDL_Quit();
         native.initialized = false;
     }
@@ -368,74 +336,24 @@ pub const Native = struct {
         native.pending_icons = false;
     }
 
-    fn resetText(native: *Native) !void {
-        native.clearTexts();
-        sdl.TTF_DestroyRendererTextEngine(native.text_engine);
-        native.text_engine = sdl.TTF_CreateRendererTextEngine(native.renderer) orelse
-            return error.TtfTextEngineCreateFailed;
-        while (native.text_count < native.texts.len) {
-            native.texts[native.text_count] = sdl.TTF_CreateText(
-                native.text_engine,
-                native.font,
-                null,
-                0,
-            ) orelse return error.TtfTextCreateFailed;
-            native.text_count += 1;
-        }
-    }
-
-    fn clearTexts(native: *Native) void {
-        while (native.text_count > 0) {
-            native.text_count -= 1;
-            sdl.TTF_DestroyText(native.texts[native.text_count]);
-        }
+    fn resetText(native: *Native) void {
+        if (native.text) |*painter| painter.reset();
     }
 
     fn clearText(native: *Native) void {
-        native.clearTexts();
-        sdl.TTF_DestroyRendererTextEngine(native.text_engine);
-        sdl.TTF_CloseFont(native.font);
-        if (native.font_stream) |stream| {
-            std.debug.assert(sdl.SDL_CloseIO(stream));
-        }
-        native.text_engine = null;
-        native.font = null;
-        native.font_stream = null;
+        if (native.text) |*painter| painter.deinit();
+        native.text = null;
     }
 
-    fn drawText(
-        native: *Native,
-        index: usize,
-        text: []const u8,
-        color: [3]u8,
-        x: f32,
-        y: f32,
-    ) !void {
-        std.debug.assert(index < native.text_count);
-        const item = native.texts[index];
-        if (!sdl.TTF_SetTextString(item, textPointer(text), text.len)) return error.TtfTextSetFailed;
-        if (!sdl.TTF_SetTextColor(item, color[0], color[1], color[2], 255)) {
-            return error.TtfTextColorFailed;
-        }
-        if (!sdl.TTF_DrawRendererText(item, x, y)) return error.TtfTextDrawFailed;
+    fn drawText(native: *Native, value: []const u8, color: [3]u8, x: f32, y: f32) !void {
+        const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
+        try painter.draw(value, color, x, y);
     }
 
-    fn drawClippedText(
-        native: *Native,
-        index: usize,
-        text: []const u8,
-        color: [3]u8,
-        clip: sdl.SDL_Rect,
-    ) !void {
+    fn drawClippedText(native: *Native, value: []const u8, color: [3]u8, clip: sdl.SDL_Rect) !void {
         const renderer = native.renderer orelse unreachable;
         if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.SdlDrawFailed;
-        const result = native.drawText(
-            index,
-            text,
-            color,
-            @floatFromInt(clip.x),
-            @floatFromInt(clip.y + 5),
-        );
+        const result = native.drawText(value, color, @floatFromInt(clip.x), @floatFromInt(clip.y + 5));
         if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
         try result;
     }
@@ -608,20 +526,11 @@ fn rowApp(row: picker.Row) ?u16 {
     };
 }
 
-fn textIndex(row: usize) usize {
-    std.debug.assert(row < picker.visible_row_capacity);
-    return row + 1;
-}
-
 fn displayText(text: []const u8) []const u8 {
     const line_end = std.mem.indexOfAny(u8, text, "\r\n") orelse text.len;
     var end = @min(line_end, 256);
     while (end < text.len and end > 0 and text[end] & 0b1100_0000 == 0b1000_0000) end -= 1;
     return text[0..end];
-}
-
-fn textPointer(text: []const u8) ?[*]const u8 {
-    return if (text.len == 0) null else text.ptr;
 }
 
 test "window metadata combines workspace spatial identity and viewport direction" {
@@ -725,33 +634,6 @@ test "notification display is one bounded complete UTF-8 line" {
     const x: [255]u8 = @splat('x');
     const prefix = x ++ "λtail";
     try std.testing.expectEqual(@as(usize, 255), displayText(prefix).len);
-}
-
-test "empty picker text clears SDL_ttf without borrowing a strlen pointer" {
-    try std.testing.expect(sdl.TTF_Init());
-    defer sdl.TTF_Quit();
-    const stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse return error.FontStreamFailed;
-    defer std.debug.assert(sdl.SDL_CloseIO(stream));
-    const font = sdl.TTF_OpenFontIO(stream, false, 16) orelse return error.FontOpenFailed;
-    defer sdl.TTF_CloseFont(font);
-    const item = sdl.TTF_CreateText(null, font, null, 0) orelse return error.TextCreateFailed;
-    defer sdl.TTF_DestroyText(item);
-    const prior = [_]u8{ 'p', 'r', 'i', 'o', 'r' };
-    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(&prior), prior.len));
-    var width: c_int = 0;
-    var height: c_int = 0;
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expect(width > 0);
-    const empty = prior[0..0];
-    try std.testing.expect(textPointer(empty) == null);
-    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(empty), empty.len));
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expectEqual(@as(c_int, 0), width);
-    const exact = [_]u8{ 'o', 'k' };
-    try std.testing.expect(textPointer(&exact).? == exact[0..].ptr);
-    try std.testing.expect(sdl.TTF_SetTextString(item, textPointer(&exact), exact.len));
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expect(width > 0);
 }
 
 fn testApp(name: []const u8) apps.App {

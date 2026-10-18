@@ -4,16 +4,9 @@
     .fingerprint = 0x1bbfcaf57fa6a14e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
+        .howl_text = .{ .path = "vendor/howl-text" },
         .sdl = .{
             .path = "vendor/sdl",
-        },
-        .freetype_source = .{
-            .url = "https://github.com/freetype/freetype/archive/6d9fc45fc4bca8aef0b8f65592520673638c3334.tar.gz",
-            .hash = "N-V-__8AAD-TqwCmjJavuFHppHipenph8m0E4k1hO5mr2gM5",
-        },
-        .harfbuzz_source = .{
-            .url = "https://github.com/harfbuzz/harfbuzz/archive/ab6aa4f449457be45e8e0218f7a8de271fb19967.tar.gz",
-            .hash = "N-V-__8AAMph5gWWxtuHdlGvzHmC-oKTcgKxYFWkUbNQTtkb",
         },
     },
     .paths = .{
@@ -21,15 +14,13 @@
         ".zig-audit.json",
         "LICENSE",
         "build.zig",
-        "build_libs.zig",
         "build.zig.zon",
         "assets",
         "protocols",
         "src",
         "tools",
-        "vendor/freetype",
+        "vendor/howl-text",
         "vendor/sdl",
-        "vendor/sdl_ttf",
         "vendor/stb",
     },
 }

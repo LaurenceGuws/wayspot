@@ -50,8 +50,12 @@ vendored sources where present, otherwise use an available upstream checkout or
 the upstream project itself. Do not encode one developer machine's filesystem
 layout into Wayspot's product or contributor contract.
 
-SDL source used by the build is vendored under `vendor/sdl/`. Protocol XML used
-by the Wayland resident lives under `protocols/`.
+SDL3 used for windowing/drawing is vendored under `vendor/sdl/`.
+The Howl Text font/shaping/rasterization source is a pinned upstream snapshot
+under `vendor/howl-text/`; Wayspot owns only presentation, clipping and SDL
+glyph textures, not font shaping or a terminal renderer. The original upstream
+commit and subtree are recorded in `vendor/howl-text/UPSTREAM.md`. Protocol XML
+used by the Wayland resident lives under `protocols/`.
 
 ## Working loop
 

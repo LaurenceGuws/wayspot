@@ -171,8 +171,11 @@ release tag are stable.
 ## Building
 
 Wayspot is developed and tested with official Zig `0.17.0` on Arch Linux, also
-recorded in `.zigversion` and the Zig package manifest. SDL is vendored; the
-build also uses the system Wayland and D-Bus development interfaces.
+recorded in `.zigversion` and the Zig package manifest. SDL3 is vendored for
+windowing and drawing. Text shaping and glyph rasterization come from an exact,
+provenance-recorded snapshot of Howl Text in
+`vendor/howl-text`, using system FreeType and HarfBuzz. Wayland and D-Bus are
+also system dependencies.
 
 Normal desktop build (`ReleaseSafe`):
 

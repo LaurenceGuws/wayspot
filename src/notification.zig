@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl_c");
+const text_draw = @import("text_draw.zig");
 const dbus = @import("dbus_c");
 
 pub const app_name_capacity = 256;
@@ -240,14 +241,13 @@ const Mailbox = struct {
     }
 };
 
-const font_bytes = @embedFile("NotoSans-Regular.ttf");
 const banner_width = 420;
 const banner_height = 120;
 const banner_font_size = 16;
 const wake_unset = std.math.maxInt(u32);
 var wake_event: std.atomic.Value(u32) = .init(wake_unset);
 
-const UiResource = enum(u8) { sdl, ttf, window, renderer, stream, font, engine, summary, body };
+const UiResource = enum(u8) { sdl, window, renderer, text };
 
 const UiResources = struct {
     count: u8 = 0,
@@ -267,11 +267,7 @@ const UiResources = struct {
 const Banner = struct {
     window: ?*sdl.SDL_Window = null,
     renderer: ?*sdl.SDL_Renderer = null,
-    stream: ?*sdl.SDL_IOStream = null,
-    font: ?*sdl.TTF_Font = null,
-    engine: ?*sdl.TTF_TextEngine = null,
-    summary: ?*sdl.TTF_Text = null,
-    body: ?*sdl.TTF_Text = null,
+    text: ?text_draw.Painter = null,
     resources: UiResources = .{},
 
     fn init(banner: *Banner, mailbox: *Mailbox) !void {
@@ -281,8 +277,6 @@ const Banner = struct {
         errdefer banner.deinit(mailbox);
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
         banner.resources.acquired(.sdl);
-        if (!sdl.TTF_Init()) return error.TtfInitFailed;
-        banner.resources.acquired(.ttf);
         const event = sdl.SDL_RegisterEvents(1);
         if (event == wake_unset) return error.SdlEventRegistrationFailed;
         wake_event.store(event, .release);
@@ -305,22 +299,8 @@ const Banner = struct {
             banner_height,
             sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )) return error.SdlLogicalPresentationFailed;
-        banner.stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse
-            return error.TtfFontStreamCreateFailed;
-        banner.resources.acquired(.stream);
-        banner.font = sdl.TTF_OpenFontIO(banner.stream, false, banner_font_size) orelse
-            return error.TtfFontOpenFailed;
-        banner.resources.acquired(.font);
-        banner.engine = sdl.TTF_CreateRendererTextEngine(banner.renderer) orelse
-            return error.TtfTextEngineCreateFailed;
-        banner.resources.acquired(.engine);
-        banner.summary = sdl.TTF_CreateText(banner.engine, banner.font, null, 0) orelse
-            return error.TtfTextCreateFailed;
-        banner.resources.acquired(.summary);
-        banner.body = sdl.TTF_CreateText(banner.engine, banner.font, null, 0) orelse
-            return error.TtfTextCreateFailed;
-        banner.resources.acquired(.body);
-        if (!sdl.TTF_SetTextWrapWidth(banner.body, banner_width - 32)) return error.TtfTextWrapFailed;
+        banner.text = try text_draw.Painter.init(mailbox.allocator, banner.renderer.?, banner_font_size);
+        banner.resources.acquired(.text);
         mailbox.ready();
     }
 
@@ -328,14 +308,11 @@ const Banner = struct {
         mailbox.pause();
         wake_event.store(wake_unset, .release);
         while (banner.resources.release()) |resource| switch (resource) {
-            .body => sdl.TTF_DestroyText(banner.body.?),
-            .summary => sdl.TTF_DestroyText(banner.summary.?),
-            .engine => sdl.TTF_DestroyRendererTextEngine(banner.engine.?),
-            .font => sdl.TTF_CloseFont(banner.font.?),
-            .stream => std.debug.assert(sdl.SDL_CloseIO(banner.stream.?)),
+            .text => {
+                if (banner.text) |*painter| painter.deinit();
+            },
             .renderer => sdl.SDL_DestroyRenderer(banner.renderer.?),
             .window => sdl.SDL_DestroyWindow(banner.window.?),
-            .ttf => sdl.TTF_Quit(),
             .sdl => sdl.SDL_Quit(),
         };
         banner.* = .{};
@@ -343,29 +320,30 @@ const Banner = struct {
 
     fn draw(banner: *Banner, item: *const Presentation) !void {
         const renderer = banner.renderer orelse unreachable;
+        const painter = if (banner.text) |*value| value else return error.TextNotInitialized;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
-        try setBannerText(banner.summary, item.summary);
-        try setBannerText(banner.body, item.body);
-        if (!sdl.TTF_SetTextColor(banner.summary, 235, 235, 240, 255) or
-            !sdl.TTF_SetTextColor(banner.body, 190, 192, 202, 255)) return error.TtfTextColorFailed;
         const summary_clip = sdl.SDL_Rect{ .x = 16, .y = 12, .w = banner_width - 32, .h = 24 };
         if (!sdl.SDL_SetRenderClipRect(renderer, &summary_clip)) return error.SdlClipFailed;
-        if (!sdl.TTF_DrawRendererText(banner.summary, 16, 14)) return error.TtfTextDrawFailed;
+        const summary_result = painter.draw(item.summary, .{ 235, 235, 240 }, 16, 14);
+        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlClipFailed;
+        try summary_result;
         const body_clip = sdl.SDL_Rect{ .x = 16, .y = 42, .w = banner_width - 32, .h = 60 };
         if (!sdl.SDL_SetRenderClipRect(renderer, &body_clip)) return error.SdlClipFailed;
-        if (!sdl.TTF_DrawRendererText(banner.body, 16, 44)) return error.TtfTextDrawFailed;
+        const body_result = painter.drawWrapped(
+            item.body,
+            .{ 190, 192, 202 },
+            16,
+            44,
+            banner_width - 32,
+            body_clip.h,
+        );
         if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlClipFailed;
+        try body_result;
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
         if (!sdl.SDL_ShowWindow(banner.window)) return error.SdlShowFailed;
     }
 };
-
-fn setBannerText(item: ?*sdl.TTF_Text, text: []const u8) !void {
-    if (!sdl.TTF_SetTextString(item, if (text.len == 0) null else text.ptr, text.len)) {
-        return error.TtfTextSetFailed;
-    }
-}
 
 fn wakeUi() bool {
     const event_type = wake_event.load(.acquire);
@@ -1477,14 +1455,9 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
         .{ .decision = .none },
         .{ .decision = .initialize },
         .{ .acquire = .sdl },
-        .{ .acquire = .ttf },
         .{ .acquire = .window },
         .{ .acquire = .renderer },
-        .{ .acquire = .stream },
-        .{ .acquire = .font },
-        .{ .acquire = .engine },
-        .{ .acquire = .summary },
-        .{ .acquire = .body },
+        .{ .acquire = .text },
         .{ .decision = .none },
         .{ .draw = two },
         .{ .wait = 100 },
@@ -1492,14 +1465,9 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
         .{ .draw = three },
         .{ .wait = 200 },
         .{ .closed = .{ .key = three, .reason = .expired } },
-        .{ .release = .body },
-        .{ .release = .summary },
-        .{ .release = .engine },
-        .{ .release = .font },
-        .{ .release = .stream },
+        .{ .release = .text },
         .{ .release = .renderer },
         .{ .release = .window },
-        .{ .release = .ttf },
         .{ .release = .sdl },
         .{ .decision = .stop },
         .{ .decision = .failed },
@@ -1546,30 +1514,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
     try transcript.observe(.{ .draw = hidden.key.? });
     try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&hidden, .{ .hidden = one })) });
     try transcript.done();
-}
-
-test "empty banner field clears SDL_ttf without borrowing a strlen pointer" {
-    try std.testing.expect(sdl.TTF_Init());
-    defer sdl.TTF_Quit();
-    const stream = sdl.SDL_IOFromConstMem(font_bytes.ptr, font_bytes.len) orelse return error.FontStreamFailed;
-    defer std.debug.assert(sdl.SDL_CloseIO(stream));
-    const font = sdl.TTF_OpenFontIO(stream, false, banner_font_size) orelse return error.FontOpenFailed;
-    defer sdl.TTF_CloseFont(font);
-    const item = sdl.TTF_CreateText(null, font, null, 0) orelse return error.TextCreateFailed;
-    defer sdl.TTF_DestroyText(item);
-    const prior = [_]u8{ 'p', 'r', 'i', 'o', 'r' };
-    try setBannerText(item, &prior);
-    var width: c_int = 0;
-    var height: c_int = 0;
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expect(width > 0);
-    try setBannerText(item, prior[0..0]);
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expectEqual(@as(c_int, 0), width);
-    const exact = [_]u8{ 'o', 'k' };
-    try setBannerText(item, &exact);
-    try std.testing.expect(sdl.TTF_GetTextSize(item, &width, &height));
-    try std.testing.expect(width > 0);
 }
 
 test "strict UI cleanup transcript reverses every partial acquisition" {

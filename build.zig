@@ -1,5 +1,4 @@
 const std = @import("std");
-const libs = @import("build_libs.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -15,11 +14,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .preferred_linkage = .static,
     });
-    const text = libs.text(b, target, optimize, sdl.artifact("SDL3"), sdl.path("include"));
+    const howl_text = b.dependency("howl_text", .{ .target = target, .optimize = optimize });
     const headers = b.addWriteFiles();
     const sdl_header = headers.add(
         "wayspot-sdl.h",
-        "#include <SDL3/SDL.h>\n#include <SDL3_ttf/SDL_ttf.h>\n",
+        "#include <SDL3/SDL.h>\n",
     );
     const sdl_translate = b.addTranslateC(.{
         .root_source_file = sdl_header,
@@ -27,7 +26,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sdl_translate.addIncludePath(sdl.path("include"));
-    sdl_translate.addIncludePath(text.include);
     const sdl_c = sdl_translate.createModule();
 
     const dbus_header = headers.add("wayspot-dbus.h", "#include <dbus/dbus.h>\n");
@@ -48,12 +46,10 @@ pub fn build(b: *std.Build) void {
     wayspot.addIncludePath(sdl.path("include"));
     wayspot.addIncludePath(b.path("vendor/stb"));
     wayspot.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
-    wayspot.addIncludePath(text.include);
     wayspot.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
     wayspot.linkLibrary(sdl.artifact("SDL3"));
-    wayspot.linkLibrary(text.library);
     wayspot.linkSystemLibrary("dbus-1", .{});
     const layer_xml = b.path("protocols/wlr-layer-shell-unstable-v1.xml");
     const layer_header = waylandHeader(
@@ -88,6 +84,7 @@ pub fn build(b: *std.Build) void {
     wayland_translate.linkSystemLibrary("wayland-client", .{});
     const wayland_c = wayland_translate.createModule();
     wayspot.addImport("sdl_c", sdl_c);
+    wayspot.addImport("howl_text", howl_text.module("howl_text"));
     wayspot.addImport("dbus_c", dbus_c);
     wayspot.addImport("wayland_c", wayland_c);
 
@@ -107,7 +104,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, picker_tests.root_module, sdl, text, sdl_c, dbus_c);
+    addNotificationLibraries(b, picker_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c);
     picker_tests.use_llvm = false;
     picker_tests.use_lld = false;
     const run_picker_tests = b.addRunArtifact(picker_tests);
@@ -135,7 +132,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, transcript_tests.root_module, sdl, text, sdl_c, dbus_c);
+    addNotificationLibraries(b, transcript_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c);
     transcript_tests.use_llvm = false;
     transcript_tests.use_lld = false;
     const run_transcript_tests = b.addRunArtifact(transcript_tests);
@@ -251,15 +248,29 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
     sdl_tests.root_module.addIncludePath(sdl.path("include"));
-    sdl_tests.root_module.addIncludePath(text.include);
     sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    sdl_tests.root_module.linkLibrary(text.library);
     sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
     sdl_tests.root_module.addImport("sdl_c", sdl_c);
     sdl_tests.root_module.addImport("dbus_c", dbus_c);
     sdl_tests.use_llvm = false;
     sdl_tests.use_lld = false;
     const run_sdl_tests = b.addRunArtifact(sdl_tests);
+    sdl_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
+    const text_draw_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/text_draw.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    text_draw_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
+        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
+    });
+    text_draw_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
+    text_draw_tests.root_module.addImport("sdl_c", sdl_c);
+    text_draw_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    const run_text_draw_tests = b.addRunArtifact(text_draw_tests);
     const sdl_pixels_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_pixels.zig"),
@@ -280,15 +291,14 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
     notification_tests.root_module.addIncludePath(sdl.path("include"));
-    notification_tests.root_module.addIncludePath(text.include);
     notification_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    notification_tests.root_module.linkLibrary(text.library);
     notification_tests.root_module.linkSystemLibrary("dbus-1", .{});
     notification_tests.root_module.addImport("sdl_c", sdl_c);
     notification_tests.root_module.addImport("dbus_c", dbus_c);
     notification_tests.use_llvm = false;
     notification_tests.use_lld = false;
     const run_notification_tests = b.addRunArtifact(notification_tests);
+    notification_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
     const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
@@ -306,6 +316,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wallpaper_catalog_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
+    test_step.dependOn(&run_text_draw_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });
@@ -315,7 +326,6 @@ pub fn build(b: *std.Build) void {
     const formatting = b.addFmt(.{
         .paths = &.{
             b.path("build.zig"),
-            b.path("build_libs.zig"),
             b.path("build.zig.zon"),
             b.path("src"),
             b.path("tools/wallpaper_catalog.zig"),
@@ -367,7 +377,7 @@ fn addNotificationLibraries(
     b: *std.Build,
     module: *std.Build.Module,
     sdl: *std.Build.Dependency,
-    text: libs.Text,
+    howl_text: *std.Build.Module,
     sdl_c: *std.Build.Module,
     dbus_c: *std.Build.Module,
 ) void {
@@ -375,10 +385,9 @@ fn addNotificationLibraries(
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
     module.addIncludePath(sdl.path("include"));
-    module.addIncludePath(text.include);
     module.linkLibrary(sdl.artifact("SDL3"));
-    module.linkLibrary(text.library);
     module.linkSystemLibrary("dbus-1", .{});
+    module.addImport("howl_text", howl_text);
     module.addImport("sdl_c", sdl_c);
     module.addImport("dbus_c", dbus_c);
 }

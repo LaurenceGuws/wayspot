@@ -1,0 +1,159 @@
+# howl-text
+
+`howl-text` is a bounded reusable Zig text-production module: font loading, metrics,
+fallback selection, OpenType shaping, source-cluster identity, glyph lookup, natural
+alpha rasterization, and caller-sized generated glyph geometry.
+
+It deliberately stops before presentation. Windows, widgets, text layout, terminal
+cells, line wrapping, clipping, GPU resources, and application layout belong to its
+callers.
+
+## Boundary
+
+The public module is `howl_text`.
+
+- `FontSet` owns one primary font plus an ordered bounded fallback list.
+- `ShapeBuffer` owns reusable bounded HarfBuzz shaping storage.
+- `shape` accepts Unicode scalar values plus caller-defined source-cluster IDs
+  and returns positioned glyphs borrowing caller storage.
+- `faceFor` and `glyphForCodepoint` expose low-level face/glyph lookup when a
+  caller does not need shaping.
+- `rasterize` returns a tightly packed bounded alpha mask at the configured font
+  size with the glyph's natural bearings. It does not rescale or crop to fit a
+  presentation box.
+- `generated` owns the repository's Kitty-derived box/block/Braille/sextant/octant,
+  Powerline, progress/spinner, and branch masks from explicit caller-supplied geometry.
+  The ordinary `rasterize` API requires only a target width and height; callers may use
+  terminal cells, editor cells, or other layout boxes. Kitty/OSC-specific sizing stays
+  explicit in the narrower box/Powerline/progress/branch APIs. These are glyph
+  production, not a rendering backend.
+
+Retained FreeType and HarfBuzz state is opaque to consumers. Allocation
+ownership and shaping/raster ceilings are explicit in the API.
+
+### Generated geometry
+
+Generated glyphs are not coupled to a VT or terminal renderer. Their geometry is
+explicit because box drawing, block elements, Braille, Powerline separators, and
+similar symbols often need to meet the edges of the layout box exactly. A terminal
+cell is one caller-owned box; a fixed-column editor, dashboard, code block, or other
+text layout can supply different geometry.
+
+The generic generated path remains:
+
+```zig
+const family = howl_text.generated.classify(codepoint);
+try howl_text.generated.rasterize(
+    pixels,
+    width_px,
+    height_px,
+    codepoint,
+);
+```
+
+Some families additionally expose Kitty-derived stroke/DPI/multicell controls for
+terminal consumers. Those controls are optional specialization rather than a
+requirement of generated glyph production.
+
+## Current scope
+
+The library currently uses the system FreeType and HarfBuzz libraries and libc.
+Fallback selection is intentionally simple: one complete input sequence is
+shaped with the first configured face that covers every scalar in that
+sequence. Rich script-itemization and per-span fallback are not hidden behind a
+pretend-generic abstraction; they can be added when a real consumer earns that
+requirement.
+
+Font discovery is also caller-owned. `Config` takes explicit font paths;
+`MemoryConfig` takes bytes copied into the font owner.
+
+## Build
+
+The package is pinned to the Zig version in `build.zig.zon` and expects
+FreeType and HarfBuzz development files to be available through the system
+toolchain.
+
+```sh
+zig build check
+zig build test
+```
+
+Deterministic redistributed font assets and proof fixtures are documented in
+`LICENSES/test-fonts.txt`. `primary.ttf` and `symbols.ttf` are also canonical shared
+assets consumed by maintained hosts; downstream product copies must remain byte-identical.
+Generated-glyph provenance is documented in `LICENSES/generated-glyphs.txt`.
+
+## Owned font bytes
+
+`FontSet.initMemory(allocator, MemoryConfig)` complements the existing path-based
+constructor. It copies the primary and ordered fallback font bytes into the
+opaque owner; callers may release or overwrite their input immediately after
+construction. Native faces close before their copied font storage is released,
+on both successful teardown and partial-construction failure.
+
+Memory input is bounded before any allocation or native access: one required
+nonempty primary, at most 24 fallbacks, at most 32 MiB per font and 64 MiB total
+copied font data. Those limits do not include the separate native library
+allocations. Sizing, metrics, fallback selection, shaping and natural rasterization
+share the same engine as path loading. This is not a second browser text engine.
+
+Native proofs compare path/memory metrics, source clusters, glyphs, variation
+fallback and alpha masks after destroying the caller's input. They exercise
+configuration limits and every Zig allocation-failure point, including cleanup
+of already-opened fallback faces. C-library allocation failure is not exhaustively
+injected by those tests.
+
+## Target-built dependencies
+
+The ordinary module build still uses system FreeType/HarfBuzz and libc. It does
+not download the optional upstream dependencies. A consuming build can request
+`bundled = true` to build the exact content-pinned upstream sources recorded in
+`build.zig.zon`. `bundled.zig` owns their configuration and linkage. No caller
+passes machine-local source mirrors or modifies a dependency cache.
+
+Bundled Wasm is **memory-only** and uses `FontSet.initMemory`; FreeType
+filesystem streams are disabled there. Native bundled builds also support
+`FontSet.init` with caller-selected filesystem paths, matching the ordinary
+system-backed module. Environment configuration and HarfBuzz file/mmap loading
+and threading remain disabled. Both configurations retain the actual
+FreeType/HarfBuzz shaping and rasterization implementations.
+
+Run the native path/memory ownership proofs against both dependency selections:
+
+```sh
+zig build check test -Doptimize=ReleaseSafe
+zig build check test -Dbundled=true -Doptimize=ReleaseSafe
+```
+
+The current Web target is `wasm32-wasi` with exception handling plus reference types, not the
+zero-import freestanding wire canary. The exact pinned compiler's C nonlocal-jump
+path needs LLVM SjLj lowering, a matching declaration macro during C translation,
+and the narrow exception-tag definition in `config/wasi-exception-tag.c`. That
+file defines the missing tag only; the real jump implementation comes from the
+compiler's libc. A C regression probe tests both nonzero and zero longjmp values.
+Reassess this compatibility detail when the tracked compiler changes.
+
+The maintained target proof is owned by the Web consumer:
+
+```sh
+cd ../howl-web
+zig build text-check
+zig build text-web
+```
+
+`text-check` builds the same upstream revisions natively and for Wasm, then
+compares metadata and every raster byte. `text-web` creates a **local-only**
+font/raster test site at `text/zig-out/text-web/`. It is not the terminal client,
+an installed PWA or a public font distribution.
+
+The text canary's browser runtime admits exactly four WASI functions:
+`fd_close`, `fd_seek`, `fd_write` and `random_get`. It provides bounded console
+output, explicit bad-descriptor/nonseekable errors and real host entropy, but no
+filesystem. It recreates memory views after Wasm calls because libc can grow
+linear memory. The proof uses 64 MiB initial memory and a 96 MiB maximum; these
+are coarse canary budgets, not a finished terminal footprint or an
+allocation-free promise. Fifty repeated font lifetimes must reproduce the native
+result without increasing warmed-up linear memory.
+
+Dependency notices are retained in `LICENSES/bundled-dependencies.txt` and copied
+into the local browser proof alongside the existing fixture licences.

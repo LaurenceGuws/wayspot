@@ -1,0 +1,204 @@
+//! Public boundary for bounded reusable text production.
+//!
+//! Native font loading/shaping/rasterization and caller-sized generated glyphs
+//! share one owner; presentation, layout, clipping, caches, and backend resources do not.
+
+const std = @import("std");
+const engine = @import("engine.zig");
+
+/// Owns caller-sized generated glyph classification and alpha rasterization.
+pub const generated = @import("generated.zig");
+
+/// Bounds fallback sources supplied by one construction config.
+pub const max_fallbacks = engine.max_fallbacks;
+/// Bounds each copied font path before native library access.
+pub const max_font_path_bytes = engine.max_font_path_bytes;
+/// Bounds each owned in-memory font before any copy or native access.
+pub const max_font_bytes = engine.max_font_bytes;
+/// Bounds aggregate copied font data in one in-memory font set.
+pub const max_font_set_bytes = engine.max_font_set_bytes;
+/// Bounds one shaping call before native library ingestion.
+pub const max_codepoints = engine.max_codepoints;
+/// Bounds one HarfBuzz result before allocation.
+pub const max_glyphs = engine.max_glyphs;
+/// Bounds one owned glyph alpha mask.
+pub const max_raster_bytes = engine.max_raster_bytes;
+
+/// Names construction failures before a complete native font set exists.
+pub const InitError = engine.InitError;
+/// Names failures while shaping one borrowed Unicode sequence.
+pub const ShapeError = engine.ShapeError;
+/// Names caller-buffer initialization failures, including allocation failure.
+pub const ShapeBufferInitError = engine.ShapeBufferInitError || error{OutOfMemory};
+/// Names failures while producing one owned native glyph alpha mask.
+pub const RasterError = engine.RasterError;
+/// Names failures while resolving one Unicode scalar to one configured face.
+pub const GlyphLookupError = engine.GlyphLookupError;
+
+/// Preserves one canonical point-size and DPI construction identity.
+pub const PointSize = engine.PointSize;
+/// Selects exact pixel sizing or point sizing at an integer DPI.
+pub const Size = engine.Size;
+/// Borrows bounded font paths and one exact native size during construction.
+pub const Config = engine.Config;
+/// Borrows font bytes only during construction; successful owners retain independent copies.
+pub const MemoryConfig = engine.MemoryConfig;
+/// Describes validated nonzero font-derived text geometry.
+pub const Metrics = engine.Metrics;
+/// Borrows a bounded Unicode scalar sequence and its source-cluster identities.
+pub const Text = engine.Text;
+/// Records one exact HarfBuzz glyph, source cluster, and 26.6 position.
+pub const Glyph = engine.Glyph;
+/// Borrows caller storage containing one complete bounded shaping result.
+pub const Run = engine.Run;
+/// Owns one bounded tightly packed glyph alpha mask and validated baseline placement.
+pub const Raster = engine.Raster;
+
+const FontOwner = struct {
+    value: engine.FontSet,
+};
+
+/// Opaque owner of one ordered native font/fallback set.
+// zig-audit: acknowledge opaque_type
+// reason: This handle intentionally hides its backing owner layout so callers can use only the bounded public lifetime/API.
+pub const FontSet = opaque {
+    /// Copies the config and transactionally opens all native font state.
+    pub fn init(allocator: std.mem.Allocator, config: Config) InitError!*FontSet {
+        try engine.validateConfig(config);
+        const owner = allocator.create(FontOwner) catch return error.OutOfMemory;
+        errdefer allocator.destroy(owner);
+        owner.* = .{ .value = try engine.FontSet.init(allocator, config) };
+        // zig-audit: acknowledge ptr_cast
+        // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+        return @ptrCast(owner);
+    }
+
+    /// Copies bounded font bytes into this owner. Caller buffers may be
+    /// released or overwritten as soon as construction returns.
+    pub fn initMemory(allocator: std.mem.Allocator, config: MemoryConfig) InitError!*FontSet {
+        try engine.validateMemoryConfig(config);
+        const owner = allocator.create(FontOwner) catch return error.OutOfMemory;
+        errdefer allocator.destroy(owner);
+        owner.* = .{ .value = try engine.FontSet.initMemory(allocator, config) };
+        // zig-audit: acknowledge ptr_cast
+        // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+        return @ptrCast(owner);
+    }
+
+    /// Releases every native face/library and the opaque owner exactly once.
+    pub fn deinit(self: *FontSet) void {
+        const owner = fontOwner(self);
+        const allocator = owner.value.allocator;
+        owner.value.deinit();
+        allocator.destroy(owner);
+    }
+
+    /// Copies the validated native metrics for this configured font set.
+    pub fn metrics(self: *const FontSet) Metrics {
+        return fontOwnerConst(self).value.metrics;
+    }
+
+    /// Shapes one validated sequence into caller-owned glyph storage.
+    pub fn shape(
+        self: *FontSet,
+        buffer: *ShapeBuffer,
+        text: Text,
+        glyph_storage: []Glyph,
+    ) ShapeError!Run {
+        return fontOwner(self).value.shape(
+            &shapeOwner(buffer).value,
+            text,
+            glyph_storage,
+        );
+    }
+
+    /// Returns the first configured face covering one complete valid sequence.
+    pub fn faceFor(
+        self: *FontSet,
+        codepoints: []const u32,
+    ) error{ InvalidText, TextTooLong }!?u8 {
+        return fontOwner(self).value.faceFor(codepoints);
+    }
+
+    /// Returns the selected face's exact glyph identity for one scalar.
+    pub fn glyphForCodepoint(
+        self: *FontSet,
+        face_index: u8,
+        codepoint: u21,
+    ) GlyphLookupError!u32 {
+        return fontOwner(self).value.glyphForCodepoint(face_index, codepoint);
+    }
+
+    /// Rasterizes one glyph at the configured size with natural bearings.
+    pub fn rasterize(
+        self: *FontSet,
+        allocator: std.mem.Allocator,
+        face_index: u8,
+        glyph_id: u32,
+    ) RasterError!Raster {
+        return fontOwner(self).value.rasterize(
+            allocator,
+            face_index,
+            glyph_id,
+        );
+    }
+};
+
+const ShapeOwner = struct {
+    allocator: std.mem.Allocator,
+    value: engine.ShapeBuffer,
+};
+
+/// Opaque owner of one bounded reusable native shaping buffer.
+// zig-audit: acknowledge opaque_type
+// reason: This handle intentionally hides its backing owner layout so callers can use only the bounded public lifetime/API.
+pub const ShapeBuffer = opaque {
+    /// Allocates one opaque owner and preallocates native shaping capacity.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        capacity: u32,
+    ) ShapeBufferInitError!*ShapeBuffer {
+        if (capacity == 0 or capacity > max_glyphs) return error.InvalidCapacity;
+        const owner = allocator.create(ShapeOwner) catch return error.OutOfMemory;
+        errdefer allocator.destroy(owner);
+        owner.* = .{
+            .allocator = allocator,
+            .value = try engine.ShapeBuffer.init(capacity),
+        };
+        // zig-audit: acknowledge ptr_cast
+        // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+        return @ptrCast(owner);
+    }
+
+    /// Releases native shaping storage and the opaque owner exactly once.
+    pub fn deinit(self: *ShapeBuffer) void {
+        const owner = shapeOwner(self);
+        const allocator = owner.allocator;
+        owner.value.deinit();
+        allocator.destroy(owner);
+    }
+};
+
+fn fontOwner(value: *FontSet) *FontOwner {
+    // zig-audit: acknowledge ptr_cast
+    // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+    // zig-audit: acknowledge align_cast
+    // reason: The originating allocation/ABI preserves this type alignment; the cast asserts that invariant before recovering the concrete view.
+    return @ptrCast(@alignCast(value));
+}
+
+fn fontOwnerConst(value: *const FontSet) *const FontOwner {
+    // zig-audit: acknowledge ptr_cast
+    // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+    // zig-audit: acknowledge align_cast
+    // reason: The originating allocation/ABI preserves this type alignment; the cast asserts that invariant before recovering the concrete view.
+    return @ptrCast(@alignCast(value));
+}
+
+fn shapeOwner(value: *ShapeBuffer) *ShapeOwner {
+    // zig-audit: acknowledge ptr_cast
+    // reason: This boundary owns or proves the concrete pointee layout; the cast only adapts it to the C/opaque ABI without changing address or lifetime.
+    // zig-audit: acknowledge align_cast
+    // reason: The originating allocation/ABI preserves this type alignment; the cast asserts that invariant before recovering the concrete view.
+    return @ptrCast(@alignCast(value));
+}
