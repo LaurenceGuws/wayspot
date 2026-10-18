@@ -1,10 +1,13 @@
 const std = @import("std");
 
+/// Carries the vendored SDL_ttf build artifact and its include path.
 pub const Text = struct {
     library: *std.Build.Step.Compile,
     include: std.Build.LazyPath,
 };
 
+/// Links vendored SDL_ttf to the pinned FreeType and HarfBuzz sources.
+/// This is build-time composition, not an alternative runtime text backend.
 pub fn text(
     b: *std.Build,
     target: std.Build.ResolvedTarget,

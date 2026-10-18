@@ -57,4 +57,8 @@ by the Wayland resident lives under `protocols/`.
 
 Implement the smallest complete useful change, exercise the real path, run the
 relevant deterministic tests, and stop when the requested problem is solved.
+Use `zig build check` for repository formatting and the full regression graph.
+The shared `zig build audit` currently covers build logic and maintenance tools,
+not `src/`; a future source audit migration must review the product's findings
+individually rather than silently baselining them.
 Keep reviewer checkpoints small. Do not commit without operator authority.

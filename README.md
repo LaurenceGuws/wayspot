@@ -154,11 +154,11 @@ source <(wayspot completion bash)
 
 An AUR-style VCS package is maintained in [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD).
 It installs the binary, desktop entry, icon, Bash completion, and MIT license.
-Until Zig 0.17 stabilizes, the package deliberately builds with `zig-master-bin`
-because Wayspot uses the current Zig 0.17 development toolchain.
+Wayspot requires the official Zig `0.17.0` compiler. The VCS package downloads
+that exact Linux x86_64 compiler as a checksum-verified build source, rather
+than depending on an outdated distribution compiler or Zig's moving `master`.
 
-With an AUR helper, `zig-master-bin` is resolved as a build dependency. For a
-manual build, install `zig-master-bin` first, then from the packaging directory:
+For a manual package build, from the packaging directory:
 
 ```bash
 makepkg -si
@@ -170,9 +170,9 @@ release tag are stable.
 
 ## Building
 
-Wayspot is currently developed against Zig `0.17.0-dev.1454+5faa79730` on
-Arch Linux. SDL is vendored; the build also uses the system Wayland and D-Bus
-development interfaces.
+Wayspot is developed and tested with official Zig `0.17.0` on Arch Linux, also
+recorded in `.zigversion` and the Zig package manifest. SDL is vendored; the
+build also uses the system Wayland and D-Bus development interfaces.
 
 Normal desktop build (`ReleaseSafe`):
 
@@ -193,6 +193,18 @@ Run the complete test suite with:
 ```bash
 zig build test --summary all
 ```
+
+Run the normal repository health gate with:
+
+```bash
+zig build check
+```
+
+It checks Zig formatting and runs the full tests (including the standalone
+wallpaper-catalog tool and Bash completion). `zig build audit` is a separate
+ruleset-3 gate for build logic and maintenance Zig tooling. Application source
+still needs its own reviewed shared-audit migration; this gate deliberately
+does not claim to audit the product's `src/` files yet.
 
 ## Scope
 

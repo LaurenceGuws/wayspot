@@ -23,10 +23,11 @@ const Catalog = struct {
     }
 };
 
+/// Reads a wallpaper directory once and emits bounded file and duplicate JSONL.
 pub fn main(init: std.process.Init) !u8 {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
-    std.debug.assert(args.skip());
+    if (!args.skip()) return error.ArgumentsMissing;
     const root_path = args.next() orelse return 2;
     if (args.next() != null) return 2;
     var native = try Native.init(init.io, root_path);
@@ -40,6 +41,8 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+// zig-audit: acknowledge anytype
+// reason: The native directory reader and deterministic transcript share one compile-time checked walk/hash interface; no runtime type erasure is needed.
 fn collect(source: anytype, allocator: std.mem.Allocator) !Catalog {
     var catalog = Catalog{ .allocator = allocator };
     errdefer catalog.deinit();
@@ -109,7 +112,7 @@ fn emit(catalog: *const Catalog, writer: *std.Io.Writer) !void {
     for (indices[0..catalog.items.items.len], 0..) |*index, value| index.* = @intCast(value);
     const Context = struct {
         items: []const Item,
-        pub fn lessThan(context: @This(), a: u32, b: u32) bool {
+        fn lessThan(context: @This(), a: u32, b: u32) bool {
             return lessDigest(context.items, a, b);
         }
     };
@@ -270,6 +273,8 @@ const Transcript = struct {
     operation_count: usize = 0,
 
     fn record(transcript: *Transcript, operation: ScriptOperation) void {
+        // The fixed-size synthetic history is a test oracle. Overflow means
+        // the test fixture is wrong, so do not silently discard operations.
         std.debug.assert(transcript.operation_count < transcript.operations.len);
         transcript.operations[transcript.operation_count] = operation;
         transcript.operation_count += 1;

@@ -4,6 +4,12 @@ const libs = @import("build_libs.zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = optimizeOption(b);
+    // The non-product Zig build/tooling source is fully covered here.
+    // Application source has its own pending review, not a blanket baseline.
+    const audit = b.step("audit", "Audit build and maintenance Zig source");
+    const audit_command = b.addSystemCommand(&.{ "zig-audit", "check" });
+    audit_command.setCwd(b.path("."));
+    audit.dependOn(&audit_command.step);
     const sdl = b.dependency("sdl", .{
         .target = target,
         .optimize = optimize,
@@ -215,6 +221,16 @@ pub fn build(b: *std.Build) void {
     wallpaper_native_tests.use_llvm = false;
     wallpaper_native_tests.use_lld = false;
     const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
+    // The standalone wallpaper-catalog diagnostic is maintained Zig too.
+    // Exercise its source-local tests without making it an installed product.
+    const wallpaper_catalog_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/wallpaper_catalog.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wallpaper_catalog_tests = b.addRunArtifact(wallpaper_catalog_tests);
     const sdl_event_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_event.zig"),
@@ -287,6 +303,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wallpaper_tests.step);
     test_step.dependOn(&run_wallpaper_transcript_tests.step);
     test_step.dependOn(&run_wallpaper_native_tests.step);
+    test_step.dependOn(&run_wallpaper_catalog_tests.step);
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
@@ -295,12 +312,23 @@ pub fn build(b: *std.Build) void {
     run_bash_completion_test.addArtifactArg2(executable, .{});
     test_step.dependOn(&run_bash_completion_test.step);
 
+    const formatting = b.addFmt(.{
+        .paths = &.{
+            b.path("build.zig"),
+            b.path("build_libs.zig"),
+            b.path("build.zig.zon"),
+            b.path("src"),
+            b.path("tools/wallpaper_catalog.zig"),
+        },
+        .check = true,
+    });
+    const check = b.step("check", "Check formatting, audit build tools, and run regression tests");
+    check.dependOn(&formatting.step);
+    check.dependOn(audit);
+    check.dependOn(test_step);
+
     const run = b.addRunArtifact(executable);
-    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
-        run.addPassthruArgs();
-    } else if (b.args) |args| {
-        run.addArgs(args);
-    }
+    run.addPassthruArgs();
     const run_step = b.step("run", "Run Wayspot");
     run_step.dependOn(&run.step);
 }
