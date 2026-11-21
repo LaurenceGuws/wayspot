@@ -104,8 +104,10 @@ That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
 not redefine the primary latency requirement or justify a generic framework.
 
-Wayspot is currently Hyprland-only by choice. There is no planned compositor
-plugin architecture.
+Hyprland remains the primary desktop for the picker and WMIO-driven controls.
+Wallpaper instead consumes standard Wayland output and background-surface
+protocols, so the same resident works with Snowman without a separate backend
+or compositor plugin architecture.
 
 ## 5. Direct code is a means, not the product
 

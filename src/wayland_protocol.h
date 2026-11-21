@@ -16,6 +16,8 @@ struct wp_viewport;
 struct wp_viewporter;
 struct zwlr_layer_shell_v1;
 struct zwlr_layer_surface_v1;
+struct zxdg_output_manager_v1;
+struct zxdg_output_v1;
 
 enum {
     WAYSPOT_LAYER_BACKGROUND = 0,
@@ -30,6 +32,20 @@ struct wayspot_layer_listener {
     void (*configure)(void *, struct zwlr_layer_surface_v1 *, uint32_t, uint32_t, uint32_t);
     void (*closed)(void *, struct zwlr_layer_surface_v1 *);
 };
+
+struct wayspot_xdg_output_listener {
+    void (*logical_position)(void *, struct zxdg_output_v1 *, int32_t, int32_t);
+    void (*logical_size)(void *, struct zxdg_output_v1 *, int32_t, int32_t);
+    void (*done)(void *, struct zxdg_output_v1 *);
+    void (*name)(void *, struct zxdg_output_v1 *, const char *);
+    void (*description)(void *, struct zxdg_output_v1 *, const char *);
+};
+
+const struct wl_interface *wayspot_xdg_output_manager_interface(void);
+struct zxdg_output_v1 *wayspot_xdg_output_manager_get_output(struct zxdg_output_manager_v1 *, struct wl_output *);
+int wayspot_xdg_output_add_listener(struct zxdg_output_v1 *, const struct wayspot_xdg_output_listener *, void *);
+void wayspot_xdg_output_destroy(struct zxdg_output_v1 *);
+void wayspot_xdg_output_manager_destroy(struct zxdg_output_manager_v1 *);
 
 const struct wl_interface *wayspot_viewporter_interface(void);
 const struct wl_interface *wayspot_layer_shell_interface(void);

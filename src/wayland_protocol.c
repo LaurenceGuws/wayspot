@@ -4,6 +4,8 @@
 #include <viewporter-client.h>
 #include <wlr-layer-shell-unstable-v1-client.h>
 #include <wlr-layer-shell-unstable-v1.c>
+#include <xdg-output-unstable-v1-client.h>
+/* SDL3 already owns the xdg-output interface definitions. */
 
 _Static_assert(
     sizeof(struct wayspot_layer_listener) == sizeof(struct zwlr_layer_surface_v1_listener),
@@ -16,6 +18,32 @@ _Static_assert(
     offsetof(struct wayspot_layer_listener, closed) ==
         offsetof(struct zwlr_layer_surface_v1_listener, closed),
     "layer closed listener ABI changed");
+
+_Static_assert(
+    sizeof(struct wayspot_xdg_output_listener) == sizeof(struct zxdg_output_v1_listener),
+    "xdg-output listener ABI changed");
+
+const struct wl_interface *wayspot_xdg_output_manager_interface(void) {
+    return &zxdg_output_manager_v1_interface;
+}
+
+struct zxdg_output_v1 *wayspot_xdg_output_manager_get_output(
+    struct zxdg_output_manager_v1 *manager, struct wl_output *output) {
+    return zxdg_output_manager_v1_get_xdg_output(manager, output);
+}
+
+int wayspot_xdg_output_add_listener(
+    struct zxdg_output_v1 *output, const struct wayspot_xdg_output_listener *listener, void *data) {
+    return zxdg_output_v1_add_listener(output, (const struct zxdg_output_v1_listener *)listener, data);
+}
+
+void wayspot_xdg_output_destroy(struct zxdg_output_v1 *output) {
+    zxdg_output_v1_destroy(output);
+}
+
+void wayspot_xdg_output_manager_destroy(struct zxdg_output_manager_v1 *manager) {
+    zxdg_output_manager_v1_destroy(manager);
+}
 
 const struct wl_interface *wayspot_viewporter_interface(void) {
     return &wp_viewporter_interface;

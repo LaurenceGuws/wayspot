@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
     );
     const layer_code = waylandCode(b, layer_xml, "wlr-layer-shell-unstable-v1");
     const viewport_header = waylandHeader(b, b.path("protocols/viewporter.xml"), "viewporter");
+    const xdg_output_xml = b.path("protocols/xdg-output-unstable-v1.xml");
+    const xdg_output_header = waylandHeader(b, xdg_output_xml, "xdg-output-unstable-v1");
     const wayland_protocol_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -67,6 +69,7 @@ pub fn build(b: *std.Build) void {
     wayland_protocol_module.addIncludePath(layer_header.dirname());
     wayland_protocol_module.addIncludePath(layer_code.dirname());
     wayland_protocol_module.addIncludePath(viewport_header.dirname());
+    wayland_protocol_module.addIncludePath(xdg_output_header.dirname());
     wayland_protocol_module.addIncludePath(b.path("src"));
     wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland_protocol.c") });
     wayland_protocol_module.linkSystemLibrary("wayland-client", .{});
@@ -218,6 +221,39 @@ pub fn build(b: *std.Build) void {
     wallpaper_native_tests.use_llvm = false;
     wallpaper_native_tests.use_lld = false;
     const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
+
+    // Explicit diagnostic: only invoked by an isolated Wayland test harness.
+    const output_probe_module = b.createModule(.{
+        .root_source_file = b.path("tools/wallpaper-output-probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const output_observer_module = b.createModule(.{
+        .root_source_file = b.path("src/wallpaper_outputs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    output_observer_module.addImport("wayland_c", wayland_c);
+    output_probe_module.addImport("wayspot_wallpaper_outputs", output_observer_module);
+    output_probe_module.addImport("wayland_c", wayland_c);
+    output_probe_module.linkLibrary(wayland_protocol);
+    output_probe_module.linkLibrary(sdl.artifact("SDL3"));
+    const output_probe = b.addExecutable(.{ .name = "wayspot-wallpaper-output-probe", .root_module = output_probe_module });
+    const output_probe_install = b.addInstallArtifact(output_probe, .{});
+    b.step("wallpaper-output-probe", "Build private Wayland-native output observation probe")
+        .dependOn(&output_probe_install.step);
+    // Optional source-built integration; requires explicitly provided private
+    // Snowman executable/CLI from a matching external test fixture.
+    const live_wallpaper = b.addSystemCommand(&.{"bash"});
+    live_wallpaper.addFileArg(b.path("tools/wallpaper-live.sh"));
+    live_wallpaper.addFileArg(executable.getEmittedBin());
+    live_wallpaper.setCwd(b.path("."));
+    live_wallpaper.has_side_effects = true;
+    b.step("wallpaper-live", "Prove Wayland-native wallpaper against explicit isolated compositor")
+        .dependOn(&live_wallpaper.step);
+
     // The standalone wallpaper-catalog diagnostic is maintained Zig too.
     // Exercise its source-local tests without making it an installed product.
     const wallpaper_catalog_tests = b.addTest(.{

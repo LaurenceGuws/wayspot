@@ -26,7 +26,7 @@ scope:
   platform:
     compositor: Hyprland
     display: Wayland
-    other_compositors: excluded
+    other_compositors: wallpaper_only_via_wayland_protocols
 
   interfaces:
     gui:
@@ -68,6 +68,10 @@ scope:
         - notification history
     wallpaper:
       purpose: discover, show, and rotate monitor wallpapers
+      output_authority: native wl_output plus zxdg_output_v1 logical geometry
+      presentation: layer-shell surfaces plus wp_viewporter per output
+      rotation_scope: XDG_RUNTIME_DIR plus WAYLAND_DISPLAY
+      independent_headless_acceptance: Snowman two-output and zero-output reconciliation
       resident_process: true
       persistent_derived_state: false
       invariants:

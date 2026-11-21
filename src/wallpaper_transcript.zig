@@ -317,6 +317,7 @@ const Resident = struct {
     output_changes: []const bool = &.{false},
     output_index: u8 = 0,
     event_reads: []const []const u8 = &.{"workspace>>1\n"},
+
     event_read_index: u8 = 0,
     event_losses: u8 = 0,
     display_failures: []const anyerror = &.{},
@@ -409,85 +410,7 @@ const Resident = struct {
         return resident.waits[resident.wait_index];
     }
 
-    pub fn connectRequest(
-        resident: *Resident,
-        _: []const u8,
-        stop_fd: u8,
-        event_fd: u8,
-        _: u64,
-    ) !u8 {
-        std.debug.assert(stop_fd == resident.stop_identity);
-        std.debug.assert(event_fd == resident.event_identity);
-        resident.record(.request);
-        if (resident.request_failures > 0) {
-            resident.request_failures -= 1;
-            return error.ConnectionTimedOut;
-        }
-        if (resident.reply_index == resident.replies.len) return error.ConnectionTimedOut;
-        resident.reply_done = false;
-        return 11;
-    }
-
-    pub fn writeRequest(resident: *Resident, fd: u8, bytes: []const u8) anyerror!usize {
-        std.debug.assert(fd == 11);
-        if (resident.block_write) {
-            resident.block_write = false;
-            return error.WouldBlock;
-        }
-        const count = @min(bytes.len, resident.request_chunk);
-        try std.testing.expectEqualStrings(
-            "j/monitors"[resident.request_offset..][0..count],
-            bytes[0..count],
-        );
-        resident.request_offset += @intCast(count);
-        return count;
-    }
-
-    pub fn readReply(resident: *Resident, fd: u8, bytes: []u8) anyerror!usize {
-        std.debug.assert(fd == 11);
-        if (resident.reply_done) {
-            resident.reply_index += 1;
-            if (resident.reset_after_reply) return error.ConnectionResetByPeer;
-            return 0;
-        }
-        const reply = resident.replies[resident.reply_index];
-        if (resident.block_read) {
-            resident.block_read = false;
-            return error.WouldBlock;
-        }
-        const count = @min(bytes.len, resident.reply_chunk, reply.len - resident.reply_offset);
-        @memcpy(bytes[0..count], reply[resident.reply_offset..][0..count]);
-        resident.reply_offset += @intCast(count);
-        resident.reply_done = resident.reply_offset == reply.len;
-        return count;
-    }
-
-    pub fn closeRequest(resident: *Resident, fd: u8) void {
-        std.debug.assert(fd == 11);
-        resident.request_offset = 0;
-        resident.reply_offset = 0;
-        resident.request_closes += 1;
-    }
-
-    pub fn waitSocket(resident: *Resident, _: u8, _: u8, _: u8, _: bool, _: u64) !void {
-        resident.socket_waits += 1;
-    }
-
-    pub fn readEvent(resident: *Resident, event_fd: u8, bytes: []u8) anyerror!usize {
-        std.debug.assert(event_fd == resident.event_identity);
-        resident.record(.read_event);
-        if (resident.event_losses > 0) {
-            resident.event_losses -= 1;
-            return error.EventSocketLost;
-        }
-        if (resident.event_read_index == resident.event_reads.len) return error.WouldBlock;
-        const source = resident.event_reads[resident.event_read_index];
-        resident.event_read_index += 1;
-        @memcpy(bytes[0..source.len], source);
-        return source.len;
-    }
-
-    pub fn reconnectEvent(resident: *Resident, event_fd: *u8, _: []const u8, stop_fd: u8, _: u64) !void {
+    pub fn reconnectEvent(resident: *Resident, event_fd: *u8, stop_fd: u8, _: u64) !void {
         std.debug.assert(stop_fd == resident.stop_identity);
         std.debug.assert(event_fd.* == 0);
         resident.record(.reconnect);
@@ -500,6 +423,89 @@ const Resident = struct {
 
     pub fn closeEvent(_: *Resident, event_fd: *u8) void {
         event_fd.* = 0;
+    }
+
+    /// Test-only incoming observations. The production resident receives typed
+    /// wl_output/xdg-output callbacks; these JSON fixtures exercise the same
+    /// publication and recovery semantics without opening real sockets.
+    pub fn observeSnapshot(resident: *Resident, allocator: std.mem.Allocator, event_fd: *u8, _: u64) !wallpaper.Snapshot {
+        std.debug.assert(event_fd.* == resident.event_identity);
+        resident.record(.request);
+        if (resident.request_failures > 0) {
+            resident.request_failures -= 1;
+            return error.ConnectionTimedOut;
+        }
+        if (resident.reply_index == resident.replies.len) return error.ConnectionTimedOut;
+        const bytes = resident.replies[resident.reply_index];
+        defer {
+            resident.reply_index += 1;
+            resident.request_closes += 1;
+        }
+        const Raw = struct {
+            name: []const u8,
+            width: u32,
+            height: u32,
+            x: i32,
+            y: i32,
+            scale: f64,
+            transform: u8,
+            disabled: bool = false,
+        };
+        var parsed = try std.json.parseFromSlice([]Raw, allocator, bytes, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+            .duplicate_field_behavior = .@"error",
+        });
+        defer parsed.deinit();
+        if (parsed.value.len > wallpaper.monitor_capacity) return error.TooManyMonitors;
+        var snapshot: wallpaper.Snapshot = .{};
+        for (parsed.value) |raw| {
+            if (raw.disabled) continue;
+            if (raw.name.len == 0 or raw.name.len > wallpaper.monitor_name_capacity) return error.MonitorNameInvalid;
+            if (raw.width == 0 or raw.height == 0) return error.MonitorDimensionsZero;
+            const transform = std.enums.fromInt(wallpaper.Transform, raw.transform) orelse return error.MonitorTransformInvalid;
+            var monitor: wallpaper.Monitor = .{
+                .name_bytes = undefined,
+                .name_len = @intCast(raw.name.len),
+                .x = raw.x,
+                .y = raw.y,
+                .width = raw.width,
+                .height = raw.height,
+                .scale = raw.scale,
+                .transform = transform,
+            };
+            @memcpy(monitor.name_bytes[0..raw.name.len], raw.name);
+            snapshot.monitors[snapshot.count] = monitor;
+            snapshot.count += 1;
+        }
+        if (snapshot.count == 0) return error.NoEnabledMonitors;
+        std.mem.sort(wallpaper.Monitor, snapshot.monitors[0..snapshot.count], {}, struct {
+            fn less(_: void, left: wallpaper.Monitor, right: wallpaper.Monitor) bool {
+                return std.mem.order(u8, left.name(), right.name()) == .lt;
+            }
+        }.less);
+        for (snapshot.monitors[1..snapshot.count], snapshot.monitors[0 .. snapshot.count - 1]) |next, previous| {
+            if (std.mem.eql(u8, next.name(), previous.name())) return error.DuplicateMonitorName;
+        }
+        return snapshot;
+    }
+
+    /// Synthetic event turns preserve the old regression histories, but no
+    /// Hyprland event parser is reachable by the installed wallpaper process.
+    pub fn outputEvent(resident: *Resident, event_fd: u8) !bool {
+        std.debug.assert(event_fd == resident.event_identity);
+        resident.record(.read_event);
+        if (resident.event_losses > 0) {
+            resident.event_losses -= 1;
+            return error.EventSocketLost;
+        }
+        if (resident.event_read_index == resident.event_reads.len) return false;
+        const bytes = resident.event_reads[resident.event_read_index];
+        resident.event_read_index += 1;
+        if (bytes.len == 0) return error.EventSocketLost;
+        return std.mem.indexOf(u8, bytes, "monitoradded") != null or
+            std.mem.indexOf(u8, bytes, "monitorremoved") != null or
+            std.mem.indexOf(u8, bytes, "configreloaded") != null;
     }
 
     pub fn drainWayland(resident: *Resident, _: *Transcript) !bool {
@@ -643,10 +649,8 @@ test "reconciliation swaps only Wayland ownership and preserves resident fds" {
     var published: wallpaper.Round = .{};
     try wallpaper.publishRound(old, &published, &first, false);
     var current = wallpaper.Current(Transcript){ .native = old, .round = published };
-    var lines: wallpaper.EventLines = .{};
     var event_fd = resident.event_identity;
     var work: wallpaper.Work = .refresh;
-    var paths = pathsValue();
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -655,8 +659,6 @@ test "reconciliation swaps only Wayland ownership and preserves resident fds" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     );
     try std.testing.expectEqual(@as(u8, 2), current.native.id);
@@ -690,10 +692,8 @@ test "successful event reconnect survives transient request retries and preserve
     var image = try imageValue();
     defer image.deinit(std.testing.allocator);
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var lines: wallpaper.EventLines = .{};
     var event_fd: u8 = 0;
     var work: wallpaper.Work = .reconnect;
-    var paths = pathsValue();
     try std.testing.expectError(error.ConnectionTimedOut, wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -702,8 +702,6 @@ test "successful event reconnect survives transient request retries and preserve
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     ));
     var reconnects: u8 = 0;
@@ -735,10 +733,8 @@ test "successful event reconnect is reused after transient candidate mismatch" {
     var image = try imageValue();
     defer image.deinit(std.testing.allocator);
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var lines: wallpaper.EventLines = .{};
     var event_fd: u8 = 0;
     var work: wallpaper.Work = .reconnect;
-    var paths = pathsValue();
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -747,8 +743,6 @@ test "successful event reconnect is reused after transient candidate mismatch" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     );
     var reconnects: u8 = 0;
@@ -774,10 +768,8 @@ test "failed event reconnect keeps absent ownership and reconnect work" {
     var image = try imageValue();
     defer image.deinit(std.testing.allocator);
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var lines: wallpaper.EventLines = .{};
     var event_fd: u8 = 0;
     var work: wallpaper.Work = .reconnect;
-    var paths = pathsValue();
     try std.testing.expectError(error.ConnectionRefused, wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -786,8 +778,6 @@ test "failed event reconnect keeps absent ownership and reconnect work" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     ));
     var reconnects: u8 = 0;
@@ -816,10 +806,8 @@ test "pre-drain event loss reconnects before requesting a snapshot" {
     var image = try imageValue();
     defer image.deinit(std.testing.allocator);
     var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var lines: wallpaper.EventLines = .{};
     var event_fd = resident.event_identity;
     var work: wallpaper.Work = .refresh;
-    var paths = pathsValue();
     _ = try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -828,8 +816,6 @@ test "pre-drain event loss reconnects before requesting a snapshot" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     );
     var reconnects: u8 = 0;
@@ -889,9 +875,7 @@ test "both zero-time checks discard stale snapshots before candidate allocation"
         var round: wallpaper.Round = .{};
         try wallpaper.publishRound(native, &round, &first, false);
         var current = wallpaper.Current(Transcript){ .native = native, .round = round };
-        var lines: wallpaper.EventLines = .{};
         var event_fd = resident.event_identity;
-        var paths = pathsValue();
         var work: wallpaper.Work = .refresh;
         _ = try wallpaper.reconcile(
             &resident,
@@ -901,8 +885,6 @@ test "both zero-time checks discard stale snapshots before candidate allocation"
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
-            &lines,
             &work,
         );
         try std.testing.expectEqual(@as(u8, 1), resident.candidate_index);
@@ -941,9 +923,7 @@ test "changed configure with unchanged snapshot recreates candidate" {
     var round: wallpaper.Round = .{};
     try wallpaper.publishRound(native, &round, &first, false);
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
-    var lines: wallpaper.EventLines = .{};
     var event_fd = resident.event_identity;
-    var paths = pathsValue();
     var work: wallpaper.Work = .refresh;
     _ = try wallpaper.reconcile(
         &resident,
@@ -953,8 +933,6 @@ test "changed configure with unchanged snapshot recreates candidate" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     );
     try std.testing.expectEqual(@as(u8, 1), resident.candidate_index);
@@ -980,9 +958,7 @@ test "stop during old retirement remains sticky through new current cleanup" {
     try wallpaper.publishRound(old, &published, &first, false);
     old.stop_on_release = true;
     var current = wallpaper.Current(Transcript){ .native = old, .round = published };
-    var lines: wallpaper.EventLines = .{};
     var event_fd = resident.event_identity;
-    var paths = pathsValue();
     var work: wallpaper.Work = .refresh;
     try std.testing.expectError(error.Stopped, wallpaper.reconcile(
         &resident,
@@ -992,8 +968,6 @@ test "stop during old retirement remains sticky through new current cleanup" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     ));
     try std.testing.expectEqual(@as(u8, 2), current.native.id);
@@ -1022,14 +996,12 @@ test "published round waits one rotation interval and stop wins" {
     try wallpaper.publishRound(native, &round, &next, false);
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, runResident(
         &resident,
         std.testing.allocator,
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
     ));
     const last = resident.operations[resident.count - 1].wait;
     try std.testing.expectEqual(@as(?u64, wallpaper.rotation_interval_milliseconds), last.timeout);
@@ -1059,7 +1031,6 @@ test "direct rotate acknowledges only after forced complete replacement" {
     catalog.published = catalog.order.items[0];
     catalog.cursor = 1;
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, wallpaper.runRotation(
         &resident,
         std.testing.allocator,
@@ -1068,7 +1039,6 @@ test "direct rotate acknowledges only after forced complete replacement" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
         10,
     ));
     var received: ?usize = null;
@@ -1116,7 +1086,6 @@ test "stop after publication replies error and every retirement failure keeps va
         catalog.published = catalog.order.items[0];
         catalog.cursor = 1;
         var event_fd: u8 = 0;
-        var paths = pathsValue();
         const result = wallpaper.runRotation(
             &resident,
             std.testing.allocator,
@@ -1125,7 +1094,6 @@ test "stop after publication replies error and every retirement failure keeps va
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
             10,
         );
         if (failure == null) {
@@ -1183,7 +1151,6 @@ test "one file and invalid alternatives never select published or replace Curren
         catalog.published = catalog.order.items[0];
         catalog.cursor = 1;
         var event_fd: u8 = 0;
-        var paths = pathsValue();
         try std.testing.expectError(error.Stopped, wallpaper.runRotation(
             &resident,
             std.testing.allocator,
@@ -1192,7 +1159,6 @@ test "one file and invalid alternatives never select published or replace Curren
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
             10,
         ));
         try std.testing.expectEqual(@as(u8, 2), current.native.id);
@@ -1225,7 +1191,6 @@ test "stop and rotate readiness together sends no reply and stop propagates" {
     try catalog.shuffle();
     catalog.published = catalog.order.items[0];
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, wallpaper.runRotation(
         &resident,
         std.testing.allocator,
@@ -1234,7 +1199,6 @@ test "stop and rotate readiness together sends no reply and stop propagates" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
         10,
     ));
     for (resident.operations[0..resident.count]) |operation| switch (operation) {
@@ -1264,9 +1228,7 @@ test "independent snapshot and output order retries without changing current ear
     var round: wallpaper.Round = .{};
     try wallpaper.publishRound(old, &round, &next, false);
     var current = wallpaper.Current(Transcript){ .native = old, .round = round };
-    var lines: wallpaper.EventLines = .{};
     var event_fd = resident.event_identity;
-    var paths = pathsValue();
     var work: wallpaper.Work = .refresh;
     _ = try wallpaper.reconcile(
         &resident,
@@ -1276,8 +1238,6 @@ test "independent snapshot and output order retries without changing current ear
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     );
     try std.testing.expectEqual(@as(u8, 3), current.native.id);
@@ -1320,10 +1280,8 @@ test "Hyprland and Wayland may report one removed output in either order" {
         var round: wallpaper.Round = .{};
         try wallpaper.publishRound(native, &round, &next, false);
         var current = wallpaper.Current(Transcript){ .native = native, .round = round };
-        var lines: wallpaper.EventLines = .{};
         var event_fd = resident.event_identity;
         var work: wallpaper.Work = .refresh;
-        var paths = pathsValue();
         _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
@@ -1332,8 +1290,6 @@ test "Hyprland and Wayland may report one removed output in either order" {
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
-            &lines,
             &work,
         );
         try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
@@ -1373,14 +1329,12 @@ test "reconcile exhaustion and zero enabled outputs wait and recover" {
         var image = try imageValue();
         defer image.deinit(std.testing.allocator);
         var event_fd: u8 = 0;
-        var paths = pathsValue();
         try std.testing.expectError(error.Stopped, runResident(
             &resident,
             std.testing.allocator,
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
         ));
         try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
         try std.testing.expect(resident.reply_index >= 1);
@@ -1418,7 +1372,6 @@ test "topology retry preserves selected image and rotation deadline" {
     catalog.cursor = 1;
     const selected_index = catalog.published;
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, wallpaper.runRotation(
         &resident,
         std.testing.allocator,
@@ -1427,7 +1380,6 @@ test "topology retry preserves selected image and rotation deadline" {
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
         10,
     ));
     try std.testing.expectEqual(selected_bytes, image.bytes.ptr);
@@ -1472,10 +1424,8 @@ test "unchanged round skips decoding and topology change uses retained bytes wit
     var selected = try encodedImageValue();
     defer selected.deinit(std.testing.allocator);
     const original_bytes = selected.bytes.ptr;
-    var lines: wallpaper.EventLines = .{};
     var work: wallpaper.Work = .refresh;
     var event_fd = resident.event_identity;
-    var paths = pathsValue();
     try std.testing.expectEqual(wallpaper.ReconcileOutcome.unchanged, try wallpaper.reconcile(
         &resident,
         std.testing.allocator,
@@ -1484,8 +1434,6 @@ test "unchanged round skips decoding and topology change uses retained bytes wit
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     ));
     try std.testing.expectEqual(@as(u16, 0), resident.image_decodes);
@@ -1500,8 +1448,6 @@ test "unchanged round skips decoding and topology change uses retained bytes wit
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
-        &lines,
         &work,
     ));
     try std.testing.expectEqual(@as(u16, 1), resident.image_decodes);
@@ -1543,14 +1489,12 @@ test "every unusable current display failure invalidates once and reconnects" {
         try wallpaper.publishRound(native, &round, &next, false);
         var current = wallpaper.Current(Transcript){ .native = native, .round = round };
         var event_fd: u8 = 0;
-        var paths = pathsValue();
         try std.testing.expectError(error.Stopped, runResident(
             &resident,
             std.testing.allocator,
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
         ));
         try std.testing.expectEqual(@as(u8, 2), current.native.id);
         try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
@@ -1595,10 +1539,8 @@ test "candidate Wayland setup disagreement retries but internal failure propagat
         var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
         var image = try imageValue();
         defer image.deinit(std.testing.allocator);
-        var lines: wallpaper.EventLines = .{};
         var event_fd = resident.event_identity;
         var work: wallpaper.Work = .refresh;
-        var paths = pathsValue();
         _ = try wallpaper.reconcile(
             &resident,
             std.testing.allocator,
@@ -1607,8 +1549,6 @@ test "candidate Wayland setup disagreement retries but internal failure propagat
             &current,
             resident.stop_identity,
             &event_fd,
-            &paths,
-            &lines,
             &work,
         );
         try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
@@ -1633,14 +1573,12 @@ test "candidate Wayland setup disagreement retries but internal failure propagat
     try wallpaper.publishRound(native, &round, &next, false);
     var current = wallpaper.Current(Transcript){ .native = native, .round = round };
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.SurfaceStateInvalid, runResident(
         &resident,
         std.testing.allocator,
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
     ));
     try std.testing.expectEqual(@as(u8, 1), current.round.monitors.count);
     try std.testing.expect(current.native.connected);
@@ -1664,127 +1602,16 @@ test "stop during topology recovery is the only normal exit" {
     var image = try imageValue();
     defer image.deinit(std.testing.allocator);
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, runResident(
         &resident,
         std.testing.allocator,
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
     ));
     try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
     try std.testing.expectEqual(@as(u8, wallpaper.reconcile_attempt_capacity - 1), resident.request_failures);
     resident.destroyNative(std.testing.allocator, current.native);
-}
-
-test "request wire handles partial would-block EOF and closes once" {
-    const reply =
-        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}]
-    ;
-    var resident = Resident{
-        .waits = &.{},
-        .replies = &.{reply},
-        .request_chunk = 2,
-        .reply_chunk = 7,
-        .block_write = true,
-        .block_read = true,
-    };
-    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
-    const count = try wallpaper.requestMonitors(
-        &resident,
-        "/run/hypr/x/.socket.sock",
-        resident.stop_identity,
-        resident.event_identity,
-        &bytes,
-        2000,
-    );
-    try std.testing.expectEqualStrings(reply, bytes[0..count]);
-    try std.testing.expectEqual(@as(u8, 2), resident.socket_waits);
-    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
-}
-
-test "request reset accepts only an already complete JSON array" {
-    const complete =
-        \\[{"name":"M0","width":2,"height":1,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}]
-    ;
-    var resident = Resident{
-        .waits = &.{},
-        .replies = &.{complete},
-        .reply_chunk = 7,
-        .reset_after_reply = true,
-    };
-    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
-    const count = try wallpaper.requestMonitors(
-        &resident,
-        "/run/hypr/x/.socket.sock",
-        resident.stop_identity,
-        resident.event_identity,
-        &bytes,
-        2000,
-    );
-    try std.testing.expectEqualStrings(complete, bytes[0..count]);
-    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
-
-    resident = .{
-        .waits = &.{},
-        .replies = &.{complete[0 .. complete.len - 1]},
-        .reset_after_reply = true,
-    };
-    try std.testing.expectError(error.ConnectionResetByPeer, wallpaper.requestMonitors(
-        &resident,
-        "/run/hypr/x/.socket.sock",
-        resident.stop_identity,
-        resident.event_identity,
-        &bytes,
-        2000,
-    ));
-    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
-}
-
-test "balanced malformed reset frame reaches parser but no candidate or publication" {
-    var resident = Resident{
-        .waits = &.{},
-        .replies = &.{"[}"},
-        .reset_after_reply = true,
-    };
-    const native = try std.testing.allocator.create(Transcript);
-    native.* = .{ .id = 1 };
-    var image = try imageValue();
-    defer image.deinit(std.testing.allocator);
-    var current = wallpaper.Current(Transcript){ .native = native, .round = .{} };
-    var lines: wallpaper.EventLines = .{};
-    var event_fd = resident.event_identity;
-    var work: wallpaper.Work = .refresh;
-    var paths = pathsValue();
-    if (wallpaper.reconcile(
-        &resident,
-        std.testing.allocator,
-        .{ .decoded = &image },
-        false,
-        &current,
-        resident.stop_identity,
-        &event_fd,
-        &paths,
-        &lines,
-        &work,
-    )) |_| return error.ExpectedMalformedJson else |_| {}
-    try std.testing.expectEqual(@as(u8, 0), resident.candidate_index);
-    try std.testing.expectEqual(@as(u8, 0), current.round.monitors.count);
-    try std.testing.expectEqual(@as(u8, 1), current.native.id);
-    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
-    resident.destroyNative(std.testing.allocator, current.native);
-}
-
-test "generated request progress remains bounded and closes once" {
-    if (@import("builtin").fuzz) {
-        try std.testing.fuzz({}, fuzzRequest, .{});
-        return;
-    }
-    var smith = std.testing.Smith{ .in = "" };
-    try fuzzRequest({}, &smith);
 }
 
 test "partial preparation discards only new resources in reverse" {
@@ -2044,20 +1871,6 @@ fn snapshotValue(count: u8) wallpaper.Snapshot {
     return snapshot;
 }
 
-fn pathsValue() wallpaper.SocketPaths {
-    var paths: wallpaper.SocketPaths = .{
-        .request = .{},
-        .event = .{},
-    };
-    const request = "/run/hypr/x/.socket.sock";
-    const event = "/run/hypr/x/.socket2.sock";
-    @memcpy(paths.request.bytes[0..request.len], request);
-    paths.request.len = request.len;
-    @memcpy(paths.event.bytes[0..event.len], event);
-    paths.event.len = event.len;
-    return paths;
-}
-
 // Exercise the single production resident loop for topology and display recovery.
 fn runResident(
     resident: *Resident,
@@ -2065,7 +1878,6 @@ fn runResident(
     current: *wallpaper.Current(Transcript),
     stop_fd: u8,
     event_fd: *u8,
-    paths: *const wallpaper.SocketPaths,
 ) !void {
     var catalog = wallpaper.Catalog{ .allocator = allocator, .prng = .init(42) };
     defer catalog.deinit();
@@ -2074,7 +1886,7 @@ fn runResident(
     catalog.published = 0;
     var selected = try encodedImageValue();
     defer selected.deinit(allocator);
-    return wallpaper.runRotation(resident, allocator, &catalog, &selected, current, stop_fd, event_fd, paths, wallpaper.rotation_interval_milliseconds);
+    return wallpaper.runRotation(resident, allocator, &catalog, &selected, current, stop_fd, event_fd, wallpaper.rotation_interval_milliseconds);
 }
 
 fn encodedImageValue() !wallpaper.EncodedImage {
@@ -2123,30 +1935,6 @@ fn fuzzRounds(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expect(transcript.count <= operation_capacity);
 }
 
-fn fuzzRequest(_: void, smith: *std.testing.Smith) !void {
-    const reply = "[]";
-    var resident = Resident{
-        .waits = &.{},
-        .replies = &.{reply},
-        .request_chunk = smith.valueRangeAtMost(u8, 1, 10),
-        .reply_chunk = smith.valueRangeAtMost(u16, 1, reply.len),
-        .block_write = smith.value(bool),
-        .block_read = smith.value(bool),
-    };
-    var bytes: [wallpaper.monitor_response_capacity]u8 = undefined;
-    const count = try wallpaper.requestMonitors(
-        &resident,
-        "request",
-        resident.stop_identity,
-        resident.event_identity,
-        &bytes,
-        2000,
-    );
-    try std.testing.expectEqualStrings(reply, bytes[0..count]);
-    try std.testing.expectEqual(@as(u8, 1), resident.request_closes);
-    try std.testing.expect(resident.socket_waits <= 2);
-}
-
 const ScheduleSummary = struct {
     image_opens: u16 = 0,
     direct_successes: u16 = 0,
@@ -2188,7 +1976,6 @@ fn runScheduleHistory(
     catalog.published = catalog.order.items[0];
     catalog.cursor = 1;
     var event_fd: u8 = 0;
-    var paths = pathsValue();
     try std.testing.expectError(error.Stopped, wallpaper.runRotation(
         &resident,
         std.testing.allocator,
@@ -2197,7 +1984,6 @@ fn runScheduleHistory(
         &current,
         resident.stop_identity,
         &event_fd,
-        &paths,
         interval_milliseconds,
     ));
     var summary: ScheduleSummary = .{ .final_clock = resident.clock };

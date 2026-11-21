@@ -4,13 +4,9 @@ const std = @import("std");
 
 pub const monitor_capacity = 16;
 pub const monitor_name_capacity = 128;
-pub const monitor_response_capacity = 64 * 1024;
 pub const monitor_side_capacity = 16_384;
 pub const monitor_pixel_capacity = 33_177_600;
 pub const round_pixel_capacity = 67_108_864;
-pub const event_line_capacity = 4096;
-pub const event_read_capacity = 8192;
-pub const event_batch_capacity = 64;
 pub const image_path_capacity = 4095;
 pub const image_file_capacity = 64 * 1024 * 1024;
 pub const catalog_file_capacity = 16 * 1024;
@@ -32,9 +28,7 @@ pub const reconcile_wait_milliseconds = 250;
 /// One reconciliation fails visibly after two seconds.
 pub const reconcile_deadline_milliseconds = 2000;
 /// One readiness result drains at most eight socket2 reads.
-pub const event_drain_capacity = 8;
 /// One readiness result accepts at most 64KiB from socket2.
-pub const event_drain_byte_capacity = 64 * 1024;
 /// The resident attempts one automatic rotation per hour.
 pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 
@@ -56,19 +50,6 @@ pub const Ready = packed struct {
     event: bool = false,
     rotate: bool = false,
 };
-/// Owns one bounded Unix socket path without allocation; callers borrow `slice()`.
-pub const SocketPath = struct {
-    bytes: [107]u8 = undefined,
-    len: u8 = 0,
-
-    /// Borrows the initialized path bytes.
-    pub fn slice(path: *const SocketPath) []const u8 {
-        return path.bytes[0..path.len];
-    }
-};
-/// Owns the exact Hyprland request and socket2 paths used by one resident run.
-pub const SocketPaths = struct { request: SocketPath, event: SocketPath };
-
 pub const Catalog = struct {
     paths: std.ArrayList([]u8) = .empty,
     order: std.ArrayList(u16) = .empty,
@@ -214,206 +195,6 @@ pub const Snapshot = struct {
     }
 };
 
-/// Unknown fields are ignored because Hyprland extends this object; every retained field is required and typed.
-pub fn parseMonitors(allocator: std.mem.Allocator, bytes: []const u8) !Snapshot {
-    if (bytes.len > monitor_response_capacity) return error.MonitorResponseTooLong;
-    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
-        .parse_numbers = false,
-        .duplicate_field_behavior = .@"error",
-        .max_value_len = monitor_response_capacity,
-    });
-    defer parsed.deinit();
-    const values = switch (parsed.value) {
-        .array => |array| array.items,
-        else => return error.MonitorArrayExpected,
-    };
-    if (values.len > monitor_capacity) return error.TooManyMonitors;
-
-    var snapshot: Snapshot = .{};
-    var pixels: u64 = 0;
-    for (values) |value| {
-        const object = switch (value) {
-            .object => |object| object,
-            else => return error.MonitorObjectExpected,
-        };
-        const disabled = try booleanField(object, "disabled");
-        const monitor = try parseMonitor(object);
-        if (disabled) continue;
-        const monitor_pixels = @as(u64, monitor.width) * monitor.height;
-        if (monitor_pixels > monitor_pixel_capacity) return error.MonitorPixelsTooMany;
-        pixels += monitor_pixels;
-        if (pixels > round_pixel_capacity) return error.RoundPixelsTooMany;
-        snapshot.monitors[snapshot.count] = monitor;
-        snapshot.count += 1;
-    }
-    if (snapshot.count == 0) return error.NoEnabledMonitors;
-    std.mem.sort(Monitor, snapshot.monitors[0..snapshot.count], {}, monitorLessThan);
-    for (snapshot.monitors[1..snapshot.count], snapshot.monitors[0 .. snapshot.count - 1]) |current, previous| {
-        if (std.mem.eql(u8, current.name(), previous.name())) return error.DuplicateMonitorName;
-    }
-    return snapshot;
-}
-
-fn parseMonitor(object: std.json.ObjectMap) !Monitor {
-    const name = try stringField(object, "name");
-    if (name.len == 0) return error.MonitorNameEmpty;
-    if (name.len > monitor_name_capacity) return error.MonitorNameTooLong;
-    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.MonitorNameInvalid;
-    const width = try unsignedField(object, "width");
-    const height = try unsignedField(object, "height");
-    if (width == 0 or height == 0) return error.MonitorDimensionsZero;
-    if (width > monitor_side_capacity or height > monitor_side_capacity) {
-        return error.MonitorDimensionsTooLarge;
-    }
-    var monitor: Monitor = .{
-        .name_bytes = undefined,
-        .name_len = @intCast(name.len),
-        .x = try signedField(object, "x"),
-        .y = try signedField(object, "y"),
-        .width = width,
-        .height = height,
-        .scale = try parseScale(try numberField(object, "scale")),
-        .transform = std.enums.fromInt(Transform, try unsignedField(object, "transform")) orelse
-            return error.MonitorTransformInvalid,
-    };
-    @memcpy(monitor.name_bytes[0..name.len], name);
-    return monitor;
-}
-
-fn field(object: std.json.ObjectMap, name: []const u8) !std.json.Value {
-    return object.get(name) orelse error.MonitorFieldMissing;
-}
-
-fn stringField(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    return switch (try field(object, name)) {
-        .string => |value| value,
-        else => error.MonitorFieldTypeInvalid,
-    };
-}
-
-fn numberField(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    return switch (try field(object, name)) {
-        .number_string => |value| value,
-        else => error.MonitorFieldTypeInvalid,
-    };
-}
-
-fn booleanField(object: std.json.ObjectMap, name: []const u8) !bool {
-    return switch (try field(object, name)) {
-        .bool => |value| value,
-        else => error.MonitorFieldTypeInvalid,
-    };
-}
-
-fn unsignedField(object: std.json.ObjectMap, name: []const u8) !u32 {
-    return std.fmt.parseInt(u32, try numberField(object, name), 10) catch error.MonitorIntegerInvalid;
-}
-
-fn signedField(object: std.json.ObjectMap, name: []const u8) !i32 {
-    return std.fmt.parseInt(i32, try numberField(object, name), 10) catch error.MonitorIntegerInvalid;
-}
-
-fn parseScale(bytes: []const u8) !f64 {
-    if (bytes.len == 0 or bytes.len > 16 or !std.ascii.isDigit(bytes[0]) or
-        bytes[0] == '0' and bytes.len > 1 and bytes[1] != '.')
-    {
-        return error.MonitorScaleInvalid;
-    }
-    var dot_seen = false;
-    for (bytes) |byte| switch (byte) {
-        '0'...'9' => {},
-        '.' => {
-            if (dot_seen) return error.MonitorScaleInvalid;
-            dot_seen = true;
-        },
-        else => return error.MonitorScaleInvalid,
-    };
-    if (bytes[bytes.len - 1] == '.') return error.MonitorScaleInvalid;
-    const scale = std.fmt.parseFloat(f64, bytes) catch return error.MonitorScaleInvalid;
-    if (scale <= 0 or scale > 10) return error.MonitorScaleInvalid;
-    return scale;
-}
-
-fn monitorLessThan(_: void, left: Monitor, right: Monitor) bool {
-    return std.mem.order(u8, left.name(), right.name()) == .lt;
-}
-
-pub const Event = enum { refresh, ignore, malformed };
-
-pub const Feed = struct {
-    event: ?Event = null,
-    consumed: usize = 0,
-};
-
-pub const EventLines = struct {
-    bytes: [event_line_capacity]u8 = undefined,
-    len: u16 = 0,
-    discarding: bool = false,
-
-    /// Returns at the first complete event; consumed preserves the caller's exact remainder.
-    pub fn feed(lines: *EventLines, input: []const u8) Feed {
-        var result: Feed = .{};
-        while (result.consumed < input.len) {
-            const byte = input[result.consumed];
-            result.consumed += 1;
-            if (lines.discarding) {
-                if (byte == '\n') {
-                    lines.discarding = false;
-                    result.event = .malformed;
-                    return result;
-                }
-                continue;
-            }
-            if (byte == '\n') {
-                result.event = classify(lines.bytes[0..lines.len]);
-                lines.len = 0;
-                return result;
-            } else if (lines.len == event_line_capacity) {
-                lines.len = 0;
-                lines.discarding = true;
-            } else {
-                lines.bytes[lines.len] = byte;
-                lines.len += 1;
-            }
-        }
-        return result;
-    }
-};
-
-/// Drains one bounded socket2 batch; loss or excess is visible and no event mutates monitor facts.
-pub fn drainEvents(source: anytype, event_fd: anytype, lines: *EventLines, work: *Work) !bool {
-    var bytes: [event_read_capacity]u8 = undefined;
-    var total: usize = 0;
-    var events: u8 = 0;
-    var changed = false;
-    for (0..event_drain_capacity) |_| {
-        const count = source.readEvent(event_fd, &bytes) catch |err| switch (err) {
-            error.WouldBlock => return changed,
-            else => return err,
-        };
-        if (count == 0) return error.EventSocketLost;
-        total += count;
-        if (total > event_drain_byte_capacity) return error.EventDrainExceeded;
-        var offset: usize = 0;
-        while (offset < count) {
-            const feed = lines.feed(bytes[offset..count]);
-            std.debug.assert(feed.consumed > 0);
-            offset += feed.consumed;
-            if (feed.event) |event| {
-                if (events == event_batch_capacity) return error.EventDrainExceeded;
-                events += 1;
-                if (event == .refresh) {
-                    work.* = .refresh;
-                    changed = true;
-                }
-            }
-        }
-        if (count < bytes.len) return changed;
-    }
-    return error.EventDrainExceeded;
-}
-
 pub const Image = struct {
     width: u32,
     height: u32,
@@ -550,8 +331,6 @@ pub fn reconcile(
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
-    paths: *const SocketPaths,
-    lines: *EventLines,
     work: *Work,
 ) !ReconcileOutcome {
     const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
@@ -560,27 +339,20 @@ pub fn reconcile(
     for (0..reconcile_attempt_capacity) |attempt| {
         const failure: ?anyerror = attempt_work: {
             var reconnect = work.* == .reconnect;
-            _ = try waitCurrent(resident, current, stop_fd, event_fd, lines, work, 0);
+            _ = try waitCurrent(resident, current, stop_fd, event_fd, work, 0);
             if (work.* == .rotate) return .unchanged;
             reconnect = reconnect or work.* == .reconnect;
             if (reconnect) {
-                resident.reconnectEvent(event_fd, paths.event.slice(), stop_fd, deadline) catch |err| {
+                resident.reconnectEvent(event_fd, stop_fd, deadline) catch |err| {
                     work.* = .reconnect;
                     break :attempt_work err;
                 };
                 if (work.* == .reconnect) work.* = .refresh;
             }
-            var reply: [monitor_response_capacity]u8 = undefined;
-            const count = requestMonitors(
-                resident,
-                paths.request.slice(),
-                stop_fd,
-                event_fd.*,
-                &reply,
-                deadline,
-            ) catch |err| break :attempt_work err;
-            const snapshot = try parseMonitors(allocator, reply[0..count]);
-            if (try waitCurrent(resident, current, stop_fd, event_fd, lines, work, 0)) {
+            // The source of truth is the current Wayland output registry and
+            // its committed logical/output geometry, not compositor IPC JSON.
+            const snapshot = resident.observeSnapshot(allocator, event_fd, deadline) catch |err| break :attempt_work err;
+            if (try waitCurrent(resident, current, stop_fd, event_fd, work, 0)) {
                 break :attempt_work null;
             }
             if (!force_publication and
@@ -630,13 +402,14 @@ pub fn reconcile(
                 return .published_cleanup_failed;
             };
             resident.destroyNative(allocator, old_native);
+            // One bounded record per committed round, never a focus/workspace event.
+            std.log.info("wallpaper published {d} output surfaces", .{snapshot.count});
             work.* = .idle;
             return .published;
         };
         if (failure) |err| {
             if (err == error.EventSocketLost) {
                 resident.closeEvent(event_fd);
-                lines.* = .{};
                 work.* = .reconnect;
             }
             if (!transient(err)) return err;
@@ -644,96 +417,12 @@ pub fn reconcile(
         } else if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
         const now = resident.now();
         if (now >= deadline) return error.ReconcileTimeout;
-        _ = try waitCurrent(resident, current, stop_fd, event_fd, lines, work, @min(
+        _ = try waitCurrent(resident, current, stop_fd, event_fd, work, @min(
             reconcile_wait_milliseconds,
             deadline - now,
         ));
     }
     return error.ReconcileExhausted;
-}
-
-/// Reads one complete bounded `j/monitors` reply and closes its per-call socket on every path.
-pub fn requestMonitors(
-    source: anytype,
-    path: []const u8,
-    stop_fd: anytype,
-    event_fd: anytype,
-    reply: []u8,
-    deadline: u64,
-) !usize {
-    const fd = try source.connectRequest(path, stop_fd, event_fd, deadline);
-    defer source.closeRequest(fd);
-    var offset: usize = 0;
-    var attempts: u8 = 0;
-    while (offset < "j/monitors".len and attempts < 32) : (attempts += 1) {
-        offset += source.writeRequest(fd, "j/monitors"[offset..]) catch |err| switch (err) {
-            error.WouldBlock => {
-                try source.waitSocket(fd, stop_fd, event_fd, true, deadline);
-                continue;
-            },
-            else => return err,
-        };
-    }
-    if (offset != "j/monitors".len) return error.RequestWriteIncomplete;
-    offset = 0;
-    attempts = 0;
-    while (attempts < 32) : (attempts += 1) {
-        var probe: [1]u8 = undefined;
-        const output = if (offset == reply.len) &probe else reply[offset..];
-        const count = source.readReply(fd, output) catch |err| switch (err) {
-            error.WouldBlock => {
-                try source.waitSocket(fd, stop_fd, event_fd, false, deadline);
-                continue;
-            },
-            error.ConnectionResetByPeer => if (completeJsonArray(reply[0..offset])) return offset else return err,
-            else => return err,
-        };
-        if (offset == reply.len and count != 0) return error.MonitorResponseTooLong;
-        if (count == 0) return offset;
-        offset += count;
-    }
-    return error.RequestReadAttemptsExceeded;
-}
-
-// A reset is an end marker only after one complete top-level JSON array is already buffered.
-fn completeJsonArray(bytes: []const u8) bool {
-    var depth: usize = 0;
-    var string = false;
-    var escaped = false;
-    var started = false;
-    for (bytes) |byte| {
-        if (!started) {
-            if (std.ascii.isWhitespace(byte)) continue;
-            if (byte != '[') return false;
-            started = true;
-            depth = 1;
-            continue;
-        }
-        if (depth == 0) {
-            if (!std.ascii.isWhitespace(byte)) return false;
-            continue;
-        }
-        if (string) {
-            if (escaped) {
-                escaped = false;
-            } else if (byte == '\\') {
-                escaped = true;
-            } else if (byte == '"') {
-                string = false;
-            }
-            continue;
-        }
-        switch (byte) {
-            '"' => string = true,
-            '[', '{' => depth += 1,
-            ']', '}' => {
-                if (depth == 0) return false;
-                depth -= 1;
-            },
-            else => {},
-        }
-    }
-    return started and depth == 0 and !string;
 }
 
 /// Owns direct-request image replacement; acknowledgement follows complete publication only.
@@ -745,18 +434,16 @@ pub fn runRotation(
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
-    paths: *const SocketPaths,
     comptime interval_milliseconds: u64,
 ) !void {
     comptime std.debug.assert(interval_milliseconds > 0);
-    var lines: EventLines = .{};
     var work: Work = .reconnect;
     var deadline: ?u64 = null;
     while (true) {
         if (work == .idle) {
             const now = resident.now();
             const timeout = if (deadline) |end| end -| now else null;
-            _ = waitCurrent(resident, current, stop_fd, event_fd, &lines, &work, timeout) catch |err| {
+            _ = waitCurrent(resident, current, stop_fd, event_fd, &work, timeout) catch |err| {
                 if (!recoverableTopology(err)) return err;
                 continue;
             };
@@ -771,8 +458,6 @@ pub fn runRotation(
                     current,
                     stop_fd,
                     event_fd,
-                    paths,
-                    &lines,
                     &work,
                 ) catch |err| {
                     if (!recoverableTopology(err)) return err;
@@ -781,7 +466,6 @@ pub fn runRotation(
                         current,
                         stop_fd,
                         event_fd,
-                        &lines,
                         &work,
                         reconcile_wait_milliseconds,
                     ) catch |wait_err| {
@@ -804,8 +488,6 @@ pub fn runRotation(
                 current,
                 stop_fd,
                 event_fd,
-                paths,
-                &lines,
                 &work,
                 false,
             );
@@ -820,8 +502,6 @@ pub fn runRotation(
             current,
             stop_fd,
             event_fd,
-            paths,
-            &lines,
             &work,
             true,
         );
@@ -860,8 +540,6 @@ fn rotateOnce(
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
-    paths: *const SocketPaths,
-    lines: *EventLines,
     work: *Work,
     direct: bool,
 ) !bool {
@@ -903,8 +581,6 @@ fn rotateOnce(
             current,
             stop_fd,
             event_fd,
-            paths,
-            lines,
             work,
         ) catch |err| {
             if (err == error.Stopped) {
@@ -931,25 +607,24 @@ fn rotateOnce(
     return rotated;
 }
 
-// Classifies one borrowed-fd wait and drains only the descriptors reported ready.
+// Classifies one native Wayland output event; focus/workspace events never
+// cause a wallpaper publication, and the renderer has its own display owner.
 fn waitForWork(
     resident: anytype,
     native: anytype,
     stop_fd: anytype,
     event_fd: anytype,
-    lines: *EventLines,
     work: *Work,
     timeout: ?u64,
 ) !bool {
-    var socket_lost = false;
-    defer if (socket_lost) {
+    var lost = false;
+    defer if (lost) {
         resident.closeEvent(event_fd);
-        lines.* = .{};
         work.* = .reconnect;
     };
     const ready = resident.wait(native, stop_fd, event_fd.*, timeout) catch |err| {
         if (err != error.EventSocketLost) return err;
-        socket_lost = true;
+        lost = true;
         return true;
     };
     if (ready.stop) return error.Stopped;
@@ -958,11 +633,17 @@ fn waitForWork(
         work.* = .refresh;
         changed = true;
     }
-    if (ready.event) changed = drainEvents(resident, event_fd.*, lines, work) catch |err| {
-        if (err != error.EventSocketLost) return err;
-        socket_lost = true;
-        return true;
-    } or changed;
+    if (ready.event) {
+        const output_changed = resident.outputEvent(event_fd.*) catch |err| {
+            if (err != error.EventSocketLost) return err;
+            lost = true;
+            return true;
+        };
+        if (output_changed) {
+            work.* = .refresh;
+            changed = true;
+        }
+    }
     if (ready.rotate and work.* == .idle) {
         work.* = .rotate;
         changed = true;
@@ -970,18 +651,17 @@ fn waitForWork(
     return changed;
 }
 
-// A lost display invalidates its surfaces once. The same native allocation remains a
-// disconnected stop/event wait owner until normal reconciliation publishes a replacement.
+// A lost compositor connection retires only renderer state; the resident
+// observer and selected image remain available for a future publication.
 fn waitCurrent(
     resident: anytype,
     current: anytype,
     stop_fd: anytype,
     event_fd: anytype,
-    lines: *EventLines,
     work: *Work,
     timeout: ?u64,
 ) !bool {
-    return waitForWork(resident, current.native, stop_fd, event_fd, lines, work, timeout) catch |err| {
+    return waitForWork(resident, current.native, stop_fd, event_fd, work, timeout) catch |err| {
         if (currentDisplayUnusable(err)) {
             current.native.disconnectAfterDisplayLoss();
             current.round = .{};
@@ -1151,309 +831,30 @@ fn inspectPng(bytes: []const u8) !struct { width: u32, height: u32 } {
     return .{ .width = width, .height = height };
 }
 
-fn classify(line: []const u8) Event {
-    if (std.mem.indexOfScalar(u8, line, 0) != null) return .malformed;
-    const separator = std.mem.indexOf(u8, line, ">>") orelse return .malformed;
-    if (separator == 0) return .malformed;
-    const name = line[0..separator];
-    for (name) |byte| {
-        if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '_') return .malformed;
-    }
-    inline for (.{
-        "monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2", "configreloaded",
-    }) |refresh| {
-        if (std.mem.eql(u8, name, refresh)) return .refresh;
-    }
-    return .ignore;
-}
-
-const one_monitor =
-    \\[{"name":"DP-1","width":1920,"height":1080,"x":-1920,"y":0,
-    \\"scale":1.25,"transform":0,"disabled":false}]
-;
-
-test "monitor response retains exact facts and ignores extensions" {
-    const json =
-        \\[{"name":"DP-2","width":2560,"height":1440,"x":0,"y":0,"scale":1.00,
-        \\"transform":3,"disabled":false,"future":{"nested":true}},
-        \\{"name":"DP-1","width":1920,"height":1080,"x":-1920,"y":0,"scale":1.25,
-        \\"transform":0,"disabled":false}]
-    ;
-    const snapshot = try parseMonitors(std.testing.allocator, json);
-    try std.testing.expectEqual(@as(u8, 2), snapshot.count);
-    try std.testing.expectEqualStrings("DP-1", snapshot.monitors[0].name());
-    try std.testing.expectEqual(@as(i32, -1920), snapshot.monitors[0].x);
-    try std.testing.expectEqual(@as(f64, 1.25), snapshot.monitors[0].scale);
-    try std.testing.expectEqual(Transform.rotate_270, snapshot.monitors[1].transform);
-}
-
-test "snapshot equality covers every retained fact" {
-    const first = try parseMonitors(std.testing.allocator, one_monitor);
-    const same = try parseMonitors(std.testing.allocator,
-        \\[{"future":1,"disabled":false,"transform":0,"scale":1.25,"y":0,
-        \\"x":-1920,"height":1080,"width":1920,"name":"DP-1"}]
-    );
-    const changed = try parseMonitors(std.testing.allocator,
-        \\[{"name":"DP-1","width":1920,"height":1080,"x":-1919,"y":0,
-        \\"scale":1.25,"transform":0,"disabled":false}]
-    );
-    try std.testing.expect(first.eql(&same));
-    try std.testing.expect(!first.eql(&changed));
-}
-
-test "scale accepts bounded Hyprland decimal spellings" {
-    try std.testing.expectEqual(@as(f64, 0.01), try parseScale("0.01"));
-    try std.testing.expectEqual(@as(f64, 1), try parseScale("1"));
-    try std.testing.expectEqual(@as(f64, 1.6), try parseScale("1.6"));
-    try std.testing.expectEqual(@as(f64, 1.6), try parseScale("1.60"));
-    try std.testing.expectEqual(@as(f64, 10), try parseScale("10.00"));
-    inline for (.{
-        "",   "0",    ".5",  "0.00", "01.00", "+1.00",             "-1.00",
-        "1.", "1..0", "1e0", "NaN",  "10.01", "12345678901234567",
-    }) |invalid| {
-        try std.testing.expectError(error.MonitorScaleInvalid, parseScale(invalid));
-    }
-}
-
-test "Hyprland 0.56 monitor scale spellings form one snapshot" {
-    const snapshot = try parseMonitors(std.testing.allocator,
-        \\[{"name":"HDMI-A-1","width":3840,"height":2160,"x":1920,"y":0,
-        \\"scale":1.6,"transform":0,"disabled":false},
-        \\{"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,
-        \\"scale":1,"transform":0,"disabled":false}]
-    );
-    try std.testing.expectEqual(@as(u8, 2), snapshot.count);
-    try std.testing.expectEqual(@as(f64, 1), snapshot.monitors[0].scale);
-    try std.testing.expectEqual(@as(f64, 1.6), snapshot.monitors[1].scale);
-}
-
-test "transform tags match the pinned Hyprland wire values" {
-    const transforms = std.enums.values(Transform);
-    try std.testing.expectEqual(@as(usize, 8), transforms.len);
-    for (transforms, 0..) |transform, value| {
-        try std.testing.expectEqual(value, @backingInt(transform));
-    }
-}
-
-test "monitor required fields and types reject exactly" {
-    try std.testing.expectError(error.MonitorFieldMissing, parseMonitors(std.testing.allocator,
-        \\[{"name":"DP-1","width":1920,"height":1080,"x":0,"y":0,
-        \\"scale":1.00,"transform":0}]
-    ));
-    try std.testing.expectError(error.MonitorFieldTypeInvalid, parseMonitors(std.testing.allocator,
-        \\[{"name":"DP-1","width":"1920","height":1080,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}]
-    ));
-    try std.testing.expectError(error.DuplicateField, parseMonitors(std.testing.allocator,
-        \\[{"name":"DP-1","name":"DP-2","width":1,"height":1,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}]
-    ));
-}
-
-test "monitor identity dimensions coordinates transform and availability are bounded" {
-    try expectMonitorError(error.MonitorNameEmpty,
-        \\[{"name":"","width":1,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.MonitorDimensionsZero,
-        \\[{"name":"A","width":0,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.MonitorDimensionsTooLarge,
-        \\[{"name":"A","width":16385,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.MonitorPixelsTooMany,
-        \\[{"name":"A","width":8192,"height":4096,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.MonitorIntegerInvalid,
-        \\[{"name":"A","width":1,"height":1,"x":2147483648,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.MonitorTransformInvalid,
-        \\[{"name":"A","width":1,"height":1,"x":0,"y":0,"scale":1.00,"transform":8,"disabled":false}]
-    );
-    try expectMonitorError(error.NoEnabledMonitors,
-        \\[{"name":"A","width":1,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":true}]
-    );
-    try expectMonitorError(error.NoEnabledMonitors, "[]");
-}
-
-test "monitor name count and round pixels are bounded after sorting" {
-    var exact_name: [monitor_name_capacity]u8 = @splat('a');
-    var name: [monitor_name_capacity + 1]u8 = @splat('a');
-    var json: [512]u8 = undefined;
-    const exact_name_json = try std.fmt.bufPrint(&json,
-        \\[{{"name":"{s}","width":1,"height":1,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}}]
-    , .{&exact_name});
-    const named = try parseMonitors(std.testing.allocator, exact_name_json);
-    try std.testing.expectEqual(@as(usize, monitor_name_capacity), named.monitors[0].name().len);
-    const overlong = try std.fmt.bufPrint(&json,
-        \\[{{"name":"{s}","width":1,"height":1,"x":0,"y":0,
-        \\"scale":1.00,"transform":0,"disabled":false}}]
-    , .{&name});
-    try std.testing.expectError(error.MonitorNameTooLong, parseMonitors(std.testing.allocator, overlong));
-    try expectMonitorError(error.DuplicateMonitorName,
-        \\[{"name":"A","width":1,"height":1,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false},
-        \\{"name":"A","width":1,"height":1,"x":1,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try expectMonitorError(error.RoundPixelsTooMany,
-        \\[{"name":"A","width":7680,"height":4320,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false},
-        \\{"name":"B","width":7680,"height":4320,"x":1,"y":0,"scale":1.00,"transform":0,"disabled":false},
-        \\{"name":"C","width":1920,"height":1080,"x":2,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    const exact = try parseMonitors(std.testing.allocator,
-        \\[{"name":"A","width":7680,"height":4320,"x":0,"y":0,"scale":1.00,"transform":0,"disabled":false},
-        \\{"name":"B","width":7680,"height":4320,"x":1,"y":0,"scale":1.00,"transform":0,"disabled":false},
-        \\{"name":"C","width":736,"height":1024,"x":2,"y":0,"scale":1.00,"transform":0,"disabled":false}]
-    );
-    try std.testing.expectEqual(@as(u8, 3), exact.count);
-
-    var many_json: [4096]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&many_json);
-    try writer.writeAll("[");
-    for (0..monitor_capacity + 1) |index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.print(
-            "{{\"name\":\"M{d}\",\"width\":1,\"height\":1,\"x\":0,\"y\":0," ++
-                "\"scale\":1.00,\"transform\":0,\"disabled\":false}}",
-            .{index},
-        );
-    }
-    try writer.writeAll("]");
-    try std.testing.expectError(
-        error.TooManyMonitors,
-        parseMonitors(std.testing.allocator, writer.buffered()),
-    );
-}
-
-test "monitor response bytes and JSON are bounded" {
-    var exact: [monitor_response_capacity]u8 = @splat(' ');
-    @memcpy(exact[0..one_monitor.len], one_monitor);
-    const exact_snapshot = try parseMonitors(std.testing.allocator, &exact);
-    try std.testing.expectEqual(@as(u8, 1), exact_snapshot.count);
-    var excessive: [monitor_response_capacity + 1]u8 = @splat(' ');
-    try std.testing.expectError(
-        error.MonitorResponseTooLong,
-        parseMonitors(std.testing.allocator, &excessive),
-    );
-    var invalid_utf8 = [_]u8{ '[', 0xff, ']' };
-    try std.testing.expectError(error.InvalidUtf8, parseMonitors(std.testing.allocator, &invalid_utf8));
-    try std.testing.expectError(
-        error.MonitorArrayExpected,
-        parseMonitors(std.testing.allocator, "{}"),
-    );
-    try std.testing.expectError(
-        error.MonitorObjectExpected,
-        parseMonitors(std.testing.allocator, "[1]"),
-    );
-    if (parseMonitors(std.testing.allocator, "[") catch null) |_| return error.ExpectedMalformedJson;
-}
-
-test "complete JSON array framing covers containers strings escapes and truncation" {
-    const cases = [_]struct { bytes: []const u8, complete: bool }{
-        .{ .bytes = "[]", .complete = true },
-        .{ .bytes = " \t\r\n[]\n\r\t ", .complete = true },
-        .{ .bytes = "[{\"items\":[{},[1,2],{\"more\":[]}]}]", .complete = true },
-        .{ .bytes = "[\"] } still string\",\"{ [ also string\"]", .complete = true },
-        .{ .bytes = "[\"quote: \\\" slash: \\\\\"]", .complete = true },
-        .{ .bytes = "[", .complete = false },
-        .{ .bytes = "[{\"items\":[1,2]}", .complete = false },
-        .{ .bytes = "[\"unterminated", .complete = false },
-        .{ .bytes = "[\"trailing escape\\", .complete = false },
-        .{ .bytes = "{}", .complete = false },
-        .{ .bytes = "[]x", .complete = false },
-        .{ .bytes = "", .complete = false },
-        .{ .bytes = " \t\r\n", .complete = false },
+test "wallpaper output snapshots compare every retained display fact" {
+    var one: Snapshot = .{};
+    one.count = 1;
+    one.monitors[0] = .{
+        .name_bytes = undefined,
+        .name_len = 3,
+        .x = -1920,
+        .y = 0,
+        .width = 1920,
+        .height = 1080,
+        .scale = 1.5,
+        .transform = .normal,
     };
-    for (cases) |case| {
-        try std.testing.expectEqual(case.complete, completeJsonArray(case.bytes));
-    }
-}
-
-test "event fragments coalesce and classify without payload state" {
-    var lines: EventLines = .{};
-    try std.testing.expectEqual(@as(?Event, null), lines.feed("monitoradd").event);
-    var events: [3]Event = undefined;
-    try std.testing.expectEqual(
-        @as(usize, 3),
-        collectEvents(&lines, "ed>>DP-1\nworkspace>>1\nconfigreloaded>>\n", &events),
-    );
-    try std.testing.expectEqualSlices(Event, &.{ .refresh, .ignore, .refresh }, &events);
-    try std.testing.expectEqual(@as(u16, 0), lines.len);
-}
-
-test "only exact monitor and config event names refresh" {
-    var lines: EventLines = .{};
-    var events: [10]Event = undefined;
-    const count = collectEvents(
-        &lines,
-        "monitoradded>>A\nmonitoraddedv2>>1,A,x\nmonitorremoved>>A\n" ++
-            "monitorremovedv2>>1,A,x\nconfigreloaded>>\nfocusedmon>>A,1\n" ++
-            "workspace>>1\nactivewindow>>kitty,x\nopenwindow>>x\nmouse>>move\n",
-        &events,
-    );
-    try std.testing.expectEqualSlices(Event, &.{
-        .refresh, .refresh, .refresh, .refresh, .refresh,
-        .ignore,  .ignore,  .ignore,  .ignore,  .ignore,
-    }, events[0..count]);
-}
-
-test "malformed and overlong lines preserve following valid lines" {
-    var lines: EventLines = .{};
-    var malformed: [5]Event = undefined;
-    const malformed_count = collectEvents(
-        &lines,
-        ">>x\nmissing\nbad-name>>x\nok>>a\x00b\nworkspace>>1\n",
-        &malformed,
-    );
-    try std.testing.expectEqualSlices(
-        Event,
-        &.{ .malformed, .malformed, .malformed, .malformed, .ignore },
-        malformed[0..malformed_count],
-    );
-    var bytes: [event_line_capacity + 32]u8 = @splat('a');
-    bytes[event_line_capacity + 1] = '\n';
-    @memcpy(bytes[event_line_capacity + 2 ..][0.."monitoradded>>A\n".len], "monitoradded>>A\n");
-    var overlong: [2]Event = undefined;
-    const overlong_count = collectEvents(
-        &lines,
-        bytes[0 .. event_line_capacity + 2 + "monitoradded>>A\n".len],
-        &overlong,
-    );
-    try std.testing.expectEqualSlices(
-        Event,
-        &.{ .malformed, .refresh },
-        overlong[0..overlong_count],
-    );
-}
-
-test "one event returns an exact unconsumed remainder" {
-    const line = "workspace>>1\n";
-    var bytes: [line.len * (event_batch_capacity + 1)]u8 = undefined;
-    for (0..event_batch_capacity + 1) |index| @memcpy(bytes[index * line.len ..][0..line.len], line);
-    var lines: EventLines = .{};
-    const first = lines.feed(&bytes);
-    try std.testing.expectEqual(Event.ignore, first.event.?);
-    try std.testing.expectEqual(line.len, first.consumed);
-    const second = lines.feed(bytes[first.consumed..]);
-    try std.testing.expectEqual(Event.ignore, second.event.?);
-    try std.testing.expectEqual(line.len, second.consumed);
-}
-
-test "generated monitor JSON and arbitrary bytes remain bounded" {
-    if (@import("builtin").fuzz) {
-        try std.testing.fuzz({}, fuzzMonitors, .{});
-        return;
-    }
-    var empty = std.testing.Smith{ .in = "" };
-    try fuzzMonitors({}, &empty);
-}
-
-test "generated event histories remain bounded" {
-    if (@import("builtin").fuzz) {
-        try std.testing.fuzz({}, fuzzEvents, .{});
-        return;
-    }
-    var empty = std.testing.Smith{ .in = "" };
-    try fuzzEvents({}, &empty);
+    @memcpy(one.monitors[0].name_bytes[0..3], "DP1");
+    var same = one;
+    try std.testing.expect(one.eql(&same));
+    same.monitors[0].x += 1;
+    try std.testing.expect(!one.eql(&same));
+    same = one;
+    same.monitors[0].scale = 1.25;
+    try std.testing.expect(!one.eql(&same));
+    same = one;
+    same.monitors[0].transform = .rotate_90;
+    try std.testing.expect(!one.eql(&same));
 }
 
 const FileStat = struct { kind: std.Io.File.Kind, size: u64 };
@@ -1985,10 +1386,6 @@ test "Smith crop arithmetic and PNG headers remain bounded" {
     try fuzzImage({}, &empty);
 }
 
-fn expectMonitorError(expected: anyerror, json: []const u8) !void {
-    try std.testing.expectError(expected, parseMonitors(std.testing.allocator, json));
-}
-
 fn pngHeader(bytes: []u8, width: u32, height: u32) void {
     @memset(bytes, 0);
     @memcpy(bytes[0..8], "\x89PNG\r\n\x1a\n");
@@ -2013,117 +1410,4 @@ fn fuzzImage(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(dimensions.width <= image_side_capacity);
         try std.testing.expect(dimensions.height <= image_side_capacity);
     } else |_| {}
-}
-
-fn fuzzMonitors(_: void, smith: *std.testing.Smith) !void {
-    var arbitrary: [2048]u8 = undefined;
-    if (parseMonitors(std.testing.allocator, arbitrary[0..smith.slice(&arbitrary)]) catch null) |snapshot| {
-        try assertSnapshot(&snapshot);
-    }
-
-    var json: [8192]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&json);
-    try writer.writeAll("[");
-    const count = smith.valueRangeAtMost(u8, 1, monitor_capacity);
-    for (0..count) |index| {
-        if (index != 0) try writer.writeAll(",");
-        const width = smith.valueRangeAtMost(u16, 1, 4096);
-        const height = smith.valueRangeAtMost(u16, 1, 2160);
-        try writer.print(
-            "{{\"name\":\"M{d:0>2}\",\"width\":{d},\"height\":{d},\"x\":{d},\"y\":0," ++
-                "\"scale\":1.25,\"transform\":{d},\"disabled\":false,\"future\":null}}",
-            .{ index, width, height, smith.valueRangeAtMost(i16, -4096, 4096), index % 8 },
-        );
-    }
-    try writer.writeAll("]");
-    const snapshot = try parseMonitors(std.testing.allocator, writer.buffered());
-    try std.testing.expectEqual(count, snapshot.count);
-    try assertSnapshot(&snapshot);
-}
-
-fn assertSnapshot(snapshot: *const Snapshot) !void {
-    try std.testing.expect(snapshot.count > 0);
-    try std.testing.expect(snapshot.count <= monitor_capacity);
-    var pixels: u64 = 0;
-    for (snapshot.slice(), 0..) |monitor, index| {
-        try std.testing.expect(monitor.name().len > 0);
-        try std.testing.expect(monitor.name().len <= monitor_name_capacity);
-        try std.testing.expect(monitor.width > 0 and monitor.height > 0);
-        pixels += @as(u64, monitor.width) * monitor.height;
-        if (index > 0) try std.testing.expect(std.mem.order(
-            u8,
-            snapshot.monitors[index - 1].name(),
-            monitor.name(),
-        ) == .lt);
-    }
-    try std.testing.expect(pixels <= round_pixel_capacity);
-}
-
-fn fuzzEvents(_: void, smith: *std.testing.Smith) !void {
-    var input: [event_read_capacity]u8 = undefined;
-    const bytes = input[0..smith.slice(&input)];
-    var lines: EventLines = .{};
-    var consumed: usize = 0;
-    var feeds: usize = 0;
-    while (consumed < bytes.len and feeds <= bytes.len) : (feeds += 1) {
-        const feed = lines.feed(bytes[consumed..]);
-        try std.testing.expect(feed.consumed <= bytes.len - consumed);
-        if (feed.consumed == 0) break;
-        consumed += feed.consumed;
-    }
-    try std.testing.expect(consumed <= bytes.len);
-    try std.testing.expect(lines.len <= event_line_capacity);
-
-    const choices = [_][]const u8{
-        "monitoradded>>A\n",
-        "workspace>>1\n",
-        "bad\n",
-        "configreloaded>>\n",
-    };
-    const tags = [_]Event{ .refresh, .ignore, .malformed, .refresh };
-    var history: [event_batch_capacity * 20]u8 = undefined;
-    var expected: [event_batch_capacity]Event = undefined;
-    var actual: [event_batch_capacity]Event = undefined;
-    var history_len: usize = 0;
-    const count = smith.valueRangeAtMost(u8, 1, event_batch_capacity);
-    for (0..count) |index| {
-        const choice = smith.valueRangeLessThan(u8, 0, choices.len);
-        @memcpy(history[history_len..][0..choices[choice].len], choices[choice]);
-        history_len += choices[choice].len;
-        expected[index] = tags[choice];
-    }
-    lines = .{};
-    consumed = 0;
-    var emitted: usize = 0;
-    while (consumed < history_len) {
-        const remaining = history_len - consumed;
-        const chunk = smith.valueRangeAtMost(u16, 1, @intCast(remaining));
-        const end = consumed + chunk;
-        while (consumed < end) {
-            const feed = lines.feed(history[consumed..end]);
-            if (feed.event) |event| {
-                actual[emitted] = event;
-                emitted += 1;
-            }
-            consumed += feed.consumed;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, count), emitted);
-    try std.testing.expectEqualSlices(Event, expected[0..count], actual[0..emitted]);
-    try std.testing.expectEqual(@as(u16, 0), lines.len);
-}
-
-fn collectEvents(lines: *EventLines, input: []const u8, events: []Event) usize {
-    var consumed: usize = 0;
-    var count: usize = 0;
-    while (consumed < input.len) {
-        const feed = lines.feed(input[consumed..]);
-        consumed += feed.consumed;
-        if (feed.event) |event| {
-            std.debug.assert(count < events.len);
-            events[count] = event;
-            count += 1;
-        }
-    }
-    return count;
 }

@@ -144,6 +144,21 @@ background surface per current monitor and reconciles those surfaces when the
 monitor topology changes. Merely moving focus between monitors, workspaces, or
 windows does not change the current wallpaper round.
 
+The wallpaper resident now observes `wl_output` and `zxdg_output_v1` directly:
+physical dimensions, exact logical origin, fractional logical size, and
+output add/remove all come from the active Wayland session. Its existing
+layer-shell/viewporter surfaces and transactional image/rotation engine are
+unchanged. `wayspot wallpaper rotate` addresses an authenticated per-display
+socket derived from `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`; neither operation
+requires `HYPRLAND_INSTANCE_SIGNATURE`, Hyprland monitor JSON, or Hyprland IPC.
+
+A disposable Snowman Wayland session has passed two-output publication,
+1.5x fractional scale, output disable/re-enable, zero-output recovery,
+manual rotation, and clean termination. Hyprland and attended physical-screen
+acceptance remain separate from this isolated proof. Wallpaper portability does
+not imply that the picker/window-finder and tray workflows are compositor
+neutral.
+
 ### Bash completion
 
 ```bash
@@ -211,9 +226,10 @@ does not claim to audit the product's `src/` files yet.
 
 ## Scope
 
-Wayspot is intentionally Hyprland- and Wayland-specific. It is not trying to be
-a compositor abstraction, plugin platform, general search framework, or full
-desktop environment.
+Wayspot's picker and window-oriented tools remain Hyprland-first. Its wallpaper
+resident consumes standard Wayland output/layer-shell interfaces and is usable
+without a Hyprland compositor. Wayspot is not a compositor abstraction, plugin
+platform, general search framework, or full desktop environment.
 
 New tools are welcome when they solve a real desktop problem without damaging
 the properties that make the existing tool pleasant to use: immediate

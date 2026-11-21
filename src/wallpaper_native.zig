@@ -4,6 +4,7 @@ const std = @import("std");
 const wallpaper = @import("wallpaper.zig");
 const sdl = @import("sdl_c");
 const wl = @import("wayland_c");
+const outputs = @import("wallpaper_outputs.zig");
 
 extern fn wayspot_jpeg_decode(
     bytes: [*]const u8,
@@ -62,6 +63,7 @@ pub const Native = struct {
     rotate_client: std.posix.fd_t = -1,
     rotate_bytes: [16]u8 = undefined,
     rotate_length: u8 = 0,
+    observer: outputs.Observer = .{},
     display: ?*wl.wl_display = null,
     registry_proxy: ?*wl.wl_registry = null,
     compositor: ?*wl.wl_compositor = null,
@@ -215,59 +217,37 @@ pub const Native = struct {
         allocator.destroy(native);
     }
 
-    /// Opens the borrowed socket2 fd slot before the shared deadline; failure leaves it closed.
-    pub fn reconnectEvent(
-        native: *Native,
-        event_fd: *std.posix.fd_t,
-        path: []const u8,
-        stop_fd: std.posix.fd_t,
-        deadline: u64,
-    ) !void {
+    /// Connect to the native Wayland output registry. The descriptor remains
+    /// owned by Observer and is only borrowed by the resident poll loop.
+    pub fn reconnectEvent(native: *Native, event_fd: *std.posix.fd_t, _: std.posix.fd_t, _: u64) !void {
         std.debug.assert(event_fd.* < 0);
-        event_fd.* = try native.connectUnix(path, stop_fd, -1, deadline);
+        native.observer.disconnect();
+        try native.observer.connect();
+        event_fd.* = native.observer.fd();
     }
 
-    /// Closes the resident-owned socket2 descriptor and restores its absent sentinel.
-    pub fn closeEvent(_: *Native, event_fd: *std.posix.fd_t) void {
-        _ = std.posix.system.close(event_fd.*);
+    /// Stop borrowing the display's output-event fd before releasing it.
+    pub fn closeEvent(native: *Native, event_fd: *std.posix.fd_t) void {
+        native.observer.disconnect();
         event_fd.* = -1;
     }
 
-    /// Reads at most the caller's bounded socket2 buffer; EOF and errors remain visible.
-    pub fn readEvent(native: *Native, event_fd: std.posix.fd_t, bytes: []u8) !usize {
-        const file: std.Io.File = .{ .handle = event_fd, .flags = .{ .nonblocking = true } };
-        return file.readStreaming(native.io, &.{bytes});
+    /// Output changes are committed Wayland events, not IPC text from Hyprland.
+    pub fn outputEvent(native: *Native, event_fd: std.posix.fd_t) !bool {
+        if (native.observer.fd() != event_fd) return error.EventSocketLost;
+        return native.observer.dispatch() catch return error.EventSocketLost;
     }
 
-    /// Opens one per-request Hyprland socket while stop and socket2 loss retain priority.
-    pub fn connectRequest(
-        native: *Native,
-        path: []const u8,
-        stop_fd: std.posix.fd_t,
-        event_fd: std.posix.fd_t,
-        deadline: u64,
-    ) !std.posix.fd_t {
-        return native.connectUnix(path, stop_fd, event_fd, deadline);
-    }
-
-    /// Writes one borrowed request suffix and exposes partial progress or failure.
-    pub fn writeRequest(native: *Native, fd: std.posix.fd_t, bytes: []const u8) !usize {
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        return file.writeStreaming(native.io, &.{}, &.{bytes}, 1);
-    }
-
-    /// Reads into one borrowed bounded reply suffix and exposes EOF or failure.
-    pub fn readReply(native: *Native, fd: std.posix.fd_t, bytes: []u8) !usize {
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        return file.readStreaming(native.io, &.{bytes}) catch |err| switch (err) {
-            error.EndOfStream => 0,
-            else => return err,
-        };
-    }
-
-    /// Closes one per-call request descriptor exactly once.
-    pub fn closeRequest(_: *Native, fd: std.posix.fd_t) void {
-        _ = std.posix.system.close(fd);
+    /// Snapshot actual output facts, replacing the observer when outputs are
+    /// added/removed. Its fd may change and must update the borrowed slot.
+    pub fn observeSnapshot(native: *Native, _: std.mem.Allocator, event_fd: *std.posix.fd_t, _: u64) !wallpaper.Snapshot {
+        // A topology refresh may replace or lose the observer socket before
+        // producing a complete snapshot. Never leave a stale borrowed fd in
+        // the poll loop after the old Wayland connection has been destroyed.
+        errdefer event_fd.* = native.observer.fd();
+        const value = try native.observer.refresh();
+        event_fd.* = native.observer.fd();
+        return value;
     }
 
     pub fn openOutputs(native: *Native, snapshot: *const wallpaper.Snapshot) !void {
@@ -718,30 +698,6 @@ pub const Native = struct {
         return error.WaylandFlushAttemptsExceeded;
     }
 
-    /// Waits for one request socket direction before the shared deadline with stop priority.
-    pub fn waitSocket(
-        native: *Native,
-        fd: std.posix.fd_t,
-        stop_fd: std.posix.fd_t,
-        event_fd: std.posix.fd_t,
-        write: bool,
-        deadline: u64,
-    ) !void {
-        if (native.now() >= deadline) return error.ConnectionTimedOut;
-        var fds = [_]std.posix.pollfd{
-            .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = fd, .events = if (write) std.posix.POLL.OUT else std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        };
-        if (try native.pollUntil(&fds, deadline, false) == 0) return error.ConnectionTimedOut;
-        if (fds[0].revents != 0) return error.Stopped;
-        if (fds[2].revents != 0) return error.EventSocketLost;
-        if (!write and fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) return;
-        if (fds[1].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0) {
-            return error.ConnectionResetByPeer;
-        }
-    }
-
     // Polls through at most 16 interruptions; zero means one nonblocking attempt, not no poll.
     fn pollUntil(native: *Native, fds: []std.posix.pollfd, deadline: ?u64, zero: bool) !usize {
         for (0..16) |_| {
@@ -769,58 +725,6 @@ pub const Native = struct {
             break :blk &timeout;
         } else null;
         return std.posix.ppoll(fds, timeout_ptr, null);
-    }
-
-    // Opens one nonblocking Unix socket and either returns its sole fd owner or closes it on failure.
-    fn connectUnix(
-        native: *Native,
-        path: []const u8,
-        stop_fd: std.posix.fd_t,
-        event_fd: std.posix.fd_t,
-        deadline: u64,
-    ) !std.posix.fd_t {
-        if (path.len == 0 or path.len > 107) return error.SocketPathInvalid;
-        const result = std.posix.system.socket(
-            std.posix.AF.UNIX,
-            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-            0,
-        );
-        const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
-            @intCast(result)
-        else
-            return error.SocketOpenFailed;
-        errdefer _ = std.posix.system.close(fd);
-        var address: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = @splat(0) };
-        @memcpy(address.path[0..path.len], path);
-        const length: std.posix.socklen_t = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + path.len + 1);
-        switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address), length))) {
-            .SUCCESS => {},
-            .INPROGRESS => {
-                try native.waitSocket(fd, stop_fd, event_fd, true, deadline);
-                var value: c_int = 0;
-                var value_len: std.posix.socklen_t = @sizeOf(c_int);
-                if (std.posix.errno(std.posix.system.getsockopt(
-                    fd,
-                    std.posix.SOL.SOCKET,
-                    std.posix.SO.ERROR,
-                    @ptrCast(&value),
-                    &value_len,
-                )) != .SUCCESS or value_len != @sizeOf(c_int)) return error.SocketConnectFailed;
-                if (value != 0) switch (@as(std.posix.E, @fromBackingInt(@intCast(value)))) {
-                    .CONNREFUSED, .NOENT, .AGAIN => return error.ConnectionRefused,
-                    .CONNRESET => return error.ConnectionResetByPeer,
-                    .TIMEDOUT => return error.ConnectionTimedOut,
-                    else => return error.SocketConnectFailed,
-                };
-            },
-            .CONNREFUSED => return error.ConnectionRefused,
-            .CONNRESET => return error.ConnectionResetByPeer,
-            .NOENT, .AGAIN => return error.ConnectionRefused,
-            .TIMEDOUT => return error.ConnectionTimedOut,
-            .INTR => return error.ConnectionInterrupted,
-            else => return error.SocketConnectFailed,
-        }
-        return fd;
     }
 
     pub fn decode(
@@ -899,7 +803,7 @@ fn abstractAddress(signature: []const u8) !AbstractAddress {
         std.mem.indexOfAny(u8, signature, "\x00/") != null or
         prefix.len + signature.len > 107)
     {
-        return error.HyprlandSignatureInvalid;
+        return error.RotationInstanceInvalid;
     }
     var value: std.posix.sockaddr.un = .{ .family = std.posix.AF.UNIX, .path = @splat(0) };
     @memcpy(value.path[1..][0..prefix.len], prefix);
@@ -1015,26 +919,22 @@ fn pollDirect(io: std.Io, fd: std.posix.fd_t, events: i16, started: std.Io.Times
     }
 }
 
-/// Builds both bounded Hyprland Unix paths; invalid components publish no partial paths.
-pub fn buildSocketPaths(runtime: []const u8, signature: []const u8) !wallpaper.SocketPaths {
-    if (runtime.len == 0 or signature.len == 0 or
+/// Stable per-display identity for Wayspot rotation control, independent of
+/// compositor-specific sockets and without ever accepting PAM credentials.
+pub fn sessionIdentifier(runtime: []const u8, display: []const u8) ![32]u8 {
+    if (runtime.len == 0 or runtime.len > 4096 or runtime[0] != '/' or
+        display.len == 0 or display.len > 4096 or
         std.mem.indexOfScalar(u8, runtime, 0) != null or
-        std.mem.indexOfAny(u8, signature, "\x00/") != null or
-        !std.unicode.utf8ValidateSlice(runtime) or !std.unicode.utf8ValidateSlice(signature))
-    {
-        return error.HyprlandEnvironmentInvalid;
-    }
-    var paths: wallpaper.SocketPaths = .{ .request = .{}, .event = .{} };
-    inline for (.{
-        .{ &paths.request, ".socket.sock" },
-        .{ &paths.event, ".socket2.sock" },
-    }) |value| {
-        const bytes = std.fmt.bufPrint(&value[0].bytes, "{s}/hypr/{s}/{s}", .{
-            runtime, signature, value[1],
-        }) catch return error.SocketPathTooLong;
-        value[0].len = @intCast(bytes.len);
-    }
-    return paths;
+        std.mem.indexOfScalar(u8, display, 0) != null or
+        (display[0] != '/' and std.mem.indexOfAny(u8, display, "/\\") != null))
+        return error.InvalidWaylandSession;
+    var digest: [32]u8 = undefined;
+    var sha = std.crypto.hash.sha2.Sha256.init(.{});
+    sha.update(runtime);
+    sha.update(&.{0});
+    sha.update(display);
+    sha.final(&digest);
+    return std.fmt.bytesToHex(digest[0..16], .lower);
 }
 
 /// Blocks termination signals and returns their signalfd plus the exact prior mask.
@@ -1358,9 +1258,7 @@ fn reconcileParity(
     current: *wallpaper.Current(Native),
     stop_fd: std.posix.fd_t,
     event_fd: *std.posix.fd_t,
-    paths: *const wallpaper.SocketPaths,
 ) !void {
-    var lines: wallpaper.EventLines = .{};
     var work: wallpaper.Work = .refresh;
     _ = try wallpaper.reconcile(
         native,
@@ -1370,8 +1268,6 @@ fn reconcileParity(
         current,
         stop_fd,
         event_fd,
-        paths,
-        &lines,
         &work,
     );
 }
@@ -1379,25 +1275,19 @@ fn reconcileParity(
 test "native adapter reaches every one-surface operation without a display" {
     _ = surfaceParity;
     _ = reconcileParity;
-    _ = buildSocketPaths;
     _ = openStop;
     _ = closeStop;
 }
 
-test "Hyprland socket paths are exact and bounded" {
-    const paths = try buildSocketPaths("/run/user/1000", "instance");
-    try std.testing.expectEqualStrings(
-        "/run/user/1000/hypr/instance/.socket.sock",
-        paths.request.slice(),
-    );
-    try std.testing.expectEqualStrings(
-        "/run/user/1000/hypr/instance/.socket2.sock",
-        paths.event.slice(),
-    );
-    try std.testing.expectError(error.HyprlandEnvironmentInvalid, buildSocketPaths("", "x"));
-    try std.testing.expectError(error.HyprlandEnvironmentInvalid, buildSocketPaths("/run", "a/b"));
-    var runtime: [100]u8 = @splat('a');
-    try std.testing.expectError(error.SocketPathTooLong, buildSocketPaths(&runtime, "instance"));
+test "rotation socket identity is stable per Wayland display and rejects malformed context" {
+    const one = try sessionIdentifier("/run/user/1000", "wayland-0");
+    const same = try sessionIdentifier("/run/user/1000", "wayland-0");
+    const different = try sessionIdentifier("/run/user/1000", "wayland-1");
+    try std.testing.expectEqual(one, same);
+    try std.testing.expect(!std.mem.eql(u8, &one, &different));
+    try std.testing.expectError(error.InvalidWaylandSession, sessionIdentifier("relative", "wayland-0"));
+    try std.testing.expectError(error.InvalidWaylandSession, sessionIdentifier("/run/user/1000", "abc/def"));
+    try std.testing.expectError(error.InvalidWaylandSession, sessionIdentifier("/run/user/1000", ""));
 }
 
 test "output probe owns only one exact name and done identity" {
@@ -1484,30 +1374,6 @@ test "zero-time poll observes readiness with absent borrowed descriptors" {
     try std.testing.expectEqual(@as(i16, 0), fds[0].revents);
     try std.testing.expect(fds[1].revents & std.posix.POLL.IN != 0);
     try std.testing.expectEqual(@as(i16, 0), fds[2].revents);
-}
-
-test "request wait drains bytes before peer close and then observes EOF" {
-    var sockets: [2]std.posix.fd_t = undefined;
-    const result = std.posix.system.socketpair(
-        std.posix.AF.UNIX,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-        0,
-        &sockets,
-    );
-    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
-    const writer = std.Io.File{ .handle = sockets[0], .flags = .{ .nonblocking = true } };
-    defer _ = std.posix.system.close(sockets[1]);
-    try writer.writeStreamingAll(std.testing.io, "[]");
-    writer.close(std.testing.io);
-    sockets[0] = -1;
-
-    var native: Native = .{ .io = std.testing.io };
-    try native.waitSocket(sockets[1], -1, -1, false, native.now() + 100);
-    var bytes: [2]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 2), try native.readReply(sockets[1], &bytes));
-    try std.testing.expectEqualStrings("[]", &bytes);
-    try native.waitSocket(sockets[1], -1, -1, false, native.now() + 100);
-    try std.testing.expectEqual(@as(usize, 0), try native.readReply(sockets[1], &bytes));
 }
 
 test "native PNG decode and linear cover scaling" {
@@ -1685,4 +1551,8 @@ fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
         try std.testing.expect(image.height > 0 and image.height <= wallpaper.image_side_capacity);
         try std.testing.expectEqual(@as(usize, image.width) * image.height, image.pixels.len);
     } else |_| {}
+}
+
+test "Wayland output observer contracts" {
+    _ = @import("wallpaper_outputs.zig");
 }

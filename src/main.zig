@@ -148,11 +148,13 @@ fn perform(
         },
         .wallpaper => |wallpaper_command| switch (wallpaper_command) {
             .run => |root| try runWallpaper(init, root),
-            .rotate => try wallpaper_native.requestRotation(
-                init.io,
-                init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse
-                    return error.HyprlandSignatureMissing,
-            ),
+            .rotate => {
+                const identifier = try wallpaper_native.sessionIdentifier(
+                    init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
+                    init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,
+                );
+                try wallpaper_native.requestRotation(init.io, &identifier);
+            },
         },
         .apps => |app| switch (app) {
             .list => |query| {
@@ -180,14 +182,12 @@ fn perform(
 fn runWallpaper(init: std.process.Init, root: []const u8) !void {
     var catalog = try wallpaper_native.discoverCatalog(init.io, init.gpa, root);
     defer catalog.deinit();
-    const signature = init.environ_map.get("HYPRLAND_INSTANCE_SIGNATURE") orelse
-        return error.HyprlandSignatureMissing;
-    const paths = try wallpaper_native.buildSocketPaths(
+    const identifier = try wallpaper_native.sessionIdentifier(
         init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
-        signature,
+        init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,
     );
     var resident = wallpaper_native.Native{ .io = init.io };
-    try resident.openRotation(signature);
+    try resident.openRotation(&identifier);
     defer resident.closeRotation();
     const native = try resident.createNative(init.gpa);
     var current = wallpaper.Current(wallpaper_native.Native){ .native = native, .round = .{} };
@@ -225,7 +225,6 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
         &current,
         stop.fd,
         &event_fd,
-        &paths,
         wallpaper.rotation_interval_milliseconds,
     ) catch |err| {
         if (err != error.Stopped) return err;
