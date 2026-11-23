@@ -240,6 +240,8 @@ pub const Frame = struct {
     first: usize = 0,
     total_count: usize = 0,
     window_status: WindowStatus = .dormant,
+    /// Specific backend error, retained while the window finder is unavailable.
+    window_error: ?[]const u8 = null,
 
     pub fn rowSlice(frame: *const Frame) []const Row {
         return frame.rows[0..frame.row_count];
@@ -286,6 +288,7 @@ pub fn run(
     operations: anytype,
     history_reader: anytype,
     navigator_operations: anytype,
+    window_backend: ?navigator.Backend,
     allocator: std.mem.Allocator,
     self_pid: i64,
     applications: []const apps.App,
@@ -293,6 +296,7 @@ pub fn run(
     var state: State = .{
         .allocator = allocator,
         .self_pid = self_pid,
+        .window_backend = window_backend,
         .applications = applications,
     };
     defer state.rows.deinit(allocator);
@@ -313,6 +317,7 @@ pub fn run(
 const State = struct {
     allocator: std.mem.Allocator,
     self_pid: i64 = -1,
+    window_backend: ?navigator.Backend = null,
     applications: []const apps.App,
     query: Query = .{},
     rows: Rows = .{ .apps = .{ .applications = &.{}, .matches = .{} } },
@@ -320,6 +325,7 @@ const State = struct {
     first: usize = 0,
     finder: Finder = .applications,
     window_status: WindowStatus = .dormant,
+    window_error: ?[]const u8 = null,
     window_snapshot: navigator.Snapshot = .{},
 
     fn setQuery(state: *State, history_reader: anytype, query: Query) !void {
@@ -362,6 +368,7 @@ const State = struct {
 
     fn enterApplications(state: *State, history_reader: anytype) !void {
         state.finder = .applications;
+        state.window_error = null;
         const query: Query = .{};
         try state.setQuery(history_reader, query);
     }
@@ -370,13 +377,13 @@ const State = struct {
         state.finder = .windows;
         state.window_snapshot = .{};
         state.window_status = .dormant;
-        const snapshot = navigator.load(
-            operations,
-            state.allocator,
-            state.self_pid,
-        ) catch |failure| switch (failure) {
+        state.window_error = null;
+        const snapshot = navigator.load(operations, state.allocator, state.window_backend, state.self_pid) catch |failure| switch (failure) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.SnowmanWindowDiscoveryUnavailable => return error.SnowmanWindowDiscoveryUnavailable,
             else => {
+                state.window_error = @errorName(failure);
+                if (!@import("builtin").is_test) std.log.warn("wayspot window discovery failed: {s}", .{state.window_error.?});
                 state.window_status = .unavailable;
                 const query: Query = .{};
                 try state.setQueryNoHistory(query);
@@ -405,9 +412,12 @@ const State = struct {
             .window => |row| row.window,
             else => return error.WindowRowExpected,
         };
-        navigator.focus(operations, state.allocator, window.stable_id.slice()) catch |failure| switch (failure) {
+        navigator.focus(operations, state.allocator, state.window_backend, window.stable_id.slice()) catch |failure| switch (failure) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.SnowmanFocusUnavailable => return error.SnowmanFocusUnavailable,
             else => {
+                state.window_error = @errorName(failure);
+                if (!@import("builtin").is_test) std.log.warn("wayspot focus of window {s} failed: {s}", .{ window.stable_id.slice(), state.window_error.? });
                 state.window_status = .focus_failed;
                 return false;
             },
@@ -511,6 +521,7 @@ fn makeFrame(state: *const State) Frame {
         .first = @min(state.first, total),
         .total_count = total,
         .window_status = state.window_status,
+        .window_error = state.window_error,
     };
     while (frame.first + frame.row_count < frame.total_count) {
         if (frame.row_count == visible_row_capacity) break;

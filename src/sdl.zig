@@ -174,14 +174,21 @@ pub const Native = struct {
         if (!sdl.SDL_SetRenderDrawColor(renderer, 30, 31, 39, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderFillRect(renderer, &query_pane)) return error.SdlDrawFailed;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
-        const query: []const u8 = if (frame.query.len == 0) switch (frame.table) {
+        var failure_text: [160]u8 = undefined;
+        const query: []const u8 = if (frame.table == .windows and frame.window_error != null and
+            (frame.window_status == .unavailable or frame.window_status == .focus_failed))
+            std.fmt.bufPrint(&failure_text, "{s}: {s}  ·  Tab: applications", .{
+                if (frame.window_status == .unavailable) @as([]const u8, "Windows unavailable") else "Window focus failed",
+                frame.window_error.?,
+            }) catch return error.SdlDrawFailed
+        else if (frame.query.len == 0) switch (frame.table) {
             .root => "Choose a mode",
             .apps => "Search applications   ·   Tab: windows",
             .windows => switch (frame.window_status) {
                 .dormant, .ready => "Search windows   ·   Tab: applications",
                 .empty => "No windows   ·   Tab: applications",
                 .unavailable => "Windows unavailable   ·   Tab: applications",
-                .focus_failed => "Window moved or disappeared   ·   Tab: applications",
+                .focus_failed => "Window focus failed   ·   Tab: applications",
             },
             .notifications => "Notification history",
         } else frame.query;

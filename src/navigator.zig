@@ -1,110 +1,50 @@
-//! Owns one bounded, invocation-local WMIO desktop snapshot and exact focus action.
-//!
-//! Wayspot deliberately learns graphical truth only through WMIO's public
-//! `wmio/v1` envelope. The picker decides when to load this model; this module
-//! has no resident watcher, persistent cache, or Hyprland vocabulary.
-
+//! On-demand window discovery and focus. No resident state or compositor fallback.
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const max_windows = 128;
+const max_reply = 256 * 1024;
+const max_action_reply = 64 * 1024;
 
-pub const window_capacity: usize = 128;
-pub const response_capacity: usize = 256 * 1024;
-pub const action_response_capacity: usize = 64 * 1024;
-pub const error_response_capacity: usize = 16 * 1024;
-pub const process_timeout: std.Io.Clock.Duration = .{
-    .raw = .fromSeconds(2),
-    .clock = .awake,
-};
-
-const stable_id_capacity: usize = 128;
-const workspace_id_capacity: usize = 128;
-const monitor_id_capacity: usize = 128;
-const app_id_capacity: usize = 192;
-const title_capacity: usize = 384;
-
-fn FixedText(comptime capacity: usize) type {
-    comptime std.debug.assert(capacity <= std.math.maxInt(u16));
+fn Text(comptime capacity: usize) type {
     return struct {
-        const Self = @This();
-
         bytes: [capacity]u8 = undefined,
         len: u16 = 0,
 
-        pub fn exact(input: []const u8) !Self {
-            if (input.len == 0) return error.TextEmpty;
-            if (input.len > capacity) return error.TextTooLong;
-            if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
-            if (std.mem.indexOfScalar(u8, input, 0) != null) return error.TextInvalid;
-            var value: Self = .{ .len = @intCast(input.len) };
-            @memcpy(value.bytes[0..input.len], input);
-            return value;
+        pub fn exact(input: []const u8) !@This() {
+            if (input.len == 0 or input.len > capacity or !std.unicode.utf8ValidateSlice(input) or
+                std.mem.indexOfScalar(u8, input, 0) != null) return error.InvalidText;
+            var text: @This() = .{ .len = @intCast(input.len) };
+            @memcpy(text.bytes[0..input.len], input);
+            return text;
         }
 
-        pub fn display(input: []const u8) !Self {
-            if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
-            if (std.mem.indexOfScalar(u8, input, 0) != null) return error.TextInvalid;
-            if (input.len <= capacity) {
-                var value: Self = .{ .len = @intCast(input.len) };
-                @memcpy(value.bytes[0..input.len], input);
-                return value;
-            }
-            const ellipsis = "…";
-            comptime std.debug.assert(capacity > ellipsis.len);
-            var prefix = capacity - ellipsis.len;
-            while (prefix > 0 and textContinuation(input[prefix])) prefix -= 1;
-            var value: Self = .{ .len = @intCast(prefix + ellipsis.len) };
-            @memcpy(value.bytes[0..prefix], input[0..prefix]);
-            @memcpy(value.bytes[prefix..][0..ellipsis.len], ellipsis);
-            return value;
+        pub fn display(input: []const u8) !@This() {
+            if (!std.unicode.utf8ValidateSlice(input) or std.mem.indexOfScalar(u8, input, 0) != null) return error.InvalidText;
+            if (input.len == 0) return .{};
+            if (input.len <= capacity) return exact(input);
+            var end = capacity - "…".len;
+            while (!std.unicode.utf8ValidateSlice(input[0..end])) end -= 1;
+            var text: @This() = .{ .len = @intCast(end + "…".len) };
+            @memcpy(text.bytes[0..end], input[0..end]);
+            @memcpy(text.bytes[end..][0.."…".len], "…");
+            return text;
         }
 
-        pub fn slice(value: *const Self) []const u8 {
-            return value.bytes[0..value.len];
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
         }
     };
 }
 
-fn textContinuation(byte: u8) bool {
-    return byte & 0b1100_0000 == 0b1000_0000;
-}
-
-pub const StableId = FixedText(stable_id_capacity);
-pub const WorkspaceId = FixedText(workspace_id_capacity);
-pub const MonitorId = FixedText(monitor_id_capacity);
-pub const AppId = FixedText(app_id_capacity);
-pub const Title = FixedText(title_capacity);
-
-pub const ViewportState = enum {
-    visible,
-    partial,
-    offscreen,
-    unknown,
-};
-
-pub const Presentation = enum {
-    presented,
-    workspace_inactive,
-    occluded,
-    hidden,
-    unmapped,
-};
-
-pub const Edges = struct {
-    left: bool = false,
-    right: bool = false,
-    top: bool = false,
-    bottom: bool = false,
-
-    pub fn any(edges: Edges) bool {
-        return edges.left or edges.right or edges.top or edges.bottom;
-    }
-};
-
-pub const Geometry = struct {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-};
+pub const StableId = Text(128);
+pub const WorkspaceId = Text(128);
+pub const MonitorId = Text(128);
+pub const AppId = Text(192);
+pub const Title = Text(384);
+pub const Geometry = struct { x: f64, y: f64, width: f64, height: f64 };
+pub const ViewportState = enum { visible, partial, offscreen, unknown };
+pub const Presentation = enum { presented, workspace_inactive, occluded, hidden, unmapped };
+pub const Edges = struct { left: bool = false, right: bool = false, top: bool = false, bottom: bool = false };
 
 pub const Window = struct {
     stable_id: StableId,
@@ -113,50 +53,35 @@ pub const Window = struct {
     workspace_id: ?WorkspaceId,
     monitor_id: ?MonitorId,
     geometry: Geometry,
-    viewport: ViewportState,
-    edges: Edges,
+    viewport: ViewportState = .unknown,
+    edges: Edges = .{},
     presentation: Presentation,
     focus_rank: ?u32,
     active: bool,
     floating: bool,
     fullscreen: bool,
-
-    pub fn label(window: *const Window) []const u8 {
-        if (window.title.len > 0) return window.title.slice();
-        if (window.app_id.len > 0) return window.app_id.slice();
-        return window.stable_id.slice();
-    }
 };
 
-pub const WorkspacePosition = struct {
-    ordinal: u16,
-    total: u16,
-};
-
+pub const WorkspacePosition = struct { ordinal: u16, total: u16 };
 pub const Snapshot = struct {
-    windows: [window_capacity]Window = undefined,
+    windows: [max_windows]Window = undefined,
     count: usize = 0,
 
-    pub fn slice(snapshot: *const Snapshot) []const Window {
-        return snapshot.windows[0..snapshot.count];
+    pub fn slice(self: *const Snapshot) []const Window {
+        return self.windows[0..self.count];
     }
 
-    pub fn selected(snapshot: *const Snapshot) ?usize {
-        return if (snapshot.count == 0) null else 0;
-    }
-
-    /// Returns a stable 1/N geometry ordinal without changing the finder's MRU order.
-    pub fn workspacePosition(snapshot: *const Snapshot, index: usize) ?WorkspacePosition {
-        if (index >= snapshot.count) return null;
-        const target = &snapshot.windows[index];
-        const workspace_id = target.workspace_id orelse return null;
+    pub fn workspacePosition(self: *const Snapshot, index: usize) ?WorkspacePosition {
+        if (index >= self.count) return null;
+        const target = &self.windows[index];
+        const workspace = target.workspace_id orelse return null;
         var total: u16 = 0;
         var before: u16 = 0;
-        for (snapshot.slice()) |*candidate| {
-            const candidate_workspace = candidate.workspace_id orelse continue;
-            if (!std.mem.eql(u8, candidate_workspace.slice(), workspace_id.slice())) continue;
+        for (self.slice()) |*window| {
+            const candidate = window.workspace_id orelse continue;
+            if (!std.mem.eql(u8, workspace.slice(), candidate.slice())) continue;
             total += 1;
-            if (spatialLessThan(candidate, target)) before += 1;
+            if (spatialLess(window, target)) before += 1;
         }
         std.debug.assert(total > 0);
         return .{ .ordinal = before + 1, .total = total };
@@ -164,82 +89,114 @@ pub const Snapshot = struct {
 };
 
 pub const Matches = struct {
-    indexes: [window_capacity]u16 = undefined,
+    indexes: [max_windows]u16 = undefined,
     count: usize = 0,
 
     pub fn init(snapshot: *const Snapshot, query: []const u8) !Matches {
-        if (query.len > 256) return error.QueryTooLong;
-        if (!std.unicode.utf8ValidateSlice(query)) return error.InvalidUtf8;
+        if (query.len > 256 or !std.unicode.utf8ValidateSlice(query)) return error.InvalidQuery;
         var matches: Matches = .{};
-        for (snapshot.slice(), 0..) |window, index| {
-            if (!windowMatches(&window, query)) continue;
+        for (snapshot.slice(), 0..) |*window, index| {
+            const workspace = if (window.workspace_id) |id| id.slice() else "";
+            const monitor = if (window.monitor_id) |id| id.slice() else "";
+            const ws_query = workspace.len != 0 and query.len > 3 and
+                std.ascii.eqlIgnoreCase(query[0..3], "ws ") and
+                std.ascii.eqlIgnoreCase(std.mem.trimStart(u8, query[3..], " "), workspace);
+            if (!contains(window.app_id.slice(), query) and !contains(window.title.slice(), query) and
+                !contains(workspace, query) and !contains(monitor, query) and !ws_query) continue;
             matches.indexes[matches.count] = @intCast(index);
             matches.count += 1;
         }
         return matches;
     }
 
-    pub fn slice(matches: *const Matches) []const u16 {
-        return matches.indexes[0..matches.count];
+    pub fn slice(self: *const Matches) []const u16 {
+        return self.indexes[0..self.count];
     }
 };
 
-fn windowMatches(window: *const Window, query: []const u8) bool {
-    if (query.len == 0) return true;
-    if (containsIgnoreCase(window.app_id.slice(), query)) return true;
-    if (containsIgnoreCase(window.title.slice(), query)) return true;
-    if (window.workspace_id) |workspace_id| {
-        if (containsIgnoreCase(workspace_id.slice(), query)) return true;
-        if (workspaceQuery(query, workspace_id.slice())) return true;
-    }
-    if (window.monitor_id) |monitor_id| {
-        if (containsIgnoreCase(monitor_id.slice(), query)) return true;
+fn contains(text: []const u8, query: []const u8) bool {
+    if (query.len > text.len) return false;
+    for (0..text.len - query.len + 1) |i| {
+        if (std.ascii.eqlIgnoreCase(text[i..][0..query.len], query)) return true;
     }
     return false;
 }
 
-fn workspaceQuery(query: []const u8, workspace_id: []const u8) bool {
-    if (query.len < 2) return false;
-    if (std.ascii.toLower(query[0]) != 'w' or std.ascii.toLower(query[1]) != 's') return false;
-    var start: usize = 2;
-    while (start < query.len and query[start] == ' ') start += 1;
-    return start < query.len and std.ascii.eqlIgnoreCase(query[start..], workspace_id);
+fn spatialLess(a: *const Window, b: *const Window) bool {
+    if (a.geometry.x != b.geometry.x) return a.geometry.x < b.geometry.x;
+    if (a.geometry.y != b.geometry.y) return a.geometry.y < b.geometry.y;
+    if (a.geometry.width != b.geometry.width) return a.geometry.width < b.geometry.width;
+    if (a.geometry.height != b.geometry.height) return a.geometry.height < b.geometry.height;
+    return std.mem.lessThan(u8, a.stable_id.slice(), b.stable_id.slice());
 }
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    if (needle.len == 0) return true;
-    for (0..haystack.len - needle.len + 1) |index| {
-        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+fn windowLess(_: void, a: Window, b: Window) bool {
+    if (a.active != b.active) return a.active;
+    if (a.focus_rank != b.focus_rank) {
+        if (a.focus_rank == null) return false;
+        if (b.focus_rank == null) return true;
+        return a.focus_rank.? < b.focus_rank.?;
     }
-    return false;
+    if (a.workspace_id) |workspace| {
+        if (b.workspace_id) |other| {
+            const order = std.mem.order(u8, workspace.slice(), other.slice());
+            if (order != .eq) return order == .lt;
+        } else return true;
+    } else if (b.workspace_id != null) return false;
+    return spatialLess(&a, &b);
 }
 
-pub const Request = union(enum) {
-    desktop,
-    focus: []const u8,
+/// The session's exact SDDM desktop identity, not a compatibility list.
+pub const Backend = enum { hyprland, snowman };
+pub fn backendForSession(desktop: ?[]const u8) ?Backend {
+    const name = desktop orelse return null;
+    if (std.mem.eql(u8, name, "Hyprland")) return .hyprland;
+    if (std.mem.eql(u8, name, "Snowman")) return .snowman;
+    return null;
+}
 
-    pub fn arguments(request: Request, storage: *[4][]const u8) []const []const u8 {
-        return switch (request) {
-            .desktop => blk: {
-                storage[0] = "wmio";
-                storage[1] = "desktop";
-                break :blk storage[0..2];
-            },
-            .focus => |stable_id| blk: {
-                storage[0] = "wmio";
-                storage[1] = "focus";
-                storage[2] = "--stable-id";
-                storage[3] = stable_id;
-                break :blk storage[0..4];
+/// Select a compositor's window listing operation.
+pub const WindowDiscovery = union(Backend) {
+    hyprland: void,
+    snowman: void,
+
+    pub fn argv(self: WindowDiscovery) ![]const []const u8 {
+        return switch (self) {
+            .hyprland => &.{ "hyprctl", "-j", "clients" },
+            .snowman => error.SnowmanWindowDiscoveryUnavailable,
+        };
+    }
+};
+
+/// Focus one exact compositor-native window identity.
+pub const WindowFocus = union(Backend) {
+    hyprland: []const u8,
+    snowman: []const u8,
+
+    pub fn argv(self: WindowFocus, storage: *[3][]const u8, target: *[136]u8) ![]const []const u8 {
+        return switch (self) {
+            .snowman => error.SnowmanFocusUnavailable,
+            .hyprland => |id| blk: {
+                try validAddress(id);
+                // Hyprland 0.56+ dispatches Lua expressions, not legacy names.
+                storage[0] = "hyprctl";
+                storage[1] = "dispatch";
+                storage[2] = try std.fmt.bufPrint(target, "hl.dsp.focus({{ window = \"address:{s}\" }})", .{id});
+                break :blk storage[0..3];
             },
         };
     }
+};
 
-    pub fn stdoutLimit(request: Request) usize {
-        return switch (request) {
-            .desktop => response_capacity,
-            .focus => action_response_capacity,
+/// Observe the compositor's actual focused window after dispatch.
+pub const FocusObservation = union(Backend) {
+    hyprland: void,
+    snowman: void,
+
+    pub fn argv(self: FocusObservation) ![]const []const u8 {
+        return switch (self) {
+            .hyprland => &.{ "hyprctl", "-j", "activewindow" },
+            .snowman => error.SnowmanFocusUnavailable,
         };
     }
 };
@@ -249,619 +206,293 @@ pub const ProcessResult = struct {
     stderr: []u8,
     succeeded: bool,
 
-    pub fn deinit(result: *ProcessResult, allocator: std.mem.Allocator) void {
-        allocator.free(result.stderr);
-        allocator.free(result.stdout);
-        result.* = undefined;
+    pub fn deinit(self: *ProcessResult, allocator: Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+        self.* = undefined;
     }
 };
 
-pub const Native = struct {
-    io: std.Io,
-
-    pub fn run(
-        native: *Native,
-        allocator: std.mem.Allocator,
-        request: Request,
-    ) !ProcessResult {
-        var argument_storage: [4][]const u8 = undefined;
-        const arguments = request.arguments(&argument_storage);
-        const result = std.process.run(allocator, native.io, .{
-            .argv = arguments,
-            .stdout_limit = .limited(request.stdoutLimit()),
-            .stderr_limit = .limited(error_response_capacity),
-            .timeout = .{ .duration = process_timeout },
+/// Native operations use std.Io; tests may supply a deterministic subprocess transcript.
+fn run(operations: anytype, allocator: Allocator, argv: []const []const u8, max_stdout: usize) !ProcessResult {
+    if (@TypeOf(operations) == std.Io) {
+        const child = std.process.run(allocator, operations, .{
+            .argv = argv,
+            .stdout_limit = .limited(max_stdout),
+            .stderr_limit = .limited(16 * 1024),
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
         }) catch |failure| return switch (failure) {
-            error.FileNotFound => error.WmioUnavailable,
-            error.StreamTooLong => error.WmioOutputTooLong,
-            error.Timeout => error.WmioTimedOut,
+            error.FileNotFound => error.CompositorCliUnavailable,
+            error.StreamTooLong => error.CompositorReplyTooLong,
+            error.Timeout => error.CompositorCliTimedOut,
             error.OutOfMemory => error.OutOfMemory,
-            else => error.WmioSpawnFailed,
+            else => error.CompositorCliFailed,
         };
         return .{
-            .stdout = result.stdout,
-            .stderr = result.stderr,
-            .succeeded = termSucceeded(result.term),
+            .stdout = child.stdout,
+            .stderr = child.stderr,
+            .succeeded = switch (child.term) {
+                .exited => |code| code == 0,
+                else => false,
+            },
         };
+    } else return operations.run(allocator, argv, max_stdout);
+}
+
+/// Read current mapped windows only when the picker enters window mode.
+pub fn load(operations: anytype, allocator: Allocator, backend: ?Backend, self_pid: i64) !Snapshot {
+    switch (backend orelse return error.UnsupportedCompositor) {
+        .snowman => return error.SnowmanWindowDiscoveryUnavailable,
+        .hyprland => {},
     }
-};
-
-fn termSucceeded(term: std.process.Child.Term) bool {
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-}
-
-/// Reads one fresh bounded desktop snapshot through the public WMIO CLI.
-pub fn load(
-    operations: anytype,
-    allocator: std.mem.Allocator,
-    self_pid: i64,
-) !Snapshot {
-    var result = try operations.run(allocator, Request{ .desktop = {} });
+    var result = try run(operations, allocator, try (WindowDiscovery{ .hyprland = {} }).argv(), 256 * 1024);
     defer result.deinit(allocator);
-    if (!result.succeeded) return error.WmioRejected;
-    return parseDesktop(allocator, result.stdout, self_pid);
+    if (!result.succeeded) return error.CompositorCliRejected;
+    return parseDesktop(allocator, result.stdout, self_pid, .hyprland);
 }
 
-/// Requests and verifies exact stable-id focus through the public WMIO CLI.
-pub fn focus(
-    operations: anytype,
-    allocator: std.mem.Allocator,
-    stable_id: []const u8,
-) !void {
-    _ = try StableId.exact(stable_id);
-    var result = try operations.run(allocator, .{ .focus = stable_id });
+/// Focus one window through Hyprland; Snowman refuses without invoking a CLI.
+pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: []const u8) !void {
+    switch (backend orelse return error.UnsupportedCompositor) {
+        .snowman => return error.SnowmanFocusUnavailable,
+        .hyprland => {},
+    }
+    var storage: [3][]const u8 = undefined;
+    var target: [136]u8 = undefined;
+    var result = try run(operations, allocator, try (WindowFocus{ .hyprland = id }).argv(&storage, &target), max_action_reply);
     defer result.deinit(allocator);
-    if (!result.succeeded) return error.WmioRejected;
-    try parseFocus(allocator, result.stdout, stable_id);
-}
-
-pub fn parseDesktop(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    self_pid: i64,
-) !Snapshot {
-    if (bytes.len > response_capacity) return error.WmioOutputTooLong;
-    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
-        .parse_numbers = false,
-        .duplicate_field_behavior = .@"error",
-        .max_value_len = response_capacity,
-    }) catch |failure| return switch (failure) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.WmioMalformed,
-    };
-    defer parsed.deinit();
-
-    const envelope = try object(parsed.value);
-    try validateEnvelope(envelope, "desktop");
-    const data = try object(try field(envelope, "data"));
-    var snapshot: Snapshot = .{};
-
-    const windows = try array(try field(data, "windows"));
-    if (windows.len > window_capacity) return error.TooManyWindows;
-    for (windows) |value| {
-        const window_object = try object(value);
-        if (!try booleanField(window_object, "mapped")) continue;
-        if (!try booleanField(window_object, "accepts_input")) continue;
-        const pid = try nullableIntegerField(window_object, "pid");
-        if (pid != null and pid.? == self_pid) continue;
-        if (snapshot.count == snapshot.windows.len) return error.TooManyWindows;
-        const retained = try parseWindow(window_object);
-        for (snapshot.windows[0..snapshot.count]) |existing| {
-            if (std.mem.eql(u8, existing.stable_id.slice(), retained.stable_id.slice())) {
-                return error.DuplicateStableId;
+    if (!result.succeeded or !std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), "ok")) {
+        if (!@import("builtin").is_test) {
+            // Quote bounded CLI output so diagnostics cannot inject terminal controls.
+            const details = std.json.Stringify.valueAlloc(allocator, .{
+                .exit_ok = result.succeeded,
+                .stdout = result.stdout[0..@min(result.stdout.len, 256)],
+                .stderr = result.stderr[0..@min(result.stderr.len, 256)],
+            }, .{}) catch null;
+            if (details) |reply| {
+                defer allocator.free(reply);
+                std.log.warn("hyprctl focus dispatch rejected: {s}", .{reply});
             }
         }
-        snapshot.windows[snapshot.count] = retained;
+        return error.CompositorFocusRejected;
+    }
+    var observed = try run(operations, allocator, try (FocusObservation{ .hyprland = {} }).argv(), max_action_reply);
+    defer observed.deinit(allocator);
+    if (!observed.succeeded) return error.CompositorFocusUnverified;
+    if (observed.stdout.len > max_action_reply) return error.CompositorReplyTooLong;
+    var active = std.json.parseFromSlice(struct { address: []const u8 }, allocator, observed.stdout, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch return error.CompositorReplyMalformed;
+    defer active.deinit();
+    try validAddress(active.value.address);
+    if (!std.ascii.eqlIgnoreCase(active.value.address, id)) return error.CompositorFocusMismatch;
+}
+
+const Client = struct {
+    address: []const u8,
+    class: []const u8,
+    title: []const u8,
+    pid: ?i64 = null,
+    mapped: bool,
+    xwayland_hidden: bool = false,
+    hidden: bool = false,
+    at: [2]f64,
+    size: [2]f64,
+    workspace: struct {
+        id: ?i64 = null,
+        address: ?[]const u8 = null,
+    },
+    monitor: i64,
+    floating: bool,
+    fullscreen: std.json.Value,
+    focusHistoryID: ?i64 = null,
+};
+
+/// Decode one bounded, owned Hyprland client list into the picker's window model.
+pub fn parseDesktop(allocator: Allocator, bytes: []const u8, self_pid: i64, backend: Backend) !Snapshot {
+    if (backend == .snowman) return error.SnowmanWindowDiscoveryUnavailable;
+    if (bytes.len > max_reply) return error.CompositorReplyTooLong;
+    var decoded = std.json.parseFromSlice([]Client, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .@"error",
+        .max_value_len = max_reply,
+    }) catch |failure| {
+        if (failure == error.OutOfMemory) return error.OutOfMemory;
+        // Only on schema failure: locate the bad client without exposing titles
+        // or paying for a second decode on successful discovery.
+        var raw = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
+            .duplicate_field_behavior = .@"error",
+            .max_value_len = max_reply,
+        }) catch {
+            if (!@import("builtin").is_test) std.log.warn("hyprctl clients JSON syntax error: {s}", .{@errorName(failure)});
+            return error.CompositorReplyMalformed;
+        };
+        defer raw.deinit();
+        if (raw.value == .array) {
+            for (raw.value.array.items, 0..) |entry, index| {
+                var checked = std.json.parseFromValue(Client, allocator, entry, .{
+                    .ignore_unknown_fields = true,
+                }) catch |cause| {
+                    if (cause == error.OutOfMemory) return error.OutOfMemory;
+                    if (!@import("builtin").is_test) std.log.warn("hyprctl clients[{d}] schema mismatch: {s}", .{ index, @errorName(cause) });
+                    return error.CompositorReplyMalformed;
+                };
+                checked.deinit();
+            }
+        }
+        if (!@import("builtin").is_test) std.log.warn("hyprctl clients JSON decode failed: {s}", .{@errorName(failure)});
+        return error.CompositorReplyMalformed;
+    };
+    defer decoded.deinit();
+    if (decoded.value.len > max_windows) return error.TooManyWindows;
+    var snapshot: Snapshot = .{};
+    for (decoded.value, 0..) |client, index| {
+        if (!client.mapped or client.xwayland_hidden or (client.pid != null and client.pid.? == self_pid)) continue;
+        try validAddress(client.address);
+        // A mapped scratchpad may be hidden before it receives positive geometry.
+        // Preserve it in the finder without inventing dimensions or rejecting the list.
+        if (!std.math.isFinite(client.at[0]) or !std.math.isFinite(client.at[1]) or
+            !std.math.isFinite(client.size[0]) or !std.math.isFinite(client.size[1]) or
+            client.size[0] < 0 or client.size[1] < 0)
+        {
+            if (!@import("builtin").is_test) std.log.warn("hyprctl clients[{d}] ({s}): nonfinite or negative geometry", .{ index, client.address });
+            return error.GeometryInvalid;
+        }
+        const fullscreen = switch (client.fullscreen) {
+            .bool => |v| v,
+            .integer => |v| v != 0,
+            else => {
+                if (!@import("builtin").is_test) std.log.warn("hyprctl clients[{d}] fullscreen is not boolean or integer", .{index});
+                return error.CompositorReplyMalformed;
+            },
+        };
+        var ws: [32]u8 = undefined;
+        var monitor: [32]u8 = undefined;
+        const rank = client.focusHistoryID;
+        // Hyprland's special workspaces have an address but no numeric id.
+        const workspace = if (client.workspace.id) |id|
+            try std.fmt.bufPrint(&ws, "{d}", .{id})
+        else
+            client.workspace.address orelse return error.CompositorFieldMissing;
+        const window: Window = .{
+            .stable_id = try StableId.exact(client.address),
+            .app_id = try AppId.display(client.class),
+            .title = try Title.display(client.title),
+            .workspace_id = try WorkspaceId.exact(workspace),
+            .monitor_id = if (client.monitor < 0) null else try MonitorId.exact(try std.fmt.bufPrint(&monitor, "{d}", .{client.monitor})),
+            .geometry = .{ .x = client.at[0], .y = client.at[1], .width = client.size[0], .height = client.size[1] },
+            .presentation = if (client.hidden) .hidden else .presented,
+            .focus_rank = if (rank != null and rank.? >= 0 and rank.? <= std.math.maxInt(u32)) @intCast(rank.?) else null,
+            .active = rank != null and rank.? == 0,
+            .floating = client.floating,
+            .fullscreen = fullscreen,
+        };
+        for (snapshot.slice()) |existing| {
+            if (std.mem.eql(u8, existing.stable_id.slice(), window.stable_id.slice())) return error.DuplicateStableId;
+        }
+        snapshot.windows[snapshot.count] = window;
         snapshot.count += 1;
     }
-    std.mem.sort(Window, snapshot.windows[0..snapshot.count], {}, windowLessThan);
+    std.mem.sort(Window, snapshot.windows[0..snapshot.count], {}, windowLess);
     return snapshot;
 }
 
-fn parseWindow(object_value: std.json.ObjectMap) !Window {
-    const viewport = try parseViewport(object_value.get("viewport"));
-    const mode = try stringField(object_value, "mode");
-    const workspace_ids = try array(try field(object_value, "workspace_ids"));
-    const workspace_id: ?WorkspaceId = if (workspace_ids.len == 0)
-        null
-    else
-        try WorkspaceId.exact(try string(workspace_ids[0]));
-    const focus_rank_value = try optionalNullableIntegerField(object_value, "focus_rank");
-    const focus_rank: ?u32 = if (focus_rank_value) |rank| blk: {
-        if (rank < 0 or rank > std.math.maxInt(u32)) return error.FocusRankInvalid;
-        break :blk @intCast(rank);
-    } else null;
-    return .{
-        .stable_id = try StableId.exact(try stringField(object_value, "stable_id")),
-        .app_id = try AppId.display(try stringField(object_value, "app_id")),
-        .title = try Title.display(try stringField(object_value, "title")),
-        .workspace_id = workspace_id,
-        .monitor_id = if (try nullableStringField(object_value, "monitor_id")) |monitor_id|
-            try MonitorId.exact(monitor_id)
-        else
-            null,
-        .geometry = try parseGeometry(try object(try field(object_value, "geometry"))),
-        .viewport = viewport.state,
-        .edges = viewport.edges,
-        .presentation = try parsePresentation(try stringField(object_value, "presentation")),
-        .focus_rank = focus_rank,
-        .active = try booleanField(object_value, "active"),
-        .floating = std.mem.eql(u8, mode, "floating"),
-        .fullscreen = std.mem.eql(u8, mode, "fullscreen"),
-    };
+fn validAddress(value: []const u8) !void {
+    if (value.len < 3 or value.len > 18 or !std.mem.startsWith(u8, value, "0x")) return error.InvalidWindowAddress;
+    for (value[2..]) |byte| if (!std.ascii.isHex(byte)) return error.InvalidWindowAddress;
 }
 
-fn parseFocus(allocator: std.mem.Allocator, bytes: []const u8, expected_id: []const u8) !void {
-    if (bytes.len > action_response_capacity) return error.WmioOutputTooLong;
-    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
-        .parse_numbers = false,
-        .duplicate_field_behavior = .@"error",
-        .max_value_len = action_response_capacity,
-    }) catch |failure| return switch (failure) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.WmioMalformed,
-    };
-    defer parsed.deinit();
-    const envelope = try object(parsed.value);
-    try validateEnvelope(envelope, "focus");
-    const data = try object(try field(envelope, "data"));
-    if (!std.mem.eql(u8, try stringField(data, "stable_id"), expected_id)) {
-        return error.WmioFocusMismatch;
-    }
-}
-
-fn validateEnvelope(envelope: std.json.ObjectMap, operation: []const u8) !void {
-    if (!std.mem.eql(u8, try stringField(envelope, "schema"), "wmio/v1")) {
-        return error.WmioSchemaInvalid;
-    }
-    if (!try booleanField(envelope, "ok")) return error.WmioRejected;
-    if (!std.mem.eql(u8, try stringField(envelope, "operation"), operation)) {
-        return error.WmioOperationInvalid;
-    }
-}
-
-fn parseGeometry(value: std.json.ObjectMap) !Geometry {
-    const width = try floatField(value, "width");
-    const height = try floatField(value, "height");
-    if (width <= 0 or height <= 0) return error.GeometryInvalid;
-    return .{
-        .x = try floatField(value, "x"),
-        .y = try floatField(value, "y"),
-        .width = width,
-        .height = height,
-    };
-}
-
-const Viewport = struct {
-    state: ViewportState,
-    edges: Edges,
-};
-
-fn parseViewport(value: ?std.json.Value) !Viewport {
-    if (value == null) return .{ .state = .unknown, .edges = .{} };
-    const object_value = try object(value.?);
-    const state_bytes = try stringField(object_value, "state");
-    const state: ViewportState = if (std.mem.eql(u8, state_bytes, "visible"))
-        .visible
-    else if (std.mem.eql(u8, state_bytes, "partial"))
-        .partial
-    else if (std.mem.eql(u8, state_bytes, "offscreen"))
-        .offscreen
-    else if (std.mem.eql(u8, state_bytes, "unknown"))
-        .unknown
-    else
-        return error.ViewportInvalid;
-    const edge_values = try array(try field(object_value, "edges"));
-    if (edge_values.len > 4) return error.ViewportInvalid;
-    var edges: Edges = .{};
-    for (edge_values) |edge_value| {
-        const edge = try string(edge_value);
-        if (std.mem.eql(u8, edge, "left")) {
-            if (edges.left) return error.ViewportInvalid;
-            edges.left = true;
-        } else if (std.mem.eql(u8, edge, "right")) {
-            if (edges.right) return error.ViewportInvalid;
-            edges.right = true;
-        } else if (std.mem.eql(u8, edge, "top")) {
-            if (edges.top) return error.ViewportInvalid;
-            edges.top = true;
-        } else if (std.mem.eql(u8, edge, "bottom")) {
-            if (edges.bottom) return error.ViewportInvalid;
-            edges.bottom = true;
-        } else {
-            return error.ViewportInvalid;
-        }
-    }
-    switch (state) {
-        .visible, .unknown => if (edges.any()) return error.ViewportInvalid,
-        .partial, .offscreen => if (!edges.any()) return error.ViewportInvalid,
-    }
-    return .{ .state = state, .edges = edges };
-}
-
-fn parsePresentation(value: []const u8) !Presentation {
-    if (std.mem.eql(u8, value, "presented")) return .presented;
-    if (std.mem.eql(u8, value, "workspace-inactive")) return .workspace_inactive;
-    if (std.mem.eql(u8, value, "occluded")) return .occluded;
-    if (std.mem.eql(u8, value, "hidden")) return .hidden;
-    if (std.mem.eql(u8, value, "unmapped")) return .unmapped;
-    return error.PresentationInvalid;
-}
-
-fn windowLessThan(_: void, left: Window, right: Window) bool {
-    if (left.active != right.active) return left.active;
-    if (left.focus_rank != right.focus_rank) {
-        if (left.focus_rank == null) return false;
-        if (right.focus_rank == null) return true;
-        return left.focus_rank.? < right.focus_rank.?;
-    }
-    if (left.workspace_id != null and right.workspace_id != null) {
-        const order = std.mem.order(u8, left.workspace_id.?.slice(), right.workspace_id.?.slice());
-        if (order != .eq) return order == .lt;
-    } else if (left.workspace_id == null and right.workspace_id != null) {
-        return false;
-    } else if (left.workspace_id != null and right.workspace_id == null) {
-        return true;
-    }
-    return spatialLessThan(&left, &right);
-}
-
-fn spatialLessThan(left: *const Window, right: *const Window) bool {
-    if (left.geometry.x != right.geometry.x) return left.geometry.x < right.geometry.x;
-    if (left.geometry.y != right.geometry.y) return left.geometry.y < right.geometry.y;
-    if (left.geometry.width != right.geometry.width) return left.geometry.width < right.geometry.width;
-    if (left.geometry.height != right.geometry.height) return left.geometry.height < right.geometry.height;
-    return std.mem.lessThan(u8, left.stable_id.slice(), right.stable_id.slice());
-}
-
-fn field(object_value: std.json.ObjectMap, name: []const u8) !std.json.Value {
-    return object_value.get(name) orelse error.WmioFieldMissing;
-}
-
-fn object(value: std.json.Value) !std.json.ObjectMap {
-    return switch (value) {
-        .object => |object_value| object_value,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn array(value: std.json.Value) ![]const std.json.Value {
-    return switch (value) {
-        .array => |array_value| array_value.items,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn string(value: std.json.Value) ![]const u8 {
-    return switch (value) {
-        .string => |string_value| string_value,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn stringField(object_value: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    return string(try field(object_value, name));
-}
-
-fn nullableStringField(object_value: std.json.ObjectMap, name: []const u8) !?[]const u8 {
-    const value = object_value.get(name) orelse return error.WmioFieldMissing;
-    return switch (value) {
-        .null => null,
-        .string => |string_value| string_value,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn booleanField(object_value: std.json.ObjectMap, name: []const u8) !bool {
-    return switch (try field(object_value, name)) {
-        .bool => |value| value,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn integerField(object_value: std.json.ObjectMap, name: []const u8) !i32 {
-    return std.fmt.parseInt(i32, try numberField(object_value, name), 10) catch
-        error.WmioIntegerInvalid;
-}
-
-fn floatField(object_value: std.json.ObjectMap, name: []const u8) !f64 {
-    const value = std.fmt.parseFloat(f64, try numberField(object_value, name)) catch
-        return error.WmioNumberInvalid;
-    if (!std.math.isFinite(value)) return error.WmioNumberInvalid;
-    return value;
-}
-
-fn nullableIntegerField(object_value: std.json.ObjectMap, name: []const u8) !?i64 {
-    const value = object_value.get(name) orelse return error.WmioFieldMissing;
-    return switch (value) {
-        .null => null,
-        .number_string => |bytes| std.fmt.parseInt(i64, bytes, 10) catch
-            error.WmioIntegerInvalid,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn optionalNullableIntegerField(object_value: std.json.ObjectMap, name: []const u8) !?i64 {
-    const value = object_value.get(name) orelse return null;
-    return switch (value) {
-        .null => null,
-        .number_string => |bytes| std.fmt.parseInt(i64, bytes, 10) catch
-            error.WmioIntegerInvalid,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn numberField(object_value: std.json.ObjectMap, name: []const u8) ![]const u8 {
-    return switch (try field(object_value, name)) {
-        .number_string => |value| value,
-        else => error.WmioFieldTypeInvalid,
-    };
-}
-
-fn containsString(values: []const std.json.Value, wanted: []const u8) !bool {
-    var found = false;
-    for (values) |value| {
-        if (std.mem.eql(u8, try string(value), wanted)) found = true;
-    }
-    return found;
-}
-
-const desktop_fixture =
-    \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{
-    \\  "focus":{"monitor_id":"0","workspace_id":"1","window_id":"zen"},
-    \\  "windows":[
-    \\    {"stable_id":"zen","app_id":"zen","title":"Browser","pid":20,"mapped":true,"accepts_input":true,"active":false,"focus_rank":1,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":6,"y":4,"width":1910,"height":1072},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"tiled"},
-    \\    {"stable_id":"kitty","app_id":"kitty","title":"Terminal","pid":10,"mapped":true,"accepts_input":true,"active":false,"focus_rank":2,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":-1910,"y":4,"width":1910,"height":1072},"viewport":{"state":"offscreen","edges":["left"]},"presentation":"occluded","mode":"tiled"},
-    \\    {"stable_id":"other","app_id":"files","title":"Files","pid":30,"mapped":true,"accepts_input":true,"active":false,"focus_rank":3,"workspace_ids":["2"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":100,"height":100},"viewport":{"state":"unknown","edges":[]},"presentation":"workspace-inactive","mode":"floating"},
-    \\    {"stable_id":"self","app_id":"wayspot","title":"wayspot","pid":99,"mapped":true,"accepts_input":true,"active":true,"focus_rank":0,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":720,"height":480},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"floating"},
-    \\    {"stable_id":"overlay","app_id":"overlay","title":"Overlay","pid":40,"mapped":true,"accepts_input":false,"active":false,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":100,"height":100},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"floating"}
-    \\  ]
-    \\}}
+const fixture =
+    \\[
+    \\ {"address":"0x2","class":"zen","title":"Browser","pid":20,"mapped":true,"at":[6.5,4],"size":[1910.25,1072],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":1},
+    \\ {"address":"0x3","class":"kitty","title":"Terminal","pid":10,"mapped":true,"at":[-1910,4],"size":[1910,1072],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":2},
+    \\ {"address":"0x4","class":"org.kde.dolphin","title":"Files","pid":30,"mapped":true,"hidden":true,"at":[1920,0],"size":[960,1080],"workspace":{"id":2},"monitor":1,"floating":true,"fullscreen":0,"focusHistoryID":3},
+    \\ {"address":"0x5","class":"wayspot","title":"Picker","pid":99,"mapped":true,"at":[0,0],"size":[720,520],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":0}
+    \\]
 ;
 
-const focus_fixture =
-    \\{"schema":"wmio/v1","ok":true,"operation":"focus","data":{"stable_id":"kitty"}}
-;
+test "session selection is exact" {
+    try std.testing.expectEqual(@as(?Backend, .snowman), backendForSession("Snowman"));
+    try std.testing.expectEqual(@as(?Backend, .hyprland), backendForSession("Hyprland"));
+    try std.testing.expectEqual(@as(?Backend, null), backendForSession("Hyprland:Snowman"));
+    try std.testing.expectEqual(@as(?Backend, null), backendForSession(null));
+}
 
-const Transcript = struct {
-    desktop_bytes: []const u8 = desktop_fixture,
-    focus_bytes: []const u8 = focus_fixture,
-    succeed: bool = true,
-    calls: usize = 0,
-    expected_focus: ?[]const u8 = null,
-
-    pub fn run(
-        transcript: *Transcript,
-        allocator: std.mem.Allocator,
-        request: Request,
-    ) !ProcessResult {
-        transcript.calls += 1;
-        const bytes = switch (request) {
-            .desktop => transcript.desktop_bytes,
-            .focus => |stable_id| blk: {
-                const expected = transcript.expected_focus orelse return error.UnexpectedFocus;
-                if (!std.mem.eql(u8, expected, stable_id)) return error.FocusTargetMismatch;
-                break :blk transcript.focus_bytes;
-            },
-        };
-        const stdout = try allocator.dupe(u8, bytes);
-        errdefer allocator.free(stdout);
-        return .{
-            .stdout = stdout,
-            .stderr = try allocator.dupe(u8, ""),
-            .succeeded = transcript.succeed,
-        };
-    }
-};
-
-test "desktop model keeps global windows and orders them by recent focus" {
-    const snapshot = try parseDesktop(std.testing.allocator, desktop_fixture, 99);
+test "Hyprland snapshot retains focus order and workspace metadata" {
+    const snapshot = try parseDesktop(std.testing.allocator, fixture, 99, .hyprland);
     try std.testing.expectEqual(@as(usize, 3), snapshot.count);
-    try std.testing.expectEqualStrings("zen", snapshot.windows[0].stable_id.slice());
-    try std.testing.expectEqual(@as(?u32, 1), snapshot.windows[0].focus_rank);
-    try std.testing.expectEqual(.visible, snapshot.windows[0].viewport);
-    try std.testing.expectEqualStrings("kitty", snapshot.windows[1].stable_id.slice());
-    try std.testing.expectEqual(@as(?u32, 2), snapshot.windows[1].focus_rank);
-    try std.testing.expectEqual(.offscreen, snapshot.windows[1].viewport);
-    try std.testing.expect(snapshot.windows[1].edges.left);
-    try std.testing.expectEqual(.occluded, snapshot.windows[1].presentation);
-    try std.testing.expectEqualStrings("other", snapshot.windows[2].stable_id.slice());
-    try std.testing.expectEqualStrings("2", snapshot.windows[2].workspace_id.?.slice());
-    try std.testing.expectEqual(.workspace_inactive, snapshot.windows[2].presentation);
-    try std.testing.expectEqual(@as(?usize, 0), snapshot.selected());
-}
-
-test "workspace position is spatial metadata and does not change MRU order" {
-    const snapshot = try parseDesktop(std.testing.allocator, desktop_fixture, 99);
-    try std.testing.expectEqualStrings("zen", snapshot.windows[0].stable_id.slice());
-    try std.testing.expectEqualStrings("kitty", snapshot.windows[1].stable_id.slice());
+    try std.testing.expectEqualStrings("0x2", snapshot.windows[0].stable_id.slice());
+    try std.testing.expectEqualStrings("0x3", snapshot.windows[1].stable_id.slice());
+    try std.testing.expectEqual(.hidden, snapshot.windows[2].presentation);
     try std.testing.expectEqual(WorkspacePosition{ .ordinal = 2, .total = 2 }, snapshot.workspacePosition(0).?);
-    try std.testing.expectEqual(WorkspacePosition{ .ordinal = 1, .total = 2 }, snapshot.workspacePosition(1).?);
-    try std.testing.expectEqual(WorkspacePosition{ .ordinal = 1, .total = 1 }, snapshot.workspacePosition(2).?);
-    try std.testing.expectEqual(@as(?WorkspacePosition, null), snapshot.workspacePosition(snapshot.count));
+    try std.testing.expectEqualSlices(u16, &.{1}, (try Matches.init(&snapshot, "term")).slice());
+    try std.testing.expectEqualSlices(u16, &.{2}, (try Matches.init(&snapshot, "ws 2")).slice());
 }
 
-test "workspace position uses top-to-bottom and stable identity for equal x" {
-    var snapshot: Snapshot = .{};
-    const workspace = try WorkspaceId.exact("7");
-    const base = Window{
-        .stable_id = try StableId.exact("middle"),
-        .app_id = try AppId.display("kitty"),
-        .title = try Title.display("~"),
-        .workspace_id = workspace,
-        .monitor_id = null,
-        .geometry = .{ .x = 100, .y = 20, .width = 50, .height = 50 },
-        .viewport = .visible,
-        .edges = .{},
-        .presentation = .presented,
-        .focus_rank = 0,
-        .active = true,
-        .floating = false,
-        .fullscreen = false,
-    };
-    snapshot.windows[0] = base;
-    snapshot.windows[1] = base;
-    snapshot.windows[1].stable_id = try StableId.exact("top");
-    snapshot.windows[1].geometry.y = 10;
-    snapshot.windows[2] = base;
-    snapshot.windows[2].stable_id = try StableId.exact("z-bottom");
-    snapshot.windows[2].geometry.y = 20;
-    snapshot.count = 3;
-    try std.testing.expectEqual(WorkspacePosition{ .ordinal = 2, .total = 3 }, snapshot.workspacePosition(0).?);
-    try std.testing.expectEqual(WorkspacePosition{ .ordinal = 1, .total = 3 }, snapshot.workspacePosition(1).?);
-    try std.testing.expectEqual(WorkspacePosition{ .ordinal = 3, .total = 3 }, snapshot.workspacePosition(2).?);
-}
-
-test "window matches preserve MRU order and search app title or workspace" {
-    const snapshot = try parseDesktop(std.testing.allocator, desktop_fixture, 99);
-    const all = try Matches.init(&snapshot, "");
-    try std.testing.expectEqualSlices(u16, &.{ 0, 1, 2 }, all.slice());
-    const terminal = try Matches.init(&snapshot, "term");
-    try std.testing.expectEqualSlices(u16, &.{1}, terminal.slice());
-    const workspace = try Matches.init(&snapshot, "ws 2");
-    try std.testing.expectEqualSlices(u16, &.{2}, workspace.slice());
-    const title = try Matches.init(&snapshot, "browser");
-    try std.testing.expectEqualSlices(u16, &.{0}, title.slice());
-}
-
-test "desktop model accepts an older WMIO snapshot without viewport metadata" {
-    const bytes =
-        \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{"focus":{"workspace_id":"1"},"windows":[
-        \\{"stable_id":"a","app_id":"app","title":"App","pid":1,"mapped":true,"accepts_input":true,"active":true,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":1,"height":1},"presentation":"presented","mode":"tiled"}
-        \\]}}
+test "hidden Hyprland special workspace can have zero-sized geometry" {
+    const payload =
+        \\[
+        \\ {"address":"0x9","class":"kitty","title":"Scratchpad","mapped":true,"hidden":true,"at":[430,-2880],"size":[0,0],"workspace":{"id":-98,"name":"special:scratchpad"},"monitor":-1,"floating":true,"fullscreen":false,"focusHistoryID":-1}
+        \\]
     ;
-    const snapshot = try parseDesktop(std.testing.allocator, bytes, 2);
+    const snapshot = try parseDesktop(std.testing.allocator, payload, 42, .hyprland);
     try std.testing.expectEqual(@as(usize, 1), snapshot.count);
-    try std.testing.expectEqual(.unknown, snapshot.windows[0].viewport);
+    const window = &snapshot.windows[0];
+    try std.testing.expectEqualStrings("-98", window.workspace_id.?.slice());
+    try std.testing.expect(window.monitor_id == null);
+    try std.testing.expectEqual(@as(f64, 0), window.geometry.width);
+    try std.testing.expectEqual(@as(f64, 0), window.geometry.height);
+    try std.testing.expectEqual(Presentation.hidden, window.presentation);
+    try std.testing.expect(window.focus_rank == null);
 }
 
-test "desktop model accepts backend-neutral fractional geometry" {
-    const bytes =
-        \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{"focus":{"workspace_id":"1"},"windows":[
-        \\{"stable_id":"a","app_id":"app","title":"App","pid":1,"mapped":true,"accepts_input":true,"active":true,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":1920.0,"y":0,"width":2258.823529411765,"height":1227.0588235294117},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"floating"}
-        \\]}}
+test "one malformed Hyprland client reports a schema failure without partial publication" {
+    const payload =
+        \\[
+        \\ {"address":"0x2","class":"kitty","title":"Terminal","mapped":true,"at":[0,0],"size":[120,80],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0},
+        \\ {"address":"0x3","class":"broken","title":"Scratchpad","mapped":true,"at":[0,0],"size":[0,0],"workspace":{"id":"special:broken"},"monitor":-1,"floating":true,"fullscreen":false}
+        \\]
     ;
-    const snapshot = try parseDesktop(std.testing.allocator, bytes, 2);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.count);
-    try std.testing.expectEqual(@as(f64, 1920.0), snapshot.windows[0].geometry.x);
-    try std.testing.expectApproxEqAbs(@as(f64, 2258.823529411765), snapshot.windows[0].geometry.width, 0.0000001);
+    try std.testing.expectError(error.CompositorReplyMalformed, parseDesktop(std.testing.allocator, payload, 42, .hyprland));
 }
 
-test "desktop model rejects malformed viewport semantics without partial publication" {
-    const malformed =
-        \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{"focus":{"workspace_id":"1"},"windows":[
-        \\{"stable_id":"a","app_id":"app","title":"App","pid":1,"mapped":true,"accepts_input":true,"active":true,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":1,"height":1},"viewport":{"state":"offscreen","edges":[]},"presentation":"occluded","mode":"tiled"}
-        \\]}}
+test "Hyprland mixed normal and special workspace clients include an absent numeric id" {
+    const payload =
+        \\[
+        \\ {"address":"0x1","class":"howl","title":"Terminal","mapped":true,"hidden":false,"at":[1924,4],"size":[2392,1342],"workspace":{"address":"2","id":2,"type":"normal","name":"2"},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":0},
+        \\ {"address":"0x2","class":"howl","title":"Scratch","mapped":true,"hidden":false,"at":[1924,4],"size":[2392,1342],"workspace":{"address":"special:magic","type":"special","name":"special:magic"},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":1}
+        \\]
     ;
-    try std.testing.expectError(
-        error.ViewportInvalid,
-        parseDesktop(std.testing.allocator, malformed, 2),
-    );
+    const snapshot = try parseDesktop(std.testing.allocator, payload, 99, .hyprland);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.count);
+    try std.testing.expectEqualStrings("2", snapshot.windows[0].workspace_id.?.slice());
+    try std.testing.expectEqualStrings("special:magic", snapshot.windows[1].workspace_id.?.slice());
+    try std.testing.expectEqual(@as(usize, 1), (try Matches.init(&snapshot, "special:magic")).count);
+    try std.testing.expectEqualSlices(u16, &.{1}, (try Matches.init(&snapshot, "ws special:magic")).slice());
 }
 
-test "desktop model rejects duplicate exact targets" {
+test "Snowman never produces a subprocess command" {
+    try std.testing.expectError(error.SnowmanWindowDiscoveryUnavailable, (WindowDiscovery{ .snowman = {} }).argv());
+    var storage: [3][]const u8 = undefined;
+    var target: [136]u8 = undefined;
+    try std.testing.expectError(error.SnowmanFocusUnavailable, (WindowFocus{ .snowman = "1" }).argv(&storage, &target));
+    try std.testing.expectError(error.SnowmanFocusUnavailable, (FocusObservation{ .snowman = {} }).argv());
+    try std.testing.expectError(error.SnowmanWindowDiscoveryUnavailable, parseDesktop(std.testing.allocator, "[]", 1, .snowman));
+}
+
+test "bad native data and duplicate exact targets are rejected" {
+    try std.testing.expectError(error.CompositorReplyMalformed, parseDesktop(std.testing.allocator, "{}", 1, .hyprland));
     const duplicated =
-        \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{"focus":{"workspace_id":"1"},"windows":[
-        \\{"stable_id":"same","app_id":"one","title":"One","pid":1,"mapped":true,"accepts_input":true,"active":false,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":0,"y":0,"width":1,"height":1},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"tiled"},
-        \\{"stable_id":"same","app_id":"two","title":"Two","pid":2,"mapped":true,"accepts_input":true,"active":false,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":1,"y":0,"width":1,"height":1},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"tiled"}
-        \\]}}
+        \\[
+        \\ {"address":"0x1","class":"one","title":"One","mapped":true,"at":[0,0],"size":[100,100],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0},
+        \\ {"address":"0x1","class":"two","title":"Two","mapped":true,"at":[0,0],"size":[100,100],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0}
+        \\]
     ;
-    try std.testing.expectError(
-        error.DuplicateStableId,
-        parseDesktop(std.testing.allocator, duplicated, 99),
-    );
-}
-
-test "desktop response bytes and window count are bounded" {
-    const too_long = try std.testing.allocator.alloc(u8, response_capacity + 1);
-    defer std.testing.allocator.free(too_long);
-    @memset(too_long, ' ');
-    try std.testing.expectError(
-        error.WmioOutputTooLong,
-        parseDesktop(std.testing.allocator, too_long, 1),
-    );
-
-    var many_json: [8192]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&many_json);
-    try writer.writeAll(
-        "{\"schema\":\"wmio/v1\",\"ok\":true,\"operation\":\"desktop\"," ++
-            "\"data\":{\"focus\":{\"workspace_id\":\"1\"},\"windows\":[",
-    );
-    for (0..window_capacity + 1) |index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.writeAll("{}");
-    }
-    try writer.writeAll("]}}");
-    try std.testing.expectError(
-        error.TooManyWindows,
-        parseDesktop(std.testing.allocator, writer.buffered(), 1),
-    );
-}
-
-test "display text truncates on a UTF-8 boundary" {
-    const input = "123456789" ++ "λ";
-    const Tiny = FixedText(10);
-    const value = try Tiny.display(input);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(value.slice()));
-    try std.testing.expectEqualStrings("1234567…", value.slice());
-}
-
-test "requests are bounded public WMIO commands" {
-    var storage: [4][]const u8 = undefined;
-    const desktop = Request{ .desktop = {} };
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "wmio", "desktop" },
-        desktop.arguments(&storage),
-    );
-    try std.testing.expectEqual(response_capacity, desktop.stdoutLimit());
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "wmio", "focus", "--stable-id", "abc" },
-        (Request{ .focus = "abc" }).arguments(&storage),
-    );
-    try std.testing.expectEqual(action_response_capacity, (Request{ .focus = "abc" }).stdoutLimit());
-    try std.testing.expect(process_timeout.raw.nanoseconds > 0);
-    try std.testing.expect(error_response_capacity < response_capacity);
-}
-
-test "load and focus use one exact bounded operation each" {
-    var transcript: Transcript = .{ .expected_focus = "kitty" };
-    const snapshot = try load(&transcript, std.testing.allocator, 99);
-    try std.testing.expectEqual(@as(usize, 3), snapshot.count);
-    try focus(&transcript, std.testing.allocator, "kitty");
-    try std.testing.expectEqual(@as(usize, 2), transcript.calls);
-}
-
-test "failed command and mismatched focus remain failures" {
-    var rejected: Transcript = .{ .succeed = false };
-    try std.testing.expectError(
-        error.WmioRejected,
-        load(&rejected, std.testing.allocator, 99),
-    );
-    var mismatch: Transcript = .{
-        .expected_focus = "kitty",
-        .focus_bytes =
-        \\{"schema":"wmio/v1","ok":true,"operation":"focus","data":{"stable_id":"zen"}}
-        ,
-    };
-    try std.testing.expectError(
-        error.WmioFocusMismatch,
-        focus(&mismatch, std.testing.allocator, "kitty"),
-    );
-}
-
-test "empty desktop has an honest empty finder" {
-    const bytes =
-        \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{"focus":{"workspace_id":null},"windows":[]}}
-    ;
-    const snapshot = try parseDesktop(std.testing.allocator, bytes, 1);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.count);
-    try std.testing.expectEqual(@as(?usize, null), snapshot.selected());
-    try std.testing.expectEqual(@as(usize, 0), (try Matches.init(&snapshot, "")).count);
+    try std.testing.expectError(error.DuplicateStableId, parseDesktop(std.testing.allocator, duplicated, 1, .hyprland));
+    var storage: [3][]const u8 = undefined;
+    var target: [136]u8 = undefined;
+    const focus_args = try (WindowFocus{ .hyprland = "0xAbC123" }).argv(&storage, &target);
+    try std.testing.expectEqual(@as(usize, 3), focus_args.len);
+    try std.testing.expectEqualStrings("hyprctl", focus_args[0]);
+    try std.testing.expectEqualStrings("dispatch", focus_args[1]);
+    try std.testing.expectEqualStrings("hl.dsp.focus({ window = \"address:0xAbC123\" })", focus_args[2]);
+    try std.testing.expectError(error.InvalidWindowAddress, (WindowFocus{ .hyprland = "class:any" }).argv(&storage, &target));
 }

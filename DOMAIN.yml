@@ -48,16 +48,15 @@ scope:
         primary_input: keyboard
         scope: global current windows across workspaces and monitors
         hierarchy: flat; workspace and monitor are location metadata
-        ordering: recent-focus facts from WMIO with deterministic fallback
+        ordering: Hyprland focus-history facts with deterministic fallback
         location_metadata:
           - workspace id
           - workspace-local geometry ordinal when multiple windows share a workspace
-          - compact WMIO viewport direction when offscreen or clipped
         filtering: current window identity, title, workspace, and monitor metadata
         icon_identity: one exact unambiguous desktop-application id match only
-        authority: WMIO
-        discovery: one fresh bounded desktop snapshot per activation
-        mutation: exact stable-id focus through WMIO
+        authority: native Hyprland CLI; Snowman adapter explicitly unavailable
+        discovery: one bounded hyprctl clients snapshot per activation on Hyprland
+        mutation: exact Hyprland address focus followed by activewindow verification; Snowman refuses
         resident_process: false
         persistent_derived_state: false
     notifications:

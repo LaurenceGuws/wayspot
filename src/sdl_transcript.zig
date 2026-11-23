@@ -31,6 +31,7 @@ const Draw = struct {
     rows: ExpectedRows = .none,
     selected_row: usize = 0,
     window_status: picker.WindowStatus = .dormant,
+    window_error: ?[]const u8 = null,
     result: Result = .ok,
 };
 
@@ -56,16 +57,20 @@ const HistoryRead = enum {
     allocation,
 };
 
-const NavigatorProcess = union(enum) {
-    desktop: struct {
-        bytes: []const u8 = navigator_desktop_fixture,
-        result: Result = .ok,
-    },
-    focus: struct {
-        stable_id: []const u8,
-        bytes: []const u8 = navigator_focus_fixture,
-        result: Result = .ok,
-    },
+const NavigatorDiscovery = struct {
+    bytes: []const u8 = navigator_desktop_fixture,
+    result: Result = .ok,
+};
+
+const NavigatorFocus = struct {
+    stable_id: []const u8,
+    bytes: []const u8 = "ok\n",
+    result: Result = .ok,
+};
+
+const NavigatorFocusObservation = struct {
+    bytes: []const u8 = "{\"address\":\"0x3\"}",
+    result: Result = .ok,
 };
 
 const Step = union(enum) {
@@ -75,7 +80,9 @@ const Step = union(enum) {
     wait: Wait,
     draw: Draw,
     read_history: HistoryRead,
-    navigator_process: NavigatorProcess,
+    navigator_discovery: NavigatorDiscovery,
+    navigator_focus: NavigatorFocus,
+    navigator_focus_observation: NavigatorFocusObservation,
     stop_text: Result,
     destroy,
     quit,
@@ -84,6 +91,7 @@ const Step = union(enum) {
 const Transcript = struct {
     steps: []const Step,
     applications: []const apps.App,
+    backend: ?navigator.Backend = .hyprland,
     retained: ?notification.History = null,
     history_reads: usize = 0,
     index: usize = 0,
@@ -154,7 +162,11 @@ const Transcript = struct {
         if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
             return error.TranscriptMismatch;
         }
-        if (frame.window_status != expected.window_status) return error.TranscriptMismatch;
+        if (frame.window_status != expected.window_status or
+            (frame.window_error == null) != (expected.window_error == null)) return error.TranscriptMismatch;
+        if (frame.window_error) |reason| {
+            if (!std.mem.eql(u8, reason, expected.window_error.?)) return error.TranscriptMismatch;
+        }
         if (expected.result == .fail) return error.SdlDrawFailed;
     }
 
@@ -200,28 +212,37 @@ const Transcript = struct {
     pub fn run(
         transcript: *Transcript,
         allocator: std.mem.Allocator,
-        request: navigator.Request,
+        argv: []const []const u8,
+        max_stdout: usize,
     ) !navigator.ProcessResult {
-        const process = switch (transcript.next() orelse return error.TranscriptMismatch) {
-            .navigator_process => |process| process,
-            else => return error.TranscriptMismatch,
-        };
+        if (argv.len < 3 or !std.mem.eql(u8, argv[0], "hyprctl") or transcript.backend != .hyprland)
+            return error.TranscriptMismatch;
+        const step = transcript.next() orelse return error.TranscriptMismatch;
         const Selected = struct { bytes: []const u8, result: Result };
-        const selected: Selected = switch (process) {
-            .desktop => |desktop| switch (request) {
-                .desktop => .{ .bytes = desktop.bytes, .result = desktop.result },
-                .focus => return error.TranscriptMismatch,
-            },
-            .focus => |focus| switch (request) {
-                .desktop => return error.TranscriptMismatch,
-                .focus => |stable_id| blk: {
-                    if (!std.mem.eql(u8, stable_id, focus.stable_id)) {
-                        return error.TranscriptMismatch;
-                    }
+        const selected: Selected = if (argv.len == 3 and std.mem.eql(u8, argv[1], "-j") and
+            std.mem.eql(u8, argv[2], "clients") and max_stdout == 256 * 1024)
+            switch (step) {
+                .navigator_discovery => |discovery| .{ .bytes = discovery.bytes, .result = discovery.result },
+                else => return error.TranscriptMismatch,
+            }
+        else if (argv.len == 3 and std.mem.eql(u8, argv[1], "dispatch") and max_stdout == 64 * 1024)
+            switch (step) {
+                .navigator_focus => |focus| blk: {
+                    var expected_buffer: [136]u8 = undefined;
+                    const expected = try std.fmt.bufPrint(&expected_buffer, "hl.dsp.focus({{ window = \"address:{s}\" }})", .{focus.stable_id});
+                    if (!std.mem.eql(u8, argv[2], expected)) return error.TranscriptMismatch;
                     break :blk .{ .bytes = focus.bytes, .result = focus.result };
                 },
-            },
-        };
+                else => return error.TranscriptMismatch,
+            }
+        else if (argv.len == 3 and std.mem.eql(u8, argv[1], "-j") and
+            std.mem.eql(u8, argv[2], "activewindow") and max_stdout == 64 * 1024)
+            switch (step) {
+                .navigator_focus_observation => |observation| .{ .bytes = observation.bytes, .result = observation.result },
+                else => return error.TranscriptMismatch,
+            }
+        else
+            return error.TranscriptMismatch;
         const stdout = try allocator.dupe(u8, selected.bytes);
         errdefer allocator.free(stdout);
         return .{
@@ -317,10 +338,20 @@ fn simulateHistory(
     applications: []const apps.App,
     retained: ?notification.History,
 ) !?usize {
+    return simulateHistoryBackend(steps, applications, retained, .hyprland);
+}
+
+fn simulateHistoryBackend(
+    steps: []const Step,
+    applications: []const apps.App,
+    retained: ?notification.History,
+    backend: navigator.Backend,
+) !?usize {
     if (steps.len > step_capacity) return error.TranscriptTooLong;
     var transcript = Transcript{
         .steps = steps,
         .applications = applications,
+        .backend = backend,
         .retained = retained,
     };
     defer if (transcript.retained) |*history| history.deinit(std.testing.allocator);
@@ -328,6 +359,7 @@ fn simulateHistory(
         &transcript,
         &transcript,
         &transcript,
+        transcript.backend,
         std.testing.allocator,
         999,
         applications,
@@ -337,19 +369,12 @@ fn simulateHistory(
 }
 
 const navigator_desktop_fixture =
-    \\{"schema":"wmio/v1","ok":true,"operation":"desktop","data":{
-    \\  "focus":{"monitor_id":"0","workspace_id":"1","window_id":"self"},
-    \\  "windows":[
-    \\    {"stable_id":"zen","app_id":"zen","title":"Browser","pid":20,"mapped":true,"accepts_input":true,"active":false,"focus_rank":1,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":6,"y":4,"width":1910,"height":1072},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"tiled"},
-    \\    {"stable_id":"kitty","app_id":"kitty","title":"Terminal","pid":10,"mapped":true,"accepts_input":true,"active":false,"focus_rank":2,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":-1910,"y":4,"width":1910,"height":1072},"viewport":{"state":"offscreen","edges":["left"]},"presentation":"occluded","mode":"tiled"},
-    \\    {"stable_id":"files","app_id":"org.kde.dolphin","title":"Downloads","pid":30,"mapped":true,"accepts_input":true,"active":false,"focus_rank":3,"workspace_ids":["2"],"monitor_id":"1","geometry":{"x":1920,"y":0,"width":960,"height":1080},"viewport":{"state":"visible","edges":[]},"presentation":"workspace-inactive","mode":"tiled"},
-    \\    {"stable_id":"self","app_id":"wayspot","title":"wayspot","pid":999,"mapped":true,"accepts_input":true,"active":true,"focus_rank":0,"workspace_ids":["1"],"monitor_id":"0","geometry":{"x":600,"y":300,"width":720,"height":480},"viewport":{"state":"visible","edges":[]},"presentation":"presented","mode":"floating"}
-    \\  ]
-    \\}}
-;
-
-const navigator_focus_fixture =
-    \\{"schema":"wmio/v1","ok":true,"operation":"focus","data":{"stable_id":"kitty"}}
+    \\[
+    \\ {"address":"0x2","class":"zen","title":"Browser","pid":20,"mapped":true,"hidden":false,"at":[6,4],"size":[1910,1072],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":1},
+    \\ {"address":"0x3","class":"kitty","title":"Terminal","pid":10,"mapped":true,"hidden":false,"at":[-1910,4],"size":[1910,1072],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0,"focusHistoryID":2},
+    \\ {"address":"0x4","class":"org.kde.dolphin","title":"Downloads","pid":30,"mapped":true,"hidden":true,"at":[1920,0],"size":[960,1080],"workspace":{"id":2},"monitor":1,"floating":false,"fullscreen":0,"focusHistoryID":3},
+    \\ {"address":"0x5","class":"wayspot","title":"wayspot","pid":999,"mapped":true,"hidden":false,"at":[600,300],"size":[720,480],"workspace":{"id":1},"monitor":0,"floating":true,"fullscreen":0,"focusHistoryID":0}
+    \\]
 ;
 
 test "text input starts before wait and cleanup is exact" {
@@ -374,14 +399,14 @@ test "Tab lazily opens a global MRU window finder and exact Enter focuses select
         .{ .start_text = .ok },
         .{ .draw = .{ .query = "" } },
         .{ .wait = .{ .event = .tab } },
-        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .navigator_discovery = .{} },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .window_status = .ready,
         } },
@@ -390,15 +415,16 @@ test "Tab lazily opens a global MRU window finder and exact Enter focuses select
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .selected_row = 1,
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_process = .{ .focus = .{ .stable_id = "kitty" } } },
+        .{ .navigator_focus = .{ .stable_id = "0x3" } },
+        .{ .navigator_focus_observation = .{} },
         .{ .stop_text = .ok },
         .destroy,
         .quit,
@@ -412,14 +438,14 @@ test "typing in window finder filters windows instead of returning to applicatio
         .{ .start_text = .ok },
         .{ .draw = .{ .query = "" } },
         .{ .wait = .{ .event = .tab } },
-        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .navigator_discovery = .{} },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .window_status = .ready,
         } },
@@ -427,11 +453,12 @@ test "typing in window finder filters windows instead of returning to applicatio
         .{ .draw = .{
             .table = .windows,
             .query = "term",
-            .rows = .{ .windows = &.{.{ .stable_id = "kitty" }} },
+            .rows = .{ .windows = &.{.{ .stable_id = "0x3" }} },
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_process = .{ .focus = .{ .stable_id = "kitty" } } },
+        .{ .navigator_focus = .{ .stable_id = "0x3" } },
+        .{ .navigator_focus_observation = .{} },
         .{ .stop_text = .ok },
         .destroy,
         .quit,
@@ -446,14 +473,14 @@ test "Tab toggles window finder back to a fresh application finder" {
         .{ .start_text = .ok },
         .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} } } },
         .{ .wait = .{ .event = .tab } },
-        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .navigator_discovery = .{} },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .window_status = .ready,
         } },
@@ -470,7 +497,7 @@ test "Tab toggles window finder back to a fresh application finder" {
     }, &applications);
 }
 
-test "WMIO discovery failure leaves a bounded window mode and Tab recovers apps" {
+test "Hyprland discovery failure leaves a bounded window mode and Tab recovers apps" {
     const applications = [_]apps.App{testApp("Alpha")};
     _ = try simulateApps(&.{
         .{ .init = .ok },
@@ -478,11 +505,12 @@ test "WMIO discovery failure leaves a bounded window mode and Tab recovers apps"
         .{ .start_text = .ok },
         .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} } } },
         .{ .wait = .{ .event = .tab } },
-        .{ .navigator_process = .{ .desktop = .{ .result = .fail } } },
+        .{ .navigator_discovery = .{ .result = .fail } },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .window_status = .unavailable,
+            .window_error = "CompositorCliRejected",
         } },
         .{ .wait = .{ .event = .tab } },
         .{ .draw = .{
@@ -490,6 +518,30 @@ test "WMIO discovery failure leaves a bounded window mode and Tab recovers apps"
             .rows = .{ .apps = &.{0} },
             .window_status = .unavailable,
         } },
+        .{ .wait = .{ .event = .escape } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &applications);
+}
+
+test "malformed Hyprland client response is visible and recoverable" {
+    const applications = [_]apps.App{testApp("Alpha")};
+    _ = try simulateApps(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} } } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .navigator_discovery = .{ .bytes = "{}" } },
+        .{ .draw = .{
+            .table = .windows,
+            .query = "",
+            .window_status = .unavailable,
+            .window_error = "CompositorReplyMalformed",
+        } },
+        .{ .wait = .{ .event = .tab } },
+        .{ .draw = .{ .query = "", .rows = .{ .apps = &.{0} }, .window_status = .unavailable } },
         .{ .wait = .{ .event = .escape } },
         .{ .stop_text = .ok },
         .destroy,
@@ -504,14 +556,14 @@ test "stale exact window focus remains visible instead of activating another tar
         .{ .start_text = .ok },
         .{ .draw = .{ .query = "" } },
         .{ .wait = .{ .event = .tab } },
-        .{ .navigator_process = .{ .desktop = .{} } },
+        .{ .navigator_discovery = .{} },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .window_status = .ready,
         } },
@@ -520,34 +572,47 @@ test "stale exact window focus remains visible instead of activating another tar
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .selected_row = 1,
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_process = .{ .focus = .{
-            .stable_id = "kitty",
-            .bytes = "{\"schema\":\"wmio/v1\",\"ok\":true,\"operation\":\"focus\",\"data\":{\"stable_id\":\"zen\"}}",
-        } } },
+        .{ .navigator_focus = .{ .stable_id = "0x3" } },
+        .{ .navigator_focus_observation = .{ .bytes = "{\"address\":\"0x2\"}" } },
         .{ .draw = .{
             .table = .windows,
             .query = "",
             .rows = .{ .windows = &.{
-                .{ .stable_id = "zen" },
-                .{ .stable_id = "kitty" },
-                .{ .stable_id = "files" },
+                .{ .stable_id = "0x2" },
+                .{ .stable_id = "0x3" },
+                .{ .stable_id = "0x4" },
             } },
             .selected_row = 1,
             .window_status = .focus_failed,
+            .window_error = "CompositorFocusMismatch",
         } },
         .{ .wait = .{ .event = .escape } },
         .{ .stop_text = .ok },
         .destroy,
         .quit,
     });
+}
+
+test "Snowman window finder refuses before CLI and cleans up SDL" {
+    try std.testing.expectError(error.SnowmanWindowDiscoveryUnavailable, simulateHistoryBackend(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .tab } },
+        // No navigator discovery step: Snowman must not launch anything.
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    }, &.{}, null, .snowman));
 }
 
 test "one pending event burst produces one final draw" {

@@ -71,30 +71,31 @@ directories. Ordinary typing filters the current list; selecting a row launches
 the application and exits the picker.
 
 The same picker can find current windows without becoming a resident taskbar.
-Press `Tab` after the first frame appears to switch from applications to a
-window finder. That transition reads one fresh bounded `wmio desktop` snapshot;
-`Tab` switches back to applications. Window rows are global across current
-workspaces and monitors, keep recent-focus order when WMIO provides it, and show
-workspace as location metadata rather than a navigation hierarchy. `Up` and
-`Down` select, typing filters the current finder, `Enter` focuses the exact
-selected WMIO stable ID and closes the picker, and `Escape` closes from either
-mode.
+On Hyprland, press `Tab` after the first frame to read one bounded
+`hyprctl -j clients` snapshot. `Tab` returns to applications. Window rows span
+current workspaces and monitors; they use Hyprland focus-history order when
+available and show workspace as location metadata. `Up` and `Down` select,
+typing filters, and `Enter` focuses the exact selected address using
+the Hyprland 0.56+ Lua dispatcher `hl.dsp.focus({ window = "address:<id>" })`. Wayspot then checks that
+`hyprctl -j activewindow` reports that same address before closing.
+`Escape` closes either mode.
 
-Window rows reuse the icon of one exact matching desktop application when that
-identity is unambiguous, then show the current window title and workspace. When
-a workspace has multiple windows, the row also shows a deterministic geometry
-ordinal such as `2/5`: this is the window's left-to-right position on that
-workspace, with top-to-bottom and stable identity only as tie-breakers. The
-finder itself remains recent-focus ordered. Existing WMIO viewport facts add a
-compact `<`, `>`, `<|`, or `|>` marker when a window is offscreen or clipped.
-A window without a safe application match remains usable as text instead of
-borrowing a guessed icon. WMIO remains the authority for monitor, workspace,
-window, viewport, presentation, and focus semantics. Wayspot owns only the
-invocation-local snapshot view, filtering, selection, and rendering. It does
-not call `hyprctl`, keep a window cache, start a watcher, or make the first
-useful application-picker frame wait for WMIO. If WMIO is unavailable or a
-selected target becomes stale, the picker remains responsive and reports that
-state in window mode.
+Window rows reuse the icon of one unambiguous matching desktop application,
+then show the current title and workspace. Where a workspace has multiple
+windows, a deterministic geometry ordinal such as `2/5` is also displayed.
+Hyprland's client snapshot does not supply viewport-direction classification,
+so Wayspot does not invent offscreen/clip markers. Windows with no safe application
+identity match retain their text labels.
+
+The window finder selects its backend by an exact `XDG_SESSION_DESKTOP`
+match (`Hyprland` or `Snowman`), not a desktop compatibility list or compositor
+signature. The finder is lazy: opening the application picker does not start a
+compositor CLI, cache windows, or run a persistent watcher. When Hyprland CLI
+observation or focus fails, the window finder reports the failure without
+focusing another target. **Snowman has a refusal-only adapter for now**: trying
+to enter window mode exits Wayspot with status 4 and a precise stderr message.
+It does not invoke any Snowman CLI or use another compositor's commands. The
+normal XDG application picker remains functional on Snowman.
 
 The same application data is available from the CLI:
 

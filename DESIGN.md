@@ -20,7 +20,7 @@ Changes touching startup should preserve these properties:
 - application discovery has no dependency on notification or wallpaper state;
 - input is enabled before the picker waits for user interaction;
 - the first useful frame is presented before nonessential icon work;
-- optional window finding starts no WMIO process and parses no desktop state
+- optional window finding starts no compositor CLI and parses no window state
   until the person explicitly switches to it after the first frame;
 - queued user input takes priority over decorative background work;
 - startup latency is measured when the critical path changes.
@@ -39,7 +39,7 @@ Examples of external facts:
 
 - installed applications and their desktop entries;
 - icon files and themes;
-- monitor, workspace, window, viewport, and focus facts exposed by WMIO;
+- monitor, workspace, window, and focus facts exposed by the supported native compositor CLI;
 - wallpaper files in a configured directory.
 
 These should normally be read from their real authorities when needed. Wayspot
@@ -89,14 +89,21 @@ Wayspot currently contains three product modes:
 3. `wallpaper` - per-monitor background surfaces and rotation.
 
 The application picker may switch on demand into a global window finder that
-strengthens its original job without becoming a taskbar. Window mode reads one
-fresh bounded WMIO snapshot only after explicit activation, keeps no resident
-watcher or persistent window shadow, treats workspace/monitor as location
-metadata rather than nested navigation, and sends exact focus actions back
-through WMIO. Its default ordering may use backend-neutral focus recency from
-WMIO. Workspace-local geometry may be rendered separately as a deterministic
-position such as `2/5` without changing that navigation order, while
-layout-specific commands such as Hyprland scrolling remain outside Wayspot.
+strengthens its original job without becoming a taskbar. On Hyprland, the
+finder reads one bounded `hyprctl -j clients` snapshot only after explicit
+activation, keeps no resident watcher or persistent window shadow, and
+uses exact native window addresses with Hyprland's `hl.dsp.focus` Lua dispatcher and
+subsequent `hyprctl -j activewindow` verification. Workspace/monitor remain
+location metadata rather than nested navigation. Focus recency is read only
+when the backend supplies it; workspace-local geometry may be rendered as
+a deterministic position such as `2/5` without changing focus order.
+No viewport-direction semantics are fabricated when unavailable.
+
+The Snowman window adapter deliberately refuses both discovery and focus until
+Snowman itself offers accepted native operations. It launches no Snowman
+CLI command and never substitutes another compositor's commands.
+The picker propagates this refusal to a clear nonzero process exit, but the
+ordinary app picker remains available on Snowman.
 This remains part of the picker rather than becoming a fourth resident product
 mode.
 
@@ -104,7 +111,7 @@ That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
 not redefine the primary latency requirement or justify a generic framework.
 
-Hyprland remains the primary desktop for the picker and WMIO-driven controls.
+Hyprland remains the primary desktop for the picker and native window controls.
 Wallpaper instead consumes standard Wayland output and background-surface
 protocols, so the same resident works with Snowman without a separate backend
 or compositor plugin architecture.

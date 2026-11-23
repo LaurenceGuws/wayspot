@@ -85,7 +85,18 @@ pub fn main(init: std.process.Init) !u8 {
         return perform(init, meaning, applications.slice(), terminal, home);
     }
 
-    try runPicker(init, &files, &applications, terminal, home);
+    runPicker(init, &files, &applications, terminal, home) catch |failure| {
+        const message: []const u8 = switch (failure) {
+            error.SnowmanWindowDiscoveryUnavailable => "wayspot: Snowman window discovery unavailable: native CLI not implemented; window finder not opened\n",
+            error.SnowmanFocusUnavailable => "wayspot: Snowman window focus unavailable: native CLI not implemented; no focus change attempted\n",
+            else => return failure,
+        };
+        var stderr_buffer: [256]u8 = undefined;
+        var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
+        try stderr_writer.interface.writeAll(message);
+        try stderr_writer.interface.flush();
+        return 4;
+    };
     return 0;
 }
 
@@ -104,11 +115,12 @@ fn runPicker(
         .home = home,
     };
     var history_reader = HistoryReader{ .process = &init, .home = home };
-    var navigator_native: navigator.Native = .{ .io = init.io };
+    const window_backend = navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP"));
     if (try picker.run(
         &native,
         &history_reader,
-        &navigator_native,
+        init.io,
+        window_backend,
         init.gpa,
         @intCast(std.os.linux.getpid()),
         applications.slice(),
