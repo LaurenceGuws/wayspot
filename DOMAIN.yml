@@ -42,6 +42,12 @@ scope:
       purpose: discover, find, and open currently installed applications
       resident_process: false
       persistent_derived_state: false
+      header:
+        toolbar: clock plus on-demand StatusNotifier item icons
+        clock: 24-hour local date and time, updated while open
+        presentation: existing picker window; no separate desktop bar
+        tray_discovery: after first useful picker frame
+        tray_refresh: bounded, while picker is open
       window_finder:
         surface: same picker rows, mutually exclusive with application results
         activation: Tab after the first useful application frame
@@ -77,6 +83,13 @@ scope:
         - monitor focus never changes the current wallpaper round
         - each process start receives a fresh random sequence
         - the process remains alive while the desktop session is alive
+
+    tray:
+      purpose: retain StatusNotifierWatcher D-Bus registration ownership
+      resident_process: true
+      interface: KDE and freedesktop StatusNotifierWatcher; D-BusMenu actions
+      presentation: icons and menus only in the existing picker toolbar
+      persistent_derived_state: false
 
   process_lifecycle:
     - each resident process owns and asserts its lifecycle

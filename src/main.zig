@@ -4,6 +4,7 @@ const std = @import("std");
 const apps = @import("apps.zig");
 const cli = @import("cli.zig");
 const cmd = @import("cmd.zig");
+const tray_watcher = @import("tray_watcher.zig");
 const desktop_files = @import("desktop_files.zig");
 const launch = @import("launch.zig");
 const notification = @import("notification.zig");
@@ -29,6 +30,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     const argv = arguments[0..argument_count];
     if (argument_count > 0) {
+        if (std.mem.eql(u8, argv[0], "tray")) {
+            if (argument_count != 1) return 2;
+            try tray_watcher.run();
+            return 0;
+        }
         if (cmd.resolveCompletion(argv) catch return 2) |meaning| {
             return perform(init, meaning, &.{}, null, null);
         }

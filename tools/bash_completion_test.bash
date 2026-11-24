@@ -21,7 +21,7 @@ expect() {
 }
 
 expect 'apps' wayspot ap
-expect $'apps\nnotifications\nwallpaper' wayspot ''
+expect $'apps\nnotifications\nwallpaper\ntray' wayspot ''
 expect 'history' wayspot notifications h
 expect 'rotate' wayspot wallpaper r
 

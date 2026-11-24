@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const apps = @import("apps.zig");
+const clock = @import("clock.zig");
 const icon_path = @import("icon.zig");
 const image = @import("image.zig");
 const navigator = @import("navigator.zig");
@@ -9,7 +10,10 @@ const picker = @import("picker.zig");
 const sdl_event = @import("sdl_event.zig");
 const pixels = @import("sdl_pixels.zig");
 const text_draw = @import("text_draw.zig");
+const tray = @import("tray.zig");
+const tray_menu = @import("tray_menu.zig");
 const sdl = @import("sdl_c");
+const time = @import("time_c");
 
 /// Native is the production realization of the picker's exact SDL operations.
 pub const Native = struct {
@@ -46,11 +50,27 @@ pub const Native = struct {
     events_pending: bool = false,
     initialized: bool = false,
     text_started: bool = false,
+    tray_event: u32 = 0,
+    tray_fetched: bool = false,
+    tray_threads_initialized: bool = false,
+    tray_worker: ?std.Thread = null,
+    tray_worker_ready: std.atomic.Value(bool) = .init(false),
+    tray_stop: std.atomic.Value(bool) = .init(false),
+    tray_next_refresh: u64 = 0,
+    tray_worker_snapshot: tray.Snapshot = .{},
+    tray_snapshot: tray.Snapshot = .{},
+    tray_textures: [tray.capacity]?*sdl.SDL_Texture = @splat(null),
+    menu: ?tray_menu.Menu = null,
+    menu_item: usize = 0,
+    menu_hover: ?usize = null,
 
     /// Initializes exactly the SDL video subsystem.
     pub fn init(native: *Native) !void {
         std.debug.assert(!native.initialized);
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
+        errdefer sdl.SDL_Quit();
+        native.tray_event = sdl.SDL_RegisterEvents(1);
+        if (native.tray_event == 0xffffffff) return error.SdlTrayEventFailed;
         native.initialized = true;
     }
 
@@ -95,6 +115,10 @@ pub const Native = struct {
     /// Waits for input, then drains one bounded portion of SDL's event queue.
     pub fn read(native: *Native) !picker.Events {
         std.debug.assert(native.text_started);
+        // Refresh external tray facts only while the picker is open. Worker
+        // results return through SDL's event queue, not a polling GUI loop.
+        if (native.tray_fetched and native.tray_worker == null and
+            sdl.SDL_GetTicks() >= native.tray_next_refresh) native.startTrayFetch();
         var events: picker.Events = .{};
         while (events.count < picker.event_capacity) {
             var native_event: sdl.SDL_Event = undefined;
@@ -109,8 +133,18 @@ pub const Native = struct {
                     events.count = 1;
                     return events;
                 }
-            } else if (!sdl.SDL_WaitEvent(&native_event)) {
-                return error.SdlWaitFailed;
+            } else {
+                _ = sdl.SDL_ClearError();
+                if (!sdl.SDL_WaitEventTimeout(&native_event, native.waitTimeout())) {
+                    if (std.mem.span(sdl.SDL_GetError()).len != 0) return error.SdlWaitFailed;
+                    const tray_due = native.tray_fetched and native.tray_worker == null and
+                        sdl.SDL_GetTicks() >= native.tray_next_refresh;
+                    if (tray_due) native.startTrayFetch();
+                    // Clock ticks repaint; tray refresh is a worker event.
+                    events.items[0] = if (tray_due) .ignored else .redraw;
+                    events.count = 1;
+                    return events;
+                }
             }
             if (!sdl.SDL_ConvertEventToRenderCoordinates(native.renderer, &native_event)) {
                 return error.SdlCoordinateConversionFailed;
@@ -124,6 +158,10 @@ pub const Native = struct {
     }
 
     fn translate(native: *Native, event: sdl.SDL_Event) !picker.Event {
+        if (event.type == native.tray_event) {
+            try native.receiveTray();
+            return .redraw;
+        }
         return switch (event.type) {
             sdl.SDL_EVENT_QUIT => .quit,
             sdl.SDL_EVENT_WINDOW_CLOSE_REQUESTED => .quit,
@@ -137,28 +175,60 @@ pub const Native = struct {
             sdl.SDL_EVENT_RENDER_DEVICE_RESET => reset: {
                 native.clearIcons();
                 native.resetText();
+                native.resetTrayTextures();
                 break :reset .redraw;
             },
             sdl.SDL_EVENT_RENDER_DEVICE_LOST => error.SdlRenderDeviceLost,
             sdl.SDL_EVENT_KEY_DOWN => switch (event.key.key) {
-                sdl.SDLK_ESCAPE => .escape,
-                sdl.SDLK_BACKSPACE => .backspace,
-                sdl.SDLK_TAB => .tab,
-                sdl.SDLK_UP => .up,
-                sdl.SDLK_DOWN => .down,
-                sdl.SDLK_RETURN => .enter,
+                sdl.SDLK_ESCAPE => if (native.menu != null) blk: {
+                    native.menu = null;
+                    break :blk .redraw;
+                } else .escape,
+                sdl.SDLK_BACKSPACE => if (native.menu != null) blk: {
+                    native.menu = null;
+                    break :blk .redraw;
+                } else .backspace,
+                sdl.SDLK_TAB => blk: {
+                    native.menu = null;
+                    break :blk .tab;
+                },
+                sdl.SDLK_UP => if (native.menu != null) native.moveMenu(-1) else .up,
+                sdl.SDLK_DOWN => if (native.menu != null) native.moveMenu(1) else .down,
+                sdl.SDLK_RETURN => if (native.menu != null) native.selectMenu() else .enter,
                 else => .ignored,
             },
-            sdl.SDL_EVENT_TEXT_INPUT => .{ .text = try picker.Text.init(std.mem.span(event.text.text)) },
-            sdl.SDL_EVENT_MOUSE_MOTION => hoverAt(event.motion.x, event.motion.y) orelse .ignored,
-            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => if (event.button.button == sdl.SDL_BUTTON_LEFT)
-                clickAt(event.button.x, event.button.y) orelse .ignored
+            sdl.SDL_EVENT_TEXT_INPUT => blk: {
+                native.menu = null;
+                break :blk .{ .text = try picker.Text.init(std.mem.span(event.text.text)) };
+            },
+            sdl.SDL_EVENT_MOUSE_MOTION => if (native.menu != null)
+                native.hoverMenu(event.motion.x, event.motion.y)
             else
-                .ignored,
-            sdl.SDL_EVENT_MOUSE_WHEEL => .{ .scroll = sdl_event.wheelRows(
-                event.wheel.integer_y,
-                event.wheel.direction == sdl.SDL_MOUSEWHEEL_FLIPPED,
-            ) },
+                hoverAt(event.motion.x, event.motion.y) orelse .ignored,
+            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => blk: {
+                if (native.menu != null) {
+                    if (native.menuAt(event.button.x, event.button.y)) |index| {
+                        if (event.button.button == sdl.SDL_BUTTON_LEFT)
+                            break :blk native.clickMenu(index);
+                    }
+                    native.menu = null;
+                    break :blk .redraw;
+                }
+                if (pixels.trayAt(event.button.x, event.button.y, native.tray_snapshot.count)) |index| {
+                    break :blk native.openTray(index, event.button.button, event.button.x, event.button.y);
+                }
+                break :blk if (event.button.button == sdl.SDL_BUTTON_LEFT)
+                    clickAt(event.button.x, event.button.y) orelse .ignored
+                else
+                    .ignored;
+            },
+            sdl.SDL_EVENT_MOUSE_WHEEL => if (native.menu != null)
+                .ignored
+            else
+                .{ .scroll = sdl_event.wheelRows(
+                    event.wheel.integer_y,
+                    event.wheel.direction == sdl.SDL_MOUSEWHEEL_FLIPPED,
+                ) },
             else => .ignored,
         };
     }
@@ -169,6 +239,12 @@ pub const Native = struct {
         native.evict(frame);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
+
+        const bar_rect = nativeRect(pixels.toolbar);
+        if (!sdl.SDL_SetRenderDrawColor(renderer, 29, 33, 43, 255)) return error.SdlDrawFailed;
+        if (!sdl.SDL_RenderFillRect(renderer, &bar_rect)) return error.SdlDrawFailed;
+        try native.drawClock();
+        try native.drawTray();
 
         const query_pane = nativeRect(pixels.query);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 30, 31, 39, 255)) return error.SdlDrawFailed;
@@ -192,17 +268,30 @@ pub const Native = struct {
             },
             .notifications => "Notification history",
         } else frame.query;
-        try native.drawText(query, .{ 235, 235, 240 }, 20, 14);
+        // The query has its own full-width row, so a long search never
+        // overwrites the toolbar's clock or eventual tray icons.
+        const query_clip = sdl.SDL_Rect{ .x = 17, .y = 47, .w = 684, .h = 34 };
+        if (!sdl.SDL_SetRenderClipRect(renderer, &query_clip)) return error.SdlDrawFailed;
+        const query_draw = native.drawText(query, .{ 235, 235, 240 }, 20, 52);
+        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
+        try query_draw;
         for (frame.rowSlice(), 0..) |row, index| {
             try native.drawRow(row, index, index == frame.selected_row);
         }
         try drawScrollbar(renderer, frame);
+        try native.drawMenu();
         if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
         if (try native.firstMissing(frame)) |app_index| {
             native.pending_icons = true;
             try native.load(app_index);
         } else {
             native.pending_icons = false;
+        }
+        // Give application icons priority over tray setup. Both follow the
+        // first useful frame; a slow D-Bus item never delays picker results.
+        if (!native.tray_fetched and native.tray_worker == null) {
+            native.tray_fetched = true;
+            native.startTrayFetch();
         }
     }
 
@@ -283,6 +372,13 @@ pub const Native = struct {
         std.debug.assert(native.window != null);
         std.debug.assert(native.renderer != null);
         std.debug.assert(!native.text_started);
+        if (native.tray_worker) |worker| {
+            native.tray_stop.store(true, .release);
+            worker.join();
+            native.tray_worker = null;
+            native.tray_worker_snapshot.deinit(std.heap.page_allocator);
+        }
+        native.clearTray();
         native.clearIcons();
         native.clearText();
         sdl.SDL_DestroyRenderer(native.renderer);
@@ -352,9 +448,247 @@ pub const Native = struct {
         native.text = null;
     }
 
+    fn receiveTray(native: *Native) !void {
+        if (!native.tray_worker_ready.load(.acquire)) return;
+        if (native.tray_worker) |worker| {
+            worker.join();
+            native.tray_worker = null;
+        }
+        native.clearTray();
+        native.tray_snapshot = native.tray_worker_snapshot;
+        native.tray_worker_snapshot = .{};
+        native.createTrayTextures();
+    }
+
+    fn createTrayTextures(native: *Native) void {
+        for (native.tray_snapshot.entries[0..native.tray_snapshot.count], 0..) |*entry, index| {
+            native.tray_textures[index] = native.makeTrayTexture(entry) catch null;
+        }
+    }
+
+    fn startTrayFetch(native: *Native) void {
+        std.debug.assert(native.tray_worker == null);
+        // Do not load/initialize libdbus in the fresh picker's critical path.
+        // The very first application frame has been presented before this
+        // worker setup. Subsequent refreshes reuse the initialized library.
+        if (!native.tray_threads_initialized) {
+            if (@import("dbus_c").dbus_threads_init_default() == 0) {
+                std.log.warn("libdbus thread initialization failed; tray unavailable", .{});
+                native.tray_next_refresh = sdl.SDL_GetTicks() + 30_000;
+                return;
+            }
+            native.tray_threads_initialized = true;
+        }
+        native.tray_stop.store(false, .release);
+        native.tray_worker_ready.store(false, .release);
+        native.tray_next_refresh = sdl.SDL_GetTicks() + 7000;
+        native.tray_worker = std.Thread.spawn(.{}, trayFetch, .{native}) catch |err| {
+            std.log.warn("tray fetch thread unavailable: {s}", .{@errorName(err)});
+            return;
+        };
+    }
+
+    fn waitTimeout(native: *Native) c_int {
+        const next_clock = clockTimeout();
+        if (!native.tray_fetched or native.tray_worker != null) return next_clock;
+        const remaining = native.tray_next_refresh -| sdl.SDL_GetTicks();
+        return @intCast(@min(@as(u64, @intCast(next_clock)), @max(1, remaining)));
+    }
+
+    fn destroyTrayTextures(native: *Native) void {
+        for (&native.tray_textures) |*value| {
+            if (value.*) |texture| sdl.SDL_DestroyTexture(texture);
+            value.* = null;
+        }
+    }
+
+    fn resetTrayTextures(native: *Native) void {
+        native.destroyTrayTextures();
+        native.createTrayTextures();
+    }
+
+    fn clearTray(native: *Native) void {
+        native.menu = null;
+        native.destroyTrayTextures();
+        native.tray_snapshot.deinit(std.heap.page_allocator);
+    }
+
+    fn makeTrayTexture(native: *Native, entry: *const tray.Entry) !?*sdl.SDL_Texture {
+        if (entry.pixels) |raw| {
+            const surface = sdl.SDL_CreateSurfaceFrom(entry.width, entry.height, sdl.SDL_PIXELFORMAT_ARGB8888, raw.ptr, @as(c_int, entry.width) * 4) orelse
+                return error.TraySurfaceFailed;
+            defer sdl.SDL_DestroySurface(surface);
+            const texture = sdl.SDL_CreateTextureFromSurface(native.renderer, surface) orelse
+                return error.TrayTextureFailed;
+            if (!sdl.SDL_SetTextureBlendMode(texture, sdl.SDL_BLENDMODE_BLEND)) {
+                sdl.SDL_DestroyTexture(texture);
+                return error.TrayBlendFailed;
+            }
+            return texture;
+        }
+        // A named icon is already an external XDG fact: resolve it fresh like
+        // application icons, without a persistent icon-theme index.
+        if (entry.iconText().len == 0) return null;
+        var candidates: icon_path.Paths = .{ .home = native.home, .icon = entry.iconText() };
+        while (candidates.next() catch return null) |filename| {
+            const bytes = std.Io.Dir.cwd().readFileAlloc(native.io, filename, native.allocator, .limited(128 * 1024)) catch continue;
+            defer native.allocator.free(bytes);
+            if (image.inspect(bytes) != null) continue;
+            const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse continue;
+            const surface = sdl.SDL_LoadPNG_IO(stream, true) orelse continue;
+            defer sdl.SDL_DestroySurface(surface);
+            return sdl.SDL_CreateTextureFromSurface(native.renderer, surface);
+        }
+        return null;
+    }
+
+    fn drawTray(native: *Native) !void {
+        const renderer = native.renderer orelse unreachable;
+        for (native.tray_snapshot.entries[0..native.tray_snapshot.count], 0..) |*entry, index| {
+            const cell = pixels.traySlot(index);
+            if (native.tray_textures[index]) |texture| {
+                const target = sdl.SDL_FRect{
+                    .x = cell.x + 2,
+                    .y = cell.y + 2,
+                    .w = cell.w - 4,
+                    .h = cell.h - 4,
+                };
+                if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) return error.TrayDrawFailed;
+            } else {
+                // Missing icons remain clickable, identified by their actual
+                // application title, not a fabricated placeholder service.
+                if (!sdl.SDL_SetRenderDrawColor(renderer, 48, 55, 70, 255)) return error.TrayDrawFailed;
+                const target = nativeRect(cell);
+                if (!sdl.SDL_RenderFillRect(renderer, &target)) return error.TrayDrawFailed;
+                const title = entry.titleText();
+                if (title.len > 0 and title[0] >= 'A' and title[0] <= 'z')
+                    try native.drawText(title[0..1], .{ 220, 230, 245 }, cell.x + 7, cell.y + 3);
+            }
+        }
+    }
+
+    fn trayClick(native: *Native, index: usize, button: u8, x: f32, y: f32) void {
+        var position_x: c_int = 0;
+        var position_y: c_int = 0;
+        _ = sdl.SDL_GetWindowPosition(native.window, &position_x, &position_y);
+        native.tray_snapshot.activate(index, position_x + @as(i32, @intFromFloat(x)), position_y + @as(i32, @intFromFloat(y)), button) catch |err| {
+            std.log.warn("tray activation failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    const menu_left: f32 = 398;
+    const menu_top: f32 = 42;
+    const menu_width: f32 = 306;
+    const menu_height: f32 = 27;
+
+    /// Prefer a real DBusMenu on right click or menu-only items; otherwise
+    /// call the SNI item's own ContextMenu/Activate method.
+    fn openTray(native: *Native, index: usize, button: u8, x: f32, y: f32) picker.Event {
+        const item = &native.tray_snapshot.entries[index];
+        if ((button == sdl.SDL_BUTTON_RIGHT or item.item_is_menu) and item.menu_len > 0) {
+            if (tray_menu.fetch(item.serviceName(), item.menuPath(), 0) catch null) |menu| {
+                native.menu = menu;
+                native.menu_item = index;
+                native.menu_hover = null;
+                return .redraw;
+            }
+        }
+        native.trayClick(index, button, x, y);
+        return .ignored;
+    }
+
+    fn menuAt(native: *const Native, x: f32, y: f32) ?usize {
+        const menu = native.menu orelse return null;
+        if (x < menu_left or x >= menu_left + menu_width or y < menu_top) return null;
+        const index: usize = @intFromFloat((y - menu_top) / menu_height);
+        return if (index < menu.count) index else null;
+    }
+
+    fn hoverMenu(native: *Native, x: f32, y: f32) picker.Event {
+        const next = native.menuAt(x, y);
+        if (next == native.menu_hover) return .ignored;
+        native.menu_hover = next;
+        return .redraw;
+    }
+
+    fn moveMenu(native: *Native, direction: i8) picker.Event {
+        const count = if (native.menu) |menu| menu.count else return .ignored;
+        if (count == 0) return .ignored;
+        native.menu_hover = if (native.menu_hover) |current|
+            if (direction < 0) current -| 1 else @min(count - 1, current +| 1)
+        else if (direction < 0)
+            count - 1
+        else
+            0;
+        return .redraw;
+    }
+
+    fn selectMenu(native: *Native) picker.Event {
+        return native.clickMenu(native.menu_hover orelse 0);
+    }
+
+    fn clickMenu(native: *Native, index: usize) picker.Event {
+        const menu = native.menu orelse return .ignored;
+        if (index >= menu.count or !menu.rows[index].enabled) return .ignored;
+        const row = &menu.rows[index];
+        const item = &native.tray_snapshot.entries[native.menu_item];
+        if (row.submenu) {
+            if (tray_menu.fetch(item.serviceName(), item.menuPath(), row.id) catch null) |submenu| {
+                native.menu = submenu;
+                native.menu_hover = null;
+                return .redraw;
+            }
+        }
+        tray_menu.click(item.serviceName(), item.menuPath(), row.id) catch |err| {
+            std.log.warn("tray menu action failed: {s}", .{@errorName(err)});
+        };
+        native.menu = null;
+        native.menu_hover = null;
+        return .redraw;
+    }
+
+    fn drawMenu(native: *Native) !void {
+        const menu = if (native.menu) |*value| value else return;
+        const renderer = native.renderer orelse unreachable;
+        for (menu.rows[0..menu.count], 0..) |*row, index| {
+            const top = menu_top + menu_height * @as(f32, @floatFromInt(index));
+            const bounds: sdl.SDL_FRect = .{ .x = menu_left, .y = top, .w = menu_width, .h = menu_height };
+            const active = native.menu_hover != null and native.menu_hover.? == index;
+            const shade: [3]u8 = if (active and row.enabled) .{ 56, 66, 83 } else .{ 30, 34, 44 };
+            if (!sdl.SDL_SetRenderDrawColor(renderer, shade[0], shade[1], shade[2], 255))
+                return error.TrayMenuDrawFailed;
+            if (!sdl.SDL_RenderFillRect(renderer, &bounds)) return error.TrayMenuDrawFailed;
+            const clip = sdl.SDL_Rect{ .x = @intFromFloat(menu_left + 8), .y = @intFromFloat(top), .w = @intFromFloat(menu_width - 28), .h = @intFromFloat(menu_height) };
+            if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.TrayMenuDrawFailed;
+            const result = native.drawText(row.text(), if (row.enabled) .{ 226, 231, 241 } else .{ 122, 129, 145 }, menu_left + 10, top + 4);
+            if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.TrayMenuDrawFailed;
+            try result;
+            if (row.submenu) try native.drawText(">", .{ 185, 195, 215 }, menu_left + menu_width - 20, top + 4);
+        }
+    }
+
     fn drawText(native: *Native, value: []const u8, color: [3]u8, x: f32, y: f32) !void {
         const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
         try painter.draw(value, color, x, y);
+    }
+
+    /// A local clock belongs to the existing header, not another Wayland
+    /// surface. Time failures do not interrupt application discovery.
+    fn drawClock(native: *Native) !void {
+        var bytes: [32]u8 = undefined;
+        const label = localClock(&bytes) catch "--:--";
+        const renderer = native.renderer orelse unreachable;
+        const area = pixels.clock_clip;
+        const clip = sdl.SDL_Rect{
+            .x = @intFromFloat(area.x),
+            .y = @intFromFloat(area.y),
+            .w = @intFromFloat(area.w),
+            .h = @intFromFloat(area.h),
+        };
+        if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.SdlDrawFailed;
+        const result = native.drawText(label, .{ 164, 178, 198 }, 526, 12);
+        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
+        try result;
     }
 
     fn drawClippedText(native: *Native, value: []const u8, color: [3]u8, clip: sdl.SDL_Rect) !void {
@@ -452,6 +786,44 @@ pub const Native = struct {
         native.icon_count += 1;
     }
 };
+
+// The event queue is the only cross-thread UI boundary. The worker never
+// touches SDL textures or the window and cannot invalidate live picker state.
+fn trayFetch(native: *Native) void {
+    native.tray_worker_snapshot = tray.Snapshot.read(std.heap.page_allocator, &native.tray_stop) catch .{};
+    native.tray_worker_ready.store(true, .release);
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.type = native.tray_event;
+    _ = sdl.SDL_PushEvent(&event);
+}
+
+fn clockTimeout() c_int {
+    const epoch = time.time(null);
+    if (epoch < 0) return 60_000;
+    return clock.nextMinuteMilliseconds(@intCast(epoch));
+}
+
+fn localClock(bytes: *[32]u8) ![]const u8 {
+    const epoch = time.time(null);
+    if (epoch < 0) return error.ClockTimeUnavailable;
+    var local: time.struct_tm = undefined;
+    if (time.localtime_r(&epoch, &local) == null) return error.ClockLocalTimeUnavailable;
+    return clock.format(.{
+        .weekday = std.math.cast(u8, local.tm_wday) orelse return error.ClockDateInvalid,
+        .month = std.math.cast(u8, local.tm_mon) orelse return error.ClockDateInvalid,
+        .day = std.math.cast(u8, local.tm_mday) orelse return error.ClockDateInvalid,
+        .hour = std.math.cast(u8, local.tm_hour) orelse return error.ClockDateInvalid,
+        .minute = std.math.cast(u8, local.tm_min) orelse return error.ClockDateInvalid,
+    }, bytes);
+}
+
+test "picker clock reads local time without any Wayland or SDL window" {
+    var bytes: [32]u8 = undefined;
+    const label = try localClock(&bytes);
+    try std.testing.expect(label.len > 8 and label.len <= bytes.len);
+    try std.testing.expect(std.mem.indexOfScalar(u8, label, ':') != null);
+    try std.testing.expectEqual(@as(i32, 1_000), clock.nextMinuteMilliseconds(119));
+}
 
 fn destroyIcon(icon: Native.Icon) void {
     switch (icon.texture) {
@@ -659,4 +1031,96 @@ fn testApp(name: []const u8) apps.App {
         .terminal = false,
         .issues = .empty,
     };
+}
+
+test "tray menu overlays only its bounded picker rectangle and remains navigable" {
+    const surface = sdl.SDL_CreateSurface(pixels.window_width, pixels.window_height, sdl.SDL_PIXELFORMAT_RGBA32) orelse return error.SdlTestSurfaceFailed;
+    defer sdl.SDL_DestroySurface(surface);
+    const renderer = sdl.SDL_CreateSoftwareRenderer(surface) orelse return error.SdlTestRendererFailed;
+    defer sdl.SDL_DestroyRenderer(renderer);
+    var native = Native{ .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "/home/test", .renderer = renderer };
+    native.text = try text_draw.Painter.init(std.testing.allocator, renderer, 16);
+    defer native.clearText();
+    var menu: tray_menu.Menu = .{};
+    menu.rows[0] = .{ .id = 7, .length = 13 };
+    @memcpy(menu.rows[0].label[0..13], "Open settings");
+    menu.rows[1] = .{ .id = 8, .length = 8, .enabled = false };
+    @memcpy(menu.rows[1].label[0..8], "Disabled");
+    menu.count = 2;
+    native.menu = menu;
+    try std.testing.expectEqual(@as(?usize, 0), native.menuAt(420, 45));
+    try std.testing.expectEqual(@as(?usize, 1), native.menuAt(420, 74));
+    try std.testing.expectEqual(@as(?usize, null), native.menuAt(300, 45));
+    try std.testing.expectEqual(@as(?usize, null), native.menuAt(420, 120));
+    try std.testing.expectEqual(picker.Event.redraw, native.hoverMenu(420, 45));
+    try std.testing.expectEqual(@as(?usize, 0), native.menu_hover);
+    try std.testing.expectEqual(picker.Event.ignored, native.hoverMenu(420, 45));
+    try std.testing.expectEqual(picker.Event.redraw, native.moveMenu(1));
+    try std.testing.expectEqual(@as(?usize, 1), native.menu_hover);
+    if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255) or
+        !sdl.SDL_RenderClear(renderer)) return error.SdlTestRenderFailed;
+    try native.drawMenu();
+    if (!sdl.SDL_RenderPresent(renderer)) return error.SdlTestRenderFailed;
+    const data: [*]const u8 = @ptrCast(surface.*.pixels orelse return error.SdlSurfaceNoPixels);
+    const offset = 50 * @as(usize, @intCast(surface.*.pitch)) + 420 * 4;
+    try std.testing.expect(data[offset] != 18 or data[offset + 1] != 18 or data[offset + 2] != 24);
+}
+
+test "Tab, Backspace, and Escape dismiss tray menus without stealing picker controls" {
+    var native = Native{ .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.type = sdl.SDL_EVENT_KEY_DOWN;
+    native.menu = .{};
+    event.key.key = sdl.SDLK_TAB;
+    try std.testing.expectEqual(picker.Event.tab, try native.translate(event));
+    try std.testing.expect(native.menu == null);
+
+    native.menu = .{};
+    event.key.key = sdl.SDLK_BACKSPACE;
+    try std.testing.expectEqual(picker.Event.redraw, try native.translate(event));
+    try std.testing.expect(native.menu == null);
+    try std.testing.expectEqual(picker.Event.backspace, try native.translate(event));
+
+    native.menu = .{};
+    event.key.key = sdl.SDLK_ESCAPE;
+    try std.testing.expectEqual(picker.Event.redraw, try native.translate(event));
+    try std.testing.expect(native.menu == null);
+    try std.testing.expectEqual(picker.Event.escape, try native.translate(event));
+}
+
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+test "private-bus picker pointer events open the real tray menu and send its action" {
+    // This explicit integration probe runs only under an isolated D-Bus
+    // session hosting one known mock item. Regular CI never touches the user's
+    // production StatusNotifierWatcher or graphical seat.
+    const enabled = getenv("WAYSPOT_TRAY_PRIVATE_TEST") orelse return;
+    if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return;
+    var native = Native{
+        .applications = &.{},
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .home = "/home/test",
+    };
+    native.tray_snapshot = try tray.Snapshot.read(std.testing.allocator, null);
+    defer native.tray_snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), native.tray_snapshot.count);
+
+    var pointer = std.mem.zeroes(sdl.SDL_Event);
+    pointer.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
+    pointer.button.button = sdl.SDL_BUTTON_RIGHT;
+    pointer.button.x = 495;
+    pointer.button.y = 23;
+    try std.testing.expectEqual(picker.Event.redraw, try native.translate(pointer));
+    try std.testing.expect(native.menu != null);
+    try std.testing.expectEqualStrings("Open Mock Settings", native.menu.?.rows[0].text());
+
+    // The following click targets only the menu row within Wayspot's window,
+    // exercising the same SDL pointer path as a physical right-click then
+    // left-click without relying on an unreliable seat-injection helper.
+    pointer.button.button = sdl.SDL_BUTTON_LEFT;
+    pointer.button.x = 420;
+    pointer.button.y = 50;
+    try std.testing.expectEqual(picker.Event.redraw, try native.translate(pointer));
+    try std.testing.expect(native.menu == null);
 }

@@ -62,7 +62,7 @@ actually Wayspot-owned product data or merely a cached copy of external facts.
 
 ## 3. Resident processes must be cheap
 
-Notifications and wallpaper are resident because their jobs require continuous
+Notifications, wallpaper and the tray watcher are resident because their jobs require continuous
 ownership. Residency is not a general optimization strategy.
 
 For resident modes:
@@ -82,11 +82,16 @@ memory when evaluating a resident rather than optimizing a misleading number.
 
 ## 4. Scope does not define mission
 
-Wayspot currently contains three product modes:
+Wayspot currently contains four product modes:
 
 1. `apps` - the default application picker and direct CLI app access;
 2. `notifications` - freedesktop notification ownership and retained history;
-3. `wallpaper` - per-monitor background surfaces and rotation.
+3. `wallpaper` - per-monitor background surfaces and rotation;
+4. `tray` - a small windowless StatusNotifierWatcher resident. Icons, menus
+   and user actions live in the on-demand picker, not a persistent panel.
+
+The local clock is part of the picker header, not a separate resident. Tray
+discovery follows the first useful frame and never blocks its presentation.
 
 The application picker may switch on demand into a global window finder that
 strengthens its original job without becoming a taskbar. On Hyprland, the
@@ -104,8 +109,7 @@ Snowman itself offers accepted native operations. It launches no Snowman
 CLI command and never substitutes another compositor's commands.
 The picker propagates this refusal to a clear nonzero process exit, but the
 ordinary app picker remains available on Snowman.
-This remains part of the picker rather than becoming a fourth resident product
-mode.
+This remains part of the picker rather than becoming a resident taskbar.
 
 That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
@@ -146,7 +150,7 @@ this document only when they illustrate a durable product boundary.
 
 ## 7. Known tradeoffs are allowed to remain small
 
-The picker currently renders through a fixed `720x480` logical SDL geometry with
+The picker currently renders through a fixed `720x520` logical SDL geometry with
 high-DPI support. On a 4K display at fractional scaling around `1.6x`, text and
 other presentation can look softer than native-resolution rendering.
 

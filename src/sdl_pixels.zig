@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub const window_width = 720;
-pub const window_height = 480;
+pub const window_height = 520;
 pub const visible_rows = 14;
 pub const icon_size = 22;
 
@@ -14,10 +14,39 @@ pub const Rect = struct {
     h: f32,
 };
 
-const query_height: f32 = 52;
+const query_height: f32 = 90;
 const row_height: f32 = 30;
 
-pub const query = Rect{ .x = 8, .y = 8, .w = 704, .h = 36 };
+/// The toolbar is part of the existing picker window, not a desktop layer.
+pub const toolbar = Rect{ .x = 8, .y = 8, .w = 704, .h = 30 };
+pub const query = Rect{ .x = 8, .y = 46, .w = 704, .h = 36 };
+pub const clock_clip = Rect{ .x = 515, .y = 9, .w = 189, .h = 28 };
+
+pub const tray_capacity = 12;
+const tray_size: f32 = 26;
+const tray_right: f32 = 509;
+
+/// Tray slots populate from right to left, immediately before the clock.
+/// Zero items consume zero pixels; there are no placeholder application icons.
+pub fn traySlot(index: usize) Rect {
+    std.debug.assert(index < tray_capacity);
+    return .{
+        .x = tray_right - tray_size * @as(f32, @floatFromInt(index + 1)),
+        .y = 10,
+        .w = tray_size,
+        .h = tray_size,
+    };
+}
+
+pub fn trayAt(x: f32, y: f32, count: usize) ?usize {
+    if (count > tray_capacity) return null;
+    for (0..count) |index| {
+        const slot = traySlot(index);
+        if (x >= slot.x and x < slot.x + slot.w and y >= slot.y and y < slot.y + slot.h)
+            return index;
+    }
+    return null;
+}
 pub const scrollbar_track = Rect{
     .x = 708,
     .y = query_height,
@@ -82,4 +111,28 @@ test "scrollbar maps first and last pages to track ends" {
     try std.testing.expectEqual(scrollbar_track.y, first.y);
     try std.testing.expectEqual(scrollbar_track.y + scrollbar_track.h, last.y + last.h);
     try std.testing.expectEqual(null, scrollbar(0, visible_rows, visible_rows));
+}
+
+test "toolbar, search and all fourteen rows stay separate within the window" {
+    try std.testing.expect(toolbar.y + toolbar.h < query.y);
+    try std.testing.expect(query.y + query.h < row(0).y);
+    try std.testing.expect(row(visible_rows - 1).y + row(visible_rows - 1).h <= window_height);
+    try std.testing.expectEqual(@as(?usize, null), rowAt(20, toolbar.y + 5));
+    try std.testing.expectEqual(@as(?usize, null), rowAt(20, query.y + 5));
+    try std.testing.expectEqual(@as(?usize, 0), rowAt(20, row(0).y + 5));
+    try std.testing.expectEqual(@as(?usize, visible_rows - 1), rowAt(20, row(visible_rows - 1).y + 5));
+}
+
+test "tray hitboxes stay within toolbar and never overlap the clock" {
+    try std.testing.expectEqual(@as(?usize, null), trayAt(500, 20, 0));
+    try std.testing.expectEqual(@as(?usize, 0), trayAt(495, 20, 1));
+    try std.testing.expectEqual(@as(?usize, 1), trayAt(468, 20, 2));
+    try std.testing.expectEqual(@as(?usize, null), trayAt(495, query.y, 2));
+    for (0..tray_capacity) |index| {
+        const slot = traySlot(index);
+        try std.testing.expect(slot.y >= toolbar.y);
+        try std.testing.expect(slot.y + slot.h <= toolbar.y + toolbar.h);
+        try std.testing.expect(slot.x + slot.w <= clock_clip.x);
+        try std.testing.expect(slot.x >= toolbar.x);
+    }
 }

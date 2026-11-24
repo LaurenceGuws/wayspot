@@ -37,6 +37,14 @@ pub fn build(b: *std.Build) void {
     dbus_translate.linkSystemLibrary("dbus-1", .{});
     const dbus_c = dbus_translate.createModule();
 
+    const time_header = headers.add("wayspot-time.h", "#include <time.h>\n");
+    const time_translate = b.addTranslateC(.{
+        .root_source_file = time_header,
+        .target = target,
+        .optimize = optimize,
+    });
+    const time_c = time_translate.createModule();
+
     const wayspot = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -90,6 +98,7 @@ pub fn build(b: *std.Build) void {
     wayspot.addImport("howl_text", howl_text.module("howl_text"));
     wayspot.addImport("dbus_c", dbus_c);
     wayspot.addImport("wayland_c", wayland_c);
+    wayspot.addImport("time_c", time_c);
 
     const executable = b.addExecutable(.{
         .name = "wayspot",
@@ -288,6 +297,7 @@ pub fn build(b: *std.Build) void {
     sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
     sdl_tests.root_module.addImport("sdl_c", sdl_c);
     sdl_tests.root_module.addImport("dbus_c", dbus_c);
+    sdl_tests.root_module.addImport("time_c", time_c);
     sdl_tests.use_llvm = false;
     sdl_tests.use_lld = false;
     const run_sdl_tests = b.addRunArtifact(sdl_tests);
@@ -307,6 +317,39 @@ pub fn build(b: *std.Build) void {
     text_draw_tests.root_module.addImport("sdl_c", sdl_c);
     text_draw_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     const run_text_draw_tests = b.addRunArtifact(text_draw_tests);
+    const tray_watcher_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tray_watcher.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    tray_watcher_tests.root_module.addImport("dbus_c", dbus_c);
+    tray_watcher_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    const run_tray_watcher_tests = b.addRunArtifact(tray_watcher_tests);
+    const tray_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tray.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    tray_tests.root_module.addImport("dbus_c", dbus_c);
+    tray_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    const run_tray_tests = b.addRunArtifact(tray_tests);
+    const tray_menu_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tray_menu.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    tray_menu_tests.root_module.addImport("dbus_c", dbus_c);
+    tray_menu_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    const run_tray_menu_tests = b.addRunArtifact(tray_menu_tests);
     const sdl_pixels_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/sdl_pixels.zig"),
@@ -353,6 +396,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdl_event_tests.step);
     test_step.dependOn(&run_sdl_tests.step);
     test_step.dependOn(&run_text_draw_tests.step);
+    test_step.dependOn(&run_tray_watcher_tests.step);
+    test_step.dependOn(&run_tray_tests.step);
+    test_step.dependOn(&run_tray_menu_tests.step);
+
+    const clock_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/clock.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(clock_tests).step);
     test_step.dependOn(&run_sdl_pixels_tests.step);
     test_step.dependOn(&run_notification_tests.step);
     const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });

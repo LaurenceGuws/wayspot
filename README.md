@@ -66,6 +66,12 @@ Run the default graphical picker:
 wayspot
 ```
 
+The picker has a slim status bar above search, followed by the familiar
+fourteen result rows. The bar displays the local date and 24-hour time, and
+currently registered StatusNotifier application icons when a watcher is
+available. The clock updates at the next minute while the window is open.
+It uses the existing picker renderer and does not start a separate desktop bar.
+
 Applications are discovered directly from the current XDG application
 directories. Ordinary typing filters the current list; selecting a row launches
 the application and exits the picker.
@@ -106,6 +112,24 @@ wayspot "Firefox"
 ```
 
 The last form launches one exact application name or desktop id.
+
+### System tray
+
+The StatusNotifier watcher must remain available while the picker is closed,
+because applications register their items over the session D-Bus. Start the
+small, windowless resident alongside your Hyprland session:
+
+```bash
+wayspot tray
+```
+
+The picker reads tray items **after presenting its first frame**, loads their
+bounded pixmaps or named icons, and refreshes the tray while it is open.
+Left and middle click send standard activation methods. Right click, or an
+item that primarily represents a menu, opens its D-BusMenu inside the picker
+when available; otherwise Wayspot asks the application to show its context
+menu. Menus support selection and submenus. No tray icon database is stored,
+and an unavailable watcher never prevents the application picker from opening.
 
 ### Notifications
 

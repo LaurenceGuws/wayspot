@@ -6,7 +6,7 @@ const apps = @import("apps.zig");
 
 pub const argument_capacity = 64;
 pub const query_capacity = apps.query_capacity;
-pub const modes = [_][]const u8{ "apps", "notifications", "wallpaper" };
+pub const modes = [_][]const u8{ "apps", "notifications", "wallpaper", "tray" };
 pub const notification_operations = [_][]const u8{"history"};
 pub const wallpaper_operations = [_][]const u8{"rotate"};
 
@@ -28,7 +28,7 @@ comptime {
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "wallpaper")).len == 2);
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "apps")).len == 2);
     std.debug.assert(std.meta.fieldNames(@FieldType(Cmd, "notifications")).len == 2);
-    std.debug.assert(modes.len == 3);
+    std.debug.assert(modes.len == 4);
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
 }
 

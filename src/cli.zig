@@ -7,6 +7,7 @@ const cmd = @import("cmd.zig");
 pub const help =
     \\usage:
     \\  wayspot
+    \\  wayspot tray
     \\  wayspot wallpaper ROOT
     \\  wayspot wallpaper rotate
     \\  wayspot apps [terms...]
@@ -141,7 +142,7 @@ test "Bash definition uses current Cmd words without exposing an engine command"
         \\    local current=${COMP_WORDS[COMP_CWORD]}
         \\    local -a directories
         \\    if (( COMP_CWORD == 1 )); then
-        \\        mapfile -t COMPREPLY < <(compgen -W 'apps notifications wallpaper' -- "$current")
+        \\        mapfile -t COMPREPLY < <(compgen -W 'apps notifications wallpaper tray' -- "$current")
         \\        return
         \\    fi
         \\    case ${COMP_WORDS[1]-} in
