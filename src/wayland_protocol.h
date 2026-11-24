@@ -21,7 +21,10 @@ struct zxdg_output_v1;
 
 enum {
     WAYSPOT_LAYER_BACKGROUND = 0,
+    WAYSPOT_LAYER_TOP = 2,
+    WAYSPOT_LAYER_OVERLAY = 3,
     WAYSPOT_KEYBOARD_NONE = 0,
+    WAYSPOT_KEYBOARD_EXCLUSIVE = 1,
     WAYSPOT_ANCHOR_TOP = 1,
     WAYSPOT_ANCHOR_BOTTOM = 2,
     WAYSPOT_ANCHOR_LEFT = 4,
@@ -69,6 +72,7 @@ int wayspot_layer_surface_add_listener(
 void wayspot_layer_surface_set_size(struct zwlr_layer_surface_v1 *, uint32_t, uint32_t);
 void wayspot_layer_surface_set_anchor(struct zwlr_layer_surface_v1 *, uint32_t);
 void wayspot_layer_surface_set_exclusive_zone(struct zwlr_layer_surface_v1 *, int32_t);
+void wayspot_layer_surface_set_margin(struct zwlr_layer_surface_v1 *, int32_t, int32_t, int32_t, int32_t);
 void wayspot_layer_surface_set_keyboard(struct zwlr_layer_surface_v1 *, uint32_t);
 void wayspot_layer_surface_ack_configure(struct zwlr_layer_surface_v1 *, uint32_t);
 void wayspot_layer_surface_destroy(struct zwlr_layer_surface_v1 *);

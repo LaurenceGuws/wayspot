@@ -115,10 +115,15 @@ That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
 not redefine the primary latency requirement or justify a generic framework.
 
-Hyprland remains the primary desktop for the picker and native window controls.
-Wallpaper instead consumes standard Wayland output and background-surface
-protocols, so the same resident works with Snowman without a separate backend
-or compositor plugin architecture.
+Hyprland remains the primary desktop for native window-finder controls.
+The picker and notifications use SDL's custom Wayland surface role with
+Wayland layer-shell, rather than XDG toplevel decorations or compositor-specific
+floating exceptions. The picker uses a centered keyboard-exclusive overlay;
+notification banners use noninteractive top-right surfaces and reserve no tile
+space. SDL still owns rendering and input, not the role's Wayland lifetime.
+Wallpaper uses the same protocol family for its per-output background surfaces.
+These roles work on Snowman and other layer-shell-capable Wayland compositors,
+without a separate compositor plugin architecture.
 
 ## 5. Direct code is a means, not the product
 

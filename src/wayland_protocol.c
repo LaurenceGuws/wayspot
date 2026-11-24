@@ -72,7 +72,14 @@ void wayspot_viewport_set_destination(struct wp_viewport *proxy, int32_t width, 
 }
 
 void wayspot_layer_shell_destroy(struct zwlr_layer_shell_v1 *proxy) {
-    zwlr_layer_shell_v1_destroy(proxy);
+    // The manager's wire destructor was introduced in protocol version 3.
+    // Older bindings can release the local proxy only; the server retires it
+    // when the Wayland connection closes.
+    if (zwlr_layer_shell_v1_get_version(proxy) >= ZWLR_LAYER_SHELL_V1_DESTROY_SINCE_VERSION) {
+        zwlr_layer_shell_v1_destroy(proxy);
+    } else {
+        wl_proxy_destroy((struct wl_proxy *)proxy);
+    }
 }
 
 struct zwlr_layer_surface_v1 *wayspot_layer_shell_get_surface(
@@ -107,6 +114,10 @@ void wayspot_layer_surface_set_anchor(struct zwlr_layer_surface_v1 *proxy, uint3
 
 void wayspot_layer_surface_set_exclusive_zone(struct zwlr_layer_surface_v1 *proxy, int32_t zone) {
     zwlr_layer_surface_v1_set_exclusive_zone(proxy, zone);
+}
+
+void wayspot_layer_surface_set_margin(struct zwlr_layer_surface_v1 *proxy, int32_t top, int32_t right, int32_t bottom, int32_t left) {
+    zwlr_layer_surface_v1_set_margin(proxy, top, right, bottom, left);
 }
 
 void wayspot_layer_surface_set_keyboard(struct zwlr_layer_surface_v1 *proxy, uint32_t mode) {

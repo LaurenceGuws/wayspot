@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl_c");
+const sdl_layer = @import("sdl_layer.zig");
 const text_draw = @import("text_draw.zig");
 const dbus = @import("dbus_c");
 
@@ -266,6 +267,7 @@ const UiResources = struct {
 
 const Banner = struct {
     window: ?*sdl.SDL_Window = null,
+    layer: sdl_layer = .{},
     renderer: ?*sdl.SDL_Renderer = null,
     text: ?text_draw.Painter = null,
     resources: UiResources = .{},
@@ -280,17 +282,10 @@ const Banner = struct {
         const event = sdl.SDL_RegisterEvents(1);
         if (event == wake_unset) return error.SdlEventRegistrationFailed;
         wake_event.store(event, .release);
-        banner.window = sdl.SDL_CreateWindow(
-            "wayspot notification",
-            banner_width,
-            banner_height,
-            sdl.SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                sdl.SDL_WINDOW_BORDERLESS |
-                sdl.SDL_WINDOW_ALWAYS_ON_TOP |
-                sdl.SDL_WINDOW_NOT_FOCUSABLE |
-                sdl.SDL_WINDOW_HIDDEN,
-        ) orelse return error.SdlCreateFailed;
+        banner.window = try sdl_layer.createWindow("wayspot notification", banner_width, banner_height);
         banner.resources.acquired(.window);
+        // A noninteractive top-right layer never enters the tiling set.
+        try banner.layer.init(banner.window.?, .notification, banner_width, banner_height);
         banner.renderer = sdl.SDL_CreateRenderer(banner.window, null) orelse return error.SdlRendererCreateFailed;
         banner.resources.acquired(.renderer);
         if (!sdl.SDL_SetRenderLogicalPresentation(
@@ -312,13 +307,17 @@ const Banner = struct {
                 if (banner.text) |*painter| painter.deinit();
             },
             .renderer => sdl.SDL_DestroyRenderer(banner.renderer.?),
-            .window => sdl.SDL_DestroyWindow(banner.window.?),
+            .window => {
+                banner.layer.deinit();
+                sdl.SDL_DestroyWindow(banner.window.?);
+            },
             .sdl => sdl.SDL_Quit(),
         };
         banner.* = .{};
     }
 
     fn draw(banner: *Banner, item: *const Presentation) !void {
+        try banner.layer.update(banner.window.?);
         const renderer = banner.renderer orelse unreachable;
         const painter = if (banner.text) |*value| value else return error.TextNotInitialized;
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;

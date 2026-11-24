@@ -71,6 +71,10 @@ fourteen result rows. The bar displays the local date and 24-hour time, and
 currently registered StatusNotifier application icons when a watcher is
 available. The clock updates at the next minute while the window is open.
 It uses the existing picker renderer and does not start a separate desktop bar.
+On layer-shell-capable Wayland compositors (including Snowman), the picker is a
+centered **overlay surface** with exclusive keyboard focus while visible: no
+XDG toplevel, window decoration, or tile slot. SDL still handles its rendering,
+input, and output scaling. Its first useful frame remains the latency target.
 
 Applications are discovered directly from the current XDG application
 directories. Ordinary typing filters the current list; selecting a row launches
@@ -139,7 +143,8 @@ Own the freedesktop desktop-notification interface:
 wayspot notifications
 ```
 
-Wayspot presents the newest notification and retains notification history for
+Wayspot presents the newest notification as a noninteractive **top-right
+layer-shell surface**, never a tiled window, and retains notification history for
 30 days. History is available from the picker at `/notifications` and from the
 CLI:
 
@@ -251,10 +256,11 @@ does not claim to audit the product's `src/` files yet.
 
 ## Scope
 
-Wayspot's picker and window-oriented tools remain Hyprland-first. Its wallpaper
-resident consumes standard Wayland output/layer-shell interfaces and is usable
-without a Hyprland compositor. Wayspot is not a compositor abstraction, plugin
-platform, general search framework, or full desktop environment.
+Wayspot's native window finder remains Hyprland-first; Snowman window discovery
+and focus are not yet available. The picker, notifications and wallpaper use
+Wayland layer-shell and do not require Hyprland. Wayspot is not a compositor
+abstraction, plugin platform, general search framework, or full desktop
+environment.
 
 New tools are welcome when they solve a real desktop problem without damaging
 the properties that make the existing tool pleasant to use: immediate

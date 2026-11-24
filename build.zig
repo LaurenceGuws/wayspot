@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, picker_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c);
+    addNotificationLibraries(b, picker_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
     picker_tests.use_llvm = false;
     picker_tests.use_lld = false;
     const run_picker_tests = b.addRunArtifact(picker_tests);
@@ -144,7 +144,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    addNotificationLibraries(b, transcript_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c);
+    addNotificationLibraries(b, transcript_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
     transcript_tests.use_llvm = false;
     transcript_tests.use_lld = false;
     const run_transcript_tests = b.addRunArtifact(transcript_tests);
@@ -296,6 +296,8 @@ pub fn build(b: *std.Build) void {
     sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
     sdl_tests.root_module.addImport("sdl_c", sdl_c);
+    sdl_tests.root_module.addImport("wayland_c", wayland_c);
+    sdl_tests.root_module.linkLibrary(wayland_protocol);
     sdl_tests.root_module.addImport("dbus_c", dbus_c);
     sdl_tests.root_module.addImport("time_c", time_c);
     sdl_tests.use_llvm = false;
@@ -373,12 +375,28 @@ pub fn build(b: *std.Build) void {
     notification_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
     notification_tests.root_module.linkSystemLibrary("dbus-1", .{});
     notification_tests.root_module.addImport("sdl_c", sdl_c);
+    notification_tests.root_module.addImport("wayland_c", wayland_c);
+    notification_tests.root_module.linkLibrary(wayland_protocol);
     notification_tests.root_module.addImport("dbus_c", dbus_c);
     notification_tests.use_llvm = false;
     notification_tests.use_lld = false;
     const run_notification_tests = b.addRunArtifact(notification_tests);
     notification_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
+    const layer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sdl_layer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    layer_tests.root_module.addImport("sdl_c", sdl_c);
+    layer_tests.root_module.addImport("wayland_c", wayland_c);
+    layer_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
+    layer_tests.root_module.linkLibrary(wayland_protocol);
+    const run_layer_tests = b.addRunArtifact(layer_tests);
     const test_step = b.step("test", "Run Wayspot tests");
+    test_step.dependOn(&run_layer_tests.step);
     test_step.dependOn(&run_picker_tests.step);
     test_step.dependOn(&run_apps_tests.step);
     test_step.dependOn(&run_desktop_files_tests.step);
@@ -472,6 +490,8 @@ fn addNotificationLibraries(
     howl_text: *std.Build.Module,
     sdl_c: *std.Build.Module,
     dbus_c: *std.Build.Module,
+    wayland_c: *std.Build.Module,
+    wayland_protocol: *std.Build.Step.Compile,
 ) void {
     module.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
@@ -482,4 +502,6 @@ fn addNotificationLibraries(
     module.addImport("howl_text", howl_text);
     module.addImport("sdl_c", sdl_c);
     module.addImport("dbus_c", dbus_c);
+    module.addImport("wayland_c", wayland_c);
+    module.linkLibrary(wayland_protocol);
 }

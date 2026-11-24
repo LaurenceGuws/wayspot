@@ -8,6 +8,7 @@ const image = @import("image.zig");
 const navigator = @import("navigator.zig");
 const picker = @import("picker.zig");
 const sdl_event = @import("sdl_event.zig");
+const sdl_layer = @import("sdl_layer.zig");
 const pixels = @import("sdl_pixels.zig");
 const text_draw = @import("text_draw.zig");
 const tray = @import("tray.zig");
@@ -42,6 +43,7 @@ pub const Native = struct {
     io: std.Io,
     home: []const u8,
     window: ?*sdl.SDL_Window = null,
+    layer: sdl_layer = .{},
     renderer: ?*sdl.SDL_Renderer = null,
     text: ?text_draw.Painter = null,
     icons: [picker.visible_row_capacity]Icon = undefined,
@@ -74,27 +76,25 @@ pub const Native = struct {
         native.initialized = true;
     }
 
-    /// Creates the one picker window and its renderer together.
+    /// Create the picker SDL window with an explicit non-XDG overlay role.
     pub fn create(native: *Native) !void {
         std.debug.assert(native.initialized);
         std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         comptime std.debug.assert(picker.visible_row_capacity == pixels.visible_rows);
-        if (!sdl.SDL_CreateWindowAndRenderer(
-            "wayspot",
-            pixels.window_width,
-            pixels.window_height,
-            sdl.SDL_WINDOW_HIGH_PIXEL_DENSITY,
-            &native.window,
-            &native.renderer,
-        )) return error.SdlCreateFailed;
+        // SDL still owns the wl_surface and all rendering/input. Layer-shell
+        // supplies its overlay role without an XDG/libdecor window.
+        native.window = try sdl_layer.createWindow("wayspot", pixels.window_width, pixels.window_height);
         errdefer {
             native.clearText();
-            sdl.SDL_DestroyRenderer(native.renderer);
+            if (native.renderer) |renderer| sdl.SDL_DestroyRenderer(renderer);
+            native.layer.deinit();
             sdl.SDL_DestroyWindow(native.window);
             native.renderer = null;
             native.window = null;
         }
+        try native.layer.init(native.window.?, .picker, pixels.window_width, pixels.window_height);
+        native.renderer = sdl.SDL_CreateRenderer(native.window.?, null) orelse return error.SdlRendererCreateFailed;
         if (!sdl.SDL_SetRenderLogicalPresentation(
             native.renderer,
             pixels.window_width,
@@ -236,6 +236,7 @@ pub const Native = struct {
     /// Replaces the frame with the current terminated query.
     pub fn draw(native: *Native, frame: *const picker.Frame) !void {
         const renderer = native.renderer orelse unreachable;
+        try native.layer.update(native.window.?);
         native.evict(frame);
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
@@ -382,6 +383,7 @@ pub const Native = struct {
         native.clearIcons();
         native.clearText();
         sdl.SDL_DestroyRenderer(native.renderer);
+        native.layer.deinit();
         sdl.SDL_DestroyWindow(native.window);
         native.renderer = null;
         native.window = null;

@@ -26,11 +26,12 @@ scope:
   platform:
     compositor: Hyprland
     display: Wayland
-    other_compositors: wallpaper_only_via_wayland_protocols
+    other_compositors: picker_notifications_wallpaper_via_wayland_layer_shell
 
   interfaces:
     gui:
       purpose: interactive desktop picker
+      wayland_role: centered overlay layer with exclusive keyboard interactivity
     cli:
       purpose: direct access to current product actions
     bash:
@@ -67,6 +68,7 @@ scope:
         persistent_derived_state: false
     notifications:
       purpose: receive, show, close, and retain desktop notifications
+      presentation: noninteractive top-right layer without exclusive zone
       retention: 30 days
       resident_process: true
       persistent_product_state:
@@ -100,4 +102,4 @@ excluded:
   - persistent application or icon indexes
   - generic framework or plugin systems
   - generic compositor abstraction
-  - support for compositors other than Hyprland
+  - additional compositor-specific window finder backends without accepted native operations
