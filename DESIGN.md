@@ -163,6 +163,28 @@ This is a known polish issue, not a reason to invent a DPI framework. Fix it
 when the visual cost is worth the additional implementation, and measure the
 change against the startup path.
 
+## Accepted next runtime (not implemented)
+
+The user has accepted consolidating the picker, notifications, wallpaper and
+tray watcher into one individually configurable Zig resident. This supersedes
+the fresh-process-only requirement as the target architecture, not as a claim
+about the current executable. Preserve fresh application discovery and
+independent capability lifecycles. Prefer one sequential state owner, native
+readiness and real deadlines; introduce bounded concurrency only for proven
+blocking external work. Picker surfaces and transient resources may be
+retired independently of the resident. Do not restore the discarded Rust UI
+or create a general capability framework.
+
+Wallpaper's target is one persistent background surface per output, replacing
+buffers only for rotation or meaningful geometry changes. Add/remove outputs
+locally, ignore unrelated window/input state, acknowledge unchanged configure
+without republication, and keep live protocol events distinct from redraw
+requests. Bound work and retained resources, not the lifetime count of valid
+events. Test zero publications on unrelated toplevel and layer-shell churn.
+The current renderer still replaces entire rounds on rotation/topology change;
+its removal and the unified resident remain unimplemented. Reconcile the
+current README and DOMAIN lifecycle declarations on real migration acceptance.
+
 ## Review questions for future work
 
 Before substantial work, ask:

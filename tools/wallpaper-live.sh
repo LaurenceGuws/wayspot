@@ -107,8 +107,45 @@ for _ in {1..20}; do
 done
 sleep .15
 kill -0 "$wpid"
+[[ $(grep -c '^info: mapped view ' "$runtime/snowman.log") == 20 ]] || { printf 'HOLD: expected 20 actual mapped toplevels\n' >&2; exit 1; }
 [[ $(attach_count) == "$initial_attach" ]] || { printf 'HOLD: unrelated toplevel churn republished wallpaper\n' >&2; exit 1; }
 printf 'PASS: 20 real toplevel cycles, zero additional wallpaper attachments\n'
+python3 - "$runtime" "$wayspot" <<'PICKER'
+import os, re, subprocess, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+env = dict(os.environ, XDG_SESSION_DESKTOP='Snowman', XDG_CURRENT_DESKTOP='Snowman', SDL_VIDEODRIVER='wayland', WAYLAND_DEBUG='client')
+for key, name in [('HOME','home'),('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','data'),('XDG_CACHE_HOME','cache')]:
+    directory = root / name
+    directory.mkdir(exist_ok=True)
+    env[key] = str(directory)
+for index in range(20):
+    log = root / 'picker.wire'
+    with log.open('wb') as output:
+        p = subprocess.Popen([sys.argv[2]], env=env, stdout=output, stderr=output)
+        try:
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                text = log.read_text(errors='replace')
+                if '"wayspot-picker"' in text and re.search(r'wl_surface[@#]\d+\.attach\(wl_buffer', text):
+                    break
+                assert p.poll() is None, 'picker exited before first buffer'
+                time.sleep(.005)
+            else:
+                raise RuntimeError('picker did not attach a buffer')
+        finally:
+            if p.poll() is None:
+                p.terminate()
+                try: p.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    p.kill(); p.wait(timeout=4)
+            assert p.returncode == 0, p.returncode
+    text = log.read_text(errors='replace')
+    assert not re.search(r'wl_display[@#]\d+\.error\(', text)
+PICKER
+kill -0 "$wpid"
+[[ $(attach_count) == "$initial_attach" ]] || { printf 'HOLD: picker layer churn republished wallpaper\n' >&2; exit 1; }
+printf 'PASS: 20 real picker layer cycles, zero additional wallpaper attachments\n'
 
 "$cli" monitor list >"$runtime/monitors.json"
 "$cli" session status >"$runtime/session.json"
