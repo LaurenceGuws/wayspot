@@ -89,10 +89,10 @@ pub fn finish(self: *Self, selected: picker.Action) !void {
     switch (selected) {
         .dismiss => {},
         .launch => |index| {
-            var process: launch.Detached = .{ .io = self.process.io };
+            var process: launch.Detached = .{ .io = self.process.io, .environ_map = self.process.environ_map };
             try launch.spawn(&process, &self.applications.slice()[index], self.terminal, self.home);
         },
-        .focus => |id| try navigator.focus(self.process.io, allocator, self.state.window_backend, id.slice()),
+        .focus => |id| try navigator.focus(navigator.Native{ .io = self.process.io, .environ_map = self.process.environ_map }, allocator, self.state.window_backend, id.slice()),
         else => unreachable,
     }
 }
@@ -107,7 +107,7 @@ pub fn draw(self: *Self) !void {
 }
 
 pub fn advance(self: *Self, events: *const picker.Events) !picker.Action {
-    const action = try self.state.advance(self, self.process.io, events);
+    const action = try self.state.advance(self, navigator.Native{ .io = self.process.io, .environ_map = self.process.environ_map }, events);
     if (action == .draw) try self.draw();
     return action;
 }

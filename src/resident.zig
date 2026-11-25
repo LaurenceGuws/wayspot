@@ -41,6 +41,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
     defer parsed.deinit();
     const config = parsed.value;
     if (config.wallpaper) |root| if (!std.fs.path.isAbsolute(root)) return error.WallpaperRootInvalid;
+    if (config.picker or config.notifications) try Video.prepareProcess(init.io);
     const stop = try Stop.open();
     defer stop.close();
     var control = try Control.open(&(try signature(init)));
@@ -258,9 +259,9 @@ fn finishPicker(current: *?*Picker, selected: picker.Action) !void {
 }
 
 fn closePicker(current: *?*Picker, selected: picker.Action) void {
-    const io = if (current.*) |session| session.process.io else return;
+    const init = if (current.*) |session| session.process else return;
     finishPicker(current, selected) catch |err| {
-        if (selected == .focus) @import("picker/navigator.zig").reportFailure(io, err) else std.log.err("picker finish failed: {s}", .{@errorName(err)});
+        if (selected == .focus) @import("picker/navigator.zig").reportFailure(init, err) else std.log.err("picker finish failed: {s}", .{@errorName(err)});
     };
 }
 

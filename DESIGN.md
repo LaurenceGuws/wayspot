@@ -183,7 +183,10 @@ The shared main-thread video owner initializes SDL on its first surface lease
 and quits on its last. Every first video lease disables SDL's libdecor
 loader before initialization: all product windows have custom layer-shell
 roles and never need XDG decoration negotiation or its GTK plugin. EGL
-provider selection remains machine policy, not a product hint. Route
+provider selection remains machine policy: an optional compile-time manifest
+path restricts the GUI process before library initialization. All external
+processes receive the original entrypoint environment, not that specialization.
+The default build performs no EGL environment mutation. Route
 window and renderer events to their actual
 window, not the currently active capability. Picker input advances in bounded
 batches with a draw/finish action. Notification D-Bus intake, newest-only

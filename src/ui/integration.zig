@@ -1,6 +1,7 @@
 //! Explicit opt-in real Wayland/D-Bus qualification of shared SDL ownership.
 const std = @import("std");
 const Video = @import("video.zig");
+const navigator = @import("../picker/navigator.zig");
 const notification = @import("../notifications/root.zig");
 const picker = @import("../picker/root.zig");
 const View = @import("../picker/view.zig").Native;
@@ -94,7 +95,7 @@ test "private shared video routes two real layers and releases only the closing 
         var batch: picker.Events = .{};
         batch.items[0] = try view.handleEvent(input);
         batch.count = 1;
-        try std.testing.expectEqual(picker.Action.draw, try state.advance(HistoryReader{}, std.testing.io, &batch));
+        try std.testing.expectEqual(picker.Action.draw, try state.advance(HistoryReader{}, navigator.Native{ .io = std.testing.io, .environ_map = null }, &batch));
         try std.testing.expectEqualStrings("abc", state.frame().query);
         try view.draw(&state.frame());
         input = std.mem.zeroes(sdl.SDL_Event);

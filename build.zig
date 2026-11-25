@@ -3,6 +3,20 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = optimizeOption(b);
+    const egl_manifest = b.option([]const u8, "egl_vendor_manifest", "Restrict this build's GUI to one absolute GLVND EGL vendor manifest (default: unrestricted)");
+    const settings = b.addOptions();
+    const egl_manifest_z: ?[:0]const u8 = if (egl_manifest) |path| blk: {
+        if (!std.fs.path.isAbsolute(path) or std.mem.indexOfAny(u8, path, ":\x00\r\n") != null) {
+            std.log.err("-Degl_vendor_manifest requires one absolute manifest path", .{});
+            std.process.exit(1);
+        }
+        break :blk b.allocator.dupeSentinel(u8, path, 0) catch {
+            std.log.err("unable to retain EGL vendor manifest path", .{});
+            std.process.exit(1);
+        };
+    } else null;
+    settings.addOption(?[:0]const u8, "egl_vendor_manifest", egl_manifest_z);
+
     // The non-product Zig build/tooling source is fully covered here.
     // Application source has its own pending review, not a blanket baseline.
     const audit = b.step("audit", "Audit build and maintenance Zig source");
@@ -91,6 +105,7 @@ pub fn build(b: *std.Build) void {
     });
     wayland_translate.linkSystemLibrary("wayland-client", .{});
     const wayland_c = wayland_translate.createModule();
+    wayspot.addOptions("build_options", settings);
     wayspot.addImport("sdl_c", sdl_c);
     wayspot.addImport("howl_text", howl_text.module("howl_text"));
     wayspot.addImport("dbus_c", dbus_c);
@@ -115,6 +130,7 @@ pub fn build(b: *std.Build) void {
     }) });
     source_tests.root_module.addIncludePath(b.path("vendor/stb"));
     source_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
+    source_tests.root_module.addOptions("build_options", settings);
     source_tests.root_module.addImport("time_c", time_c);
     addNotificationLibraries(b, source_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
     source_tests.use_llvm = false;
@@ -135,6 +151,7 @@ pub fn build(b: *std.Build) void {
     live_resident.addFileArg(executable.getEmittedBin());
     live_resident.setCwd(b.path("."));
     live_resident.has_side_effects = true;
+    if (egl_manifest) |path| live_resident.setEnvironmentVariable("WAYSPOT_EXPECT_EGL_MANIFEST", path);
     b.step("resident-live", "Prove all capabilities in an explicit isolated session")
         .dependOn(&live_resident.step);
 

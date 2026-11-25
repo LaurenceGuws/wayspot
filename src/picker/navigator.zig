@@ -217,11 +217,16 @@ pub const ProcessResult = struct {
     }
 };
 
-/// Native operations use std.Io; tests may supply a deterministic subprocess transcript.
-fn run(operations: anytype, allocator: Allocator, argv: []const []const u8, max_stdout: usize) !ProcessResult {
-    if (@TypeOf(operations) == std.Io) {
-        const child = std.process.run(allocator, operations, .{
+/// Native subprocesses borrow the unmodified session environment captured
+/// at process entry, never the GUI's process-local EGL specialization.
+pub const Native = struct {
+    io: std.Io,
+    environ_map: ?*const std.process.Environ.Map,
+
+    pub fn run(self: Native, allocator: Allocator, argv: []const []const u8, max_stdout: usize) !ProcessResult {
+        const child = std.process.run(allocator, self.io, .{
             .argv = argv,
+            .environ_map = self.environ_map,
             .stdout_limit = .limited(max_stdout),
             .stderr_limit = .limited(16 * 1024),
             .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
@@ -240,23 +245,23 @@ fn run(operations: anytype, allocator: Allocator, argv: []const []const u8, max_
                 else => false,
             },
         };
-    } else return operations.run(allocator, argv, max_stdout);
-}
+    }
+};
 
 /// Read current mapped windows only when the picker enters window mode.
 pub fn load(operations: anytype, allocator: Allocator, backend: ?Backend, self_pid: i64) !Snapshot {
     switch (backend orelse return error.UnsupportedCompositor) {
         .snowman => {
-            var windows = try run(operations, allocator, try (WindowDiscovery{ .snowman = {} }).argv(), max_action_reply);
+            var windows = try operations.run(allocator, try (WindowDiscovery{ .snowman = {} }).argv(), max_action_reply);
             defer windows.deinit(allocator);
             if (!windows.succeeded) return error.CompositorCliRejected;
-            var seat = try run(operations, allocator, try (FocusObservation{ .snowman = {} }).argv(), max_action_reply);
+            var seat = try operations.run(allocator, try (FocusObservation{ .snowman = {} }).argv(), max_action_reply);
             defer seat.deinit(allocator);
             if (!seat.succeeded) return error.CompositorCliRejected;
             return parseSnowman(allocator, windows.stdout, seat.stdout);
         },
         .hyprland => {
-            var result = try run(operations, allocator, try (WindowDiscovery{ .hyprland = {} }).argv(), max_reply);
+            var result = try operations.run(allocator, try (WindowDiscovery{ .hyprland = {} }).argv(), max_reply);
             defer result.deinit(allocator);
             if (!result.succeeded) return error.CompositorCliRejected;
             return parseDesktop(allocator, result.stdout, self_pid);
@@ -270,11 +275,11 @@ pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: [
     var storage: [4][]const u8 = undefined;
     var target: [136]u8 = undefined;
     if ((backend orelse return error.UnsupportedCompositor) == .snowman) {
-        var result = try run(operations, allocator, try (WindowFocus{ .snowman = id }).argv(&storage, &target), max_action_reply);
+        var result = try operations.run(allocator, try (WindowFocus{ .snowman = id }).argv(&storage, &target), max_action_reply);
         defer result.deinit(allocator);
         return verifySnowmanFocus(allocator, &result, try numericId(id));
     }
-    var result = try run(operations, allocator, try (WindowFocus{ .hyprland = id }).argv(&storage, &target), max_action_reply);
+    var result = try operations.run(allocator, try (WindowFocus{ .hyprland = id }).argv(&storage, &target), max_action_reply);
     defer result.deinit(allocator);
     if (!result.succeeded or !std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), "ok")) {
         if (!@import("builtin").is_test) {
@@ -291,7 +296,7 @@ pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: [
         }
         return error.CompositorFocusRejected;
     }
-    var observed = try run(operations, allocator, try (FocusObservation{ .hyprland = {} }).argv(), max_action_reply);
+    var observed = try operations.run(allocator, try (FocusObservation{ .hyprland = {} }).argv(), max_action_reply);
     defer observed.deinit(allocator);
     if (!observed.succeeded) return error.CompositorFocusUnverified;
     if (observed.stdout.len > max_action_reply) return error.CompositorReplyTooLong;
@@ -436,7 +441,7 @@ fn verifySnowmanFocus(allocator: Allocator, result: *const ProcessResult, id: u6
 /// Do not wait for notify-send's D-Bus reply on the resident's UI thread:
 /// the same resident may own the notification service. The existing detached
 /// launcher waits only for the short launch helper, not the notification.
-pub fn reportFailure(io: std.Io, failure: anyerror) void {
+pub fn reportFailure(init: std.process.Init, failure: anyerror) void {
     const message: []const u8 = switch (failure) {
         error.SnowmanFocusLocked => "The selected window or workspace is locked.",
         error.SnowmanWindowGone => "The selected window no longer exists or is unmapped.",
@@ -448,7 +453,7 @@ pub fn reportFailure(io: std.Io, failure: anyerror) void {
         else => @errorName(failure),
     };
     std.log.warn("window selection failed: {s}", .{@errorName(failure)});
-    var launch = @import("../apps/launch.zig").Detached{ .io = io };
+    var launch = @import("../apps/launch.zig").Detached{ .io = init.io, .environ_map = init.environ_map };
     launch.spawn(&.{ "notify-send", "--app-name=Wayspot", "--", "Window selection failed", message }, null) catch |err| std.log.warn("cannot launch focus failure notification: {s}", .{@errorName(err)});
 }
 

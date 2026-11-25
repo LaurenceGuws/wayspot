@@ -291,6 +291,19 @@ Normal desktop build (`ReleaseSafe`):
 zig build
 ```
 
+An explicitly specialized build can restrict GUI EGL discovery to one
+installed GLVND vendor manifest, for example on an NVIDIA-only workstation:
+
+```bash
+zig build -Degl_vendor_manifest=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+```
+
+The option is absent by default. It selects a single absolute path, not a
+GPU brand or runtime detector; the selected file must be readable at graphical
+process startup. The GUI process uses the selected manifest, while application
+launches, focus commands and notification helpers receive the original
+session environment. No global EGL configuration or driver selection changes.
+
 Wayspot deliberately defaults to an optimized build with runtime safety checks.
 Use an explicit mode when debugging or measuring the fastest release shape:
 

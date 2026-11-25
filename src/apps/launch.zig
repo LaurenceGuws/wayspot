@@ -170,6 +170,7 @@ fn reserved(byte: u8) bool {
 
 pub const Native = struct {
     io: std.Io,
+    environ_map: *const std.process.Environ.Map,
 
     /// Starts one new process group with closed standard streams.
     ///
@@ -178,6 +179,7 @@ pub const Native = struct {
     pub fn spawn(native: *Native, argv: []const []const u8, cwd: ?[]const u8) !void {
         _ = try std.process.spawn(native.io, .{
             .argv = argv,
+            .environ_map = native.environ_map,
             .cwd = if (cwd) |path| .{ .path = path } else .inherit,
             .stdin = .ignore,
             .stdout = .ignore,
@@ -192,6 +194,7 @@ pub const Native = struct {
 /// wait only for that helper, never for the desktop application. No shell.
 pub const Detached = struct {
     io: std.Io,
+    environ_map: *const std.process.Environ.Map,
 
     pub fn spawn(self: *Detached, argv: []const []const u8, cwd: ?[]const u8) !void {
         if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
@@ -201,6 +204,7 @@ pub const Detached = struct {
         @memcpy(args[2..][0..argv.len], argv);
         var child = try std.process.spawn(self.io, .{
             .argv = args[0 .. argv.len + 2],
+            .environ_map = self.environ_map,
             .cwd = if (cwd) |path| .{ .path = path } else .inherit,
             .stdin = .ignore,
             .stdout = .ignore,
@@ -210,7 +214,7 @@ pub const Detached = struct {
     }
 };
 
-pub fn runPlan(io: std.Io, argv: []const []const u8) !void {
+pub fn runPlan(init: std.process.Init, argv: []const []const u8) !void {
     if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
     // The resident uses signalfd; do not export its blocked termination signals
     // to unrelated desktop applications.
@@ -218,7 +222,7 @@ pub fn runPlan(io: std.Io, argv: []const []const u8) !void {
     std.posix.sigaddset(&mask, .INT);
     std.posix.sigaddset(&mask, .TERM);
     std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &mask, null);
-    var native: Native = .{ .io = io };
+    var native: Native = .{ .io = init.io, .environ_map = init.environ_map };
     try native.spawn(argv, null);
 }
 
@@ -300,7 +304,9 @@ test "detached start presents the same bounded plan without replacing the CLI" {
     try std.testing.expectError(error.SpawnStopped, spawn(&transcript, &app, null, "/home/user"));
     try std.testing.expect(transcript.called);
 
-    var native = Native{ .io = std.Io.failing };
+    var environ_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ_map.deinit();
+    var native = Native{ .io = std.Io.failing, .environ_map = &environ_map };
     try std.testing.expectError(error.OperationUnsupported, spawn(&native, &app, null, "/home/user"));
 }
 
@@ -375,7 +381,9 @@ test "terminal policy is explicit and native spawn failure is visible" {
     try std.testing.expectError(error.HomeInvalid, spawn(&transcript, &terminal, "kitty", "relative"));
 
     const plain = testApp("App", "app", null, false);
-    var native = Native{ .io = std.Io.failing };
+    var environ_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ_map.deinit();
+    var native = Native{ .io = std.Io.failing, .environ_map = &environ_map };
     try std.testing.expectError(error.OperationUnsupported, spawn(&native, &plain, null, "/home/user"));
 }
 

@@ -3,9 +3,24 @@ const std = @import("std");
 const sdl = @import("sdl_c");
 const wl = @import("wayland_c");
 const Self = @This();
+const egl_vendor_manifest = @import("build_options").egl_vendor_manifest;
 
 users: u8 = 0,
 tray_event: ?u32 = null,
+
+/// Called once at the graphical process entrypoint, before SDL or service
+/// workers start. GLVND reads libc's environment, not SDL's private hint map.
+/// The original std.process.Init.environ_map remains the sole environment
+/// passed to external commands and application launches.
+pub fn prepareProcess(io: std.Io) !void {
+    if (egl_vendor_manifest) |manifest| {
+        const stat = std.Io.Dir.cwd().statFile(io, manifest, .{}) catch return error.EglVendorManifestUnavailable;
+        if (stat.kind != .file) return error.EglVendorManifestUnavailable;
+        std.Io.Dir.accessAbsolute(io, manifest, .{ .read = true }) catch return error.EglVendorManifestUnavailable;
+        if (sdl.SDL_setenv_unsafe("__EGL_VENDOR_LIBRARY_FILENAMES", manifest, 1) != 0) return error.EglVendorSelectionFailed;
+        std.log.info("EGL vendor manifest: {s}", .{manifest});
+    }
+}
 
 pub fn acquire(self: *Self) !void {
     if (self.users == 0) {

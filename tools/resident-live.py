@@ -13,6 +13,18 @@ repo = Path(__file__).resolve().parent.parent
 snow = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve()
 cli = Path(os.environ["SNOWMAN_CLI"]).resolve()
 baseline = Path(os.environ.get("WAYSPOT_BASELINE", str(candidate))).resolve()
+egl_variable = "__EGL_VENDOR_LIBRARY_FILENAMES"
+expected_egl = os.environ.get("WAYSPOT_EXPECT_EGL_MANIFEST")
+inherited_egl = os.environ.get("WAYSPOT_TEST_INHERITED_EGL")
+if expected_egl:
+    assert Path(expected_egl).is_absolute() and Path(expected_egl).is_file()
+    expected_library = (
+        Path(
+            json.loads(Path(expected_egl).read_text())["ICD"]["library_path"]
+        ).name.split(".so", 1)[0]
+        + ".so"
+    )
+
 actor_path = os.environ.get("SNOWMAN_SIM_CLIENT")
 actor = Path(actor_path).resolve() if actor_path else None
 if actor:
@@ -70,6 +82,7 @@ env = {
     "NO_AT_BRIDGE": "1",
     "GTK_A11Y": "none",
     "GSETTINGS_BACKEND": "memory",
+    "WAYSPOT_TEST_SESSION_SENTINEL": "original-session",
 }
 colors = {(20, 50, 90), (70, 30, 130)}
 
@@ -278,6 +291,20 @@ def assert_no_libdecor(proc):
     assert not re.search(r"/libdecor(?:[-_./]|$)", maps), "unneeded libdecor mapped"
 
 
+def assert_egl_vendor(proc):
+    if not expected_egl:
+        return
+    assert f"EGL vendor manifest: {expected_egl}" in log("resident")
+    paths = [
+        line.split()[-1]
+        for line in Path(f"/proc/{proc.pid}/maps").read_text().splitlines()
+        if "/libEGL_" in line
+    ]
+    assert any(Path(path).name.startswith(expected_library) for path in paths), paths
+    if expected_library == "libEGL_nvidia.so":
+        assert not any("libEGL_mesa.so" in path for path in paths), paths
+
+
 def sample(procs):
     a = [mem(q) for q in procs]
     time.sleep(3)
@@ -473,6 +500,62 @@ def verify_window_finder(resident):
     assert "window focus applied" not in log("resident")[offset:]
     for name, window in windows().items():
         assert window["workspace_id"] == original[name]["workspace_id"]
+    # Exercise the actual resident-to-helper-to-app launch while a banner
+    # still holds the shared SDL lease. This catches process-local graphics
+    # policy escaping into a launched app, including a replaced inherited
+    # value, rather than merely exercising the helper in a fresh process.
+    marker = root / "picker-launch.json"
+    probe = root / "launch-probe.py"
+    probe.write_text(
+        "import json, os, signal\nfrom pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text(json.dumps({{"
+        + "'egl':os.environ.get('__EGL_VENDOR_LIBRARY_FILENAMES'),"
+        + "'sentinel':os.environ.get('WAYSPOT_TEST_SESSION_SENTINEL'),"
+        + "'runtime':os.environ.get('XDG_RUNTIME_DIR'),"
+        + "'path':os.environ.get('PATH'),"
+        + "'blocked':[int(x) for x in signal.pthread_sigmask(signal.SIG_BLOCK, [])]}))\n"
+    )
+    applications = root / "d/applications"
+    applications.mkdir(exist_ok=True)
+    (applications / "wayspot-environment-probe.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=000 Wayspot Environment Probe\n"
+        + f"Exec=/usr/bin/python3 {probe}\nTerminal=false\n"
+    )
+    assert (
+        run(candidate, "apps").stdout.splitlines()[0] == "000 Wayspot Environment Probe"
+    )
+    hold = notify("Launch environment with live banner", ms=60000)
+    wait(lambda: status()["notification_visible"], "banner before launch")
+    offset = len(log("resident"))
+    run(candidate, "picker")
+    wait(lambda: new_attach("resident", "picker", offset), "application picker mapped")
+    wait(lambda: status()["video_users"] == 2, "shared SDL for launch")
+    key("enter")
+    launched = wait(
+        lambda: json.loads(marker.read_text()),
+        "actual launched application environment",
+    )
+    assert launched["egl"] == env.get(egl_variable), launched
+    assert launched["sentinel"] == env["WAYSPOT_TEST_SESSION_SENTINEL"], launched
+    assert (
+        launched["runtime"] == env["XDG_RUNTIME_DIR"]
+        and launched["path"] == env["PATH"]
+    ), launched
+    assert (
+        int(signal.SIGINT) not in launched["blocked"]
+        and int(signal.SIGTERM) not in launched["blocked"]
+    ), launched
+    assert (
+        not status()["picker_visible"]
+        and status()["video_users"] == 1
+        and status()["notification_visible"]
+    )
+    (out / "picker-launch-environment.json").write_text(
+        json.dumps(launched, indent=2) + "\n"
+    )
+    close(hold)
+    wait(lambda: status()["video_users"] == 0, "launch banner retired")
+    print("PASS: actual app inherited original EGL and session environment", flush=True)
     for q in (red, blue):
         q.stdin.write(b"exit\n")
         q.stdin.flush()
@@ -491,6 +574,7 @@ def verify_window_finder(resident):
         "pointer_release": True,
         "stale_id_notification": True,
         "membership_preserved": True,
+        "actual_launch_environment_preserved": True,
     }
 
 
@@ -543,6 +627,8 @@ try:
         ),
         "standalone released names",
     )
+    if inherited_egl is not None:
+        env[egl_variable] = inherited_egl
     resident = start([candidate, "resident", root / "resident.json"], "resident", True)
     wait(
         lambda: (
@@ -595,6 +681,7 @@ try:
             and status()["notification_visible"]
         )
         assert_no_libdecor(resident)
+        assert_egl_vendor(resident)
         if i == 0:
             wait(lambda: (root / "action.fetch").exists(), "actual SNI property fetch")
         run(candidate, "picker")
@@ -731,6 +818,9 @@ try:
         "detached_launch_mask_pass": True,
         "window_finder": finder,
         "layer_only_libdecor_absent": True,
+        "expected_egl_manifest": expected_egl,
+        "inherited_egl_manifest": inherited_egl,
+        "egl_vendor_verified": expected_egl is not None,
     }
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2))
     print("RESIDENT_PASS", json.dumps(receipt), flush=True)

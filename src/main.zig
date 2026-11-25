@@ -29,13 +29,17 @@ pub fn main(init: std.process.Init) !u8 {
 
     const argv = arguments[0..argument_count];
     if (argument_count > 0 and std.mem.eql(u8, argv[0], "--launch-plan")) {
-        try launch.runPlan(init.io, argv[1..]);
+        try launch.runPlan(init, argv[1..]);
         return 0;
     }
     if (argument_count > cmd.argument_capacity) return 2;
     if (argument_count > 0 and std.mem.eql(u8, argv[0], "resident")) {
         if (argument_count != 2) return 2;
-        if (std.mem.eql(u8, argv[1], "status")) try resident.request(init, .status) else try resident.run(init, argv[1]);
+        if (std.mem.eql(u8, argv[1], "status")) {
+            try resident.request(init, .status);
+        } else {
+            try resident.run(init, argv[1]);
+        }
         return 0;
     }
     if (argument_count > 0 and std.mem.eql(u8, argv[0], "picker")) {
@@ -104,9 +108,10 @@ pub fn main(init: std.process.Init) !u8 {
         return perform(init, meaning, applications.slice(), terminal, home);
     }
 
+    try Video.prepareProcess(init.io);
     runPicker(init, &files, &applications, terminal, home) catch |failure| {
         if (navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP")) != .snowman) return failure;
-        navigator.reportFailure(init.io, failure);
+        navigator.reportFailure(init, failure);
         return 4;
     };
     return 0;
@@ -133,13 +138,13 @@ fn runPicker(
     if (try picker.run(
         &native,
         &history_reader,
-        init.io,
+        navigator.Native{ .io = init.io, .environ_map = init.environ_map },
         window_backend,
         init.gpa,
         @intCast(std.os.linux.getpid()),
         applications.slice(),
     )) |index| {
-        var process = launch.Native{ .io = init.io };
+        var process = launch.Native{ .io = init.io, .environ_map = init.environ_map };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }
 }
@@ -193,7 +198,7 @@ fn perform(
             .open => |index| {
                 const cwd = home orelse return error.HomeMissing;
                 if (index >= applications.len) return error.ApplicationIndexInvalid;
-                var process = launch.Native{ .io = init.io };
+                var process = launch.Native{ .io = init.io, .environ_map = init.environ_map };
                 try launch.spawn(&process, &applications[index], terminal, cwd);
             },
         },
@@ -210,6 +215,7 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
 }
 
 fn runNotifications(init: std.process.Init) !void {
+    try Video.prepareProcess(init.io);
     try notification.run(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"));
 }
 
