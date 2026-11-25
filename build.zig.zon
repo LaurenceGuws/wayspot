@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .howl_text = .{ .path = "vendor/howl-text" },
+        .wayland = .{ .path = "vendor/zig-wayland-native" },
         .sdl = .{
             .path = "vendor/sdl",
         },
@@ -20,6 +21,7 @@
         "src",
         "tools",
         "vendor/howl-text",
+        "vendor/zig-wayland-native",
         "vendor/sdl",
         "vendor/stb",
     },

@@ -133,8 +133,29 @@ pub fn build(b: *std.Build) void {
     source_tests.root_module.addOptions("build_options", settings);
     source_tests.root_module.addImport("time_c", time_c);
     addNotificationLibraries(b, source_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
+    // The native surface owner is qualified before it replaces SDL video.
+    // Use the exact pinned native Wayland package already used by Snowman's
+    // simulator. No second compositor-specific protocol implementation.
+    const native_wayland = b.dependency("wayland", .{ .target = target, .optimize = optimize });
+    const native_protocols = @import("wayland").addProtocols(b, native_wayland, .{
+        .target = target,
+        .optimize = optimize,
+        .extra = &.{layer_xml},
+    });
+    const native_present = @import("wayland").addPresent(b, native_wayland, native_protocols);
+    source_tests.root_module.addImport("wayland-client", native_wayland.module("client"));
+    source_tests.root_module.addImport("wayland-protocols", native_protocols);
+    source_tests.root_module.addImport("wayland-present", native_present);
+    source_tests.root_module.addImport("wayland-wire", native_wayland.module("protocol"));
     source_tests.use_llvm = false;
     source_tests.use_lld = false;
+    const live_native = b.addSystemCommand(&.{"python3"});
+    live_native.addFileArg(b.path("tools/native-surface-live.py"));
+    live_native.addFileArg(source_tests.getEmittedBin());
+    live_native.setCwd(b.path("."));
+    live_native.has_side_effects = true;
+    b.step("native-surface-live", "Prove the native surface owner on an explicit private compositor")
+        .dependOn(&live_native.step);
 
     // Optional source-built integration; requires explicitly provided private
     // Snowman executable/CLI from a matching external test fixture.

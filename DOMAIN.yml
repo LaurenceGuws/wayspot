@@ -1,8 +1,9 @@
 product:
   name: wayspot
   mission: >
-    Make application launching on Hyprland feel immediate, then provide a small
-    set of pleasant desktop utilities without compromising that fast path.
+    Make application launching feel immediate, then provide a small set of
+    pleasant Snowman desktop utilities without compromising that fast path.
+    Retain Hyprland compatibility during Snowman maturation.
 
 principles:
   picker_latency:
@@ -24,7 +25,9 @@ principles:
 scope:
   binary: wayspot
   platform:
-    compositor: Hyprland
+    compositor: [Snowman, Hyprland]
+    intended_sole_compositor: Snowman
+    specialization: compile_time_at_actual_compositor_specific_boundaries
     display: Wayland
     other_compositors: picker_notifications_wallpaper_via_wayland_layer_shell
 

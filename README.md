@@ -1,7 +1,8 @@
 # Wayspot
 
-Wayspot is a fast application picker and a small set of Hyprland desktop tools
-written in Zig.
+Wayspot is a fast application picker and a small set of desktop tools
+written in Zig. Snowman is its intended long-term desktop; Hyprland remains
+supported during the transition.
 
 It started for one reason: the launcher I was using took roughly four tenths of
 a second to appear after its shortcut. That was slow enough to feel wrong. The
@@ -104,6 +105,14 @@ private D-Bus session and two headless outputs; the fixture requires Python
 with dbus-python and PyGObject, gdbus, grim, and a matching Snowman build.
 Provide the matching source-built `SNOWMAN_SIM_CLIENT` to also exercise the
 window finder using real private Wayland keyboard and pointer events.
+
+The opt-in `zig build native-surface-live` gate exercises the candidate
+native SHM surface owner on a disposable single-output Snowman session. Set
+`SNOWMAN_COMPOSITOR`, `WAYSPOT_TEST_SCRATCH`, and `WAYSPOT_PROOF_DIR` as above.
+It witnesses actual CPU-rendered glyphs and independent picker/banner
+retirement; ordinary tests exercise delayed buffer release and failed wire
+operations on real socketpairs. This is not a renderer cutover, and the
+current product still uses SDL video.
 
 ### Application picker
 

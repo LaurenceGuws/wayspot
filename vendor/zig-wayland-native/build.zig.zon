@@ -1,0 +1,31 @@
+.{
+    .name = .wayland,
+    .version = "0.2.0",
+    .fingerprint = 0xa8d655e542f9371, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .zxml = .{
+            .url = "git+https://git.jcollie.dev/jeff/zxml.git#5ed321016b104cbfc8f6ea24edf96bf5be4a40a4",
+            .hash = "zxml-0.2.0-JUQ_3VWSBACHDuQEBRk261c8VU2k49kO5Cf4pIeJhzEo",
+        },
+        .wayland_xml = .{
+            .url = "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.26.0/downloads/wayland-1.26.0.tar.xz",
+            .hash = "N-V-__8AAA46JQABKU7sa-6xGUAN44uFsYSUS_w79UVuu7qo",
+        },
+        .wayland_protocols = .{
+            .url = "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.49/downloads/wayland-protocols-1.49.tar.xz",
+            .hash = "N-V-__8AAOTNEADZkChhsSciYizE4kIbZsozjDZXVeG5R_uY",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "tools",
+        "examples",
+        "LICENSES",
+        "REUSE.toml",
+        "README.md",
+    },
+}

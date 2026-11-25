@@ -127,8 +127,25 @@ floating exceptions. The picker uses a centered keyboard-exclusive overlay;
 notification banners use noninteractive top-right surfaces and reserve no tile
 space. SDL still owns rendering and input, not the role's Wayland lifetime.
 Wallpaper uses the same protocol family for its per-output background surfaces.
-These roles work on Snowman and other layer-shell-capable Wayland compositors,
-without a separate compositor plugin architecture.
+These roles work on Snowman and other layer-shell-capable Wayland compositors.
+Snowman is the intended sole product target once mature; Hyprland remains
+supported during that transition. Prefer compile-time specialization at a
+real compositor-specific boundary, such as window discovery and focus, over
+runtime probing or a permanent compositor plugin abstraction. Shared protocol
+behavior has no reason to specialize.
+
+The native SHM surface owner is an opt-in, source-qualified replacement
+boundary, not yet the installed renderer. Its one visible-session connection
+owns at most one picker and one notification, with at most three buffers per
+surface across all extents. A frame callback permits presentation pacing;
+only wl_buffer.release permits writing into an already-submitted buffer.
+Invalidations coalesce while either fence is outstanding. Paint receives a
+scoped writable borrow; failed paint cancels it before attachment. Surface
+retirement abandons mappings without waiting for release and clears callback
+contexts; an asynchronous display sync fence can establish dismissal before
+native focus. The renderer, scaling and input migration remain separate gates.
+The pinned native Wayland snapshot carries a six-site raw Linux errno fix
+for libc-linked executables, with its retirement criterion in UPSTREAM.md.
 
 ## 5. Direct code is a means, not the product
 

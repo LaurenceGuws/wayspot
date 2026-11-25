@@ -21,6 +21,8 @@ test {
     _ = @import("picker/simulator.zig");
     _ = @import("ui/text.zig");
     _ = @import("ui/video.zig");
+    _ = @import("ui/native_surface.zig");
+    _ = @import("ui/native_surface_test.zig");
     _ = @import("ui/integration.zig");
     _ = @import("tray/host.zig");
     _ = @import("tray/menu.zig");

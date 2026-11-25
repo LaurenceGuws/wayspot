@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+SPDX-License-Identifier: MIT
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zig-wayland-native</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+  dt { font-weight: 600; margin-top: 1rem; }
+  dd { margin-left: 0; }
+</style>
+</head>
+<body>
+<h1>zig-wayland-native</h1>
+<p>A Wayland client written in Zig, with no libwayland. The documentation is
+generated from the doc comments, one bundle per module; each module depends
+only on the one above it, and <code>present</code> is built against a
+consumer's own bindings.</p>
+<dl>
+  <dt><a href="scanner/">scanner</a></dt>
+  <dd>Reads Wayland protocol XML and writes Zig bindings for it. Depends on zxml.</dd>
+  <dt><a href="protocol/">protocol</a></dt>
+  <dd>The wire format and the object bookkeeping, with no I/O: bytes and file
+  descriptors in, events out. Depends on nothing but the standard library.</dd>
+  <dt><a href="client/">client</a></dt>
+  <dd>The socket: connecting, sending and receiving with file descriptors, and
+  dispatching events to listeners. Depends on <code>protocol</code>; Linux only.</dd>
+  <dt><a href="present/">present</a></dt>
+  <dd>Buffers in shared memory or dma-bufs, a presenter that puts them on a
+  surface at the compositor's pace with explicit sync if asked, and
+  linux-dmabuf feedback. Depends on <code>client</code> and the generated
+  bindings; Linux only.</dd>
+</dl>
+</body>
+</html>
