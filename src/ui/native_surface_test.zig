@@ -13,6 +13,7 @@ const wp = @import("wayland-protocols").wp;
 const present = @import("wayland-present");
 const sdl = @import("sdl_c");
 const Painter = @import("text.zig").Painter;
+const Input = native.Input;
 
 const endian = @import("builtin").cpu.arch.endian();
 const size = native.Extent{ .width = 64, .height = 32 };
@@ -120,10 +121,22 @@ const Fixture = struct {
     }
 
     fn event(self: *Fixture, object: wire.ObjectId, interface: *const wire.Interface, opcode: u16, args: []const wire.Arg) !void {
+        try self.eventFd(object, interface, opcode, args, null);
+    }
+
+    fn eventFd(self: *Fixture, object: wire.ObjectId, interface: *const wire.Interface, opcode: u16, args: []const wire.Arg, fd: ?i32) !void {
         var bytes: [wire.wire.max_message_size]u8 = undefined;
         const len = try wire.wire.encodedSize(interface.events[opcode].args, args);
         wire.wire.encode(bytes[0..len], object, opcode, args);
-        try testing.expectEqual(len, linux.sendto(self.server, &bytes, len, linux.MSG.NOSIGNAL, null, 0));
+        if (fd) |file| {
+            var control: [32]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+            const header: *linux.cmsghdr = @ptrCast(&control);
+            header.* = .{ .len = @sizeOf(linux.cmsghdr) + @sizeOf(i32), .level = linux.SOL.SOCKET, .type = linux.SCM.RIGHTS };
+            @memcpy(control[@sizeOf(linux.cmsghdr)..][0..@sizeOf(i32)], std.mem.asBytes(&file));
+            const iov = [_]std.posix.iovec_const{.{ .base = &bytes, .len = len }};
+            const msg: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = &iov, .iovlen = 1, .control = &control, .controllen = std.mem.alignForward(usize, header.len, @sizeOf(usize)), .flags = 0 };
+            try testing.expectEqual(len, linux.sendmsg(self.server, &msg, linux.MSG.NOSIGNAL));
+        } else try testing.expectEqual(len, linux.sendto(self.server, &bytes, len, linux.MSG.NOSIGNAL, null, 0));
         // This is a local socketpair, not an unbounded compositor wait.
         var poll = [_]linux.pollfd{.{ .fd = self.display.fd(), .events = linux.POLL.IN, .revents = 0 }};
         try testing.expectEqual(@as(usize, 1), linux.poll(&poll, 1, 1000));
@@ -480,6 +493,198 @@ test "invalid fractional hints and physical extent bounds fail before allocating
     try testing.expectEqual(@as(usize, 0), s.pool.?.count());
 }
 
+// Self-contained XKB map, including modifiers. No host layout or locale
+// participates in the socket transcript.
+const input_keymap = "xkb_keymap { xkb_keycodes { minimum=8; maximum=255; <AC01>=38; <TAB>=23; <LFSH>=50; <LCTL>=37; }; xkb_types { type \"ONE_LEVEL\" { modifiers=None; level_name[Level1]=\"Any\"; }; type \"TWO_LEVEL\" { modifiers=Shift; map[Shift]=Level2; level_name[Level1]=\"Base\"; level_name[Level2]=\"Shift\"; }; }; xkb_compatibility {}; xkb_symbols { key <AC01> { type=\"TWO_LEVEL\", [ a, A ] }; key <TAB> { type=\"ONE_LEVEL\", [ Tab ] }; key <LFSH> { type=\"ONE_LEVEL\", [ Shift_L ] }; key <LCTL> { type=\"ONE_LEVEL\", [ Control_L ] }; modifier_map Shift { <LFSH> }; modifier_map Control { <LCTL> }; }; };\x00";
+
+fn seatEvent(f: *Fixture, seat: wl.Seat, name: [:0]const u8) !void {
+    try f.event(seat.id, &wl.Seat.interface, 1, &.{.{ .string = name }});
+    try f.event(seat.id, &wl.Seat.interface, 0, &.{.{ .uint = 3 }});
+}
+
+fn localInput(f: *Fixture) !void {
+    try f.global(20, "wl_seat", 8);
+    try seatEvent(f, f.display.input.seats[0].?.object, "seat0");
+    _ = try f.take();
+}
+
+fn keymapEvent(f: *Fixture, bytes: []const u8, declared_size: u32) !void {
+    const rc = linux.memfd_create("wayspot-keymap-fixture", linux.MFD.CLOEXEC);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    try testing.expectEqual(bytes.len, linux.write(fd, bytes.ptr, bytes.len));
+    try f.eventFd(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 0, &.{ .{ .uint = 1 }, .{ .fd = fd }, .{ .uint = declared_size } }, fd);
+}
+
+fn keyboardEnter(f: *Fixture, surface: *native.Surface, held: []const u8) !void {
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 1, &.{ .{ .uint = 1 }, .{ .object = surface.surface.?.id }, .{ .array = held } });
+}
+
+fn keyEvent(f: *Fixture, code: u32, pressed: bool) !void {
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 3, &.{ .{ .uint = 2 }, .{ .uint = 10 }, .{ .uint = code }, .{ .uint = @intFromBool(pressed) } });
+}
+
+fn modifiers(f: *Fixture, mask: u32) !void {
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 4, &.{ .{ .uint = 3 }, .{ .uint = mask }, .{ .uint = 0 }, .{ .uint = 0 }, .{ .uint = 0 } });
+}
+
+fn pointerEnter(f: *Fixture, surface: *native.Surface, x: f64, y: f64) !void {
+    try f.event(f.display.input.pointer.?.id, &wl.Pointer.interface, 0, &.{ .{ .uint = 1 }, .{ .object = surface.surface.?.id }, .{ .fixed = .fromDouble(x) }, .{ .fixed = .fromDouble(y) } });
+}
+
+fn buttonEvent(f: *Fixture, pressed: bool) !void {
+    try f.event(f.display.input.pointer.?.id, &wl.Pointer.interface, 3, &.{ .{ .uint = 2 }, .{ .uint = 10 }, .{ .uint = 272 }, .{ .uint = @intFromBool(pressed) } });
+}
+
+fn nextInput(f: *Fixture, surface: *native.Surface, tag: std.meta.Tag(@FieldType(Input.Event, "value"))) !Input.Event {
+    const event = f.display.input.pop() orelse return error.MissingInput;
+    try testing.expectEqual(surface.surface.?.id, event.surface);
+    try testing.expectEqual(tag, std.meta.activeTag(event.value));
+    return event;
+}
+
+test "native keyboard owns seat0, inherited keys, keymap and compositor modifier facts" {
+    var f = try Fixture.open();
+    defer f.close();
+    try f.global(19, "wl_seat", 8);
+    try seatEvent(&f, f.display.input.seats[0].?.object, "agent-seat");
+    try testing.expect(f.display.input.keyboard == null and f.display.input.pointer == null);
+    try f.global(20, "wl_seat", 8);
+    const seat = f.display.input.seats[1].?.object;
+    try seatEvent(&f, seat, "seat0");
+    _ = try f.take();
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 5, &.{ .{ .int = 25 }, .{ .int = 400 } });
+    try testing.expectEqual(@as(i32, 25), f.display.input.repeat_rate);
+    try testing.expectEqual(@as(i32, 400), f.display.input.repeat_delay);
+    var held: [4]u8 = undefined;
+    std.mem.writeInt(u32, &held, 30, endian);
+    try keyboardEnter(&f, picker, &held);
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try keyEvent(&f, 30, true); // not a new press
+    try keyEvent(&f, 30, false); // inherited release
+    try testing.expect(f.display.input.pop() == null);
+    try keyEvent(&f, 30, true);
+    const a = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqualStrings("a", a.utf8());
+    try testing.expectEqual(@as(u32, 97), a.symbol);
+    try testing.expect(a.pressed and a.repeatable);
+    try keyEvent(&f, 30, false);
+    try testing.expect(!(try nextInput(&f, picker, .key)).value.key.pressed);
+    try modifiers(&f, 1); // Shift
+    try keyEvent(&f, 30, true);
+    const upper = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqualStrings("A", upper.utf8());
+    try testing.expect(upper.modifiers.shift);
+    try keyEvent(&f, 30, false);
+    _ = try nextInput(&f, picker, .key);
+    try modifiers(&f, 4); // Control
+    try keyEvent(&f, 30, true);
+    const ctrl = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expect(ctrl.modifiers.control and ctrl.text_len == 0);
+    try keyEvent(&f, 30, false);
+    _ = try nextInput(&f, picker, .key);
+    try modifiers(&f, 0);
+    try keyEvent(&f, 15, true);
+    const tab = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqual(@as(u32, 0xff09), tab.symbol);
+    try testing.expectEqual(@as(u8, 0), tab.text_len);
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 2, &.{ .{ .uint = 4 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .keyboard_leave);
+    try keyboardEnter(&f, banner, &.{});
+    try keyEvent(&f, 30, true);
+    try testing.expect(f.display.input.pop() == null);
+    const old = f.display.input.keyboard.?.id;
+    try f.event(seat.id, &wl.Seat.interface, 0, &.{.{ .uint = 1 }});
+    try testing.expect(f.display.input.keyboard == null and f.display.input.state == null);
+    try f.event(seat.id, &wl.Seat.interface, 0, &.{.{ .uint = 3 }});
+    try testing.expect(f.display.input.keyboard.?.id != old);
+    try testing.expect(f.display.input.state == null);
+}
+
+test "native pointer preserves logical coordinates, matched release and scroll frames" {
+    var f = try Fixture.openWith(.{ .fractional = true, .viewport = true });
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    _ = try f.take();
+    try f.scale(picker, 210);
+    try f.configure(picker, 1, size);
+    const pointer = f.display.input.pointer.?.id;
+    try pointerEnter(&f, picker, 21.25, 15.5);
+    const enter = (try nextInput(&f, picker, .pointer_enter)).value.pointer_enter;
+    try testing.expectEqual(@as(f64, 21.25), enter.x);
+    try testing.expectEqual(@as(f64, 15.5), enter.y);
+    try buttonEvent(&f, false);
+    try testing.expect(f.display.input.pop() == null);
+    try buttonEvent(&f, true);
+    try testing.expect((try nextInput(&f, picker, .button)).value.button.pressed);
+    try f.event(pointer, &wl.Pointer.interface, 2, &.{ .{ .uint = 5 }, .{ .fixed = .fromDouble(30.5) }, .{ .fixed = .fromDouble(20.25) } });
+    _ = try nextInput(&f, picker, .motion);
+    try buttonEvent(&f, false);
+    const release = (try nextInput(&f, picker, .button)).value.button;
+    try testing.expect(!release.pressed and release.at.x == 30.5 and release.at.y == 20.25);
+    for (0..2) |_| {
+        try f.event(pointer, &wl.Pointer.interface, 9, &.{ .{ .uint = 0 }, .{ .int = 60 } });
+        try f.event(pointer, &wl.Pointer.interface, 4, &.{ .{ .uint = 6 }, .{ .uint = 0 }, .{ .fixed = .fromInt(5) } });
+        try f.event(pointer, &wl.Pointer.interface, 5, &.{});
+    }
+    try testing.expectEqual(@as(i8, 3), (try nextInput(&f, picker, .scroll)).value.scroll);
+    try testing.expect(f.display.input.pop() == null);
+    try buttonEvent(&f, true);
+    _ = try nextInput(&f, picker, .button);
+    try f.event(pointer, &wl.Pointer.interface, 1, &.{ .{ .uint = 7 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .pointer_leave);
+    try pointerEnter(&f, banner, 4, 5);
+    _ = try nextInput(&f, banner, .pointer_enter);
+    try buttonEvent(&f, false); // cannot complete another surface's press
+    try testing.expect(f.display.input.pop() == null);
+    try buttonEvent(&f, true);
+    try buttonEvent(&f, false);
+    try testing.expect((try nextInput(&f, banner, .button)).value.button.pressed);
+    try testing.expect(!(try nextInput(&f, banner, .button)).value.button.pressed);
+    try buttonEvent(&f, true);
+    try f.event(banner.layer.?.id, &zwlr.LayerSurfaceV1.interface, 1, &.{});
+    try testing.expect(f.display.input.pop() == null and f.display.input.pointer_focus == null);
+    try buttonEvent(&f, false);
+    try testing.expect(f.display.input.pop() == null);
+}
+
+test "truncated keymap fails before keymap parsing" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    try testing.expectError(error.NativeKeymapTruncated, keymapEvent(&f, input_keymap, input_keymap.len + 1));
+    try testing.expectEqual(native.Display.Status.failed, f.display.status());
+    try testing.expect(f.display.input.state == null);
+}
+
+test "bounded native input queue refuses overflow instead of dropping a release" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try pointerEnter(&f, picker, 1, 1);
+    for (0..Input.max_events * 2) |i| try f.event(f.display.input.pointer.?.id, &wl.Pointer.interface, 2, &.{ .{ .uint = 1 }, .{ .fixed = .fromInt(@intCast(i)) }, .{ .fixed = .fromInt(3) } });
+    try testing.expectEqual(@as(usize, 2), f.display.input.count);
+    _ = try nextInput(&f, picker, .pointer_enter);
+    try testing.expectEqual(@as(f64, Input.max_events * 2 - 1), (try nextInput(&f, picker, .motion)).value.motion.x);
+    for (0..Input.max_events) |i| try buttonEvent(&f, i % 2 == 0);
+    try testing.expectError(error.NativeInputOverflow, buttonEvent(&f, true));
+    try testing.expectEqual(native.Display.Status.failed, f.display.status());
+}
+
 // The opt-in integration test renders actual SDL CPU pixels, then witnesses
 // their composition through a private real Wayland compositor. No synthetic
 // SDL events, wall-clock-dependent sleeps, or product runtime replacement.
@@ -592,7 +797,7 @@ fn privateEnvironment() !?std.process.Environ.Map {
 }
 
 test "private real native layers draw CPU pixels and retire independently" {
-    if (getenv("WAYSPOT_NATIVE_MIXED_TEST") != null) return;
+    if (getenv("WAYSPOT_NATIVE_MIXED_TEST") != null or getenv("WAYSPOT_NATIVE_INPUT_TEST") != null) return;
     var env = (try privateEnvironment()) orelse return;
     defer env.deinit();
     const black = [3]u8{ 0, 0, 0 };
@@ -786,4 +991,74 @@ test "private mixed density layers keep their roles through real output scale ch
     try testing.expectEqual(@as(u8, 0), display.surfaces);
     try testing.expectEqual(@as(u32, 0), sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO));
     std.debug.print("NATIVE_SCALE_LIVE_PASS mixed density, four live scale transitions, stable role identity, native raster pixels and independent retirement\n", .{});
+}
+
+fn awaitInput(display: *native.Display, surface: wire.ObjectId, tag: std.meta.Tag(@FieldType(Input.Event, "value"))) !Input.Event {
+    const start = std.Io.Clock.awake.now(testing.io);
+    while (true) {
+        while (display.input.pop()) |event| {
+            if (event.surface == surface and std.meta.activeTag(event.value) == tag) return event;
+        }
+        try readBefore(display, start);
+    }
+}
+
+test "private actual Wayland keyboard and pointer reach the native fractional picker" {
+    if (getenv("WAYSPOT_NATIVE_INPUT_TEST") == null) return;
+    var env = (try privateEnvironment()) orelse return error.PrivateRuntimeRequired;
+    defer env.deinit();
+    const actor_path = std.mem.span(getenv("WAYSPOT_NATIVE_ACTOR") orelse return error.NativeFixtureActorMissing);
+    if (!std.fs.path.isAbsolute(actor_path) or std.mem.startsWith(u8, actor_path, "/usr/local/bin/") or !std.mem.eql(u8, std.fs.path.basename(actor_path), "snowman-sim-client")) return error.NativeFixtureActorInvalid;
+    var actor = try std.process.spawn(testing.io, .{ .argv = &.{ actor_path, "red", "ff0000" }, .environ_map = &env, .stdin = .pipe, .stdout = .ignore, .stderr = .inherit });
+    defer actor.kill(testing.io);
+    try actor.stdin.?.writeStreamingAll(testing.io, "input\n");
+    const display = try native.Display.open(testing.allocator, testing.io, &env);
+    defer display.destroy();
+    const start = std.Io.Clock.awake.now(testing.io);
+    while (display.status() == .discovering or display.input.pointer == null or display.input.state == null) try readBefore(display, start);
+    try testing.expectEqual(native.Display.Status.ready, display.status());
+    var seat_count: usize = 0;
+    for (display.input.seats) |seat| if (seat != null) {
+        seat_count += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), seat_count);
+    var picker: ?*native.Surface = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, null);
+    defer if (picker) |s| s.destroy() catch {};
+    const id = picker.?.surface.?.id;
+    try drawBefore(display, picker.?, .{ 20, 110, 60 });
+    try settleScale(display, picker.?, .{ 20, 110, 60 }, 210);
+    _ = try awaitInput(display, id, .keyboard_enter);
+    try actor.stdin.?.writeStreamingAll(testing.io, "move-left\n");
+    const motion_start = std.Io.Clock.awake.now(testing.io);
+    while (display.input.pointer_focus != id or @abs(display.input.point.x - 40) > 2 or @abs(display.input.point.y - 260) > 2) try readBefore(display, motion_start);
+    try testing.expectApproxEqAbs(@as(f64, 40), display.input.point.x, 2);
+    try testing.expectApproxEqAbs(@as(f64, 260), display.input.point.y, 2);
+    while (display.input.pop()) |_| {}
+    try actor.stdin.?.writeStreamingAll(testing.io, "key-and-click\n");
+    const press = (try awaitInput(display, id, .key)).value.key;
+    const release = (try awaitInput(display, id, .key)).value.key;
+    try testing.expect(press.pressed and !release.pressed and press.code == 30 and release.code == 30);
+    try testing.expectEqualStrings("a", press.utf8());
+    try testing.expectEqual(@as(u8, 0), release.text_len);
+    const down = (try awaitInput(display, id, .button)).value.button;
+    const up = (try awaitInput(display, id, .button)).value.button;
+    try testing.expect(down.pressed and !up.pressed and down.code == 272 and up.code == 272);
+    try testing.expectApproxEqAbs(@as(f64, 40), up.at.x, 2);
+    try testing.expectApproxEqAbs(@as(f64, 260), up.at.y, 2);
+    try actor.stdin.?.writeStreamingAll(testing.io, "key-tab\nkey-escape\n");
+    for ([_]u32{ 0xff09, 0xff1b }) |symbol| {
+        const key_down = (try awaitInput(display, id, .key)).value.key;
+        const key_up = (try awaitInput(display, id, .key)).value.key;
+        try testing.expect(key_down.pressed and !key_up.pressed and key_down.symbol == symbol and key_up.symbol == symbol and key_down.text_len == 0);
+    }
+    const old = picker.?;
+    picker = null;
+    try old.destroy();
+    try barrier(display);
+    try testing.expect(display.input.keyboard_focus == null and display.input.pointer_focus == null and display.input.count == 0);
+    try actor.stdin.?.writeStreamingAll(testing.io, "exit\n");
+    const term = try actor.wait(testing.io);
+    try testing.expect(term == .exited and term.exited == 0);
+    try testing.expectEqual(@as(u32, 0), sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO));
+    std.debug.print("NATIVE_INPUT_LIVE_PASS local seat only, real XKB text and navigation, matched pointer press/release at 1.75x, retired focus\n", .{});
 }

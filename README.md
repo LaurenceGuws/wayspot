@@ -115,8 +115,11 @@ operations on real socketpairs. `zig build native-scale-live` uses the same
 explicit private fixture paths (and the matching `snowman` CLI next to the
 compositor) to check a 1x banner and a picker whose output changes between
 1x, 1.5x, 1.75x and 2x. It checks actual buffer sizes, native-density text and
-composed pixels without recreating the surfaces. These are not a renderer
-cutover; the current product still uses SDL video.
+composed pixels without recreating the surfaces. `zig build native-input-live`
+uses the matching `snowman-sim-client` next to the private compositor to
+exercise real Wayland keymap, key and matched pointer events on a 1.75x layer.
+The source-test graph links libxkbcommon for native keyboard decoding.
+These are not a renderer cutover; the current product still uses SDL video.
 
 ### Application picker
 

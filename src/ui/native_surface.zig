@@ -10,6 +10,7 @@ const wl = @import("wayland-protocols").wl;
 const zwlr = @import("wayland-protocols").zwlr;
 const wp = @import("wayland-protocols").wp;
 const Allocator = std.mem.Allocator;
+pub const Input = @import("native_input.zig");
 
 pub const Role = enum { picker, notification };
 pub const max_buffers: usize = 3;
@@ -76,6 +77,7 @@ pub const Display = struct {
     fractional_manager: ?wp.FractionalScaleManagerV1 = null,
     globals: [5]?u32 = @splat(null),
     outputs: [max_outputs]?Output = @splat(null),
+    input: Input = .{},
     discovery_done: bool = false,
     sync_pending: bool = false,
     failed: bool = false,
@@ -109,6 +111,7 @@ pub const Display = struct {
     pub fn destroy(self: *Display) void {
         std.debug.assert(self.surfaces == 0);
         if (self.shm) |shm| shm.destroy();
+        self.input.deinit();
         self.conn.deinit();
         self.allocator.destroy(self);
     }
@@ -163,6 +166,7 @@ pub const Display = struct {
                 // A removed bound manager invalidates this display owner;
                 // ordinary output hotplug does not.
                 for (self.globals) |name| if (name == r.name) return error.NativeGlobalRemoved;
+                try self.input.removeSeat(conn, r.name);
                 for (&self.outputs, 0..) |*slot, i| {
                     const output = slot.* orelse continue;
                     if (output.global != r.name) continue;
@@ -196,6 +200,8 @@ pub const Display = struct {
         } else if (std.mem.eql(u8, global.interface, "wp_fractional_scale_manager_v1") and self.fractional_manager == null) {
             self.fractional_manager = try registry.bind(session, global.name, wp.FractionalScaleManagerV1, 1);
             self.globals[4] = global.name;
+        } else if (std.mem.eql(u8, global.interface, "wl_seat")) {
+            try self.input.bindSeat(conn, registry, global.name, global.version);
         } else if (std.mem.eql(u8, global.interface, "wl_output") and global.version >= 3) {
             // Version 3 provides release on hot-unplug. Older outputs are
             // not needed by the supported compositors; absent hints mean 1x.
@@ -288,6 +294,7 @@ pub const Surface = struct {
         const session = &conn.session;
         const surface = try display.compositor.?.createSurface(session);
         self.surface = surface;
+        display.input.register(@backingInt(role), surface, role == .picker);
         try conn.setListener(surface, self, onSurface);
         // Fractional scaling is a pair: never request fractional hints when
         // the compositor cannot accept a logical-size viewport destination.
@@ -326,7 +333,10 @@ pub const Surface = struct {
                     self.dirty = true;
                 }
             },
-            .closed => self.closed = true,
+            .closed => {
+                self.closed = true;
+                self.display.input.forget(@backingInt(self.role));
+            },
         }
     }
 
@@ -435,6 +445,7 @@ pub const Surface = struct {
             display.occupied[@backingInt(self.role)] = null;
             display.allocator.destroy(self);
         }
+        display.input.forget(@backingInt(self.role));
         if (self.presenter) |presenter| presenter.destroy();
         if (self.layer) |layer| {
             conn.clearListener(layer) catch {};

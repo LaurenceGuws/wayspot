@@ -163,6 +163,25 @@ physical extents and the exact scale, so text can be rasterized at native
 pixel density without changing the widget or input coordinate space.
 The mixed-density live gate changes a mapped picker through 1.5x, 1.75x, 2x,
 1x and 1.5x while keeping an independent 1x banner alive. No role is remapped.
+The native input owner selects only the local `seat0` of the supported
+compositors; private/agent seats are not merged. Seat capabilities create
+and retire the corresponding keyboard and pointer objects. Keymap FDs are
+owned, read with an exact 1 MiB maximum and closed even on error. XKB state
+uses compositor modifier/group masks and the Wayland keycode offset; inherited
+held keys do not produce presses. Key events carry symbols, modifiers and
+bounded direct UTF-8; repeat facts are retained but not yet scheduled, and
+compose/IME are separate. The pointer uses surface-local logical coordinates;
+matched releases cannot cross focus or role lifetimes. Adjacent motion can
+coalesce, but never across key, button, focus or scroll transitions. Scroll
+frames prefer value120, then discrete detents, then continuous distance (ten
+logical pixels per detent); each detent moves three rows, at most eighteen
+per frame. The 128-event queue reports overflow rather than dropping a
+transition. Retiring a surface discards its queued input and cancels its
+focus without altering a sibling. The private real-input gate delivers
+native key and pointer events to a 1.75x picker through Snowman's existing
+virtual-input fixture, without initializing SDL video. Cursor presentation,
+repeat, IME/compose and the actual picker action adapter remain separate.
+
 The pinned native Wayland snapshot carries a six-site raw Linux errno fix
 for libc-linked executables, with its retirement criterion in UPSTREAM.md.
 

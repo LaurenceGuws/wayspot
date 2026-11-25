@@ -13,8 +13,9 @@ import time
 
 repo = Path(__file__).resolve().parent.parent
 tests = Path(sys.argv[1]).resolve(strict=True)
-assert sys.argv[2:] in ([], ["--mixed"])
+assert sys.argv[2:] in ([], ["--mixed"], ["--input"])
 mixed = sys.argv[2:] == ["--mixed"]
+input_test = sys.argv[2:] == ["--input"]
 snowman = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve(strict=True)
 scratch = Path(os.environ["WAYSPOT_TEST_SCRATCH"]).resolve(strict=True)
 out = Path(os.environ["WAYSPOT_PROOF_DIR"]).resolve(strict=True)
@@ -56,6 +57,16 @@ try:
                 "at": {"x": 1280, "y": 0},
             },
         ]
+    if input_test:
+        config["private"] = {"second_seat": True}
+        config["outputs"] = [
+            {
+                "name": "HEADLESS-1",
+                "mode": {"width": 2240, "height": 1260, "refresh_mhz": 60000},
+                "scale": {"numerator": 7, "denominator": 4},
+                "at": {"x": 0, "y": 0},
+            }
+        ]
     cfg.write_text(json.dumps(config))
     env = {
         "PATH": "/usr/bin:/bin",
@@ -75,6 +86,11 @@ try:
         assert cli.parent == snowman.parent and cli.is_file()
         env["WAYSPOT_NATIVE_MIXED_TEST"] = str(runtime)
         env["WAYSPOT_NATIVE_CLI"] = str(cli)
+    if input_test:
+        actor = snowman.with_name("snowman-sim-client").resolve(strict=True)
+        assert actor.parent == snowman.parent and actor.is_file()
+        env["WAYSPOT_NATIVE_INPUT_TEST"] = str(runtime)
+        env["WAYSPOT_NATIVE_ACTOR"] = str(actor)
     with (out / "compositor.log").open("wb") as log:
         server = subprocess.Popen(
             [str(snowman), "--config", str(cfg)],
@@ -100,11 +116,17 @@ try:
             )
         report = (out / "tests.log").read_text(errors="replace")
         assert result.returncode == 0, report[-5000:]
-        marker = "NATIVE_SCALE_LIVE_PASS" if mixed else "NATIVE_SURFACE_LIVE_PASS"
+        marker = (
+            "NATIVE_INPUT_LIVE_PASS"
+            if input_test
+            else "NATIVE_SCALE_LIVE_PASS"
+            if mixed
+            else "NATIVE_SURFACE_LIVE_PASS"
+        )
         assert marker in report, "native live test was not exercised"
         assert server.poll() is None
         assert (out / "compositor.log").read_text().count("created layer surface") == (
-            2 if mixed else 6
+            1 if input_test else 2 if mixed else 6
         )
         assert (
             "error in client communication" not in (out / "compositor.log").read_text()
@@ -114,13 +136,25 @@ try:
             "result": "pass",
             "tests_sha256": hashlib.sha256(tests.read_bytes()).hexdigest(),
             "compositor_sha256": hashlib.sha256(snowman.read_bytes()).hexdigest(),
-            "shared_display_lifetimes": 1 if mixed else 3,
-            "independent_roles": 2 if mixed else 6,
-            "actual_glyphs_and_pixels": True,
+            "shared_display_lifetimes": 1 if mixed or input_test else 3,
+            "independent_roles": 1 if input_test else 2 if mixed else 6,
+            "actual_glyphs_and_pixels": not input_test,
             "sdl_video_initialized": False,
-            "scale": [1, 1.5, 1.75, 2] if mixed else 1,
+            "scale": 1.75 if input_test else [1, 1.5, 1.75, 2] if mixed else 1,
             "logical_output": [1280, 720],
         }
+        if input_test:
+            receipt.update(
+                {
+                    "actual_wayland_input": True,
+                    "local_seat_only": True,
+                    "xkb_text_and_navigation": True,
+                    "matched_button_release": True,
+                    "logical_pointer_coordinates": True,
+                    "focus_retired": True,
+                    "actor_sha256": hashlib.sha256(actor.read_bytes()).hexdigest(),
+                }
+            )
         if mixed:
             receipt.update(
                 {

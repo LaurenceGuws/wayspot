@@ -151,6 +151,11 @@ pub fn build(b: *std.Build) void {
     source_tests.root_module.addImport("wayland-protocols", native_protocols);
     source_tests.root_module.addImport("wayland-present", native_present);
     source_tests.root_module.addImport("wayland-wire", native_wayland.module("protocol"));
+    const xkb_header = headers.add("wayspot-xkb.h", "#include <xkbcommon/xkbcommon.h>\n#include <xkbcommon/xkbcommon-names.h>\n");
+    const xkb_translate = b.addTranslateC(.{ .root_source_file = xkb_header, .target = target, .optimize = optimize });
+    xkb_translate.linkSystemLibrary("xkbcommon", .{});
+    source_tests.root_module.addImport("xkb_c", xkb_translate.createModule());
+    source_tests.root_module.linkSystemLibrary("xkbcommon", .{});
     source_tests.use_llvm = false;
     source_tests.use_lld = false;
     const live_native = b.addSystemCommand(&.{"python3"});
@@ -168,6 +173,14 @@ pub fn build(b: *std.Build) void {
     live_scale.has_side_effects = true;
     b.step("native-scale-live", "Prove real mixed-density layers and in-place scale changes")
         .dependOn(&live_scale.step);
+    const live_input = b.addSystemCommand(&.{"python3"});
+    live_input.addFileArg(b.path("tools/native-surface-live.py"));
+    live_input.addFileArg(source_tests.getEmittedBin());
+    live_input.addArg("--input");
+    live_input.setCwd(b.path("."));
+    live_input.has_side_effects = true;
+    b.step("native-input-live", "Prove actual native keyboard and pointer events on a private seat")
+        .dependOn(&live_input.step);
 
     // Optional source-built integration; requires explicitly provided private
     // Snowman executable/CLI from a matching external test fixture.
