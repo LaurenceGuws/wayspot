@@ -73,12 +73,12 @@ for name,color in [('first.png',(20,50,90)),('second.png',(70,30,130))]:
 PY
 (
     export XDG_RUNTIME_DIR="$runtime"
-    unset WAYLAND_DISPLAY WAYLAND_SOCKET DISPLAY WLR_BACKENDS WLR_HEADLESS_OUTPUTS
+    unset WAYLAND_DISPLAY WAYLAND_SOCKET DISPLAY WLR_BACKENDS WLR_HEADLESS_OUTPUTS WLR_RENDERER XDG_SESSION_TYPE XDG_SEAT XDG_VTNR XDG_CURRENT_DESKTOP LD_LIBRARY_PATH
     exec "$snow" --config "$runtime/headless.json"
 ) >"$runtime/snowman.log" 2>&1 & spid=$!
 ready=0
 for _ in {1..90}; do
-    if [[ -S "$runtime/wayland-0" && -S "$runtime/snowman-observe-wayland-0.sock" ]]; then ready=1; break; fi
+    if [[ -S "$runtime/wayland-0" && -S "$runtime/snowman-command-wayland-0.sock" ]]; then ready=1; break; fi
     kill -0 "$spid" 2>/dev/null || break
     sleep .04
 done
@@ -87,6 +87,7 @@ export XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY=wayland-0 XDG_STATE_HOME="$run
 mkdir -p -m 0700 "$XDG_STATE_HOME"
 (
     unset HYPRLAND_INSTANCE_SIGNATURE
+    export WAYLAND_DEBUG=client
     exec "$wayspot" wallpaper "$runtime/wallpapers"
 ) >"$runtime/wallpaper.log" 2>&1 & wpid=$!
 published() { local expected="$1" count="$2"; [[ "$(grep -c "wallpaper published $expected output surfaces" "$runtime/wallpaper.log" || true)" -ge "$count" ]]; }
@@ -96,7 +97,22 @@ for _ in {1..100}; do
     sleep .05
 done
 published 2 1 || { printf 'HOLD: two wallpaper surfaces not published\n' >&2; exit 1; }
-"$cli" state >"$runtime/compositor-state.json"
+# Real, unrelated layer-shell and toplevel churn must not republish wallpaper.
+# Both processes are disposable private-session clients, never the live desktop.
+attach_count() { grep -Ec 'wl_surface[@#][0-9]+\.attach\(' "$runtime/wallpaper.log" || true; }
+initial_attach=$(attach_count)
+(( initial_attach == 2 )) || { printf 'HOLD: expected exactly two initial attaches, got %s\n' "$initial_attach" >&2; exit 1; }
+for _ in {1..20}; do
+    foot --app-id=wayspot-test-churn sh -c 'sleep .08' >"$runtime/foot.log" 2>&1 || { tail -15 "$runtime/foot.log" >&2; exit 1; }
+done
+sleep .15
+kill -0 "$wpid"
+[[ $(attach_count) == "$initial_attach" ]] || { printf 'HOLD: unrelated toplevel churn republished wallpaper\n' >&2; exit 1; }
+printf 'PASS: 20 real toplevel cycles, zero additional wallpaper attachments\n'
+
+"$cli" monitor list >"$runtime/monitors.json"
+"$cli" session status >"$runtime/session.json"
+jq -n --slurpfile monitors "$runtime/monitors.json" --slurpfile session "$runtime/session.json" '{data:{display_heads:$monitors[0].data,display_revision:$session[0].data.display_revision}}' >"$runtime/compositor-state.json"
 python3 - "$runtime" initial <<'PY'
 import sys,json
 from pathlib import Path
@@ -114,7 +130,9 @@ for _ in {1..100}; do
     sleep .05
 done
 published 1 1 || { printf 'HOLD: wallpaper did not reconcile disabled output\n' >&2; exit 1; }
-"$cli" state >"$runtime/compositor-state.json"
+"$cli" monitor list >"$runtime/monitors.json"
+"$cli" session status >"$runtime/session.json"
+jq -n --slurpfile monitors "$runtime/monitors.json" --slurpfile session "$runtime/session.json" '{data:{display_heads:$monitors[0].data,display_revision:$session[0].data.display_revision}}' >"$runtime/compositor-state.json"
 python3 - "$runtime" reenable <<'PY'
 import sys,json
 from pathlib import Path
@@ -127,7 +145,9 @@ PY
 "$cli" display apply "$runtime/change.json" | jq -e '.ok and .data.status == "applied"' >/dev/null
 sleep .25
 kill -0 "$wpid" 2>/dev/null || { printf 'HOLD: wallpaper did not survive zero outputs\n' >&2; exit 1; }
-"$cli" state >"$runtime/compositor-state.json"
+"$cli" monitor list >"$runtime/monitors.json"
+"$cli" session status >"$runtime/session.json"
+jq -n --slurpfile monitors "$runtime/monitors.json" --slurpfile session "$runtime/session.json" '{data:{display_heads:$monitors[0].data,display_revision:$session[0].data.display_revision}}' >"$runtime/compositor-state.json"
 python3 - "$runtime" reenable <<'PY'
 import sys,json
 from pathlib import Path
