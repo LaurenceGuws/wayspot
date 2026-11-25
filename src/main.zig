@@ -1,18 +1,18 @@
 //! Starts one native Wayspot process.
 
 const std = @import("std");
-const apps = @import("apps.zig");
+const apps = @import("apps/catalog.zig");
 const cli = @import("cli.zig");
 const cmd = @import("cmd.zig");
-const tray_watcher = @import("tray_watcher.zig");
-const desktop_files = @import("desktop_files.zig");
-const launch = @import("launch.zig");
-const notification = @import("notification.zig");
-const navigator = @import("navigator.zig");
-const picker = @import("picker.zig");
-const sdl = @import("sdl.zig");
-const wallpaper = @import("wallpaper.zig");
-const wallpaper_native = @import("wallpaper_native.zig");
+const tray_watcher = @import("tray/watcher.zig");
+const desktop_files = @import("apps/desktop_files.zig");
+const launch = @import("apps/launch.zig");
+const notification = @import("notifications/root.zig");
+const navigator = @import("picker/navigator.zig");
+const picker = @import("picker/root.zig");
+const sdl = @import("picker/view.zig");
+const wallpaper = @import("wallpaper/root.zig");
+const wallpaper_native = @import("wallpaper/wayland.zig");
 
 var notification_stop: std.atomic.Value(bool) = .init(false);
 

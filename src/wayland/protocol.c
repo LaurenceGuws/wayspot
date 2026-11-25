@@ -1,4 +1,4 @@
-#include "wayland_protocol.h"
+#include "protocol.h"
 
 #include <stddef.h>
 #include <viewporter-client.h>

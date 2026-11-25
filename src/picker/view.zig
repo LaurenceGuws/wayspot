@@ -1,18 +1,18 @@
 //! Owns native SDL startup, input, drawing, and reverse-order cleanup.
 
 const std = @import("std");
-const apps = @import("apps.zig");
+const apps = @import("../apps/catalog.zig");
 const clock = @import("clock.zig");
 const icon_path = @import("icon.zig");
 const image = @import("image.zig");
 const navigator = @import("navigator.zig");
-const picker = @import("picker.zig");
-const sdl_event = @import("sdl_event.zig");
-const sdl_layer = @import("sdl_layer.zig");
-const pixels = @import("sdl_pixels.zig");
-const text_draw = @import("text_draw.zig");
-const tray = @import("tray.zig");
-const tray_menu = @import("tray_menu.zig");
+const picker = @import("root.zig");
+const sdl_event = @import("input.zig");
+const sdl_layer = @import("../ui/layer.zig");
+const pixels = @import("geometry.zig");
+const text_draw = @import("../ui/text.zig");
+const tray = @import("../tray/host.zig");
+const tray_menu = @import("../tray/menu.zig");
 const sdl = @import("sdl_c");
 const time = @import("time_c");
 

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const apps = @import("apps.zig");
+const apps = @import("apps/catalog.zig");
 
 pub const argument_capacity = 64;
 pub const query_capacity = apps.query_capacity;

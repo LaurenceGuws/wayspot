@@ -3,8 +3,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl_c");
-const sdl_layer = @import("sdl_layer.zig");
-const text_draw = @import("text_draw.zig");
+const sdl_layer = @import("../ui/layer.zig");
+const text_draw = @import("../ui/text.zig");
 const dbus = @import("dbus_c");
 
 pub const app_name_capacity = 256;

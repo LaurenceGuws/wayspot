@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     });
     wayspot.addIncludePath(sdl.path("include"));
     wayspot.addIncludePath(b.path("vendor/stb"));
-    wayspot.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
+    wayspot.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
     wayspot.addAnonymousImport("NotoSans-Regular.ttf", .{
         .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
     });
@@ -78,8 +78,8 @@ pub fn build(b: *std.Build) void {
     wayland_protocol_module.addIncludePath(layer_code.dirname());
     wayland_protocol_module.addIncludePath(viewport_header.dirname());
     wayland_protocol_module.addIncludePath(xdg_output_header.dirname());
-    wayland_protocol_module.addIncludePath(b.path("src"));
-    wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland_protocol.c") });
+    wayland_protocol_module.addIncludePath(b.path("src/wayland"));
+    wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland/protocol.c") });
     wayland_protocol_module.linkSystemLibrary("wayland-client", .{});
     const wayland_protocol = b.addLibrary(.{
         .name = "wayspot_wayland_protocol",
@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
     });
     wayspot.linkLibrary(wayland_protocol);
     const wayland_translate = b.addTranslateC(.{
-        .root_source_file = b.path("src/wayland_protocol.h"),
+        .root_source_file = b.path("src/wayland/protocol.h"),
         .target = target,
         .optimize = optimize,
     });
@@ -108,128 +108,20 @@ pub fn build(b: *std.Build) void {
     executable.use_lld = false;
     b.installArtifact(executable);
 
-    const picker_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/picker.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    addNotificationLibraries(b, picker_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
-    picker_tests.use_llvm = false;
-    picker_tests.use_lld = false;
-    const run_picker_tests = b.addRunArtifact(picker_tests);
-    const apps_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/apps.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_apps_tests = b.addRunArtifact(apps_tests);
-    const desktop_files_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/desktop_files.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_desktop_files_tests = b.addRunArtifact(desktop_files_tests);
-    const transcript_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sdl_transcript.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    addNotificationLibraries(b, transcript_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
-    transcript_tests.use_llvm = false;
-    transcript_tests.use_lld = false;
-    const run_transcript_tests = b.addRunArtifact(transcript_tests);
-    const launch_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/launch.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_launch_tests = b.addRunArtifact(launch_tests);
-    const navigator_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/navigator.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_navigator_tests = b.addRunArtifact(navigator_tests);
-    const cli_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_cli_tests = b.addRunArtifact(cli_tests);
-    const cmd_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/cmd.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_cmd_tests = b.addRunArtifact(cmd_tests);
-    const icon_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/icon.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_icon_tests = b.addRunArtifact(icon_tests);
-    const image_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/image.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_image_tests = b.addRunArtifact(image_tests);
-    const wallpaper_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/wallpaper.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_wallpaper_tests = b.addRunArtifact(wallpaper_tests);
-    const wallpaper_transcript_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/wallpaper_transcript.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_wallpaper_transcript_tests = b.addRunArtifact(wallpaper_transcript_tests);
-    const wallpaper_native_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/wallpaper_native.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    wallpaper_native_tests.root_module.addIncludePath(sdl.path("include"));
-    wallpaper_native_tests.root_module.addIncludePath(b.path("vendor/stb"));
-    wallpaper_native_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper_jpeg.c") });
-    wallpaper_native_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    wallpaper_native_tests.root_module.linkLibrary(wayland_protocol);
-    wallpaper_native_tests.root_module.addImport("sdl_c", sdl_c);
-    wallpaper_native_tests.root_module.addImport("wayland_c", wayland_c);
-    wallpaper_native_tests.use_llvm = false;
-    wallpaper_native_tests.use_lld = false;
-    const run_wallpaper_native_tests = b.addRunArtifact(wallpaper_native_tests);
+    // Source tests share the product's module root. Import each source once;
+    // colocated tests and simulator cases keep their original bodies.
+    const source_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    source_tests.root_module.addIncludePath(b.path("vendor/stb"));
+    source_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
+    source_tests.root_module.addImport("time_c", time_c);
+    addNotificationLibraries(b, source_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
+    source_tests.use_llvm = false;
+    source_tests.use_lld = false;
 
     // Explicit diagnostic: only invoked by an isolated Wayland test harness.
     const output_probe_module = b.createModule(.{
@@ -239,7 +131,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     const output_observer_module = b.createModule(.{
-        .root_source_file = b.path("src/wallpaper_outputs.zig"),
+        .root_source_file = b.path("src/wallpaper/outputs.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -273,162 +165,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wallpaper_catalog_tests = b.addRunArtifact(wallpaper_catalog_tests);
-    const sdl_event_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sdl_event.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_sdl_event_tests = b.addRunArtifact(sdl_event_tests);
-    const sdl_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sdl.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    sdl_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
-        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
-    });
-    sdl_tests.root_module.addIncludePath(sdl.path("include"));
-    sdl_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    sdl_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    sdl_tests.root_module.addImport("sdl_c", sdl_c);
-    sdl_tests.root_module.addImport("wayland_c", wayland_c);
-    sdl_tests.root_module.linkLibrary(wayland_protocol);
-    sdl_tests.root_module.addImport("dbus_c", dbus_c);
-    sdl_tests.root_module.addImport("time_c", time_c);
-    sdl_tests.use_llvm = false;
-    sdl_tests.use_lld = false;
-    const run_sdl_tests = b.addRunArtifact(sdl_tests);
-    sdl_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
-    const text_draw_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/text_draw.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    text_draw_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
-        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
-    });
-    text_draw_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
-    text_draw_tests.root_module.addImport("sdl_c", sdl_c);
-    text_draw_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    const run_text_draw_tests = b.addRunArtifact(text_draw_tests);
-    const tray_watcher_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tray_watcher.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    tray_watcher_tests.root_module.addImport("dbus_c", dbus_c);
-    tray_watcher_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    const run_tray_watcher_tests = b.addRunArtifact(tray_watcher_tests);
-    const tray_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tray.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    tray_tests.root_module.addImport("dbus_c", dbus_c);
-    tray_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    const run_tray_tests = b.addRunArtifact(tray_tests);
-    const tray_menu_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tray_menu.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    tray_menu_tests.root_module.addImport("dbus_c", dbus_c);
-    tray_menu_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    const run_tray_menu_tests = b.addRunArtifact(tray_menu_tests);
-    const sdl_pixels_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sdl_pixels.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_sdl_pixels_tests = b.addRunArtifact(sdl_pixels_tests);
-    const notification_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/notification.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    notification_tests.root_module.addAnonymousImport("NotoSans-Regular.ttf", .{
-        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
-    });
-    notification_tests.root_module.addIncludePath(sdl.path("include"));
-    notification_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    notification_tests.root_module.linkSystemLibrary("dbus-1", .{});
-    notification_tests.root_module.addImport("sdl_c", sdl_c);
-    notification_tests.root_module.addImport("wayland_c", wayland_c);
-    notification_tests.root_module.linkLibrary(wayland_protocol);
-    notification_tests.root_module.addImport("dbus_c", dbus_c);
-    notification_tests.use_llvm = false;
-    notification_tests.use_lld = false;
-    const run_notification_tests = b.addRunArtifact(notification_tests);
-    notification_tests.root_module.addImport("howl_text", howl_text.module("howl_text"));
-    const layer_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/sdl_layer.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    layer_tests.root_module.addImport("sdl_c", sdl_c);
-    layer_tests.root_module.addImport("wayland_c", wayland_c);
-    layer_tests.root_module.linkLibrary(sdl.artifact("SDL3"));
-    layer_tests.root_module.linkLibrary(wayland_protocol);
-    const run_layer_tests = b.addRunArtifact(layer_tests);
     const test_step = b.step("test", "Run Wayspot tests");
-    test_step.dependOn(&run_layer_tests.step);
-    test_step.dependOn(&run_picker_tests.step);
-    test_step.dependOn(&run_apps_tests.step);
-    test_step.dependOn(&run_desktop_files_tests.step);
-    test_step.dependOn(&run_transcript_tests.step);
-    test_step.dependOn(&run_launch_tests.step);
-    test_step.dependOn(&run_navigator_tests.step);
-    test_step.dependOn(&run_cli_tests.step);
-    test_step.dependOn(&run_cmd_tests.step);
-    test_step.dependOn(&run_icon_tests.step);
-    test_step.dependOn(&run_image_tests.step);
-    test_step.dependOn(&run_wallpaper_tests.step);
-    test_step.dependOn(&run_wallpaper_transcript_tests.step);
-    test_step.dependOn(&run_wallpaper_native_tests.step);
+    test_step.dependOn(&b.addRunArtifact(source_tests).step);
     test_step.dependOn(&run_wallpaper_catalog_tests.step);
-    test_step.dependOn(&run_sdl_event_tests.step);
-    test_step.dependOn(&run_sdl_tests.step);
-    test_step.dependOn(&run_text_draw_tests.step);
-    test_step.dependOn(&run_tray_watcher_tests.step);
-    test_step.dependOn(&run_tray_tests.step);
-    test_step.dependOn(&run_tray_menu_tests.step);
-
-    const clock_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/clock.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(clock_tests).step);
-    test_step.dependOn(&run_sdl_pixels_tests.step);
-    test_step.dependOn(&run_notification_tests.step);
     const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });
     run_bash_completion_test.addArtifactArg2(executable, .{});
     test_step.dependOn(&run_bash_completion_test.step);

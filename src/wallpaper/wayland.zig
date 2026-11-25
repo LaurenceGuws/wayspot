@@ -1,10 +1,10 @@
 //! Owns native file, SDL image, Wayland, Hyprland socket, poll, and stop operations for wallpaper.
 
 const std = @import("std");
-const wallpaper = @import("wallpaper.zig");
+const wallpaper = @import("root.zig");
 const sdl = @import("sdl_c");
 const wl = @import("wayland_c");
-const outputs = @import("wallpaper_outputs.zig");
+const outputs = @import("outputs.zig");
 
 extern fn wayspot_jpeg_decode(
     bytes: [*]const u8,
@@ -1554,5 +1554,5 @@ fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
 }
 
 test "Wayland output observer contracts" {
-    _ = @import("wallpaper_outputs.zig");
+    _ = @import("outputs.zig");
 }

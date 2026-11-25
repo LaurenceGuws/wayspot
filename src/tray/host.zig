@@ -2,7 +2,7 @@
 //! come fresh from the live session bus after the picker's first useful frame.
 const std = @import("std");
 const dbus = @import("dbus_c");
-const watcher = @import("tray_watcher.zig");
+const watcher = @import("watcher.zig");
 
 pub const capacity = watcher.max_items;
 const service_capacity = 160;

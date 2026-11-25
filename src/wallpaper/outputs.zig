@@ -2,7 +2,7 @@
 //! socket JSON, filesystem, focus or a compositor-specific environment key.
 const std = @import("std");
 const wl = @import("wayland_c");
-const wallpaper = @import("wallpaper.zig");
+const wallpaper = @import("root.zig");
 
 const Probe = struct {
     observer: ?*Observer = null,

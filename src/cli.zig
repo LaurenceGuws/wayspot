@@ -1,7 +1,7 @@
 //! Owns bounded CLI presentation.
 
 const std = @import("std");
-const apps = @import("apps.zig");
+const apps = @import("apps/catalog.zig");
 const cmd = @import("cmd.zig");
 
 pub const help =

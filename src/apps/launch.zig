@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const apps = @import("apps.zig");
+const apps = @import("catalog.zig");
 
 pub const argument_capacity = 64;
 pub const storage_capacity = 8192;

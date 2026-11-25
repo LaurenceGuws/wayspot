@@ -2,10 +2,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const apps = @import("apps.zig");
-const notification = @import("notification.zig");
+const apps = @import("../apps/catalog.zig");
+const notification = @import("../notifications/root.zig");
 const navigator = @import("navigator.zig");
-const picker = @import("picker.zig");
+const picker = @import("root.zig");
 
 const step_capacity = 32;
 

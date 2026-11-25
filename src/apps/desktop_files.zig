@@ -1,7 +1,7 @@
 //! Reads bounded desktop files in deterministic XDG precedence order.
 
 const std = @import("std");
-const apps = @import("apps.zig");
+const apps = @import("catalog.zig");
 
 pub const file_capacity = 512;
 pub const id_capacity = 256;

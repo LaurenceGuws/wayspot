@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const apps = @import("apps.zig");
-const notification = @import("notification.zig");
+const apps = @import("../apps/catalog.zig");
+const notification = @import("../notifications/root.zig");
 const navigator = @import("navigator.zig");
 
 pub const query_capacity = apps.query_capacity;

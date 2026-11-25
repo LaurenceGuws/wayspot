@@ -1,7 +1,7 @@
 //! Strict operation histories for complete wallpaper publication rounds.
 
 const std = @import("std");
-const wallpaper = @import("wallpaper.zig");
+const wallpaper = @import("root.zig");
 
 const operation_capacity = 4096;
 
