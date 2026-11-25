@@ -143,7 +143,26 @@ Invalidations coalesce while either fence is outstanding. Paint receives a
 scoped writable borrow; failed paint cancels it before attachment. Surface
 retirement abandons mappings without waiting for release and clears callback
 contexts; an asynchronous display sync fence can establish dismissal before
-native focus. The renderer, scaling and input migration remain separate gates.
+native focus. The renderer and input migration remain separate gates.
+
+The native surface keeps layer configure dimensions in logical coordinates.
+Fractional-scale v1 and viewporter are used together: round physical extents
+in protocol 120ths, keep the wl_surface buffer scale at one, and commit the
+logical viewport destination with the buffer. Until a fractional preference
+arrives, use the core surface preferred integer scale, then the greatest
+committed integer scale of entered outputs, then 1x. Output scale changes
+become visible to this owner at wl_output.done; output removal releases its
+object and membership. Each surface has its own effective scale. An initial
+frame need not wait for a fractional preference that may follow mapping.
+Invalidations and scale changes coalesce behind frame/release fences; no
+more than three buffers of at most 16 MiB each are retained per surface,
+including stale sizes. Reject invalid or oversized physical extents before
+allocating. The supported scale numerators are positive and at most 960;
+wl_output versions before 3 are not bound. Paint receives both logical and
+physical extents and the exact scale, so text can be rasterized at native
+pixel density without changing the widget or input coordinate space.
+The mixed-density live gate changes a mapped picker through 1.5x, 1.75x, 2x,
+1x and 1.5x while keeping an independent 1x banner alive. No role is remapped.
 The pinned native Wayland snapshot carries a six-site raw Linux errno fix
 for libc-linked executables, with its retirement criterion in UPSTREAM.md.
 

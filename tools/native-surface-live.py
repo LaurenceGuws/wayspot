@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the source-owned native surface tests against one private head."""
+"""Execute the source-owned native surface or mixed-scale private fixture."""
 
 from pathlib import Path
 import hashlib
@@ -13,6 +13,8 @@ import time
 
 repo = Path(__file__).resolve().parent.parent
 tests = Path(sys.argv[1]).resolve(strict=True)
+assert sys.argv[2:] in ([], ["--mixed"])
+mixed = sys.argv[2:] == ["--mixed"]
 snowman = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve(strict=True)
 scratch = Path(os.environ["WAYSPOT_TEST_SCRATCH"]).resolve(strict=True)
 out = Path(os.environ["WAYSPOT_PROOF_DIR"]).resolve(strict=True)
@@ -29,19 +31,32 @@ try:
     runtime = root / "r"
     assert len(str(runtime / "snowman-command-wayland-0.sock")) < 108
     cfg = root / "snowman.json"
-    cfg.write_text(
-        json.dumps(
+    config = {
+        "backend": {
+            "driver": "headless",
+            "input": "none",
+            "headless_outputs": 2 if mixed else 1,
+        },
+        "publish_session_environment": False,
+        "children": [],
+    }
+    if mixed:
+        config["private"] = {"display_control": True}
+        config["outputs"] = [
             {
-                "backend": {
-                    "driver": "headless",
-                    "input": "none",
-                    "headless_outputs": 1,
-                },
-                "publish_session_environment": False,
-                "children": [],
-            }
-        )
-    )
+                "name": "HEADLESS-2",
+                "mode": {"width": 1280, "height": 720, "refresh_mhz": 60000},
+                "scale": {"numerator": 1, "denominator": 1},
+                "at": {"x": 0, "y": 0},
+            },
+            {
+                "name": "HEADLESS-1",
+                "mode": {"width": 1920, "height": 1080, "refresh_mhz": 60000},
+                "scale": {"numerator": 3, "denominator": 2},
+                "at": {"x": 1280, "y": 0},
+            },
+        ]
+    cfg.write_text(json.dumps(config))
     env = {
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
@@ -55,6 +70,11 @@ try:
         "WAYLAND_DISPLAY": "wayland-0",
         "WAYSPOT_NATIVE_PRIVATE_TEST": str(runtime),
     }
+    if mixed:
+        cli = snowman.with_name("snowman").resolve(strict=True)
+        assert cli.parent == snowman.parent and cli.is_file()
+        env["WAYSPOT_NATIVE_MIXED_TEST"] = str(runtime)
+        env["WAYSPOT_NATIVE_CLI"] = str(cli)
     with (out / "compositor.log").open("wb") as log:
         server = subprocess.Popen(
             [str(snowman), "--config", str(cfg)],
@@ -80,11 +100,12 @@ try:
             )
         report = (out / "tests.log").read_text(errors="replace")
         assert result.returncode == 0, report[-5000:]
-        assert "NATIVE_SURFACE_LIVE_PASS" in report, (
-            "native live test was not exercised"
-        )
+        marker = "NATIVE_SCALE_LIVE_PASS" if mixed else "NATIVE_SURFACE_LIVE_PASS"
+        assert marker in report, "native live test was not exercised"
         assert server.poll() is None
-        assert (out / "compositor.log").read_text().count("created layer surface") == 6
+        assert (out / "compositor.log").read_text().count("created layer surface") == (
+            2 if mixed else 6
+        )
         assert (
             "error in client communication" not in (out / "compositor.log").read_text()
         )
@@ -93,15 +114,29 @@ try:
             "result": "pass",
             "tests_sha256": hashlib.sha256(tests.read_bytes()).hexdigest(),
             "compositor_sha256": hashlib.sha256(snowman.read_bytes()).hexdigest(),
-            "shared_display_lifetimes": 3,
-            "independent_roles": 6,
+            "shared_display_lifetimes": 1 if mixed else 3,
+            "independent_roles": 2 if mixed else 6,
             "actual_glyphs_and_pixels": True,
             "sdl_video_initialized": False,
-            "scale": 1,
+            "scale": [1, 1.5, 1.75, 2] if mixed else 1,
             "logical_output": [1280, 720],
         }
+        if mixed:
+            receipt.update(
+                {
+                    "mixed_density": True,
+                    "in_place_scale_transitions": 4,
+                    "stable_surface_identity": True,
+                    "frame_receipts": [
+                        line.strip()
+                        for line in report.splitlines()
+                        if "NATIVE_SCALE_FRAME" in line
+                    ],
+                }
+            )
+            assert len(receipt["frame_receipts"]) == 6
         (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-        print("NATIVE_SURFACE_LIVE_PASS", json.dumps(receipt), flush=True)
+        print(marker, json.dumps(receipt), flush=True)
 finally:
     if server is not None and server.poll() is None:
         server.terminate()

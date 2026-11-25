@@ -140,7 +140,11 @@ pub fn build(b: *std.Build) void {
     const native_protocols = @import("wayland").addProtocols(b, native_wayland, .{
         .target = target,
         .optimize = optimize,
-        .extra = &.{layer_xml},
+        .extra = &.{
+            layer_xml,
+            b.path("protocols/viewporter.xml"),
+            native_wayland.namedLazyPath("wayland-protocols").path(b, "staging/fractional-scale/fractional-scale-v1.xml"),
+        },
     });
     const native_present = @import("wayland").addPresent(b, native_wayland, native_protocols);
     source_tests.root_module.addImport("wayland-client", native_wayland.module("client"));
@@ -156,6 +160,14 @@ pub fn build(b: *std.Build) void {
     live_native.has_side_effects = true;
     b.step("native-surface-live", "Prove the native surface owner on an explicit private compositor")
         .dependOn(&live_native.step);
+    const live_scale = b.addSystemCommand(&.{"python3"});
+    live_scale.addFileArg(b.path("tools/native-surface-live.py"));
+    live_scale.addFileArg(source_tests.getEmittedBin());
+    live_scale.addArg("--mixed");
+    live_scale.setCwd(b.path("."));
+    live_scale.has_side_effects = true;
+    b.step("native-scale-live", "Prove real mixed-density layers and in-place scale changes")
+        .dependOn(&live_scale.step);
 
     // Optional source-built integration; requires explicitly provided private
     // Snowman executable/CLI from a matching external test fixture.
