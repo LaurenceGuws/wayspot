@@ -271,6 +271,13 @@ def mem(proc):
     )
 
 
+def assert_no_libdecor(proc):
+    # All product windows use custom Wayland roles. Check the actual loaded
+    # objects while the video lease is alive, not merely an SDL hint value.
+    maps = Path(f"/proc/{proc.pid}/maps").read_text()
+    assert not re.search(r"/libdecor(?:[-_./]|$)", maps), "unneeded libdecor mapped"
+
+
 def sample(procs):
     a = [mem(q) for q in procs]
     time.sleep(3)
@@ -587,6 +594,7 @@ try:
             and status()["video_users"] == 2
             and status()["notification_visible"]
         )
+        assert_no_libdecor(resident)
         if i == 0:
             wait(lambda: (root / "action.fetch").exists(), "actual SNI property fetch")
         run(candidate, "picker")
@@ -614,6 +622,7 @@ try:
         cold_summon.append((time.monotonic_ns() - t) / 1e6)
         run(candidate, "picker", "dismiss")
         assert status()["video_users"] == 0
+        assert_no_libdecor(resident)
     print("PASS: 20 shared picker lifetimes, notification and tray survive", flush=True)
     run(candidate, "picker")
     nid = notify("expiry alongside picker", ms=250)
@@ -721,6 +730,7 @@ try:
         "tray_fetch_pass": True,
         "detached_launch_mask_pass": True,
         "window_finder": finder,
+        "layer_only_libdecor_absent": True,
     }
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2))
     print("RESIDENT_PASS", json.dumps(receipt), flush=True)

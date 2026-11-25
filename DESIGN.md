@@ -180,7 +180,11 @@ retired independently of the resident. Do not restore the discarded Rust UI
 or create a general capability framework.
 
 The shared main-thread video owner initializes SDL on its first surface lease
-and quits on its last. Route window and renderer events to their actual
+and quits on its last. Every first video lease disables SDL's libdecor
+loader before initialization: all product windows have custom layer-shell
+roles and never need XDG decoration negotiation or its GTK plugin. EGL
+provider selection remains machine policy, not a product hint. Route
+window and renderer events to their actual
 window, not the currently active capability. Picker input advances in bounded
 batches with a draw/finish action. Notification D-Bus intake, newest-only
 presentation, history and expiry share one sequential service owner; hidden

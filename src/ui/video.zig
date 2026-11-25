@@ -9,6 +9,11 @@ tray_event: ?u32 = null,
 
 pub fn acquire(self: *Self) !void {
     if (self.users == 0) {
+        // Every Wayspot window owns a custom layer-shell role. SDL's
+        // Wayland startup can otherwise initialize libdecor (and its GTK
+        // plugin) before a window even exists. Neither is a supported role
+        // here. Apply the process-local policy on every first video lease.
+        if (!sdl.SDL_SetHintWithPriority(sdl.SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR, "0", sdl.SDL_HINT_OVERRIDE)) return error.SdlLayerVideoHintFailed;
         if (!sdl.SDL_SetAppMetadata("wayspot", "0.1.0", "wayspot")) return error.SdlMetadataFailed;
         if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
     }

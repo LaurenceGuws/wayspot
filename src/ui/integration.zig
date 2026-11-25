@@ -67,6 +67,7 @@ test "private shared video routes two real layers and releases only the closing 
         var view: View = .{ .video = &video, .applications = &.{}, .allocator = std.testing.allocator, .io = std.testing.io, .home = home };
         try view.init();
         defer view.quit();
+        try std.testing.expect(!sdl.SDL_GetHintBoolean(sdl.SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR, true));
         try view.create();
         defer view.destroy();
         try view.startText();
