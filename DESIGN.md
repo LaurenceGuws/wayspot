@@ -104,18 +104,23 @@ when the backend supplies it; workspace-local geometry may be rendered as
 a deterministic position such as `2/5` without changing focus order.
 No viewport-direction semantics are fabricated when unavailable.
 
-The Snowman window adapter deliberately refuses both discovery and focus until
-Snowman itself offers accepted native operations. It launches no Snowman
-CLI command and never substitutes another compositor's commands.
-The picker propagates this refusal to a clear nonzero process exit, but the
-ordinary app picker remains available on Snowman.
+Snowman discovery uses two bounded local CLI observations on entry to window
+mode: the mapped window list and the local seat's MRU history. Scene
+participation is not a claim of unobscured pixels. The picker retains exact
+session-local IDs, including hidden and unpresented windows. Selecting a
+Snowman row ends the picker lifetime; a bounded server sync on its original
+SDL connection proves that the role and surface destruction were processed
+before issuing the compositor's greedy focus command. Validate the exact ID
+and both native focus flags. Failure produces a notification without waiting
+for our own notification service, retrying, or guessing a different target.
+The two observations need not have the same revision. Snowman still owns
+presentation, pointer placement and the authority to reject a stale ID.
 This remains part of the picker rather than becoming a resident taskbar.
 
 That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
 not redefine the primary latency requirement or justify a generic framework.
 
-Hyprland remains the primary desktop for native window-finder controls.
 The picker and notifications use SDL's custom Wayland surface role with
 Wayland layer-shell, rather than XDG toplevel decorations or compositor-specific
 floating exceptions. The picker uses a centered keyboard-exclusive overlay;

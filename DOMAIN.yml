@@ -55,15 +55,15 @@ scope:
         primary_input: keyboard
         scope: global current windows across workspaces and monitors
         hierarchy: flat; workspace and monitor are location metadata
-        ordering: Hyprland focus-history facts with deterministic fallback
+        ordering: compositor-provided local focus history with deterministic fallback
         location_metadata:
           - workspace id
           - workspace-local geometry ordinal when multiple windows share a workspace
         filtering: current window identity, title, workspace, and monitor metadata
         icon_identity: one exact unambiguous desktop-application id match only
-        authority: native Hyprland CLI; Snowman adapter explicitly unavailable
-        discovery: one bounded hyprctl clients snapshot per activation on Hyprland
-        mutation: exact Hyprland address focus followed by activewindow verification; Snowman refuses
+        authority: exact native Hyprland or Snowman CLI
+        discovery: bounded hyprctl clients snapshot or Snowman mapped windows and local seat MRU per activation; maximum 128 windows
+        mutation: exact Hyprland address with activewindow verification; Snowman exact ID after surface destruction and bounded Wayland sync, verified applied receipt; no fallback or retry
         resident_process: false
         persistent_derived_state: false
     notifications:

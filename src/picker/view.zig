@@ -69,6 +69,7 @@ pub const Native = struct {
     menu: ?tray_menu.Menu = null,
     menu_item: usize = 0,
     menu_hover: ?usize = null,
+    pressed_row: ?usize = null,
 
     /// Initializes exactly the SDL video subsystem.
     pub fn init(native: *Native) !void {
@@ -159,6 +160,10 @@ pub const Native = struct {
             try native.receiveTray();
             return .redraw;
         }
+        switch (event.type) {
+            sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_TEXT_INPUT, sdl.SDL_EVENT_MOUSE_WHEEL, sdl.SDL_EVENT_WINDOW_MOUSE_LEAVE => native.pressed_row = null,
+            else => {},
+        }
         return switch (event.type) {
             sdl.SDL_EVENT_QUIT => .quit,
             sdl.SDL_EVENT_WINDOW_CLOSE_REQUESTED => .quit,
@@ -203,6 +208,7 @@ pub const Native = struct {
             else
                 hoverAt(event.motion.x, event.motion.y) orelse .ignored,
             sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => blk: {
+                native.pressed_row = null;
                 if (native.menu != null) {
                     if (native.menuAt(event.button.x, event.button.y)) |index| {
                         if (event.button.button == sdl.SDL_BUTTON_LEFT)
@@ -214,10 +220,21 @@ pub const Native = struct {
                 if (pixels.trayAt(event.button.x, event.button.y, native.tray_snapshot.count)) |index| {
                     break :blk native.openTray(index, event.button.button, event.button.x, event.button.y);
                 }
-                break :blk if (event.button.button == sdl.SDL_BUTTON_LEFT)
-                    clickAt(event.button.x, event.button.y) orelse .ignored
-                else
-                    .ignored;
+                if (event.button.button == sdl.SDL_BUTTON_LEFT) {
+                    native.pressed_row = pixels.rowAt(event.button.x, event.button.y);
+                    if (native.pressed_row) |row| break :blk .{ .hover = row };
+                }
+                break :blk .ignored;
+            },
+            sdl.SDL_EVENT_MOUSE_BUTTON_UP => blk: {
+                // Retire the originating Wayland button grab before asking a
+                // different window to receive focus. Only a matching row
+                // release selects; tray/menu actions retain their own path.
+                if (event.button.button != sdl.SDL_BUTTON_LEFT) break :blk .ignored;
+                const pressed = native.pressed_row;
+                native.pressed_row = null;
+                if (pressed == null or native.menu != null or pixels.rowAt(event.button.x, event.button.y) != pressed) break :blk .ignored;
+                break :blk clickAt(event.button.x, event.button.y) orelse .ignored;
             },
             sdl.SDL_EVENT_MOUSE_WHEEL => if (native.menu != null)
                 .ignored
@@ -384,6 +401,16 @@ pub const Native = struct {
         sdl.SDL_DestroyWindow(native.window);
         native.renderer = null;
         native.window = null;
+    }
+
+    /// The next Snowman command travels over a different socket. Flush and
+    /// wait for a server sync after destroying the layer AND its SDL surface,
+    /// while our video lease still retains the original display connection.
+    pub fn destroyForFocus(native: *Native) !void {
+        const display = native.layer.display;
+        native.destroy();
+        const connection = display orelse return error.SdlWaylandDisplayMissing;
+        try sdl_layer.synchronize(connection, native.io);
     }
 
     /// Quits SDL after every native object has been destroyed.
@@ -1158,4 +1185,23 @@ test "private-bus picker pointer events open the real tray menu and send its act
     pointer.button.y = 50;
     try std.testing.expectEqual(picker.Event.redraw, try native.translate(pointer));
     try std.testing.expect(native.menu == null);
+}
+
+test "row selection waits for its matching left-button release" {
+    var video: Video = .{};
+    var native = Native{ .video = &video, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
+    var event = std.mem.zeroes(sdl.SDL_Event);
+    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
+    event.button.button = sdl.SDL_BUTTON_LEFT;
+    event.button.x = 20;
+    event.button.y = 100;
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, try native.translate(event));
+    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_UP;
+    try std.testing.expectEqual(picker.Event{ .click = 0 }, try native.translate(event));
+    try std.testing.expectEqual(picker.Event.ignored, try native.translate(event));
+    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, try native.translate(event));
+    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_UP;
+    event.button.y = 140;
+    try std.testing.expectEqual(picker.Event.ignored, try native.translate(event));
 }

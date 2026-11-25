@@ -13,6 +13,16 @@ repo = Path(__file__).resolve().parent.parent
 snow = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve()
 cli = Path(os.environ["SNOWMAN_CLI"]).resolve()
 baseline = Path(os.environ.get("WAYSPOT_BASELINE", str(candidate))).resolve()
+actor_path = os.environ.get("SNOWMAN_SIM_CLIENT")
+actor = Path(actor_path).resolve() if actor_path else None
+if actor:
+    assert (
+        actor.name == "snowman-sim-client"
+        and actor.is_file()
+        and os.access(actor, os.X_OK)
+    )
+    assert actor.parent == cli.parent == snow.parent
+assert cli.name == "snowman"
 assert candidate.is_relative_to(repo / ".zig-cache") or candidate.is_relative_to(
     repo / "zig-out"
 )
@@ -42,7 +52,7 @@ bus_address = "unix:path=" + str(root / "bus")
     + '</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>'
 )
 env = {
-    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "PATH": str(cli.parent) + ":/usr/bin:/bin",
     "HOME": str(root / "h"),
     "XDG_CONFIG_HOME": str(root / "c"),
     "XDG_DATA_HOME": str(root / "d"),
@@ -85,7 +95,10 @@ for i, color in enumerate(sorted(colors)):
     json.dumps(
         {
             "backend": {"driver": "headless", "input": "none", "headless_outputs": 2},
-            "private": {"display_control": True},
+            "private": {"display_control": True, "second_seat": actor is not None},
+            "initial_workspaces": 3,
+            "layout": {"default_mode": "monocle"},
+            "publish_session_environment": False,
             "children": [],
         }
     )
@@ -107,14 +120,18 @@ for i, color in enumerate(sorted(colors)):
 )
 
 
-def start(argv, name, debug=False):
+def start(argv, name, debug=False, control=False):
     e = dict(env)
     if debug:
         e["WAYLAND_DEBUG"] = "client"
     f = (out / f"{name}.log").open("wb")
     handles.append(f)
     q = subprocess.Popen(
-        list(map(str, argv)), env=e, stdin=subprocess.DEVNULL, stdout=f, stderr=f
+        list(map(str, argv)),
+        env=e,
+        stdin=subprocess.PIPE if control else subprocess.DEVNULL,
+        stdout=f,
+        stderr=f,
     )
     children.append(q)
     return q
@@ -298,6 +315,178 @@ def new_attach(name, role, offset=0):
     )
 
 
+def verify_window_finder(resident):
+    # Real native Wayland clients and a private virtual seat0 device pair.
+    # No SDL event injection and no mutation of a physical seat.
+    def resource(*args):
+        return json.loads(run(cli, *args).stdout)["data"]
+
+    def windows():
+        return {w["title"]: w for w in resource("window", "list", "--mapped")}
+
+    def seat():
+        return resource("seat", "get", "1")
+
+    def presentations():
+        return {
+            o["id"]: o["presented_workspace_id"] for o in resource("output", "list")
+        }
+
+    def new_actor(name, rgb):
+        q = start([actor, name, rgb], name, control=True)
+        wait(lambda: '"event":"frame_done"' in log(name), name + " frame")
+        wait(lambda: name in windows(), name + " mapped")
+        return q
+
+    def send(q, name, command, event):
+        marker = '"event":"' + event + '"'
+        count = log(name).count(marker)
+        assert q.poll() is None
+        q.stdin.write((command + "\n").encode())
+        q.stdin.flush()
+        wait(lambda: log(name).count(marker) > count, name + " " + command)
+
+    red = new_actor("red", "ff0000")
+    send(red, "red", "input", "input_ready")
+    green = new_actor("green", "00ff00")
+    run(cli, "workspace", "focus", "2", "--sticky")
+    blue = new_actor("blue", "0000ff")
+    original = windows()
+    assert original["red"]["workspace_id"] == original["green"]["workspace_id"] == 1
+    assert original["blue"]["workspace_id"] == 2
+    ids = {name: w["id"] for name, w in original.items()}
+    run(cli, "window", "focus", str(ids["blue"]))
+    assert presentations() == {1: 1, 2: 2}
+
+    def key(name):
+        send(red, "red", "key-" + name, "key_processed")
+
+    def open_windows(target):
+        offset = len(log("resident"))
+        run(candidate, "picker")
+        wait(lambda: new_attach("resident", "picker", offset), "picker mapped")
+        wait(lambda: status()["picker_visible"], "picker visible")
+        key("tab")
+        wait(
+            lambda: "window finder discovered " in log("resident")[offset:],
+            "window discovery",
+        )
+        facts = seat()
+        active = facts["focused_window"]
+        history = facts["recent_window_ids"]
+        live = windows()
+        # Every fixture window has an actual compositor MRU entry. The UI's
+        # order is active first then MRU, never a guessed title match.
+        assert all(w["id"] in history for w in live.values())
+        order = sorted(
+            (w["id"] for w in live.values()),
+            key=lambda i: (i != active, history.index(i)),
+        )
+        assert ids[target] in order
+        for _ in order:
+            key("up")
+        for _ in range(order.index(ids[target])):
+            key("down")
+        return offset
+
+    def expect_applied(target, offset):
+        key("enter")
+        wait(
+            lambda: (
+                f"window focus applied id={ids[target]}" in log("resident")[offset:]
+            ),
+            target + " verified receipt",
+        )
+        assert not status()["picker_visible"]
+        assert seat()["focused_window"] == ids[target]
+        wire = log("resident")[offset:]
+        assert "wayspot-picker" in wire and re.search(
+            r"zwlr_layer_surface_v1[#@]\d+\.destroy\(", wire
+        )
+        assert "wl_display#1.sync(" in wire or re.search(
+            r"wl_display[#@]\d+\.sync\(", wire
+        )
+        assert "exclusive_layer" not in wire and "window selection failed" not in wire
+
+    # Shared SDL display remains alive through the picker dismissal barrier.
+    hold = notify("Selection with a live banner", ms=60000)
+    wait(lambda: status()["notification_visible"], "banner before selection")
+    offset = open_windows("red")
+    assert status()["video_users"] == 2
+    expect_applied("red", offset)
+    assert presentations() == {1: 2, 2: 1}
+    assert windows()["red"]["scene"]["status"] == "scene_enabled"
+    assert windows()["green"]["scene"]["status"] == "layout_hidden"
+    assert status()["video_users"] == 1 and status()["notification_visible"]
+    close(hold)
+    wait(lambda: status()["video_users"] == 0, "banner retired")
+
+    run(cli, "window", "focus", str(ids["green"]))
+    send(green, "green", "fullscreen", "request_fullscreen")
+    wait(lambda: windows()["green"]["fullscreen"], "green fullscreen")
+    offset = open_windows("red")
+    expect_applied("red", offset)
+    assert not windows()["green"]["fullscreen"]
+    assert presentations() == {1: 2, 2: 1}
+
+    run(cli, "workspace", "focus", "3")
+    assert presentations() == {1: 2, 2: 3}
+    assert windows()["red"]["scene"]["status"] == "workspace_unpresented"
+    offset = open_windows("red")
+    expect_applied("red", offset)
+    assert presentations() == {1: 2, 2: 1}
+
+    # Exact native pointer release, rather than selecting on button-down.
+    offset = open_windows("red")
+    send(red, "red", "move-first-row-right", "motion_processed")
+    send(red, "red", "hold", "button_processed")
+    assert status()["picker_visible"]
+    send(red, "red", "release", "button_processed")
+    wait(
+        lambda: f"window focus applied id={ids['red']}" in log("resident")[offset:],
+        "pointer selection",
+    )
+    assert not status()["picker_visible"] and seat()["focused_window"] == ids["red"]
+
+    offset = open_windows("green")
+    green.stdin.write(b"exit\n")
+    green.stdin.flush()
+    assert green.wait(timeout=5) == 0
+    wait(lambda: "green" not in windows(), "selected window destroyed")
+    key("enter")
+    wait(
+        lambda: (
+            "window selection failed: SnowmanWindowGone" in log("resident")[offset:]
+        ),
+        "stale exact ID refused",
+    )
+    wait(lambda: status()["notification_visible"], "failure notification")
+    assert not status()["picker_visible"] and status()["pid"] == resident.pid
+    assert seat()["focused_window"] == ids["red"]
+    assert "window focus applied" not in log("resident")[offset:]
+    for name, window in windows().items():
+        assert window["workspace_id"] == original[name]["workspace_id"]
+    for q in (red, blue):
+        q.stdin.write(b"exit\n")
+        q.stdin.flush()
+        assert q.wait(timeout=5) == 0
+    print(
+        "PASS: actual picker keyboard + pointer, monocle, greedy exchange, fullscreen, hidden workspace, stale-ID notification",
+        flush=True,
+    )
+    return {
+        "actual_wayland_input": True,
+        "shared_display_barrier": True,
+        "greedy_exchange": True,
+        "monocle_reveal": True,
+        "fullscreen_reveal": True,
+        "hidden_workspace": True,
+        "pointer_release": True,
+        "stale_id_notification": True,
+        "membership_preserved": True,
+    }
+
+
 try:
     private_bus = start(
         ["dbus-daemon", "--nofork", "--config-file=" + str(root / "bus.conf")],
@@ -452,6 +641,7 @@ try:
         and status()["video_users"] == 0
     )
     assert not re.search(r"wl_display[#@]\d+\.error\(", log("resident"))
+    finder = verify_window_finder(resident) if actor else None
     assert stop(resident) == 0
     wait(
         lambda: (
@@ -530,6 +720,7 @@ try:
         "disabled_pass": True,
         "tray_fetch_pass": True,
         "detached_launch_mask_pass": True,
+        "window_finder": finder,
     }
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2))
     print("RESIDENT_PASS", json.dumps(receipt), flush=True)

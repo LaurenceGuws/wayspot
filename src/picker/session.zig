@@ -72,19 +72,28 @@ pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
     return self;
 }
 
-pub fn finish(self: *Self, selected: ?usize) !void {
+pub fn finish(self: *Self, selected: picker.Action) !void {
     const allocator = self.process.gpa;
     defer allocator.destroy(self);
     defer self.applications.deinit();
     defer self.state.deinit();
     const stop_result = self.view.stopText();
-    self.view.destroy();
+    const destroy_result = if (selected == .focus and (if (stop_result) |_| true else |_| false)) self.view.destroyForFocus() else blk: {
+        self.view.destroy();
+        break :blk {};
+    };
     self.view.quit();
     if (self.view.tray_wake_fd >= 0) _ = std.os.linux.close(self.view.tray_wake_fd);
     try stop_result;
-    if (selected) |index| {
-        var process: launch.Detached = .{ .io = self.process.io };
-        try launch.spawn(&process, &self.applications.slice()[index], self.terminal, self.home);
+    try destroy_result;
+    switch (selected) {
+        .dismiss => {},
+        .launch => |index| {
+            var process: launch.Detached = .{ .io = self.process.io };
+            try launch.spawn(&process, &self.applications.slice()[index], self.terminal, self.home);
+        },
+        .focus => |id| try navigator.focus(self.process.io, allocator, self.state.window_backend, id.slice()),
+        else => unreachable,
     }
 }
 

@@ -60,7 +60,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
     defer if (tray) |*service| service.close();
     if (tray) |*service| try service.open();
     var current: ?*Picker = null;
-    defer closePicker(&current, null);
+    defer closePicker(&current, .dismiss);
     var rotating = false;
     var tray_retry: ?u64 = null;
     var notification_ready = true;
@@ -121,7 +121,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
                     if (!config.picker) {
                         control.reject(error.PickerDisabled);
                     } else {
-                        if (finishPicker(&current, null)) |_| control.reply("ok\n") else |err| control.reject(err);
+                        if (finishPicker(&current, .dismiss)) |_| control.reply("ok\n") else |err| control.reject(err);
                     }
                 },
                 .rotate => {
@@ -195,7 +195,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
         tray_ready = tray_ready or fds[4].revents != 0;
         wallpaper_ready = fds[5].revents != 0;
         if (fds[6].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-            closePicker(&current, null);
+            closePicker(&current, .dismiss);
             if (notifications) |*service| service.displayLost();
         }
     }
@@ -211,7 +211,7 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
         if (current.*) |session| {
             batch.items[batch.count] = session.view.handleEvent(input) catch |err| {
                 std.log.warn("picker input failed: {s}", .{@errorName(err)});
-                closePicker(current, null);
+                closePicker(current, .dismiss);
                 continue;
             };
             batch.count += 1;
@@ -220,13 +220,13 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
     const more = received == picker.event_capacity or (video.users != 0 and sdl.SDL_PollEvent(null));
     if (current.*) |session| {
         if (session.view.layer.closed) {
-            closePicker(current, null);
+            closePicker(current, .dismiss);
             return more;
         }
         batch.more = more;
         const ready = if (batch.count < batch.items.len) session.trayReady() catch |err| {
             std.log.warn("picker tray wake failed: {s}", .{@errorName(err)});
-            closePicker(current, null);
+            closePicker(current, .dismiss);
             return more;
         } else false;
         const timer_due = now(io) >= session.deadline;
@@ -236,7 +236,7 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
         }
         const action = session.advance(&batch) catch |err| {
             std.log.warn("picker transition failed: {s}", .{@errorName(err)});
-            closePicker(current, null);
+            closePicker(current, .dismiss);
             return more;
         };
         switch (action) {
@@ -244,21 +244,24 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
                 session.deadline = now(io) + @as(u64, @intCast(session.view.waitTimeout()));
             },
             .draw => {},
-            .dismiss => closePicker(current, null),
-            .launch => |index| closePicker(current, index),
+            .dismiss => closePicker(current, .dismiss),
+            .launch, .focus => closePicker(current, action),
         }
     }
     return more;
 }
 
-fn finishPicker(current: *?*Picker, selected: ?usize) !void {
+fn finishPicker(current: *?*Picker, selected: picker.Action) !void {
     const session = current.* orelse return;
     current.* = null;
     try session.finish(selected);
 }
 
-fn closePicker(current: *?*Picker, selected: ?usize) void {
-    finishPicker(current, selected) catch |err| std.log.err("picker finish failed: {s}", .{@errorName(err)});
+fn closePicker(current: *?*Picker, selected: picker.Action) void {
+    const io = if (current.*) |session| session.process.io else return;
+    finishPicker(current, selected) catch |err| {
+        if (selected == .focus) @import("picker/navigator.zig").reportFailure(io, err) else std.log.err("picker finish failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn due(deadline: ?u64, tick: u64) bool {

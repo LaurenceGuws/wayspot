@@ -102,6 +102,8 @@ The opt-in `zig build resident-live` gate uses explicit source-built
 `WAYSPOT_PROOF_DIR` directories, and optionally `WAYSPOT_BASELINE`. It owns a
 private D-Bus session and two headless outputs; the fixture requires Python
 with dbus-python and PyGObject, gdbus, grim, and a matching Snowman build.
+Provide the matching source-built `SNOWMAN_SIM_CLIENT` to also exercise the
+window finder using real private Wayland keyboard and pointer events.
 
 ### Application picker
 
@@ -133,7 +135,16 @@ available and show workspace as location metadata. `Up` and `Down` select,
 typing filters, and `Enter` focuses the exact selected address using
 the Hyprland 0.56+ Lua dispatcher `hl.dsp.focus({ window = "address:<id>" })`. Wayspot then checks that
 `hyprctl -j activewindow` reports that same address before closing.
-`Escape` closes either mode.
+On Snowman, `Tab` reads `snowman window list --mapped` and `snowman seat get 1`,
+including mapped hidden and unpresented windows. The local seat supplies focus
+recency. Selecting a window retains its exact numeric ID, retires the picker
+surface and receives a bounded Wayland sync before `snowman window focus ID`.
+Greedy is the compositor default; no membership changes or alternative-target
+fallbacks are performed by Wayspot. A successful receipt must name that ID
+and confirm both keyboard and pointer focus. A refusal is reported with a
+notification (using the existing detached launcher, so the notification
+service may be owned by this same resident). Row clicks select on matching
+button release, not button-down. `Escape` closes either mode.
 
 Window rows reuse the icon of one unambiguous matching desktop application,
 then show the current title and workspace. Where a workspace has multiple
@@ -147,10 +158,11 @@ match (`Hyprland` or `Snowman`), not a desktop compatibility list or compositor
 signature. The finder is lazy: opening the application picker does not start a
 compositor CLI, cache windows, or run a persistent watcher. When Hyprland CLI
 observation or focus fails, the window finder reports the failure without
-focusing another target. **Snowman has a refusal-only adapter for now**: trying
-to enter window mode exits Wayspot with status 4 and a precise stderr message.
-It does not invoke any Snowman CLI or use another compositor's commands. The
-normal XDG application picker remains functional on Snowman.
+focusing another target. On Snowman, discovery failure remains visible in
+window mode; focus refusal after dismissal does not reopen the picker or
+retry. The two on-demand observations are not a joint atomic snapshot. The
+finder is bounded to 128 windows; oversized or malformed replies refuse
+rather than silently dropping windows. No backend substitutions occur.
 
 The same application data is available from the CLI:
 

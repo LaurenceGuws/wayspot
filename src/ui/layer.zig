@@ -122,6 +122,60 @@ pub fn deinit(self: *Self) void {
     self.* = .{};
 }
 
+/// Wait for a server sync on the original connection, without dispatching
+/// unrelated SDL callbacks or waiting indefinitely on a stalled compositor.
+/// This is a one-shot protocol barrier, not an independent display owner.
+pub fn synchronize(display: *wl.wl_display, io: std.Io) !void {
+    const queue = wl.wl_display_create_queue(display) orelse return error.PickerDismissalSyncFailed;
+    defer wl.wl_event_queue_destroy(queue);
+    const wrapper = wl.wl_proxy_create_wrapper(display) orelse return error.PickerDismissalSyncFailed;
+    wl.wl_proxy_set_queue(@ptrCast(wrapper), queue);
+    const callback = wl.wl_display_sync(@ptrCast(wrapper));
+    wl.wl_proxy_wrapper_destroy(wrapper);
+    const receipt = callback orelse return error.PickerDismissalSyncFailed;
+    defer wl.wl_callback_destroy(receipt);
+    var done = false;
+    if (wl.wl_callback_add_listener(receipt, &sync_listener, &done) != 0) return error.PickerDismissalSyncFailed;
+    const started = std.Io.Clock.awake.now(io);
+    while (true) {
+        if (wl.wl_display_dispatch_queue_pending(display, queue) < 0) return error.PickerDismissalSyncFailed;
+        if (done) return;
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+        if (elapsed >= 2000) return error.PickerDismissalSyncTimedOut;
+        if (wl.wl_display_prepare_read_queue(display, queue) != 0) continue;
+        const flushed = wl.wl_display_flush(display);
+        if (flushed < 0 and std.posix.errno(flushed) != .AGAIN) {
+            wl.wl_display_cancel_read(display);
+            return error.PickerDismissalSyncFailed;
+        }
+        var fds = [_]std.posix.pollfd{.{
+            .fd = wl.wl_display_get_fd(display),
+            .events = std.posix.POLL.IN | (if (flushed < 0) @as(i16, std.posix.POLL.OUT) else 0),
+            .revents = 0,
+        }};
+        const ready = std.posix.poll(&fds, @intCast(2000 - elapsed)) catch |err| {
+            wl.wl_display_cancel_read(display);
+            return err;
+        };
+        if (ready == 0) {
+            wl.wl_display_cancel_read(display);
+            return error.PickerDismissalSyncTimedOut;
+        }
+        if (fds[0].revents & std.posix.POLL.IN != 0) {
+            if (wl.wl_display_read_events(display) < 0) return error.PickerDismissalSyncFailed;
+        } else {
+            wl.wl_display_cancel_read(display);
+            if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.PickerDismissalSyncFailed;
+        }
+    }
+}
+
+const sync_listener = wl.wl_callback_listener{ .done = syncDone };
+fn syncDone(data: ?*anyopaque, _: ?*wl.wl_callback, _: u32) callconv(.c) void {
+    const done: *bool = @ptrCast(@alignCast(data));
+    done.* = true;
+}
+
 const registry_listener = wl.wl_registry_listener{
     .global = onGlobal,
     .global_remove = onGlobalRemove,

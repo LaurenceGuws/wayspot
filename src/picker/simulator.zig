@@ -85,6 +85,7 @@ const Step = union(enum) {
     navigator_focus_observation: NavigatorFocusObservation,
     stop_text: Result,
     destroy,
+    sync: Result,
     quit,
 };
 
@@ -215,8 +216,9 @@ const Transcript = struct {
         argv: []const []const u8,
         max_stdout: usize,
     ) !navigator.ProcessResult {
-        if (argv.len < 3 or !std.mem.eql(u8, argv[0], "hyprctl") or transcript.backend != .hyprland)
-            return error.TranscriptMismatch;
+        if (argv.len < 3) return error.TranscriptMismatch;
+        if (transcript.backend == .snowman) return transcript.snowmanRun(allocator, argv, max_stdout);
+        if (!std.mem.eql(u8, argv[0], "hyprctl") or transcript.backend != .hyprland) return error.TranscriptMismatch;
         const step = transcript.next() orelse return error.TranscriptMismatch;
         const Selected = struct { bytes: []const u8, result: Result };
         const selected: Selected = if (argv.len == 3 and std.mem.eql(u8, argv[1], "-j") and
@@ -252,6 +254,29 @@ const Transcript = struct {
         };
     }
 
+    fn snowmanRun(transcript: *Transcript, allocator: std.mem.Allocator, argv: []const []const u8, max_stdout: usize) !navigator.ProcessResult {
+        if (argv.len != 4 or !std.mem.eql(u8, argv[0], "snowman") or max_stdout != 64 * 1024) return error.TranscriptMismatch;
+        const step = transcript.next() orelse return error.TranscriptMismatch;
+        const reply = switch (step) {
+            .navigator_discovery => |value| blk: {
+                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "list") or !std.mem.eql(u8, argv[3], "--mapped")) return error.TranscriptMismatch;
+                break :blk value;
+            },
+            .navigator_focus_observation => |value| blk: {
+                if (!std.mem.eql(u8, argv[1], "seat") or !std.mem.eql(u8, argv[2], "get") or !std.mem.eql(u8, argv[3], "1")) return error.TranscriptMismatch;
+                break :blk NavigatorDiscovery{ .bytes = value.bytes, .result = value.result };
+            },
+            .navigator_focus => |value| blk: {
+                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "focus") or !std.mem.eql(u8, argv[3], value.stable_id)) return error.TranscriptMismatch;
+                break :blk NavigatorDiscovery{ .bytes = value.bytes, .result = value.result };
+            },
+            else => return error.TranscriptMismatch,
+        };
+        const stdout = try allocator.dupe(u8, if (reply.result == .ok) reply.bytes else "");
+        errdefer allocator.free(stdout);
+        return .{ .stdout = stdout, .stderr = try allocator.dupe(u8, if (reply.result == .ok) "" else reply.bytes), .succeeded = reply.result == .ok };
+    }
+
     pub fn readHistory(transcript: *Transcript) !notification.History {
         transcript.history_reads += 1;
         return switch (transcript.next() orelse return error.TranscriptMismatch) {
@@ -280,6 +305,13 @@ const Transcript = struct {
 
     pub fn destroy(transcript: *Transcript) void {
         transcript.consume(.destroy);
+    }
+
+    pub fn destroyForFocus(transcript: *Transcript) !void {
+        transcript.destroy();
+        const step = transcript.next() orelse return error.TranscriptMismatch;
+        if (step != .sync) return error.TranscriptMismatch;
+        if (step.sync == .fail) return error.PickerDismissalSyncFailed;
     }
 
     pub fn quit(transcript: *Transcript) void {
@@ -601,18 +633,28 @@ test "stale exact window focus remains visible instead of activating another tar
     });
 }
 
-test "Snowman window finder refuses before CLI and cleans up SDL" {
-    try std.testing.expectError(error.SnowmanWindowDiscoveryUnavailable, simulateHistoryBackend(&.{
-        .{ .init = .ok },
-        .{ .create = .ok },
-        .{ .start_text = .ok },
-        .{ .draw = .{ .query = "" } },
-        .{ .wait = .{ .event = .tab } },
-        // No navigator discovery step: Snowman must not launch anything.
-        .{ .stop_text = .ok },
-        .destroy,
-        .quit,
-    }, &.{}, null, .snowman));
+const snowman_windows = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_list\",\"serial\":5,\"data\":[{\"id\":42,\"workspace_id\":2,\"output_id\":null,\"mapped\":true,\"app_id\":\"kitty\",\"title\":\"Terminal\",\"geometry\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"mode\":\"tiled\",\"fullscreen\":false,\"scene\":{\"status\":\"workspace_unpresented\"}}]}";
+const snowman_seat = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"seat_get\",\"serial\":5,\"data\":{\"id\":1,\"kind\":\"shared\",\"focused_window\":null,\"recent_window_count\":1,\"recent_window_ids\":[42]}}";
+const snowman_applied = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":6,\"data\":{\"window_id\":42,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true,\"status\":\"applied\"}}";
+const snowman_selection_prefix = [_]Step{
+    .{ .init = .ok },                  .{ .create = .ok },                                        .{ .start_text = .ok },                                         .{ .draw = .{ .query = "" } },
+    .{ .wait = .{ .event = .tab } },   .{ .navigator_discovery = .{ .bytes = snowman_windows } }, .{ .navigator_focus_observation = .{ .bytes = snowman_seat } }, .{ .draw = .{ .table = .windows, .query = "", .rows = .{ .windows = &.{.{ .stable_id = "42" }} }, .window_status = .ready } },
+    .{ .wait = .{ .event = .enter } }, .{ .stop_text = .ok },                                     .destroy,
+};
+
+test "Snowman selects the exact window only after destruction, sync and SDL release" {
+    const steps = snowman_selection_prefix ++ [_]Step{ .{ .sync = .ok }, .quit, .{ .navigator_focus = .{ .stable_id = "42", .bytes = snowman_applied } } };
+    try std.testing.expectEqual(@as(?usize, null), try simulateHistoryBackend(&steps, &.{}, null, .snowman));
+}
+
+test "Snowman never attempts focus if dismissal synchronization fails" {
+    const steps = snowman_selection_prefix ++ [_]Step{ .{ .sync = .fail }, .quit };
+    try std.testing.expectError(error.PickerDismissalSyncFailed, simulateHistoryBackend(&steps, &.{}, null, .snowman));
+}
+
+test "Snowman stale selection refuses once after cleanup without retry" {
+    const steps = snowman_selection_prefix ++ [_]Step{ .{ .sync = .ok }, .quit, .{ .navigator_focus = .{ .stable_id = "42", .bytes = "{\"schema\":\"snowman-command/v1\",\"ok\":false,\"error\":{\"code\":\"not_found\"}}", .result = .fail } } };
+    try std.testing.expectError(error.SnowmanWindowGone, simulateHistoryBackend(&steps, &.{}, null, .snowman));
 }
 
 test "one pending event burst produces one final draw" {

@@ -301,17 +301,31 @@ pub fn run(
     };
     defer state.deinit();
 
-    try operations.init();
-    defer operations.quit();
-
-    try operations.create();
-    defer operations.destroy();
-
-    try operations.startText();
-
-    const result = eventLoop(operations, history_reader, navigator_operations, &state);
-    try operations.stopText();
-    return result;
+    const selected = blk: {
+        try operations.init();
+        defer operations.quit();
+        try operations.create();
+        var destroyed = false;
+        defer if (!destroyed) operations.destroy();
+        try operations.startText();
+        const result = eventLoop(operations, history_reader, navigator_operations, &state);
+        try operations.stopText();
+        const action = try result;
+        if (action == .focus) {
+            destroyed = true;
+            try operations.destroyForFocus();
+        }
+        break :blk action;
+    };
+    switch (selected) {
+        .dismiss => return null,
+        .launch => |index| return index,
+        .focus => |id| {
+            try navigator.focus(navigator_operations, allocator, window_backend, id.slice());
+            return null;
+        },
+        else => unreachable,
+    }
 }
 
 /// A bounded turn requests a draw, waits for another batch, or finishes the
@@ -321,6 +335,7 @@ pub const Action = union(enum) {
     draw,
     dismiss,
     launch: usize,
+    focus: navigator.StableId,
 };
 
 /// Keep this owner at a stable address while rows borrow its window snapshot.
@@ -413,6 +428,11 @@ pub const State = struct {
 
     fn acceptSelection(state: *State, history_reader: anytype, navigator_operations: anytype) !?Action {
         if (state.finder == .windows) {
+            if (state.window_backend == .snowman) {
+                const row = state.rows.row(state.selected) orelse return null;
+                if (row != .window) return error.WindowRowExpected;
+                return .{ .focus = row.window.window.stable_id };
+            }
             if (try state.focusSelectedWindow(navigator_operations)) return .dismiss;
         } else if (try state.selectApplicationRow(history_reader)) |index| {
             return .{ .launch = index };
@@ -472,7 +492,6 @@ pub const State = struct {
         state.window_error = null;
         const snapshot = navigator.load(operations, state.allocator, state.window_backend, state.self_pid) catch |failure| switch (failure) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.SnowmanWindowDiscoveryUnavailable => return error.SnowmanWindowDiscoveryUnavailable,
             else => {
                 state.window_error = @errorName(failure);
                 if (!@import("builtin").is_test) std.log.warn("wayspot window discovery failed: {s}", .{state.window_error.?});
@@ -486,6 +505,7 @@ pub const State = struct {
         state.window_status = if (snapshot.count == 0) .empty else .ready;
         const query: Query = .{};
         try state.setQueryNoHistory(query);
+        if (!builtin.is_test) std.log.info("window finder discovered {d} windows", .{snapshot.count});
     }
 
     fn setQueryNoHistory(state: *State, query: Query) !void {
@@ -506,7 +526,6 @@ pub const State = struct {
         };
         navigator.focus(operations, state.allocator, state.window_backend, window.stable_id.slice()) catch |failure| switch (failure) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.SnowmanFocusUnavailable => return error.SnowmanFocusUnavailable,
             else => {
                 state.window_error = @errorName(failure);
                 if (!@import("builtin").is_test) std.log.warn("wayspot focus of window {s} failed: {s}", .{ window.stable_id.slice(), state.window_error.? });
@@ -523,16 +542,16 @@ fn eventLoop(
     history_reader: anytype,
     navigator_operations: anytype,
     state: *State,
-) !?usize {
+) !Action {
     try state.begin();
     try operations.draw(&state.frame());
     while (true) {
         const events = try operations.read();
-        switch (try state.advance(history_reader, navigator_operations, &events)) {
+        const action = try state.advance(history_reader, navigator_operations, &events);
+        switch (action) {
             .wait => {},
             .draw => try operations.draw(&state.frame()),
-            .dismiss => return null,
-            .launch => |index| return index,
+            .dismiss, .launch, .focus => return action,
         }
     }
 }
