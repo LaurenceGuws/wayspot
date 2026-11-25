@@ -11,9 +11,8 @@ const notification = @import("notifications/root.zig");
 const navigator = @import("picker/navigator.zig");
 const picker = @import("picker/root.zig");
 const sdl = @import("picker/view.zig");
+const Video = @import("ui/video.zig");
 const wallpaper = @import("wallpaper/wayland.zig");
-
-var notification_stop: std.atomic.Value(bool) = .init(false);
 
 pub fn main(init: std.process.Init) !u8 {
     var argument_iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -113,7 +112,9 @@ fn runPicker(
     home: []const u8,
 ) !void {
     logApplications(files, applications);
+    var video: Video = .{};
     var native: sdl.Native = .{
+        .video = &video,
         .applications = applications.slice(),
         .allocator = init.gpa,
         .io = init.io,
@@ -200,26 +201,7 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
 }
 
 fn runNotifications(init: std.process.Init) !void {
-    notification_stop.store(false, .release);
-    const action: std.posix.Sigaction = .{
-        .handler = .{ .handler = stopNotification },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    var old_interrupt: std.posix.Sigaction = undefined;
-    var old_terminate: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.INT, &action, &old_interrupt);
-    defer std.posix.sigaction(.INT, &old_interrupt, null);
-    std.posix.sigaction(.TERM, &action, &old_terminate);
-    defer std.posix.sigaction(.TERM, &old_terminate, null);
-
-    try notification.run(
-        init.gpa,
-        init.io,
-        init.environ_map.get("XDG_STATE_HOME"),
-        init.environ_map.get("HOME"),
-        &notification_stop,
-    );
+    try notification.run(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"));
 }
 
 fn printNotificationHistory(init: std.process.Init) !void {
@@ -236,10 +218,6 @@ fn printNotificationHistory(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout_writer.interface.writeAll(bytes);
     try stdout_writer.interface.flush();
-}
-
-fn stopNotification(_: std.posix.SIG) callconv(.c) void {
-    notification_stop.store(true, .release);
 }
 
 fn logApplications(files: *const desktop_files.Files, applications: *const apps.List) void {

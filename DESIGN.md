@@ -175,6 +175,14 @@ blocking external work. Picker surfaces and transient resources may be
 retired independently of the resident. Do not restore the discarded Rust UI
 or create a general capability framework.
 
+The shared main-thread video owner initializes SDL on its first surface lease
+and quits on its last. Route window and renderer events to their actual
+window, not the currently active capability. Picker input advances in bounded
+batches with a draw/finish action. Notification D-Bus intake, newest-only
+presentation, history and expiry share one sequential service owner; hidden
+notifications need no video lease or periodic bus polling. Standalone
+entrypoints still drive these same operations until the common loop lands.
+
 Wallpaper now owns one persistent background surface per output on one Wayland
 connection. Replace buffers only for rotation or meaningful geometry changes;
 add/remove outputs locally, ignore unrelated window/input state, acknowledge

@@ -299,7 +299,7 @@ pub fn run(
         .window_backend = window_backend,
         .applications = applications,
     };
-    defer state.rows.deinit(allocator);
+    defer state.deinit();
 
     try operations.init();
     defer operations.quit();
@@ -314,7 +314,17 @@ pub fn run(
     return result;
 }
 
-const State = struct {
+/// A bounded turn requests a draw, waits for another batch, or finishes the
+/// picker. The caller owns the wait and presentation; no nested GUI loop.
+pub const Action = union(enum) {
+    wait,
+    draw,
+    dismiss,
+    launch: usize,
+};
+
+/// Keep this owner at a stable address while rows borrow its window snapshot.
+pub const State = struct {
     allocator: std.mem.Allocator,
     self_pid: i64 = -1,
     window_backend: ?navigator.Backend = null,
@@ -327,6 +337,88 @@ const State = struct {
     window_status: WindowStatus = .dormant,
     window_error: ?[]const u8 = null,
     window_snapshot: navigator.Snapshot = .{},
+    events_since_draw: usize = 0,
+    changed_since_draw: bool = false,
+
+    pub fn begin(state: *State) !void {
+        state.rows = try Rows.initApps(state.applications, "");
+    }
+
+    pub fn deinit(state: *State) void {
+        state.rows.deinit(state.allocator);
+        state.* = undefined;
+    }
+
+    pub fn frame(state: *const State) Frame {
+        return makeFrame(state);
+    }
+
+    /// Process a bounded portion of the input stream, without waiting or
+    /// drawing. Coalesce queued input but force publication at the draw bound.
+    pub fn advance(state: *State, history_reader: anytype, navigator_operations: anytype, events: *const Events) !Action {
+        std.debug.assert(events.count <= events.items.len);
+        for (events.slice()) |event| {
+            switch (event) {
+                .quit, .escape => return .dismiss,
+                .tab => {
+                    if (state.finder == .windows) {
+                        try state.enterApplications(history_reader);
+                    } else {
+                        try state.enterWindows(navigator_operations);
+                    }
+                },
+                .backspace => {
+                    var query = state.query;
+                    query.delete();
+                    try state.setQuery(history_reader, query);
+                },
+                .up => {
+                    state.selected -|= 1;
+                    keepSelectedVisible(state);
+                },
+                .down => {
+                    if (state.selected + 1 < state.rows.count()) state.selected += 1;
+                    keepSelectedVisible(state);
+                },
+                .enter => {
+                    if (try state.acceptSelection(history_reader, navigator_operations)) |action| return action;
+                },
+                .text => |text| {
+                    var query = state.query;
+                    try query.append(text.slice());
+                    try state.setQuery(history_reader, query);
+                },
+                .hover => |row| {
+                    if (visibleSelection(state, row, state.rows.count())) |selected| {
+                        state.selected = selected;
+                    }
+                },
+                .click => |row| {
+                    state.selected = visibleSelection(state, row, state.rows.count()) orelse continue;
+                    if (try state.acceptSelection(history_reader, navigator_operations)) |action| return action;
+                },
+                .scroll => |rows| scroll(state, state.rows.count(), rows),
+                .redraw, .idle => {},
+                .ignored => continue,
+            }
+            state.changed_since_draw = true;
+        }
+        state.events_since_draw += events.count;
+        if (events.more and state.events_since_draw < events_before_draw_capacity) return .wait;
+        state.events_since_draw = 0;
+        if (!state.changed_since_draw) return .wait;
+        state.changed_since_draw = false;
+        return .draw;
+    }
+
+    fn acceptSelection(state: *State, history_reader: anytype, navigator_operations: anytype) !?Action {
+        if (state.finder == .windows) {
+            if (try state.focusSelectedWindow(navigator_operations)) return .dismiss;
+        } else if (try state.selectApplicationRow(history_reader)) |index| {
+            return .{ .launch = index };
+        }
+        return null;
+    }
 
     fn setQuery(state: *State, history_reader: anytype, query: Query) !void {
         const text = query.text();
@@ -432,84 +524,16 @@ fn eventLoop(
     navigator_operations: anytype,
     state: *State,
 ) !?usize {
-    state.rows = try Rows.initApps(state.applications, "");
-    var frame = makeFrame(state);
-    try operations.draw(&frame);
-
-    var events_since_draw: usize = 0;
-    var changed_since_draw = false;
+    try state.begin();
+    try operations.draw(&state.frame());
     while (true) {
         const events = try operations.read();
-        std.debug.assert(events.count > 0);
-        for (events.slice()) |event| {
-            switch (event) {
-                .quit, .escape => return null,
-                .tab => {
-                    if (state.finder == .windows) {
-                        try state.enterApplications(history_reader);
-                    } else {
-                        try state.enterWindows(navigator_operations);
-                    }
-                },
-                .backspace => {
-                    var query = state.query;
-                    query.delete();
-                    try state.setQuery(history_reader, query);
-                },
-                .up => {
-                    state.selected -|= 1;
-                    keepSelectedVisible(state);
-                },
-                .down => {
-                    if (state.selected + 1 < state.rows.count()) state.selected += 1;
-                    keepSelectedVisible(state);
-                },
-                .enter => {
-                    if (state.finder == .windows) {
-                        if (try state.focusSelectedWindow(navigator_operations)) return null;
-                    } else if (try state.selectApplicationRow(history_reader)) |index| {
-                        return index;
-                    }
-                },
-                .text => |text| {
-                    var query = state.query;
-                    try query.append(text.slice());
-                    try state.setQuery(history_reader, query);
-                },
-                .hover => |row| {
-                    if (visibleSelection(state, row, state.rows.count())) |selected| {
-                        state.selected = selected;
-                    }
-                },
-                .click => |row| {
-                    state.selected = visibleSelection(
-                        state,
-                        row,
-                        state.rows.count(),
-                    ) orelse continue;
-                    if (state.finder == .windows) {
-                        if (try state.focusSelectedWindow(navigator_operations)) return null;
-                    } else if (try state.selectApplicationRow(history_reader)) |index| {
-                        return index;
-                    }
-                },
-                .scroll => |rows| scroll(state, state.rows.count(), rows),
-                .redraw => {},
-                .ignored => continue,
-                .idle => {},
-            }
-            changed_since_draw = true;
+        switch (try state.advance(history_reader, navigator_operations, &events)) {
+            .wait => {},
+            .draw => try operations.draw(&state.frame()),
+            .dismiss => return null,
+            .launch => |index| return index,
         }
-        events_since_draw += events.count;
-        if (events.more and events_since_draw < events_before_draw_capacity) continue;
-        if (!changed_since_draw) {
-            events_since_draw = 0;
-            continue;
-        }
-        events_since_draw = 0;
-        changed_since_draw = false;
-        frame = makeFrame(state);
-        try operations.draw(&frame);
     }
 }
 

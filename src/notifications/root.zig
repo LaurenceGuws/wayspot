@@ -6,6 +6,8 @@ const sdl = @import("sdl_c");
 const sdl_layer = @import("../ui/layer.zig");
 const text_draw = @import("../ui/text.zig");
 const dbus = @import("dbus_c");
+const Video = @import("../ui/video.zig");
+const Stop = @import("../stop.zig");
 
 pub const app_name_capacity = 256;
 pub const app_icon_capacity = 1024;
@@ -59,7 +61,7 @@ const Event = union(enum) {
     method: Method,
     reject: ReplyError,
     idle,
-    stop,
+    ignored,
     bus_lost,
     name_lost,
 };
@@ -111,142 +113,37 @@ const Desired = union(enum) {
     }
 };
 
-const UiUpdate = union(enum) { none, desired: Desired, stop, failed: anyerror };
-
-const Mailbox = struct {
-    io: std.Io,
+// At most one presentation is retained across a bounded D-Bus intake turn.
+// No synchronization: intake, persistence and presentation have one owner.
+const Pending = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-    changed: std.Io.Condition = .init,
     desired: ?Desired = null,
-    closed: ?Closed = null,
-    worker_stopped: bool = false,
-    worker_error: ?anyerror = null,
-    ui_ready: bool = false,
 
-    fn init(io: std.Io, allocator: std.mem.Allocator) Mailbox {
-        return .{ .io = io, .allocator = allocator };
+    fn clear(self: *Pending) void {
+        if (self.desired) |*value| value.deinit(self.allocator);
+        self.desired = null;
     }
 
-    fn deinit(mailbox: *Mailbox) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        const desired = mailbox.desired;
-        mailbox.desired = null;
-        mailbox.mutex.unlock(mailbox.io);
-        if (desired) |value| {
-            var owned = value;
-            owned.deinit(mailbox.allocator);
-        }
-        mailbox.* = undefined;
+    fn publish(self: *Pending, value: Presentation) void {
+        self.clear();
+        self.desired = .{ .shown = value };
     }
 
-    fn publish(mailbox: *Mailbox, value: Presentation) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        const replaced = mailbox.desired;
-        mailbox.desired = .{ .shown = value };
-        mailbox.changed.signal(mailbox.io);
-        const wake_failed = mailbox.ui_ready and !wakeUi();
-        if (wake_failed) mailbox.ui_ready = false;
-        mailbox.mutex.unlock(mailbox.io);
-        if (replaced) |old| {
-            var owned = old;
-            owned.deinit(mailbox.allocator);
-        }
+    fn hide(self: *Pending, key: Key) void {
+        self.clear();
+        self.desired = .{ .hidden = key };
     }
 
-    fn hide(mailbox: *Mailbox, key: Key) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        const replaced = mailbox.desired;
-        mailbox.desired = .{ .hidden = key };
-        mailbox.changed.signal(mailbox.io);
-        const wake_failed = mailbox.ui_ready and !wakeUi();
-        if (wake_failed) mailbox.ui_ready = false;
-        mailbox.mutex.unlock(mailbox.io);
-        if (replaced) |value| {
-            var owned = value;
-            owned.deinit(mailbox.allocator);
-        }
-    }
-
-    fn waitDesired(mailbox: *Mailbox) !?Desired {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        defer mailbox.mutex.unlock(mailbox.io);
-        while ((mailbox.desired == null or mailbox.closed != null) and
-            !mailbox.worker_stopped and mailbox.worker_error == null)
-        {
-            try mailbox.changed.wait(mailbox.io, &mailbox.mutex);
-        }
-        if (mailbox.worker_error) |err| return err;
-        if (mailbox.worker_stopped) return null;
-        const value = mailbox.desired;
-        mailbox.desired = null;
+    fn take(self: *Pending) ?Desired {
+        const value = self.desired;
+        self.desired = null;
         return value;
-    }
-
-    fn takeUiUpdate(mailbox: *Mailbox) UiUpdate {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        defer mailbox.mutex.unlock(mailbox.io);
-        if (mailbox.worker_error) |err| return .{ .failed = err };
-        if (mailbox.worker_stopped) return .stop;
-        if (mailbox.desired) |value| {
-            mailbox.desired = null;
-            return .{ .desired = value };
-        }
-        return .none;
-    }
-
-    fn reportClosed(mailbox: *Mailbox, value: Closed) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        defer mailbox.mutex.unlock(mailbox.io);
-        std.debug.assert(mailbox.closed == null);
-        mailbox.closed = value;
-    }
-
-    fn takeClosed(mailbox: *Mailbox) ?Closed {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        defer mailbox.mutex.unlock(mailbox.io);
-        const value = mailbox.closed;
-        mailbox.closed = null;
-        mailbox.changed.signal(mailbox.io);
-        return value;
-    }
-
-    fn ready(mailbox: *Mailbox) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        mailbox.ui_ready = true;
-        mailbox.mutex.unlock(mailbox.io);
-    }
-
-    fn pause(mailbox: *Mailbox) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        mailbox.ui_ready = false;
-        mailbox.mutex.unlock(mailbox.io);
-    }
-
-    fn workerDone(mailbox: *Mailbox, failure: ?anyerror) void {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        std.debug.assert(!mailbox.worker_stopped);
-        std.debug.assert(mailbox.worker_error == null);
-        mailbox.worker_stopped = failure == null;
-        mailbox.worker_error = failure;
-        mailbox.changed.signal(mailbox.io);
-        const wake_failed = mailbox.ui_ready and !wakeUi();
-        if (wake_failed) mailbox.ui_ready = false;
-        mailbox.mutex.unlock(mailbox.io);
-    }
-
-    fn workerFailure(mailbox: *Mailbox) ?anyerror {
-        mailbox.mutex.lockUncancelable(mailbox.io);
-        defer mailbox.mutex.unlock(mailbox.io);
-        return mailbox.worker_error;
     }
 };
 
 const banner_width = 420;
 const banner_height = 120;
 const banner_font_size = 16;
-const wake_unset = std.math.maxInt(u32);
-var wake_event: std.atomic.Value(u32) = .init(wake_unset);
 
 const UiResource = enum(u8) { sdl, window, renderer, text };
 
@@ -272,16 +169,10 @@ const Banner = struct {
     text: ?text_draw.Painter = null,
     resources: UiResources = .{},
 
-    fn init(banner: *Banner, mailbox: *Mailbox) !void {
-        if (!sdl.SDL_SetAppMetadata("wayspot notification", "0.1.0", "wayspot-notification")) {
-            return error.SdlMetadataFailed;
-        }
-        errdefer banner.deinit(mailbox);
-        if (!sdl.SDL_Init(sdl.SDL_INIT_VIDEO)) return error.SdlInitFailed;
+    fn init(banner: *Banner, video: *Video, allocator: std.mem.Allocator) !void {
+        errdefer banner.deinit(video);
+        try video.acquire();
         banner.resources.acquired(.sdl);
-        const event = sdl.SDL_RegisterEvents(1);
-        if (event == wake_unset) return error.SdlEventRegistrationFailed;
-        wake_event.store(event, .release);
         banner.window = try sdl_layer.createWindow("wayspot notification", banner_width, banner_height);
         banner.resources.acquired(.window);
         // A noninteractive top-right layer never enters the tiling set.
@@ -294,14 +185,11 @@ const Banner = struct {
             banner_height,
             sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
         )) return error.SdlLogicalPresentationFailed;
-        banner.text = try text_draw.Painter.init(mailbox.allocator, banner.renderer.?, banner_font_size);
+        banner.text = try text_draw.Painter.init(allocator, banner.renderer.?, banner_font_size);
         banner.resources.acquired(.text);
-        mailbox.ready();
     }
 
-    fn deinit(banner: *Banner, mailbox: *Mailbox) void {
-        mailbox.pause();
-        wake_event.store(wake_unset, .release);
+    fn deinit(banner: *Banner, video: *Video) void {
         while (banner.resources.release()) |resource| switch (resource) {
             .text => {
                 if (banner.text) |*painter| painter.deinit();
@@ -311,7 +199,7 @@ const Banner = struct {
                 banner.layer.deinit();
                 sdl.SDL_DestroyWindow(banner.window.?);
             },
-            .sdl => sdl.SDL_Quit(),
+            .sdl => video.release(),
         };
         banner.* = .{};
     }
@@ -344,19 +232,10 @@ const Banner = struct {
     }
 };
 
-fn wakeUi() bool {
-    const event_type = wake_event.load(.acquire);
-    if (event_type == wake_unset) return false;
-    var event: sdl.SDL_Event = undefined;
-    @memset(std.mem.asBytes(&event), 0);
-    event.type = event_type;
-    return sdl.SDL_PushEvent(&event);
-}
-
 const UiPhase = enum { cold, initializing, visible };
 const UiAction = enum { none, initialize, draw, hide };
-const UiSignal = union(enum) { shown: Key, hidden: Key, stop, failed: anyerror };
-const UiDecision = union(enum) { none, initialize, draw, hide, stop, failed: anyerror };
+const UiSignal = union(enum) { shown: Key, hidden: Key };
+const UiDecision = enum { none, initialize, draw, hide };
 
 const UiState = struct {
     phase: UiPhase = .cold,
@@ -416,123 +295,71 @@ fn decideUi(state: *UiState, signal: UiSignal) UiDecision {
             .hide => .hide,
             .initialize, .draw => unreachable,
         },
-        .stop => .stop,
-        .failed => |err| .{ .failed = err },
     };
 }
 
-fn runUi(mailbox: *Mailbox, allocator: std.mem.Allocator) !void {
-    while (try mailbox.waitDesired()) |first| {
-        runBanner(mailbox, allocator, first) catch |err| {
-            if (mailbox.workerFailure()) |worker_error| return worker_error;
-            std.log.err("notification banner failed: {s}", .{@errorName(err)});
-            continue;
-        };
+/// A banner can be absent while its accepted notification is still alive.
+/// Rendering failure must not stop D-Bus service or extend the expiry deadline.
+const Ui = struct {
+    banner: Banner = .{},
+    state: UiState = .{},
+    visible: ?Presentation = null,
+
+    fn clear(self: *Ui, video: *Video, allocator: std.mem.Allocator) void {
+        self.banner.deinit(video);
+        if (self.visible) |*value| value.deinit(allocator);
+        self.* = .{};
     }
-}
 
-fn runBanner(mailbox: *Mailbox, allocator: std.mem.Allocator, first: Desired) !void {
-    var state: UiState = .{};
-    var visible = switch (first) {
-        .hidden => |key| {
-            std.debug.assert(decideUi(&state, .{ .hidden = key }) == .none);
-            return;
-        },
-        .shown => |presentation| blk: {
-            std.debug.assert(decideUi(&state, .{ .shown = .{
-                .id = presentation.id,
-                .generation = presentation.generation,
-            } }) == .initialize);
-            break :blk presentation;
-        },
-    };
-    defer visible.deinit(allocator);
-    var banner: Banner = .{};
-    try banner.init(mailbox);
-    defer banner.deinit(mailbox);
-
-    switch (mailbox.takeUiUpdate()) {
-        .desired => |desired| switch (desired) {
-            .shown => |newest| {
-                visible.deinit(allocator);
-                visible = newest;
-                std.debug.assert(decideUi(&state, .{ .shown = .{
-                    .id = newest.id,
-                    .generation = newest.generation,
-                } }) == .none);
-            },
+    fn apply(self: *Ui, video: *Video, allocator: std.mem.Allocator, io: std.Io, desired: Desired) !void {
+        switch (desired) {
             .hidden => |key| {
-                std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
-                return;
+                _ = decideUi(&self.state, .{ .hidden = key });
+                self.clear(video, allocator);
             },
-        },
-        .stop => {
-            std.debug.assert(decideUi(&state, .stop) == .stop);
-            return;
-        },
-        .failed => |err| {
-            const decision = decideUi(&state, .{ .failed = err });
-            return decision.failed;
-        },
-        .none => {},
-    }
-    std.debug.assert(state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw);
-    try banner.draw(&visible);
-    session: while (true) {
-        const now = sdl.SDL_GetTicks();
-        var event: sdl.SDL_Event = undefined;
-        if (!sdl.SDL_WaitEventTimeout(&event, state.remaining(now))) {
-            if (sdl.SDL_GetTicks() >= state.deadline) {
-                mailbox.reportClosed(state.close(.expired).?);
-                break :session;
-            }
-            continue;
+            .shown => |value| {
+                _ = decideUi(&self.state, .{ .shown = .{ .id = value.id, .generation = value.generation } });
+                if (self.visible) |*prior| prior.deinit(allocator);
+                self.visible = value;
+                // Establish an expiry even if video initialization or drawing fails.
+                _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
+                if (self.banner.window == null) try self.banner.init(video, allocator);
+                try self.banner.draw(&self.visible.?);
+                _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
+            },
         }
-        if (event.type == wake_event.load(.acquire)) {
-            switch (mailbox.takeUiUpdate()) {
-                .desired => |desired| switch (desired) {
-                    .shown => |newest| {
-                        visible.deinit(allocator);
-                        visible = newest;
-                        std.debug.assert(decideUi(&state, .{ .shown = .{
-                            .id = newest.id,
-                            .generation = newest.generation,
-                        } }) == .draw);
-                        std.debug.assert(
-                            state.drawn(sdl.SDL_GetTicks(), visible.timeout_ms) == .draw,
-                        );
-                        try banner.draw(&visible);
-                    },
-                    .hidden => |key| {
-                        std.debug.assert(decideUi(&state, .{ .hidden = key }) == .hide);
-                        break :session;
-                    },
-                },
-                .stop => {
-                    std.debug.assert(decideUi(&state, .stop) == .stop);
-                    return;
-                },
-                .failed => |err| {
-                    const decision = decideUi(&state, .{ .failed = err });
-                    return decision.failed;
-                },
-                .none => {},
-            }
-        } else if (event.type == sdl.SDL_EVENT_MOUSE_BUTTON_DOWN and
-            event.button.button == sdl.SDL_BUTTON_LEFT)
-        {
-            mailbox.reportClosed(state.close(.dismissed).?);
-            break :session;
-        } else switch (event.type) {
+    }
+
+    fn event(self: *Ui, input: *const sdl.SDL_Event) !?Closed {
+        const window = self.banner.window orelse return null;
+        if (sdl.SDL_GetWindowFromEvent(input) != window) return null;
+        switch (input.type) {
+            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => if (input.button.button == sdl.SDL_BUTTON_LEFT) {
+                return self.state.close(.dismissed);
+            },
             sdl.SDL_EVENT_WINDOW_EXPOSED,
             sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
             sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
             sdl.SDL_EVENT_RENDER_TARGETS_RESET,
-            => try banner.draw(&visible),
+            => try self.banner.draw(&self.visible.?),
+            sdl.SDL_EVENT_RENDER_DEVICE_RESET => {
+                self.banner.text.?.reset();
+                try self.banner.draw(&self.visible.?);
+            },
             sdl.SDL_EVENT_RENDER_DEVICE_LOST => return error.SdlDeviceLost,
             else => {},
         }
+        return null;
     }
+
+    fn expired(self: *Ui, now: u64) ?Closed {
+        if (self.visible == null or now < self.state.deadline) return null;
+        return self.state.close(.expired);
+    }
+};
+
+fn nowMilliseconds(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.awake.now(io).toMilliseconds());
 }
 
 const Notification = struct {
@@ -1211,7 +1038,7 @@ pub fn inspect(
     return parse(allocator, bytes, try unixSeconds(io));
 }
 
-/// Owner keeps retained memory and its canonical file synchronized in the DBus worker.
+/// Owner keeps retained memory and its canonical file synchronized in the service.
 const Durability = struct {
     dirty: bool = false,
     failure: ?Error = null,
@@ -1418,7 +1245,7 @@ test "generation never wraps and exhaustion changes no state" {
 }
 
 const UiOperation = union(enum) {
-    decision: std.meta.Tag(UiDecision),
+    decision: UiDecision,
     acquire: UiResource,
     release: UiResource,
     draw: Key,
@@ -1442,10 +1269,6 @@ const UiTranscript = struct {
     }
 };
 
-fn uiDecisionTag(decision: UiDecision) std.meta.Tag(UiDecision) {
-    return std.meta.activeTag(decision);
-}
-
 test "strict UI transcript follows newest draw deadline close and cleanup policy" {
     const one = Key{ .id = 1, .generation = 1 };
     const two = Key{ .id = 1, .generation = 2 };
@@ -1468,9 +1291,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
         .{ .release = .renderer },
         .{ .release = .window },
         .{ .release = .sdl },
-        .{ .decision = .stop },
-        .{ .decision = .failed },
-        .{ .failure = error.SdlDeviceLost },
         .{ .decision = .initialize },
         .{ .draw = one },
         .{ .closed = .{ .key = one, .reason = .dismissed } },
@@ -1479,39 +1299,35 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
         .{ .decision = .hide },
     } };
     var state: UiState = .{};
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&state, .{ .hidden = one })) });
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&state, .{ .shown = one })) });
+    try transcript.observe(.{ .decision = decideUi(&state, .{ .hidden = one }) });
+    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = one }) });
     var resources: UiResources = .{};
     inline for (std.meta.tags(UiResource)) |resource| {
         resources.acquired(resource);
         try transcript.observe(.{ .acquire = resource });
     }
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&state, .{ .shown = two })) });
+    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = two }) });
     try std.testing.expectEqual(UiAction.draw, state.drawn(10, 100));
     try transcript.observe(.{ .draw = state.key.? });
     try transcript.observe(.{ .wait = state.remaining(10) });
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&state, .{ .shown = three })) });
+    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = three }) });
     try std.testing.expectEqual(UiAction.draw, state.drawn(20, 200));
     try transcript.observe(.{ .draw = state.key.? });
     try transcript.observe(.{ .wait = state.remaining(20) });
     try transcript.observe(.{ .closed = state.close(.expired).? });
     try std.testing.expect(state.close(.dismissed) == null);
     while (resources.release()) |resource| try transcript.observe(.{ .release = resource });
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&state, .stop)) });
-    const failure = decideUi(&state, .{ .failed = error.SdlDeviceLost });
-    try transcript.observe(.{ .decision = uiDecisionTag(failure) });
-    try transcript.observe(.{ .failure = failure.failed });
     var dismissed: UiState = .{};
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&dismissed, .{ .shown = one })) });
+    try transcript.observe(.{ .decision = decideUi(&dismissed, .{ .shown = one }) });
     try std.testing.expectEqual(UiAction.draw, dismissed.drawn(0, 100));
     try transcript.observe(.{ .draw = dismissed.key.? });
     try transcript.observe(.{ .closed = dismissed.close(.dismissed).? });
     try std.testing.expect(dismissed.close(.dismissed) == null);
     var hidden: UiState = .{};
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&hidden, .{ .shown = one })) });
+    try transcript.observe(.{ .decision = decideUi(&hidden, .{ .shown = one }) });
     try std.testing.expectEqual(UiAction.draw, hidden.drawn(0, 100));
     try transcript.observe(.{ .draw = hidden.key.? });
-    try transcript.observe(.{ .decision = uiDecisionTag(decideUi(&hidden, .{ .hidden = one })) });
+    try transcript.observe(.{ .decision = decideUi(&hidden, .{ .hidden = one }) });
     try transcript.done();
 }
 
@@ -1595,90 +1411,26 @@ fn acceptAllocationFailure(allocator: std.mem.Allocator) !void {
     defer accepted.presentation.deinit(allocator);
 }
 
-test "mailbox keeps only newest before init during init and while visible" {
-    var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
-    defer mailbox.deinit();
-    var one = try sampleNotification(std.testing.allocator, 1, "one");
-    defer one.deinit(std.testing.allocator);
-    var two = try sampleNotification(std.testing.allocator, 2, "two");
-    defer two.deinit(std.testing.allocator);
-    var three = try sampleNotification(std.testing.allocator, 3, "three");
-    defer three.deinit(std.testing.allocator);
-
-    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
-    var before = switch ((try mailbox.waitDesired()).?) {
-        .shown => |value| value,
-        .hidden => return error.ExpectedPresentation,
-    };
-    defer before.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 2), before.id);
-
-    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
-    mailbox.publish(try Presentation.init(std.testing.allocator, &three));
-    var during = switch (mailbox.takeUiUpdate()) {
-        .desired => |desired| switch (desired) {
-            .shown => |value| value,
-            .hidden => return error.ExpectedPresentation,
-        },
-        else => return error.ExpectedPresentation,
-    };
-    defer during.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 3), during.id);
-
-    mailbox.hide(.{ .id = 2, .generation = 2 });
-    const hidden = mailbox.takeUiUpdate().desired.hidden;
-    try std.testing.expectEqual(@as(u32, 2), hidden.id);
-    mailbox.reportClosed(.{ .key = .{ .id = 3, .generation = 3 }, .reason = .dismissed });
-    try std.testing.expectEqual(@as(u32, 3), mailbox.takeClosed().?.key.id);
-}
-
-test "latest desired state converges show close show and close show close" {
-    var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
-    defer mailbox.deinit();
+test "pending presentation retains only the latest owned value" {
+    var pending: Pending = .{ .allocator = std.testing.allocator };
+    defer pending.clear();
     var one = try sampleNotification(std.testing.allocator, 1, "one");
     defer one.deinit(std.testing.allocator);
     var two = try sampleNotification(std.testing.allocator, 2, "two");
     defer two.deinit(std.testing.allocator);
     const one_key = Key{ .id = one.id, .generation = one.generation };
     const two_key = Key{ .id = two.id, .generation = two.generation };
-
-    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    mailbox.hide(one_key);
-    mailbox.publish(try Presentation.init(std.testing.allocator, &two));
-    var shown = switch (mailbox.takeUiUpdate().desired) {
-        .shown => |value| value,
-        .hidden => return error.ExpectedPresentation,
-    };
+    pending.publish(try Presentation.init(std.testing.allocator, &one));
+    pending.hide(one_key);
+    pending.publish(try Presentation.init(std.testing.allocator, &two));
+    var shown = pending.take().?;
     defer shown.deinit(std.testing.allocator);
-    try std.testing.expectEqual(two_key, Key{ .id = shown.id, .generation = shown.generation });
-
-    mailbox.hide(two_key);
-    mailbox.publish(try Presentation.init(std.testing.allocator, &one));
-    mailbox.hide(one_key);
-    try std.testing.expectEqual(one_key, mailbox.takeUiUpdate().desired.hidden);
-}
-
-test "mailbox returns the worker failure" {
-    var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
-    defer mailbox.deinit();
-    mailbox.workerDone(error.BusLost);
-    try std.testing.expectError(error.BusLost, mailbox.waitDesired());
-}
-
-test "failed SDL wake keeps the latest desired presentation without failing intake" {
-    var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
-    defer mailbox.deinit();
-    const old_wake = wake_event.load(.acquire);
-    defer wake_event.store(old_wake, .release);
-    wake_event.store(wake_unset, .release);
-    mailbox.ui_ready = true;
-    var value = try sampleNotification(std.testing.allocator, 1, "owned");
-    defer value.deinit(std.testing.allocator);
-    mailbox.publish(try Presentation.init(std.testing.allocator, &value));
-    try std.testing.expectEqualStrings("owned", mailbox.desired.?.shown.summary);
-    try std.testing.expect(!mailbox.ui_ready);
-    try std.testing.expect(mailbox.worker_error == null);
+    try std.testing.expectEqual(two_key, Key{ .id = shown.shown.id, .generation = shown.shown.generation });
+    try std.testing.expect(pending.take() == null);
+    pending.publish(try Presentation.init(std.testing.allocator, &one));
+    pending.hide(one_key);
+    try std.testing.expectEqual(one_key, pending.take().?.hidden);
+    try std.testing.expect(pending.take() == null);
 }
 
 test "presentation timeout has exact default persistent and maximum bounds" {
@@ -1731,8 +1483,8 @@ test "generated intake histories preserve one active and one desired value" {
 fn fuzzIntake(_: void, smith: *std.testing.Smith) !void {
     var owner = testOwner(std.testing.allocator);
     defer owner.history.deinit(std.testing.allocator);
-    var mailbox = Mailbox.init(std.testing.io, std.testing.allocator);
-    defer mailbox.deinit();
+    var pending: Pending = .{ .allocator = std.testing.allocator };
+    defer pending.clear();
     var text: [128]u8 = undefined;
     for (0..256) |_| {
         if (smith.eosWeightedSimple(1, 7)) break;
@@ -1744,7 +1496,7 @@ fn fuzzIntake(_: void, smith: *std.testing.Smith) !void {
                     sampleRequestValue(replaces_id, text[0..smith.slice(&text)]),
                     @as(i64, smith.value(u32)),
                 ) catch continue;
-                mailbox.publish(accepted.presentation);
+                pending.publish(accepted.presentation);
                 accepted = undefined;
             },
             1 => {
@@ -1753,18 +1505,15 @@ fn fuzzIntake(_: void, smith: *std.testing.Smith) !void {
                     .generation = active.generation,
                 });
             },
-            2 => switch (mailbox.takeUiUpdate()) {
-                .desired => |value| {
-                    var owned = value;
-                    owned.deinit(std.testing.allocator);
-                },
-                else => {},
+            2 => if (pending.take()) |value| {
+                var owned = value;
+                owned.deinit(std.testing.allocator);
             },
             else => unreachable,
         }
         owner.history.assertValid();
         try std.testing.expect(@intFromBool(owner.history.active != null) <= 1);
-        try std.testing.expect(@intFromBool(mailbox.desired != null) <= 1);
+        try std.testing.expect(@intFromBool(pending.desired != null) <= 1);
     }
 }
 
@@ -2473,37 +2222,10 @@ fn fuzzHistory(_: void, smith: *std.testing.Smith) !void {
     defer parsed.deinit(std.testing.allocator);
 }
 
-const BatchAction = union(enum) { continue_intake, flush, flush_and_stop, fail: anyerror };
-
 const NotifyOperation = enum { dirty, reply, publish, displaced, done };
-const WorkerConnectionOperation = enum { open, own, close };
 
-const WorkerConnection = struct {
-    phase: enum { cold, open, owned, closed } = .cold,
-
-    fn opened(connection: *WorkerConnection) WorkerConnectionOperation {
-        std.debug.assert(connection.phase == .cold);
-        connection.phase = .open;
-        return .open;
-    }
-
-    fn owned(connection: *WorkerConnection) WorkerConnectionOperation {
-        std.debug.assert(connection.phase == .open);
-        connection.phase = .owned;
-        return .own;
-    }
-
-    fn closed(connection: *WorkerConnection) WorkerConnectionOperation {
-        std.debug.assert(connection.phase == .open or connection.phase == .owned);
-        connection.phase = .closed;
-        return .close;
-    }
-};
-
-const WorkerFailureAction = enum { flush_once, return_error };
-
-fn workerFailureAction(durability: *const Durability) WorkerFailureAction {
-    return if (durability.failure == null) .flush_once else .return_error;
+fn finalFlushAllowed(durability: *const Durability) bool {
+    return durability.failure == null;
 }
 
 const NotifyOrder = struct {
@@ -2552,263 +2274,129 @@ fn currentClose(active: ?Active, closed: Closed) bool {
     return std.meta.eql(key, closed.key);
 }
 
-const IntakeBatch = struct {
-    count: u8 = 0,
-
-    fn handled(batch: *IntakeBatch) BatchAction {
-        std.debug.assert(batch.count < intake_batch_max);
-        batch.count += 1;
-        return if (batch.count == intake_batch_max) .flush else .continue_intake;
+test "notification publication order and displaced identity are exact" {
+    for ([_]bool{ false, true }) |displaced| {
+        var order: NotifyOrder = .{ .displaced = displaced };
+        try std.testing.expectEqual(NotifyOperation.dirty, order.marked(true));
+        try std.testing.expectEqual(NotifyOperation.reply, order.replied());
+        try std.testing.expectEqual(NotifyOperation.publish, order.published());
+        if (displaced) try std.testing.expectEqual(NotifyOperation.displaced, order.signaled());
+        try std.testing.expectEqual(NotifyOperation.done, order.finished());
     }
-
-    fn idle(_: *IntakeBatch) BatchAction {
-        return .flush;
-    }
-
-    fn stop(_: *IntakeBatch) BatchAction {
-        return .flush_and_stop;
-    }
-
-    fn external(_: *IntakeBatch, err: anyerror) BatchAction {
-        return .{ .fail = err };
-    }
-};
-
-const WorkerOperation = union(enum) {
-    connection: WorkerConnectionOperation,
-    notify: NotifyOperation,
-    flush,
-    reply_close,
-    hide: Key,
-    signal: Closed,
-    stop,
-    failure: anyerror,
-};
-
-const WorkerTranscript = struct {
-    expected: []const WorkerOperation,
-    index: usize = 0,
-
-    fn observe(transcript: *WorkerTranscript, actual: WorkerOperation) !void {
-        if (transcript.index == transcript.expected.len) return error.ExtraOperation;
-        if (!std.meta.eql(transcript.expected[transcript.index], actual)) return error.UnexpectedOperation;
-        transcript.index += 1;
-    }
-
-    fn done(transcript: *const WorkerTranscript) !void {
-        if (transcript.index != transcript.expected.len) return error.MissingOperation;
-    }
-};
-
-fn observeFlushes(transcript: *WorkerTranscript, method_count: usize, initially_dirty: bool) !void {
-    var durability = Durability{ .dirty = initially_dirty };
-    var batch: IntakeBatch = .{};
-    for (0..method_count) |_| {
-        durability.mark();
-        if (batch.handled() == .flush) {
-            if (try durability.begin()) {
-                try transcript.observe(.flush);
-                durability.succeeded();
-            }
-            batch = .{};
-        }
-    }
-    std.debug.assert(batch.idle() == .flush);
-    if (try durability.begin()) {
-        try transcript.observe(.flush);
-        durability.succeeded();
-    }
+    const active: Active = .{ .notification_id = 7, .generation = 9, .history_id = 1 };
+    try std.testing.expect(!currentClose(active, .{ .key = .{ .id = 7, .generation = 8 }, .reason = .expired }));
+    try std.testing.expect(currentClose(active, .{ .key = .{ .id = 7, .generation = 9 }, .reason = .expired }));
 }
 
-test "strict worker transcript enforces connection notify close stop and cleanup order" {
-    const old = Key{ .id = 7, .generation = 10 };
-    const current = Key{ .id = 8, .generation = 11 };
-    var transcript = WorkerTranscript{ .expected = &.{
-        .{ .connection = .open },
-        .{ .connection = .own },
-        .{ .notify = .dirty },
-        .{ .notify = .reply },
-        .{ .notify = .publish },
-        .{ .notify = .displaced },
-        .{ .notify = .done },
-        .reply_close,
-        .{ .hide = current },
-        .{ .signal = .{ .key = current, .reason = .requested } },
-        .reply_close,
-        .{ .signal = .{ .key = current, .reason = .dismissed } },
-        .flush,
-        .stop,
-        .{ .connection = .close },
-    } };
-    var connection: WorkerConnection = .{};
-    try transcript.observe(.{ .connection = connection.opened() });
-    try transcript.observe(.{ .connection = connection.owned() });
-    var order = NotifyOrder{ .displaced = true };
-    try transcript.observe(.{ .notify = order.marked(true) });
-    try transcript.observe(.{ .notify = order.replied() });
-    try transcript.observe(.{ .notify = order.published() });
-    try transcript.observe(.{ .notify = order.signaled() });
-    try transcript.observe(.{ .notify = order.finished() });
-    var owner = testOwner(std.testing.allocator);
-    defer owner.history.deinit(std.testing.allocator);
-    owner.history.active = .{
-        .notification_id = current.id,
-        .generation = current.generation,
-        .history_id = 1,
-    };
-    try std.testing.expect(activeKey(owner.history.active, old.id) == null);
-    try transcript.observe(.reply_close);
-    const key = activeKey(owner.history.active, current.id).?;
-    try std.testing.expect(owner.close(key));
-    try std.testing.expect(owner.durability.dirty);
-    try transcript.observe(.{ .hide = key });
-    try transcript.observe(.{ .signal = .{ .key = key, .reason = .requested } });
-    try transcript.observe(.reply_close);
-    owner.history.active = .{
-        .notification_id = current.id,
-        .generation = current.generation,
-        .history_id = 1,
-    };
-    owner.durability.dirty = false;
-    const dismissed = Closed{ .key = current, .reason = .dismissed };
-    try std.testing.expect(currentClose(owner.history.active, dismissed));
-    try std.testing.expect(owner.close(dismissed.key));
-    try std.testing.expect(owner.durability.dirty);
-    try transcript.observe(.{ .signal = dismissed });
-    var durability = Durability{ .dirty = true };
-    var batch: IntakeBatch = .{};
-    try std.testing.expect(batch.stop() == .flush_and_stop);
-    try std.testing.expect(try durability.begin());
-    try transcript.observe(.flush);
-    durability.succeeded();
-    try transcript.observe(.stop);
-    try transcript.observe(.{ .connection = connection.closed() });
-    try transcript.done();
-}
-
-test "strict worker intake transcript proves zero one sixty-four and sixty-five flush counts" {
-    inline for (.{
-        .{ 0, true, 1 },
-        .{ 1, true, 1 },
-        .{ 64, true, 1 },
-        .{ 65, true, 2 },
-    }) |case| {
-        var expected: [2]WorkerOperation = undefined;
-        for (expected[0..case[2]]) |*operation| operation.* = .flush;
-        var transcript = WorkerTranscript{ .expected = expected[0..case[2]] };
-        try observeFlushes(&transcript, case[0], case[1]);
-        try transcript.done();
+test "only external connection failures retry; persistence failures remain sticky" {
+    for ([_]anyerror{ error.BusLost, error.NameLost, error.SessionBusUnavailable }) |err| {
+        try std.testing.expectEqual(@as(?i64, reconnect_wait_milliseconds), reconnectWait(err));
     }
-}
-
-test "strict worker transcript reconnects external failures and preserves sticky persistence failures" {
-    inline for (.{ error.BusLost, error.NameLost }) |external| {
-        var transcript = WorkerTranscript{ .expected = &.{
-            .{ .connection = .open },
-            .{ .connection = .own },
-            .{ .failure = external },
-            .{ .connection = .close },
-            .flush,
-            .{ .connection = .open },
-            .{ .connection = .own },
-            .stop,
-            .{ .connection = .close },
-        } };
-        var external_connection: WorkerConnection = .{};
-        try transcript.observe(.{ .connection = external_connection.opened() });
-        try transcript.observe(.{ .connection = external_connection.owned() });
-        try std.testing.expectEqual(reconnect_wait_milliseconds, reconnectWait(external).?);
-        try transcript.observe(.{ .failure = external });
-        try transcript.observe(.{ .connection = external_connection.closed() });
-        try transcript.observe(.flush);
-        var replacement_connection: WorkerConnection = .{};
-        try transcript.observe(.{ .connection = replacement_connection.opened() });
-        try transcript.observe(.{ .connection = replacement_connection.owned() });
-        try transcript.observe(.stop);
-        try transcript.observe(.{ .connection = replacement_connection.closed() });
-        try transcript.done();
-    }
-    try std.testing.expectEqual(
-        reconnect_wait_milliseconds,
-        reconnectWait(error.SessionBusUnavailable).?,
-    );
     try std.testing.expect(reconnectWait(error.NameOwned) == null);
     try std.testing.expect(reconnectWait(error.HistoryWriteFailed) == null);
-    var transcript = WorkerTranscript{ .expected = &.{
-        .flush,
-        .{ .failure = error.HistoryWriteFailed },
-        .{ .connection = .close },
-    } };
-    var connection: WorkerConnection = .{};
-    try std.testing.expect(connection.opened() == .open);
-    try std.testing.expect(connection.owned() == .own);
-    var durability = Durability{ .dirty = true };
-    try std.testing.expect(workerFailureAction(&durability) == .flush_once);
-    try transcript.observe(.flush);
+    var durability: Durability = .{ .dirty = true };
+    try std.testing.expect(finalFlushAllowed(&durability));
     durability.failed(error.HistoryWriteFailed);
-    try transcript.observe(.{ .failure = durability.failure.? });
-    try std.testing.expect(workerFailureAction(&durability) == .return_error);
+    try std.testing.expect(!finalFlushAllowed(&durability));
     try std.testing.expectError(error.HistoryWriteFailed, durability.begin());
-    try transcript.observe(.{ .connection = connection.closed() });
-    try transcript.done();
 }
 
-test "strict worker transcript closes only acquired DBus ownership on setup and reply failures" {
-    var open_failed = WorkerTranscript{ .expected = &.{.{ .failure = error.SessionBusUnavailable }} };
-    try open_failed.observe(.{ .failure = error.SessionBusUnavailable });
-    try open_failed.done();
+/// One notification service, advanced by the caller's event loop. Keep the
+/// owner at a stable address after first showing a banner (Wayland callbacks).
+pub const Service = struct {
+    owner: Owner,
+    video: *Video,
+    dbus_owner: Dbus = .{},
+    owns_history: bool = false,
+    pending: Pending,
+    ui: Ui = .{},
 
-    var own_failed = WorkerTranscript{ .expected = &.{
-        .{ .connection = .open },
-        .{ .failure = error.NameOwned },
-        .{ .connection = .close },
-    } };
-    var own_connection: WorkerConnection = .{};
-    try own_failed.observe(.{ .connection = own_connection.opened() });
-    try own_failed.observe(.{ .failure = error.NameOwned });
-    try own_failed.observe(.{ .connection = own_connection.closed() });
-    try own_failed.done();
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, video: *Video) !Service {
+        return .{
+            .owner = try Owner.init(allocator, io, state_home, home),
+            .video = video,
+            .pending = .{ .allocator = allocator },
+        };
+    }
 
-    var reply_failed = WorkerTranscript{ .expected = &.{
-        .{ .connection = .open },
-        .{ .connection = .own },
-        .{ .notify = .dirty },
-        .{ .failure = error.OutOfMemory },
-        .{ .connection = .close },
-        .flush,
-        .{ .failure = error.OutOfMemory },
-    } };
-    var reply_connection: WorkerConnection = .{};
-    try reply_failed.observe(.{ .connection = reply_connection.opened() });
-    try reply_failed.observe(.{ .connection = reply_connection.owned() });
-    var order = NotifyOrder{ .displaced = false };
-    try reply_failed.observe(.{ .notify = order.marked(true) });
-    try reply_failed.observe(.{ .failure = error.OutOfMemory });
-    try reply_failed.observe(.{ .connection = reply_connection.closed() });
-    var durability = Durability{ .dirty = true };
-    try std.testing.expect(workerFailureAction(&durability) == .flush_once);
-    try reply_failed.observe(.flush);
-    durability.succeeded();
-    try reply_failed.observe(.{ .failure = error.OutOfMemory });
-    try reply_failed.done();
-}
+    pub fn deinit(self: *Service) void {
+        self.ui.clear(self.video, self.owner.allocator);
+        self.pending.clear();
+        self.dbus_owner.close();
+        self.owner.deinit();
+    }
 
-test "strict worker transcript rejects unexpected missing and extra operations" {
-    var unexpected = WorkerTranscript{ .expected = &.{.flush} };
-    try std.testing.expectError(error.UnexpectedOperation, unexpected.observe(.reply_close));
-    var missing = WorkerTranscript{ .expected = &.{.flush} };
-    try std.testing.expectError(error.MissingOperation, missing.done());
-    var extra = WorkerTranscript{ .expected = &.{} };
-    try std.testing.expectError(error.ExtraOperation, extra.observe(.flush));
-}
+    pub fn connect(self: *Service) !void {
+        try self.dbus_owner.open();
+        errdefer self.dbus_owner.close();
+        try self.dbus_owner.own();
+        self.owns_history = true;
+    }
 
-const Worker = struct {
-    owner: *Owner,
-    mailbox: *Mailbox,
-    dbus_owner: *Dbus,
-    fn notify(worker: *Worker, request: Request) !void {
-        var accepted = worker.owner.accept(request) catch |err| {
-            try worker.dbus_owner.replyError(switch (err) {
+    pub fn disconnect(self: *Service) !void {
+        self.dbus_owner.close();
+        if (self.owner.history.active) |active| {
+            std.debug.assert(self.owner.close(.{ .id = active.notification_id, .generation = active.generation }));
+        }
+        self.pending.clear();
+        self.ui.clear(self.video, self.owner.allocator);
+        try self.flush();
+    }
+
+    pub fn fd(self: *const Service) !std.posix.fd_t {
+        const connection = self.dbus_owner.connection orelse return -1;
+        var value: c_int = -1;
+        if (dbus.dbus_connection_get_unix_fd(connection, &value) == 0 or value < 0) return error.BusSocketUnavailable;
+        return value;
+    }
+
+    pub fn flush(self: *Service) !void {
+        // A duplicate-name refusal must not overwrite the real owner's history.
+        if (self.owns_history) try self.owner.flush();
+    }
+
+    pub fn deadline(self: *const Service) ?u64 {
+        return if (self.ui.visible != null) self.ui.state.deadline else null;
+    }
+
+    pub fn advance(self: *Service) !bool {
+        const more = try intake(&self.dbus_owner, self);
+        try self.flush();
+        if (self.pending.take()) |desired| {
+            self.ui.apply(self.video, self.owner.allocator, self.owner.io, desired) catch |err| self.bannerFailed(err);
+        }
+        return more;
+    }
+
+    pub fn handleEvent(self: *Service, input: *const sdl.SDL_Event) !void {
+        const closed = self.ui.event(input) catch |err| {
+            self.bannerFailed(err);
+            return;
+        };
+        if (closed) |value| try self.complete(value);
+    }
+
+    pub fn expire(self: *Service, now: u64) !void {
+        if (self.ui.banner.layer.closed) self.bannerFailed(error.LayerClosed);
+        if (self.ui.expired(now)) |closed| try self.complete(closed);
+    }
+
+    fn bannerFailed(self: *Service, err: anyerror) void {
+        std.log.err("notification banner failed: {s}", .{@errorName(err)});
+        self.ui.banner.deinit(self.video);
+    }
+
+    fn complete(self: *Service, closed: Closed) !void {
+        if (!currentClose(self.owner.history.active, closed)) return;
+        std.debug.assert(self.owner.close(closed.key));
+        self.ui.clear(self.video, self.owner.allocator);
+        try self.dbus_owner.signalClosed(closed.key.id, closed.reason);
+        try self.flush();
+    }
+
+    fn notify(self: *Service, request: Request) !void {
+        var accepted = self.owner.accept(request) catch |err| {
+            try self.dbus_owner.replyError(switch (err) {
                 error.OutOfMemory => .out_of_memory,
                 error.InvalidUtf8 => .invalid_utf8,
                 error.FieldTooLong => .field_too_long,
@@ -2820,146 +2408,90 @@ const Worker = struct {
         const id = accepted.presentation.id;
         const displaced = accepted.displaced;
         var order = NotifyOrder{ .displaced = displaced != null };
-        std.debug.assert(order.marked(worker.owner.durability.dirty) == .dirty);
+        std.debug.assert(order.marked(self.owner.durability.dirty) == .dirty);
         var owns_presentation = true;
-        defer if (owns_presentation) accepted.presentation.deinit(worker.owner.allocator);
-        try worker.dbus_owner.replyNotify(id);
+        defer if (owns_presentation) accepted.presentation.deinit(self.owner.allocator);
+        try self.dbus_owner.replyNotify(id);
         std.debug.assert(order.replied() == .reply);
         owns_presentation = false;
-        worker.mailbox.publish(accepted.presentation);
+        self.pending.publish(accepted.presentation);
         std.debug.assert(order.published() == .publish);
         accepted = undefined;
         if (displaced) |closed| {
-            try worker.dbus_owner.signalClosed(closed.id, .expired);
+            try self.dbus_owner.signalClosed(closed.id, .expired);
             std.debug.assert(order.signaled() == .displaced);
         }
         std.debug.assert(order.finished() == .done);
     }
 
-    fn close(worker: *Worker, id: u32) !void {
-        if (activeKey(worker.owner.history.active, id)) |key| {
-            std.debug.assert(worker.owner.close(key));
-            worker.mailbox.hide(key);
-            try worker.dbus_owner.signalClosed(id, .requested);
+    fn close(self: *Service, id: u32) !void {
+        if (activeKey(self.owner.history.active, id)) |key| {
+            std.debug.assert(self.owner.close(key));
+            self.pending.hide(key);
+            try self.dbus_owner.signalClosed(id, .requested);
         }
-        try worker.dbus_owner.replyClose();
+        try self.dbus_owner.replyClose();
     }
 
-    fn drainUi(worker: *Worker) !void {
-        const closed = worker.mailbox.takeClosed() orelse return;
-        if (!currentClose(worker.owner.history.active, closed)) return;
-        std.debug.assert(worker.owner.close(closed.key));
-        try worker.dbus_owner.signalClosed(closed.key.id, closed.reason);
-    }
-
-    fn dispatch(worker: *Worker, method: Method) !void {
+    fn dispatch(self: *Service, method: Method) !void {
         switch (method) {
-            .get_capabilities => try worker.dbus_owner.replyCapabilities(),
-            .notify => |request| try worker.notify(request),
-            .close => |id| try worker.close(id),
-            .get_server_information => try worker.dbus_owner.replyServerInformation(),
-        }
-    }
-
-    fn run(worker: *Worker) !void {
-        var connection: WorkerConnection = .{};
-        try worker.dbus_owner.open();
-        std.debug.assert(connection.opened() == .open);
-        defer {
-            worker.dbus_owner.close();
-            std.debug.assert(connection.closed() == .close);
-        }
-        try worker.dbus_owner.own();
-        std.debug.assert(connection.owned() == .own);
-        batches: while (true) {
-            var batch: IntakeBatch = .{};
-            while (true) {
-                try worker.drainUi();
-                const action: BatchAction = switch (try worker.dbus_owner.next(
-                    if (batch.count == 0) wait_milliseconds else 0,
-                )) {
-                    .method => |method| blk: {
-                        try worker.dispatch(method);
-                        break :blk batch.handled();
-                    },
-                    .reject => |err| blk: {
-                        try worker.dbus_owner.replyError(err);
-                        break :blk batch.handled();
-                    },
-                    .idle => batch.idle(),
-                    .stop => batch.stop(),
-                    .bus_lost => batch.external(error.BusLost),
-                    .name_lost => batch.external(error.NameLost),
-                };
-                switch (action) {
-                    .continue_intake => continue,
-                    .flush => {
-                        try worker.drainUi();
-                        try worker.owner.flush();
-                        continue :batches;
-                    },
-                    .flush_and_stop => {
-                        try worker.drainUi();
-                        try worker.owner.flush();
-                        return;
-                    },
-                    .fail => |err| return err,
-                }
-            }
+            .get_capabilities => try self.dbus_owner.replyCapabilities(),
+            .notify => |request| try self.notify(request),
+            .close => |id| try self.close(id),
+            .get_server_information => try self.dbus_owner.replyServerInformation(),
         }
     }
 };
 
-const WorkerArgs = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    state_home: ?[]const u8,
-    home: ?[]const u8,
-    stop: *const std.atomic.Value(bool),
-    mailbox: *Mailbox,
-};
-
-fn runWorker(args: WorkerArgs) !void {
-    var owner = Owner.init(args.allocator, args.io, args.state_home, args.home) catch |err| {
-        args.mailbox.workerDone(err);
-        return err;
-    };
-    defer owner.deinit();
-    var native = Dbus{ .stop = args.stop };
-    var worker = Worker{
-        .owner = &owner,
-        .mailbox = args.mailbox,
-        .dbus_owner = &native,
-    };
-    const failure: ?anyerror = resident: while (true) {
-        worker.run() catch |err| {
-            const reconnect_wait = reconnectWait(err) orelse break :resident err;
-            if (owner.history.active) |active| {
-                const key = Key{ .id = active.notification_id, .generation = active.generation };
-                std.debug.assert(owner.close(key));
-                args.mailbox.hide(key);
-            }
-            owner.flush() catch |flush_error| break :resident flush_error;
-            if (args.stop.load(.acquire)) break :resident null;
-            std.Io.sleep(args.io, .fromMilliseconds(reconnect_wait), .awake) catch |sleep_error| {
-                break :resident sleep_error;
-            };
-            continue;
-        };
-        break :resident null;
-    };
-    if (failure) |err| {
-        const final_error = switch (workerFailureAction(&owner.durability)) {
-            .return_error => err,
-            .flush_once => blk: {
-                owner.flush() catch |flush_error| break :blk flush_error;
-                break :blk err;
-            },
-        };
-        args.mailbox.workerDone(final_error);
-        return final_error;
+// Return to the common event loop after a bounded portion of bus traffic,
+// even if the socket still has more queued messages.
+fn intake(bus: anytype, service: anytype) !bool {
+    for (0..intake_batch_max) |_| {
+        switch (try bus.next()) {
+            .method => |method| try service.dispatch(method),
+            .reject => |err| try bus.replyError(err),
+            .ignored => {},
+            .idle => return false,
+            .bus_lost => return error.BusLost,
+            .name_lost => return error.NameLost,
+        }
     }
-    args.mailbox.workerDone(null);
+    return true;
+}
+
+test "bounded real intake yields after 64 messages, then drains the remainder" {
+    const Bus = struct {
+        remaining: usize = 65,
+        dispatched: usize = 0,
+        rejected: usize = 0,
+        ignored_first: bool = true,
+
+        fn next(self: *@This()) !Event {
+            if (self.ignored_first) {
+                self.ignored_first = false;
+                return .ignored;
+            }
+            if (self.remaining == 0) return .idle;
+            self.remaining -= 1;
+            return if (self.remaining == 1) .{ .reject = .invalid_signature } else .{ .method = .get_capabilities };
+        }
+        fn dispatch(self: *@This(), method: Method) !void {
+            try std.testing.expect(method == .get_capabilities);
+            self.dispatched += 1;
+        }
+        fn replyError(self: *@This(), err: ReplyError) !void {
+            try std.testing.expectEqual(ReplyError.invalid_signature, err);
+            self.rejected += 1;
+        }
+    };
+    var bus: Bus = .{};
+    try std.testing.expect(try intake(&bus, &bus));
+    try std.testing.expectEqual(@as(usize, 63), bus.dispatched);
+    try std.testing.expectEqual(@as(usize, 2), bus.remaining);
+    try std.testing.expect(!try intake(&bus, &bus));
+    try std.testing.expectEqual(@as(usize, 64), bus.dispatched);
+    try std.testing.expectEqual(@as(usize, 1), bus.rejected);
+    try std.testing.expectEqual(@as(usize, 0), bus.remaining);
 }
 
 fn reconnectWait(err: anyerror) ?i64 {
@@ -2969,42 +2501,91 @@ fn reconnectWait(err: anyerror) ?i64 {
     };
 }
 
-pub fn run(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    state_home: ?[]const u8,
-    home: ?[]const u8,
-    stop: *std.atomic.Value(bool),
-) !void {
-    var mailbox = Mailbox.init(io, allocator);
-    defer mailbox.deinit();
-    var thread = try io.concurrent(runWorker, .{WorkerArgs{
-        .allocator = allocator,
-        .io = io,
-        .state_home = state_home,
-        .home = home,
-        .stop = stop,
-        .mailbox = &mailbox,
-    }});
-    const ui_result = runUi(&mailbox, allocator);
-    stop.store(true, .release);
-    const worker_result = thread.await(io);
-    try ui_result;
-    try worker_result;
+/// Standalone compatibility entrypoint, driven by the same sequential service
+/// that the unified resident will own. When hidden, SDL is not initialized.
+pub fn run(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8) !void {
+    const stop = try Stop.open();
+    defer stop.close();
+    var video: Video = .{};
+    var service = try Service.init(allocator, io, state_home, home, &video);
+    defer service.deinit();
+    const result = serve(&service, stop.fd);
+    // Preserve the original error if a final durability attempt also fails.
+    if (result) |_| {
+        try service.flush();
+    } else |err| {
+        if (finalFlushAllowed(&service.owner.durability)) service.flush() catch |flush_error| {
+            std.log.err("notification history final flush failed: {s}", .{@errorName(flush_error)});
+        };
+        return err;
+    }
 }
 
-// The DBus worker owns one private bounded session-bus connection.
+fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
+    var retry_at: u64 = 0;
+    while (true) {
+        var stopping = [_]std.posix.pollfd{.{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&stopping, 0) != 0) {
+            try Stop.consume(service.owner.io, stop_fd);
+            return;
+        }
+        var more = false;
+        const now = nowMilliseconds(service.owner.io);
+        if (service.dbus_owner.connection == null and now >= retry_at) {
+            service.connect() catch |err| {
+                const delay = reconnectWait(err) orelse return err;
+                retry_at = now + @as(u64, @intCast(delay));
+            };
+        }
+        if (service.dbus_owner.connection != null) {
+            more = turn(service) catch |err| blk: {
+                const delay = reconnectWait(err) orelse return err;
+                try service.disconnect();
+                retry_at = nowMilliseconds(service.owner.io) + @as(u64, @intCast(delay));
+                break :blk false;
+            };
+        }
+        if (more) continue;
+        const current = nowMilliseconds(service.owner.io);
+        const deadline = if (service.dbus_owner.connection == null) retry_at else service.deadline();
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = try service.fd(), .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = try service.video.fd(), .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        _ = try std.posix.poll(&fds, if (deadline) |end| @intCast(@min(end -| current, std.math.maxInt(i32))) else -1);
+        if (fds[0].revents != 0) {
+            try Stop.consume(service.owner.io, stop_fd);
+            return;
+        }
+        if (fds[2].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) {
+            service.bannerFailed(error.SdlDisplayLost);
+        }
+    }
+}
+
+fn turn(service: *Service) !bool {
+    const more_bus = try service.advance();
+    var count: usize = 0;
+    while (service.video.users != 0 and count < intake_batch_max) : (count += 1) {
+        var input: sdl.SDL_Event = undefined;
+        if (!sdl.SDL_PollEvent(&input)) break;
+        try service.handleEvent(&input);
+    }
+    try service.expire(nowMilliseconds(service.owner.io));
+    return more_bus or count == intake_batch_max;
+}
+
+// One private bounded session-bus connection.
 const dbus_name = "org.freedesktop.Notifications";
 const dbus_path = "/org/freedesktop/Notifications";
 const dbus_interface = "org.freedesktop.Notifications";
 const message_capacity = 64 * 1024;
-const wait_milliseconds: i32 = 100;
 const reconnect_wait_milliseconds: i64 = 250;
 const send_turn_capacity = 8;
 const send_wait_milliseconds = 25;
 
 const Dbus = struct {
-    stop: *const std.atomic.Value(bool),
     connection: ?*dbus.DBusConnection = null,
     message: ?*dbus.DBusMessage = null,
 
@@ -3038,28 +2619,29 @@ const Dbus = struct {
         }
     }
 
-    pub fn next(native: *Dbus, wait: i32) !Event {
+    pub fn next(native: *Dbus) !Event {
         std.debug.assert(native.connection != null);
         std.debug.assert(native.message == null);
-        if (native.stop.load(.acquire)) return .stop;
 
         const connection = native.connection.?;
-        if (dbus.dbus_connection_read_write(connection, wait) == 0) return .bus_lost;
-        if (native.stop.load(.acquire)) return .stop;
+        if (dbus.dbus_connection_read_write(connection, 0) == 0) return .bus_lost;
         const message = dbus.dbus_connection_pop_message(connection) orelse return .idle;
         native.message = message;
 
         if (dbus.dbus_message_is_signal(message, dbus.DBUS_INTERFACE_DBUS, "NameLost") != 0) {
             const lost = readOneString(message) orelse {
                 native.releaseMessage();
-                return .idle;
+                return .ignored;
             };
             if (std.mem.eql(u8, lost, dbus_name)) return .name_lost;
             native.releaseMessage();
-            return .idle;
+            return .ignored;
         }
-        if (dbus.dbus_message_get_type(message) != dbus.DBUS_MESSAGE_TYPE_METHOD_CALL or
-            dbus.dbus_message_has_path(message, dbus_path) == 0 or
+        if (dbus.dbus_message_get_type(message) != dbus.DBUS_MESSAGE_TYPE_METHOD_CALL) {
+            native.releaseMessage();
+            return .ignored;
+        }
+        if (dbus.dbus_message_has_path(message, dbus_path) == 0 or
             dbus.dbus_message_has_interface(message, dbus_interface) == 0)
         {
             return .{ .reject = .unknown_method };

@@ -5,6 +5,7 @@ const wallpaper = @import("root.zig");
 const sdl = @import("sdl_c");
 const wl = @import("wayland_c");
 const outputs = @import("outputs.zig");
+const Stop = @import("../stop.zig");
 
 extern fn wayspot_jpeg_decode(
     bytes: [*]const u8,
@@ -15,9 +16,6 @@ extern fn wayspot_jpeg_decode(
     height: *u32,
 ) callconv(.c) ?[*]u8;
 extern fn wayspot_jpeg_free(pixels: *anyopaque) callconv(.c) void;
-
-/// Owns one signalfd and the signal mask restored exactly by `closeStop`.
-pub const Stop = struct { fd: std.posix.fd_t, prior_mask: std.posix.sigset_t };
 
 pub fn discoverCatalog(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8) !wallpaper.Catalog {
     var source = Discovery{ .io = io };
@@ -390,26 +388,6 @@ pub fn sessionIdentifier(runtime: []const u8, display: []const u8) ![32]u8 {
     sha.update(display);
     sha.final(&digest);
     return std.fmt.bytesToHex(digest[0..16], .lower);
-}
-
-/// Blocks termination signals and returns their signalfd plus the exact prior mask.
-pub fn openStop() !Stop {
-    var mask = std.posix.sigemptyset();
-    std.posix.sigaddset(&mask, .INT);
-    std.posix.sigaddset(&mask, .TERM);
-    var prior: std.posix.sigset_t = undefined;
-    std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, &prior);
-    errdefer std.posix.sigprocmask(std.posix.SIG.SETMASK, &prior, null);
-    return .{
-        .fd = try std.posix.signalfd(-1, &mask, std.os.linux.SFD.CLOEXEC | std.os.linux.SFD.NONBLOCK),
-        .prior_mask = prior,
-    };
-}
-
-/// Closes the signalfd and restores the prior signal mask.
-pub fn closeStop(stop: Stop) void {
-    _ = std.posix.system.close(stop.fd);
-    std.posix.sigprocmask(std.posix.SIG.SETMASK, &stop.prior_mask, null);
 }
 
 fn surfaceSide(value: c_int) !u32 {
@@ -974,12 +952,6 @@ fn bufferReleased(_: ?*anyopaque, _: ?*wl.wl_buffer) callconv(.c) void {}
 const Ready = struct { stop: bool = false, rotate: bool = false, client: bool = false };
 const poll_failure = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
 
-fn readStop(source: *Source, fd: std.posix.fd_t) !void {
-    var record: [128]u8 = undefined;
-    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-    if (try file.readStreaming(source.io, &.{&record}) != record.len) return error.StopRecordIncomplete;
-}
-
 // One blocking wait over real readiness. No frame callback or periodic poll.
 fn wait(source: *Source, connection: ?*wl.wl_display, stop_fd: std.posix.fd_t, timeout: ?u64) !Ready {
     var prepared = false;
@@ -1002,7 +974,7 @@ fn wait(source: *Source, connection: ?*wl.wl_display, stop_fd: std.posix.fd_t, t
     };
     _ = try std.posix.poll(&fds, if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1);
     if (fds[0].revents != 0) {
-        try readStop(source, stop_fd);
+        try Stop.consume(source.io, stop_fd);
         return .{ .stop = true };
     }
     if (connection) |display| {
@@ -1030,7 +1002,7 @@ fn flush(source: *Source, connection: *wl.wl_display, stop_fd: std.posix.fd_t) !
         };
         if (try std.posix.poll(&fds, @intCast(remaining)) == 0) return error.WaylandDisplayLost;
         if (fds[0].revents != 0) {
-            try readStop(source, stop_fd);
+            try Stop.consume(source.io, stop_fd);
             return error.Stopped;
         }
         if (fds[1].revents & poll_failure != 0) return displayError(connection);
@@ -1044,8 +1016,8 @@ pub fn run(init: std.process.Init, root_path: []const u8) !void {
     var source: Source = .{ .io = init.io };
     try source.openRotation(&signature);
     defer source.closeRotation();
-    const stop = try openStop();
-    defer closeStop(stop);
+    const stop = try Stop.open();
+    defer stop.close();
     var first = try wallpaper.choose(&source, init.gpa, &catalog);
     first.image.deinit(init.gpa);
     var selected = first.encoded;
