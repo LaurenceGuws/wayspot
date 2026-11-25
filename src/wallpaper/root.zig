@@ -14,7 +14,6 @@ pub const catalog_entry_capacity = 32 * 1024;
 pub const catalog_path_capacity = 1024;
 pub const image_side_capacity = 16_384;
 pub const image_pixel_capacity = 67_108_864;
-pub const wayland_global_capacity = 128;
 pub const wayland_configure_capacity = 16;
 pub const wayland_release_capacity = 128;
 pub const wayland_wait_milliseconds = 1000;
@@ -27,8 +26,6 @@ pub const reconcile_attempt_capacity = 8;
 pub const reconcile_wait_milliseconds = 250;
 /// One reconciliation fails visibly after two seconds.
 pub const reconcile_deadline_milliseconds = 2000;
-/// One readiness result drains at most eight socket2 reads.
-/// One readiness result accepts at most 64KiB from socket2.
 /// The resident attempts one automatic rotation per hour.
 pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 

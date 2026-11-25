@@ -80,7 +80,6 @@ pub const Native = struct {
     layer_shell_global: u32 = 0,
     outputs_changed: bool = false,
     probe: OutputProbe = .{},
-    global_count: u8 = 0,
     failed: bool = false,
     surfaces: [wallpaper.surface_resource_capacity]Surface = @splat(.{}),
     next_surface_generation: u32 = 1,
@@ -974,7 +973,6 @@ const Surface = struct {
     viewport: ?*wl.wp_viewport = null,
     buffer: ?*wl.wl_buffer = null,
     configure: ?wallpaper.Configure = null,
-    configure_count: u8 = 0,
     configured_width: u32 = 0,
     configured_height: u32 = 0,
     closed: bool = false,
@@ -1002,11 +1000,6 @@ fn registryGlobal(
     version: u32,
 ) callconv(.c) void {
     const native: *Native = @ptrCast(@alignCast(data));
-    if (native.global_count == wallpaper.wayland_global_capacity) {
-        native.failed = true;
-        return;
-    }
-    native.global_count += 1;
     const interface_name = std.mem.span(interface);
     if (std.mem.eql(u8, interface_name, "wl_compositor")) {
         if (!bindGlobal(&native.compositor, registry, name, version, 4, &wl.wl_compositor_interface)) {
@@ -1144,12 +1137,12 @@ fn layerConfigure(
 ) callconv(.c) void {
     const surface: *Surface = @ptrCast(@alignCast(data));
     const owner = surface.owner;
-    if (width == 0 or height == 0 or surface.configure_count == wallpaper.wayland_configure_capacity) {
+    // Bound the initial configure wait, not the lifetime of a healthy surface.
+    if (width == 0 or height == 0) {
         surface.closed = true;
         if (owner) |native| native.failed = true;
         return;
     }
-    surface.configure_count += 1;
     if (surface.state == .published) {
         if (layer) |proxy| wl.wayspot_layer_surface_ack_configure(proxy, serial);
         if (width != surface.configured_width or height != surface.configured_height) {
@@ -1323,7 +1316,7 @@ test "surface handles reject absent stale and wrong generations" {
     );
 }
 
-test "configure histories are bounded" {
+test "unchanged configure events never exhaust a live wallpaper surface" {
     var native: Native = .{ .io = std.testing.io };
     var surface: Surface = .{
         .owner = &native,
@@ -1331,23 +1324,25 @@ test "configure histories are bounded" {
         .configured_width = 2,
         .configured_height = 2,
     };
-    layerConfigure(&surface, null, 1, 2, 2);
+    for (1..1001) |serial| layerConfigure(&surface, null, @intCast(serial), 2, 2);
     try std.testing.expect(!native.outputs_changed);
-    layerConfigure(&surface, null, 2, 3, 2);
+    try std.testing.expect(!surface.closed);
+    try std.testing.expect(!native.failed);
+    try std.testing.expectEqual(@as(u32, 1000), surface.configure.?.serial);
+    layerConfigure(&surface, null, 1001, 3, 2);
     try std.testing.expect(native.outputs_changed);
-    surface = .{ .owner = &native };
-    native.failed = false;
-    for (0..wallpaper.wayland_configure_capacity) |serial| {
-        layerConfigure(&surface, null, @intCast(serial), 1, 1);
-    }
-    layerConfigure(&surface, null, 99, 1, 1);
+    try std.testing.expect(!native.failed);
+    layerConfigure(&surface, null, 1002, 0, 1);
     try std.testing.expect(surface.closed);
     try std.testing.expect(native.failed);
-    surface = .{ .owner = &native };
-    native.failed = false;
-    layerConfigure(&surface, null, 1, 0, 1);
-    try std.testing.expect(surface.closed);
-    try std.testing.expect(native.failed);
+}
+
+test "irrelevant registry announcements never exhaust a live wallpaper display" {
+    var native: Native = .{ .io = std.testing.io };
+    for (1..1001) |id| registryGlobal(&native, null, @intCast(id), "wl_seat", 9);
+    try std.testing.expect(!native.failed);
+    try std.testing.expect(!native.outputs_changed);
+    try std.testing.expectEqual(@as(u8, 0), native.output_global_count);
 }
 
 test "zero-time poll observes readiness with absent borrowed descriptors" {

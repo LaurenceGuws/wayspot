@@ -43,7 +43,6 @@ pub const Observer = struct {
     records: [wallpaper.monitor_capacity]Probe = @splat(.{}),
     globals: [wallpaper.monitor_capacity]u32 = undefined,
     output_count: u8 = 0,
-    seen_globals: u16 = 0,
     ready: bool = false,
     dirty: bool = false,
     topology_changed: bool = false,
@@ -183,11 +182,6 @@ fn convert(probe: *const Probe) !wallpaper.Monitor {
 const registry_listener = wl.wl_registry_listener{ .global = registryGlobal, .global_remove = registryRemove };
 fn registryGlobal(data: ?*anyopaque, registry: ?*wl.wl_registry, id: u32, interface: [*c]const u8, version: u32) callconv(.c) void {
     const self: *Observer = @ptrCast(@alignCast(data));
-    if (self.seen_globals == wallpaper.wayland_global_capacity) {
-        self.failed = true;
-        return;
-    }
-    self.seen_globals += 1;
     const name = std.mem.span(interface);
     if (std.mem.eql(u8, name, "zxdg_output_manager_v1")) {
         if (self.manager != null or version < 3) {
@@ -226,12 +220,14 @@ const output_listener = wl.wl_output_listener{
 };
 fn outputGeometry(data: ?*anyopaque, _: ?*wl.wl_output, _: i32, _: i32, _: i32, _: i32, _: i32, _: [*c]const u8, _: [*c]const u8, transform: i32) callconv(.c) void {
     const probe: *Probe = @ptrCast(@alignCast(data));
+    if (probe.transform == transform) return;
     probe.transform = transform;
     probe.changed();
 }
 fn outputMode(data: ?*anyopaque, _: ?*wl.wl_output, flags: u32, width: i32, height: i32, _: i32) callconv(.c) void {
     if (flags & wl.WL_OUTPUT_MODE_CURRENT == 0) return;
     const probe: *Probe = @ptrCast(@alignCast(data));
+    if (probe.mode_seen and probe.width == width and probe.height == height) return;
     probe.width = width;
     probe.height = height;
     probe.mode_seen = true;
@@ -240,14 +236,10 @@ fn outputMode(data: ?*anyopaque, _: ?*wl.wl_output, flags: u32, width: i32, heig
 fn outputDone(data: ?*anyopaque, _: ?*wl.wl_output) callconv(.c) void {
     const probe: *Probe = @ptrCast(@alignCast(data));
     probe.complete = true;
-    if (probe.observer) |owner| {
-        if (owner.ready) owner.dirty = true;
-    }
+    // Only a preceding meaningful field mutation marks the observer dirty.
 }
-fn outputScale(data: ?*anyopaque, _: ?*wl.wl_output, _: i32) callconv(.c) void {
-    const probe: *Probe = @ptrCast(@alignCast(data));
-    probe.changed();
-}
+// Effective scale is derived from the physical mode and xdg logical size.
+fn outputScale(_: ?*anyopaque, _: ?*wl.wl_output, _: i32) callconv(.c) void {}
 fn outputName(data: ?*anyopaque, _: ?*wl.wl_output, name: [*c]const u8) callconv(.c) void {
     const probe: *Probe = @ptrCast(@alignCast(data));
     const value = std.mem.span(name);
@@ -255,6 +247,7 @@ fn outputName(data: ?*anyopaque, _: ?*wl.wl_output, name: [*c]const u8) callconv
         if (probe.observer) |owner| owner.failed = true;
         return;
     }
+    if (probe.name_seen and std.mem.eql(u8, probe.name[0..probe.name_len], value)) return;
     @memcpy(probe.name[0..value.len], value);
     probe.name_len = @intCast(value.len);
     probe.name_seen = true;
@@ -271,6 +264,7 @@ const xdg_listener = wl.wayspot_xdg_output_listener{
 };
 fn logicalPosition(data: ?*anyopaque, _: ?*wl.zxdg_output_v1, x: i32, y: i32) callconv(.c) void {
     const probe: *Probe = @ptrCast(@alignCast(data));
+    if (probe.position_seen and probe.x == x and probe.y == y) return;
     probe.x = x;
     probe.y = y;
     probe.position_seen = true;
@@ -278,6 +272,7 @@ fn logicalPosition(data: ?*anyopaque, _: ?*wl.zxdg_output_v1, x: i32, y: i32) ca
 }
 fn logicalSize(data: ?*anyopaque, _: ?*wl.zxdg_output_v1, width: i32, height: i32) callconv(.c) void {
     const probe: *Probe = @ptrCast(@alignCast(data));
+    if (probe.size_seen and probe.logical_width == width and probe.logical_height == height) return;
     probe.logical_width = width;
     probe.logical_height = height;
     probe.size_seen = true;
@@ -390,4 +385,30 @@ test "bad transforms and impossible pixel dimensions never escape output snapsho
     probe.logical_width = 1920;
     probe.complete = false;
     try std.testing.expectError(error.WaylandOutputIncomplete, observer.snapshot());
+}
+
+test "repeated identical output facts and unrelated globals do not schedule publication" {
+    var owner: Observer = .{ .ready = true, .output_count = 1 };
+    const probe = &owner.records[0];
+    probe.* = .{ .observer = &owner };
+    outputName(probe, null, "DP-1");
+    outputGeometry(probe, null, 0, 0, 0, 0, 0, "", "", 0);
+    outputMode(probe, null, wl.WL_OUTPUT_MODE_CURRENT, 1920, 1080, 60000);
+    logicalPosition(probe, null, 0, 0);
+    logicalSize(probe, null, 1920, 1080);
+    outputDone(probe, null);
+    const initial = try owner.snapshot();
+    owner.dirty = false;
+    for (1..1001) |id| {
+        registryGlobal(&owner, null, @intCast(id), "wl_seat", 9);
+        outputName(probe, null, "DP-1");
+        outputGeometry(probe, null, 0, 0, 0, 0, 0, "", "", 0);
+        outputMode(probe, null, wl.WL_OUTPUT_MODE_CURRENT, 1920, 1080, 60000);
+        outputScale(probe, null, 1);
+        logicalPosition(probe, null, 0, 0);
+        logicalSize(probe, null, 1920, 1080);
+        outputDone(probe, null);
+    }
+    try std.testing.expect(!owner.failed and !owner.dirty and !owner.topology_changed);
+    try std.testing.expect(initial.eql(&(try owner.snapshot())));
 }
