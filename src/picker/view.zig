@@ -55,6 +55,8 @@ pub const Native = struct {
     initialized: bool = false,
     text_started: bool = false,
     tray_event: u32 = 0,
+    tray_enabled: bool = true,
+    tray_wake_fd: std.posix.fd_t = -1,
     tray_fetched: bool = false,
     tray_threads_initialized: bool = false,
     tray_worker: ?std.Thread = null,
@@ -73,7 +75,7 @@ pub const Native = struct {
         std.debug.assert(!native.initialized);
         try native.video.acquire();
         errdefer native.video.release();
-        native.tray_event = try native.video.trayEvent();
+        if (native.tray_enabled) native.tray_event = try native.video.trayEvent();
         native.initialized = true;
     }
 
@@ -285,7 +287,7 @@ pub const Native = struct {
         }
         // Give application icons priority over tray setup. Both follow the
         // first useful frame; a slow D-Bus item never delays picker results.
-        if (!native.tray_fetched and native.tray_worker == null) {
+        if (native.tray_enabled and !native.tray_fetched and native.tray_worker == null) {
             native.tray_fetched = true;
             native.startTrayFetch();
         }
@@ -392,7 +394,7 @@ pub const Native = struct {
         std.debug.assert(!native.text_started);
         // The tray worker is joined before this; its old wake must not enter
         // a later picker lifetime when another window keeps SDL alive.
-        sdl.SDL_FlushEvent(native.tray_event);
+        if (native.tray_event != 0) sdl.SDL_FlushEvent(native.tray_event);
         native.video.release();
         native.initialized = false;
     }
@@ -446,6 +448,12 @@ pub const Native = struct {
     fn clearText(native: *Native) void {
         if (native.text) |*painter| painter.deinit();
         native.text = null;
+    }
+
+    pub fn trayReady(native: *Native) !bool {
+        if (!native.tray_worker_ready.load(.acquire) or native.tray_worker == null) return false;
+        try native.receiveTray();
+        return true;
     }
 
     fn receiveTray(native: *Native) !void {
@@ -803,11 +811,18 @@ pub const Native = struct {
     }
 };
 
-// The event queue is the only cross-thread UI boundary. The worker never
+// A completion event or eventfd is the only cross-thread UI boundary. The worker never
 // touches SDL textures or the window and cannot invalidate live picker state.
 fn trayFetch(native: *Native) void {
     native.tray_worker_snapshot = tray.Snapshot.read(std.heap.page_allocator, &native.tray_stop) catch .{};
     native.tray_worker_ready.store(true, .release);
+    if (native.tray_wake_fd >= 0) {
+        const value: u64 = 1;
+        const bytes = std.mem.asBytes(&value);
+        const result = std.os.linux.write(native.tray_wake_fd, bytes.ptr, bytes.len);
+        if (std.os.linux.errno(result) != .SUCCESS) std.log.warn("tray completion wake failed", .{});
+        return;
+    }
     var event = std.mem.zeroes(sdl.SDL_Event);
     event.type = native.tray_event;
     _ = sdl.SDL_PushEvent(&event);

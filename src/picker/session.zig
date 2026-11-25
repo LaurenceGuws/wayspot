@@ -1,0 +1,135 @@
+//! A picker invocation owns its fresh application facts and its SDL surface.
+//! Allocate at a stable address; close the surface before executing selection.
+const std = @import("std");
+const apps = @import("../apps/catalog.zig");
+const desktop_files = @import("../apps/desktop_files.zig");
+const launch = @import("../apps/launch.zig");
+const notification = @import("../notifications/root.zig");
+const picker = @import("root.zig");
+const navigator = @import("navigator.zig");
+const View = @import("view.zig").Native;
+const Video = @import("../ui/video.zig");
+const sdl = @import("sdl_c");
+const Self = @This();
+
+process: std.process.Init,
+applications: apps.List,
+terminal: ?[]const u8,
+home: []const u8,
+state: picker.State,
+view: View,
+deadline: u64 = 0,
+
+pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
+    const self = try init.gpa.create(Self);
+    errdefer init.gpa.destroy(self);
+    const home = init.environ_map.get("HOME") orelse return error.HomeMissing;
+    var files = try desktop_files.collect(init.gpa, init.io, .{
+        .home = home,
+        .data_home = init.environ_map.get("XDG_DATA_HOME"),
+        .data_dirs = init.environ_map.get("XDG_DATA_DIRS"),
+    });
+    defer files.deinit();
+    self.applications = try apps.load(init.gpa, files.items.items, init.environ_map.get("XDG_CURRENT_DESKTOP"));
+    errdefer self.applications.deinit();
+    try desktop_files.applyTryExec(init.io, init.environ_map.get("PATH"), &self.applications);
+    const terminal = try desktop_files.applyTerminal(init.io, init.environ_map.get("PATH"), init.environ_map.get("TERMINAL"), &self.applications);
+    try launch.apply(&self.applications, terminal, home);
+    self.process = init;
+    self.terminal = terminal;
+    self.home = home;
+    self.state = .{
+        .allocator = init.gpa,
+        .self_pid = @intCast(std.os.linux.getpid()),
+        .window_backend = navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP")),
+        .applications = self.applications.slice(),
+    };
+    errdefer self.state.deinit();
+    self.view = .{
+        .video = video,
+        .applications = self.applications.slice(),
+        .allocator = init.gpa,
+        .io = init.io,
+        .home = home,
+        .tray_enabled = tray_enabled,
+    };
+    if (tray_enabled) {
+        const fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
+        if (std.os.linux.errno(fd) != .SUCCESS) return error.TrayWakeOpenFailed;
+        self.view.tray_wake_fd = @intCast(fd);
+    }
+    errdefer if (self.view.tray_wake_fd >= 0) {
+        _ = std.os.linux.close(self.view.tray_wake_fd);
+    };
+    try self.view.init();
+    errdefer self.view.quit();
+    try self.view.create();
+    errdefer self.view.destroy();
+    try self.view.startText();
+    errdefer self.view.stopText() catch {};
+    try self.state.begin();
+    try self.draw();
+    return self;
+}
+
+pub fn finish(self: *Self, selected: ?usize) !void {
+    const allocator = self.process.gpa;
+    defer allocator.destroy(self);
+    defer self.applications.deinit();
+    defer self.state.deinit();
+    const stop_result = self.view.stopText();
+    self.view.destroy();
+    self.view.quit();
+    if (self.view.tray_wake_fd >= 0) _ = std.os.linux.close(self.view.tray_wake_fd);
+    try stop_result;
+    if (selected) |index| {
+        var process: launch.Detached = .{ .io = self.process.io };
+        try launch.spawn(&process, &self.applications.slice()[index], self.terminal, self.home);
+    }
+}
+
+pub fn readHistory(self: *Self) !notification.History {
+    return notification.inspect(self.process.gpa, self.process.io, self.process.environ_map.get("XDG_STATE_HOME"), self.home);
+}
+
+pub fn draw(self: *Self) !void {
+    try self.view.draw(&self.state.frame());
+    self.deadline = now(self.process.io) + @as(u64, @intCast(self.view.waitTimeout()));
+}
+
+pub fn advance(self: *Self, events: *const picker.Events) !picker.Action {
+    const action = try self.state.advance(self, self.process.io, events);
+    if (action == .draw) try self.draw();
+    return action;
+}
+
+pub fn trayReady(self: *Self) !bool {
+    if (self.view.tray_wake_fd < 0) return false;
+    var value: u64 = undefined;
+    const bytes = std.mem.asBytes(&value);
+    const result = std.os.linux.read(self.view.tray_wake_fd, bytes.ptr, bytes.len);
+    switch (std.os.linux.errno(result)) {
+        .SUCCESS => if (result != bytes.len) return error.TrayWakeReadFailed,
+        .AGAIN, .INTR => {},
+        else => return error.TrayWakeReadFailed,
+    }
+    return self.view.trayReady();
+}
+
+/// SDL's Wayland backend owns key-repeat generation. When a key is held,
+/// keep pumping it with at most an 8ms gap; no repeat timer while idle.
+pub fn repeatWake(self: *const Self) ?u64 {
+    if (sdl.SDL_GetKeyboardFocus() != self.view.window) return null;
+    var count: c_int = 0;
+    const keys = sdl.SDL_GetKeyboardState(&count);
+    if (keys == null or count <= 0) return null;
+    for (keys[0..@intCast(count)]) |pressed| if (pressed) return 8;
+    // The pinned SDL Wayland backend pumps a D-Bus IME every 200ms
+    // when no text-input-v3 manager is available. Keep that visible-only
+    // deadline too; the hidden picker has neither timer.
+    return if (!self.view.layer.text_input_v3 and sdl.SDL_TextInputActive(self.view.window)) 200 else null;
+}
+
+fn now(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.awake.now(io).toMilliseconds());
+}

@@ -8,8 +8,8 @@ principles:
   picker_latency:
     priority: primary
     invariant: >
-      The zero-argument application picker remains a direct fresh-process path;
-      unrelated product modes do not add work to its startup critical path.
+      Both the direct zero-argument picker and the resident summon discover
+      applications fresh. Unrelated capabilities do not add startup work.
   derived_state:
     invariant: >
       External desktop facts are discovered from their current authorities when
@@ -96,9 +96,18 @@ scope:
       presentation: icons and menus only in the existing picker toolbar
       persistent_derived_state: false
 
+  resident:
+    entry: wayspot resident CONFIG
+    configuration: strict startup JSON; picker, notifications, tray booleans; wallpaper absolute directory or null
+    control: same-UID session-scoped bounded seqpacket listener
+    commands: [wayspot resident status, wayspot picker, wayspot picker dismiss, wayspot wallpaper rotate]
+    lifecycle: one sequential owner; individually enabled capabilities; no derived picker state while hidden
+    graphical_lifetime: one SDL owner, independent surface leases
+    external_effects: bounded tray fetch worker; synchronous image and CLI/menu effects remain
+    compatibility: standalone commands retained; competing owners refused
   process_lifecycle:
-    - each resident process owns and asserts its lifecycle
-    - no resident launcher process
+    - the foreground session child owns and asserts its lifecycle
+    - no extra resident launcher process
     - no fallback process manager
 
 excluded:

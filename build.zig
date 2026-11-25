@@ -130,6 +130,14 @@ pub fn build(b: *std.Build) void {
     b.step("wallpaper-live", "Prove Wayland-native wallpaper against explicit isolated compositor")
         .dependOn(&live_wallpaper.step);
 
+    const live_resident = b.addSystemCommand(&.{"python3"});
+    live_resident.addFileArg(b.path("tools/resident-live.py"));
+    live_resident.addFileArg(executable.getEmittedBin());
+    live_resident.setCwd(b.path("."));
+    live_resident.has_side_effects = true;
+    b.step("resident-live", "Prove all capabilities in an explicit isolated session")
+        .dependOn(&live_resident.step);
+
     // The standalone wallpaper-catalog diagnostic is maintained Zig too.
     // Exercise its source-local tests without making it an installed product.
     const wallpaper_catalog_tests = b.addTest(.{

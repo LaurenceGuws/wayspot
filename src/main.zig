@@ -13,12 +13,13 @@ const picker = @import("picker/root.zig");
 const sdl = @import("picker/view.zig");
 const Video = @import("ui/video.zig");
 const wallpaper = @import("wallpaper/wayland.zig");
+const resident = @import("resident.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     var argument_iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer argument_iterator.deinit();
     std.debug.assert(argument_iterator.skip());
-    var arguments: [cmd.argument_capacity][]const u8 = undefined;
+    var arguments: [cmd.argument_capacity + 1][]const u8 = undefined;
     var argument_count: usize = 0;
     while (argument_iterator.next()) |argument| {
         if (argument_count == arguments.len) return error.TooManyArguments;
@@ -27,10 +28,24 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const argv = arguments[0..argument_count];
+    if (argument_count > 0 and std.mem.eql(u8, argv[0], "--launch-plan")) {
+        try launch.runPlan(init.io, argv[1..]);
+        return 0;
+    }
+    if (argument_count > cmd.argument_capacity) return 2;
+    if (argument_count > 0 and std.mem.eql(u8, argv[0], "resident")) {
+        if (argument_count != 2) return 2;
+        if (std.mem.eql(u8, argv[1], "status")) try resident.request(init, .status) else try resident.run(init, argv[1]);
+        return 0;
+    }
+    if (argument_count > 0 and std.mem.eql(u8, argv[0], "picker")) {
+        if (argument_count == 1) try resident.request(init, .summon) else if (argument_count == 2 and std.mem.eql(u8, argv[1], "dismiss")) try resident.request(init, .dismiss) else return 2;
+        return 0;
+    }
     if (argument_count > 0) {
         if (std.mem.eql(u8, argv[0], "tray")) {
             if (argument_count != 1) return 2;
-            try tray_watcher.run();
+            try tray_watcher.run(init.io);
             return 0;
         }
         if (cmd.resolveCompletion(argv) catch return 2) |meaning| {
@@ -167,6 +182,7 @@ fn perform(
         .wallpaper => |wallpaper_command| switch (wallpaper_command) {
             .run => |root| try runWallpaper(init, root),
             .rotate => {
+                if (resident.request(init, .rotate)) |_| return 0 else |err| if (err != error.ResidentUnavailable) return err;
                 const identifier = try wallpaper.sessionIdentifier(
                     init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
                     init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,

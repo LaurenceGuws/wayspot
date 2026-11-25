@@ -2308,6 +2308,7 @@ pub const Service = struct {
     video: *Video,
     dbus_owner: Dbus = .{},
     owns_history: bool = false,
+    retry_at: u64 = 0,
     pending: Pending,
     ui: Ui = .{},
 
@@ -2355,6 +2356,33 @@ pub const Service = struct {
         if (self.owns_history) try self.owner.flush();
     }
 
+    /// Advance connection recovery and intake without waiting for traffic.
+    pub fn tick(self: *Service, now: u64) !bool {
+        if (self.dbus_owner.connection == null) {
+            if (now < self.retry_at) return false;
+            self.connect() catch |err| {
+                const delay = reconnectWait(err) orelse return err;
+                self.retry_at = now + @as(u64, @intCast(delay));
+                return false;
+            };
+        }
+        return self.advance() catch |err| {
+            const delay = reconnectWait(err) orelse return err;
+            try self.disconnect();
+            self.retry_at = now + @as(u64, @intCast(delay));
+            return false;
+        };
+    }
+
+    pub fn wake(self: *const Service) ?u64 {
+        if (self.dbus_owner.connection == null) return self.retry_at;
+        return self.deadline();
+    }
+
+    pub fn visible(self: *const Service) bool {
+        return self.ui.banner.window != null;
+    }
+
     pub fn deadline(self: *const Service) ?u64 {
         return if (self.ui.visible != null) self.ui.state.deadline else null;
     }
@@ -2373,12 +2401,22 @@ pub const Service = struct {
             self.bannerFailed(err);
             return;
         };
-        if (closed) |value| try self.complete(value);
+        if (closed) |value| self.complete(value) catch |err| try self.recoverTurn(err);
     }
 
     pub fn expire(self: *Service, now: u64) !void {
         if (self.ui.banner.layer.closed) self.bannerFailed(error.LayerClosed);
-        if (self.ui.expired(now)) |closed| try self.complete(closed);
+        if (self.ui.expired(now)) |closed| self.complete(closed) catch |err| try self.recoverTurn(err);
+    }
+
+    fn recoverTurn(self: *Service, err: anyerror) !void {
+        const delay = reconnectWait(err) orelse return err;
+        try self.disconnect();
+        self.retry_at = nowMilliseconds(self.owner.io) + @as(u64, @intCast(delay));
+    }
+
+    pub fn displayLost(self: *Service) void {
+        self.bannerFailed(error.SdlDisplayLost);
     }
 
     fn bannerFailed(self: *Service, err: anyerror) void {
@@ -2522,32 +2560,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, ho
 }
 
 fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
-    var retry_at: u64 = 0;
     while (true) {
         var stopping = [_]std.posix.pollfd{.{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&stopping, 0) != 0) {
             try Stop.consume(service.owner.io, stop_fd);
             return;
         }
-        var more = false;
-        const now = nowMilliseconds(service.owner.io);
-        if (service.dbus_owner.connection == null and now >= retry_at) {
-            service.connect() catch |err| {
-                const delay = reconnectWait(err) orelse return err;
-                retry_at = now + @as(u64, @intCast(delay));
-            };
+        const more_bus = try service.tick(nowMilliseconds(service.owner.io));
+        var count: usize = 0;
+        while (service.video.users != 0 and count < intake_batch_max) : (count += 1) {
+            var input: sdl.SDL_Event = undefined;
+            if (!sdl.SDL_PollEvent(&input)) break;
+            try service.handleEvent(&input);
         }
-        if (service.dbus_owner.connection != null) {
-            more = turn(service) catch |err| blk: {
-                const delay = reconnectWait(err) orelse return err;
-                try service.disconnect();
-                retry_at = nowMilliseconds(service.owner.io) + @as(u64, @intCast(delay));
-                break :blk false;
-            };
-        }
-        if (more) continue;
+        try service.expire(nowMilliseconds(service.owner.io));
+        if (more_bus or count == intake_batch_max or (service.video.users != 0 and sdl.SDL_PollEvent(null))) continue;
         const current = nowMilliseconds(service.owner.io);
-        const deadline = if (service.dbus_owner.connection == null) retry_at else service.deadline();
+        const deadline = service.wake();
         var fds = [_]std.posix.pollfd{
             .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = try service.fd(), .events = std.posix.POLL.IN, .revents = 0 },
@@ -2558,22 +2587,8 @@ fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
             try Stop.consume(service.owner.io, stop_fd);
             return;
         }
-        if (fds[2].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) {
-            service.bannerFailed(error.SdlDisplayLost);
-        }
+        if (fds[2].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) service.displayLost();
     }
-}
-
-fn turn(service: *Service) !bool {
-    const more_bus = try service.advance();
-    var count: usize = 0;
-    while (service.video.users != 0 and count < intake_batch_max) : (count += 1) {
-        var input: sdl.SDL_Event = undefined;
-        if (!sdl.SDL_PollEvent(&input)) break;
-        try service.handleEvent(&input);
-    }
-    try service.expire(nowMilliseconds(service.owner.io));
-    return more_bus or count == intake_batch_max;
 }
 
 // One private bounded session-bus connection.

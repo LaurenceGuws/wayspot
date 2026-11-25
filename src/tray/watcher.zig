@@ -2,6 +2,7 @@
 //! The UI host opens on demand; application registration must outlive the picker.
 const std = @import("std");
 const dbus = @import("dbus_c");
+const Stop = @import("../stop.zig");
 
 pub const max_items = 12;
 const max_name = 160;
@@ -13,7 +14,6 @@ const kde_name: [*:0]const u8 = "org.kde.StatusNotifierWatcher";
 const fd_name: [*:0]const u8 = "org.freedesktop.StatusNotifierWatcher";
 const properties_interface: [*:0]const u8 = "org.freedesktop.DBus.Properties";
 const introspect_interface: [*:0]const u8 = "org.freedesktop.DBus.Introspectable";
-var stopped: std.atomic.Value(bool) = .init(false);
 
 /// Unique DBus owner + item service/path. Never retain unbounded external text.
 pub const Item = struct {
@@ -102,11 +102,11 @@ pub const State = struct {
 };
 
 /// Sole resident owns a private bus connection, item registrations and replies.
-const Watcher = struct {
+pub const Watcher = struct {
     connection: ?*dbus.DBusConnection = null,
     state: State = .{},
 
-    fn open(self: *Watcher) !void {
+    pub fn open(self: *Watcher) !void {
         self.connection = dbus.dbus_bus_get_private(dbus.DBUS_BUS_SESSION, null) orelse
             return error.TrayBusUnavailable;
         errdefer self.close();
@@ -122,7 +122,7 @@ const Watcher = struct {
         dbus.dbus_connection_flush(conn);
     }
 
-    fn close(self: *Watcher) void {
+    pub fn close(self: *Watcher) void {
         if (self.connection) |conn| {
             dbus.dbus_connection_close(conn);
             dbus.dbus_connection_unref(conn);
@@ -131,16 +131,26 @@ const Watcher = struct {
         self.state = .{};
     }
 
-    fn serve(self: *Watcher) !void {
+    pub fn fd(self: *const Watcher) !std.posix.fd_t {
+        const conn = self.connection orelse return -1;
+        var value: c_int = -1;
+        if (dbus.dbus_connection_get_unix_fd(conn, &value) == 0 or value < 0) return error.TrayBusSocketUnavailable;
+        return value;
+    }
+
+    pub fn count(self: *const Watcher) usize {
+        return self.state.count;
+    }
+
+    pub fn advance(self: *Watcher) !bool {
         const conn = self.connection orelse return error.TrayBusUnavailable;
-        while (!stopped.load(.acquire)) {
-            if (dbus.dbus_connection_read_write(conn, 250) == 0) return error.TrayBusDisconnected;
-            for (0..64) |_| {
-                const message = dbus.dbus_connection_pop_message(conn) orelse break;
-                defer dbus.dbus_message_unref(message);
-                try self.dispatch(message);
-            }
+        if (dbus.dbus_connection_read_write(conn, 0) == 0) return error.TrayBusDisconnected;
+        for (0..64) |_| {
+            const message = dbus.dbus_connection_pop_message(conn) orelse return false;
+            defer dbus.dbus_message_unref(message);
+            try self.dispatch(message);
         }
+        return true;
     }
 
     fn dispatch(self: *Watcher, message: *dbus.DBusMessage) !void {
@@ -360,7 +370,11 @@ const Watcher = struct {
     fn send(self: *Watcher, message: *dbus.DBusMessage) !void {
         const conn = self.connection orelse return error.TrayBusDisconnected;
         if (dbus.dbus_connection_send(conn, message, null) == 0) return error.OutOfMemory;
-        dbus.dbus_connection_flush(conn);
+        for (0..8) |_| {
+            if (dbus.dbus_connection_has_messages_to_send(conn) == 0) return;
+            if (dbus.dbus_connection_read_write(conn, 25) == 0) return error.TrayBusDisconnected;
+        }
+        return error.TraySendTimedOut;
     }
 };
 
@@ -407,28 +421,25 @@ fn senderOwnsRegistration(conn: *dbus.DBusConnection, registration: []const u8, 
     return std.mem.eql(u8, stringArg(&result), sender);
 }
 
-fn signalStop(_: std.posix.SIG) callconv(.c) void {
-    stopped.store(true, .release);
-}
-
-/// Own one cheap D-Bus watcher; no SDL window, icon cache or GPU context.
-pub fn run() !void {
-    stopped.store(false, .release);
-    const action: std.posix.Sigaction = .{
-        .handler = .{ .handler = signalStop },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    var previous_interrupt: std.posix.Sigaction = undefined;
-    var previous_terminate: std.posix.Sigaction = undefined;
-    std.posix.sigaction(.INT, &action, &previous_interrupt);
-    defer std.posix.sigaction(.INT, &previous_interrupt, null);
-    std.posix.sigaction(.TERM, &action, &previous_terminate);
-    defer std.posix.sigaction(.TERM, &previous_terminate, null);
+/// Standalone compatibility entrypoint; the resident drives the same turns.
+pub fn run(io: std.Io) !void {
+    const stop = try Stop.open();
+    defer stop.close();
     var watcher: Watcher = .{};
     try watcher.open();
     defer watcher.close();
-    try watcher.serve();
+    while (true) {
+        const more = try watcher.advance();
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = stop.fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = try watcher.fd(), .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        _ = try std.posix.poll(&fds, if (more) 0 else -1);
+        if (fds[0].revents != 0) {
+            try Stop.consume(io, stop.fd);
+            return;
+        }
+    }
 }
 
 test "item registrations retain only checked owner/service/path and de-duplicate" {

@@ -21,10 +21,10 @@ Three constraints shape the project.
 
 ### Fast interaction
 
-The default `wayspot` invocation is a fresh process. There is no resident
-launcher daemon or summon IPC path. SDL is fast enough to create the picker on
-demand, so Wayspot keeps the shortest path instead of maintaining machinery to
-hide startup cost.
+The default `wayspot` invocation remains a direct fresh-process compatibility
+path. In a session using the unified resident, `wayspot picker` summons the
+picker through a bounded command socket. Both paths discover applications fresh
+and initialize graphical resources on demand.
 
 The first useful frame is more important than decoration. Application icons are
 resolved and decoded just in time for visible rows after presentation rather
@@ -57,6 +57,51 @@ Replacing a heavyweight desktop utility with a tiny Zig process is a feature,
 not just an implementation detail.
 
 ## Current tools
+
+### Unified resident
+
+Start one foreground process as a compositor-owned session child, with an
+explicit JSON configuration file:
+
+```json
+{
+  "picker": true,
+  "notifications": true,
+  "tray": true,
+  "wallpaper": "/absolute/path/to/wallpapers"
+}
+```
+
+```bash
+wayspot resident /absolute/path/to/wayspot.json
+wayspot resident status
+wayspot picker
+wayspot picker dismiss
+wayspot wallpaper rotate
+```
+
+The first three capabilities default to enabled; set any to `false` to disable
+it. Wallpaper defaults to `null` (disabled) and otherwise requires an absolute
+image-directory path. Configuration is read at startup; unknown fields are
+rejected. Disabling tray also disables picker tray discovery. A hidden picker
+retains no application catalogue, window, renderer or tray textures. SDL is
+initialized on the first graphical surface and retired on the last. Wallpaper
+and D-Bus owners advance on their own readiness or deadlines; the only
+application-owned worker is the bounded visible-picker tray fetcher.
+
+Status reports the resident PID, enabled capabilities and currently owned
+surfaces. Summon and dismiss are idempotent; disabled operations refuse with an
+error. Rotation returns after publication requests are flushed, not after a
+physical frame is observed. The session-scoped, same-UID command endpoint
+refuses a second resident. Do not run standalone owners of enabled capabilities
+alongside it; their existing D-Bus names and wallpaper identity prevent
+competing ownership. Standalone commands remain available for migration.
+
+The opt-in `zig build resident-live` gate uses explicit source-built
+`SNOWMAN_COMPOSITOR` and `SNOWMAN_CLI` paths, `WAYSPOT_TEST_SCRATCH` and
+`WAYSPOT_PROOF_DIR` directories, and optionally `WAYSPOT_BASELINE`. It owns a
+private D-Bus session and two headless outputs; the fixture requires Python
+with dbus-python and PyGObject, gdbus, grim, and a matching Snowman build.
 
 ### Application picker
 
@@ -294,9 +339,9 @@ The current implementation came from deliberately cutting that shape back. The
 lesson was not that Wayspot must remain tiny at any cost. It was that complexity
 has to buy something visible to the person using the desktop. If rediscovering
 current reality is already fast enough, persistent indexes are a liability. If
-SDL starts fast enough, a launcher daemon is a liability. If a resident utility
-is cheap and pleasant, it can quietly disappear into the desktop and stop
-asking for attention.
+SDL starts fast enough, an extra launcher daemon is a liability. Sharing the
+already-required desktop utility resident is different: its ownership must
+remain simpler and its cost measured.
 
 ## License
 

@@ -85,6 +85,10 @@ const Source = struct {
     }
 
     pub fn openRotation(source: *Source, signature: []const u8) !void {
+        try source.bindRotation(signature, true);
+    }
+
+    fn bindRotation(source: *Source, signature: []const u8, listen: bool) !void {
         std.debug.assert(source.rotate_listener < 0 and source.rotate_client < 0);
         const address = try abstractAddress(signature);
         const result = std.posix.system.socket(
@@ -102,7 +106,7 @@ const Source = struct {
             .ADDRINUSE => return error.RotationNameInUse,
             else => return error.RotationSocketBindFailed,
         }
-        if (std.posix.errno(std.posix.system.listen(fd, 4)) != .SUCCESS) {
+        if (listen and std.posix.errno(std.posix.system.listen(fd, 4)) != .SUCCESS) {
             return error.RotationSocketListenFailed;
         }
         source.rotate_listener = fd;
@@ -1009,66 +1013,143 @@ fn flush(source: *Source, connection: *wl.wl_display, stop_fd: std.posix.fd_t) !
     }
 }
 
-pub fn run(init: std.process.Init, root_path: []const u8) !void {
-    var catalog = try discoverCatalog(init.io, init.gpa, root_path);
-    defer catalog.deinit();
-    const signature = try sessionIdentifier(init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing, init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing);
-    var source: Source = .{ .io = init.io };
-    try source.openRotation(&signature);
-    defer source.closeRotation();
-    const stop = try Stop.open();
-    defer stop.close();
-    var first = try wallpaper.choose(&source, init.gpa, &catalog);
-    first.image.deinit(init.gpa);
-    var selected = first.encoded;
-    defer selected.deinit(init.gpa);
-    catalog.published = first.index;
-    var schedule: wallpaper.Schedule = .{};
-    // Recover the selected endpoint on transport loss. A protocol fault is
-    // not a recoverable disconnect. Session teardown stops this process.
-    while (true) {
-        var display: Display = .{};
-        const result = result: {
-            display.connect() catch |err| break :result err;
-            break :result serve(&display, &source, init.gpa, &catalog, &selected, &schedule, stop.fd);
+/// Stable wallpaper owner. No nested blocking event loop in the resident.
+pub const Service = struct {
+    allocator: std.mem.Allocator,
+    source: Source,
+    catalog: wallpaper.Catalog,
+    selected: wallpaper.EncodedImage,
+    schedule: wallpaper.Schedule = .{},
+    display: Display = .{},
+    direct: bool = false,
+    request_deadline: ?u64 = null,
+    retry_at: ?u64 = null,
+    reconnect_at: u64 = 0,
+    write_pending: bool = false,
+    rotation_result: ?bool = null,
+
+    pub fn init(init_process: std.process.Init, root_path: []const u8) !Service {
+        var catalog = try discoverCatalog(init_process.io, init_process.gpa, root_path);
+        errdefer catalog.deinit();
+        var source: Source = .{ .io = init_process.io };
+        var first = try wallpaper.choose(&source, init_process.gpa, &catalog);
+        first.image.deinit(init_process.gpa);
+        catalog.published = first.index;
+        return .{ .allocator = init_process.gpa, .source = source, .catalog = catalog, .selected = first.encoded };
+    }
+
+    pub fn deinit(self: *Service) void {
+        self.display.deinit();
+        self.selected.deinit(self.allocator);
+        self.catalog.deinit();
+        self.source.closeRotation();
+    }
+
+    /// Reserve the old standalone identity without opening another listener.
+    /// A legacy wallpaper process must not compete with a resident surface owner.
+    pub fn reserveStandalone(self: *Service, identity: []const u8) !void {
+        try self.source.bindRotation(identity, false);
+    }
+
+    pub fn request(self: *Service) !void {
+        if (self.direct or self.rotation_result != null) return error.RotationBusy;
+        if (self.display.connection == null) return error.WallpaperResidentUnavailable;
+        self.direct = true;
+        self.request_deadline = self.source.now() + 2000;
+        for (&self.display.records) |*output| {
+            output.suspended = false;
+            output.reopen_at = null;
+        }
+    }
+
+    pub fn takeResult(self: *Service) ?bool {
+        const value = self.rotation_result;
+        self.rotation_result = null;
+        return value;
+    }
+
+    pub fn count(self: *const Service) usize {
+        return self.display.publishedCount();
+    }
+
+    pub fn pollFd(self: *const Service) std.posix.pollfd {
+        return .{
+            .fd = if (self.display.connection) |connection| wl.wl_display_get_fd(connection) else -1,
+            .events = std.posix.POLL.IN | (if (self.write_pending) @as(i16, std.posix.POLL.OUT) else 0),
+            .revents = 0,
         };
-        display.deinit();
-        result catch |err| switch (err) {
-            error.Stopped => return,
+    }
+
+    pub fn wake(self: *const Service, now: u64) ?u64 {
+        if (self.display.connection == null) return self.reconnect_at -| now;
+        var timeout = self.schedule.wake(now, self.display.allReady());
+        for ([_]?u64{ self.request_deadline, self.retry_at }) |deadline| if (deadline) |end| {
+            timeout = if (timeout) |old| @min(old, end -| now) else end -| now;
+        };
+        if (self.display.roleWake(now)) |delay| timeout = if (timeout) |old| @min(old, delay) else delay;
+        return timeout;
+    }
+
+    pub fn advance(self: *Service, stop_fd: std.posix.fd_t) !void {
+        if (self.display.connection == null) {
+            if (self.source.now() < self.reconnect_at) return;
+            self.display.connect() catch |err| return self.recover(err);
+        }
+        self.turn(stop_fd) catch |err| return self.recover(err);
+    }
+
+    fn recover(self: *Service, err: anyerror) !void {
+        switch (err) {
             error.WaylandDisplayLost, error.WaylandConnectFailed => {
-                source.replyRotation(false);
+                self.display.deinit();
+                if (self.direct) self.rotation_result = false;
+                self.direct = false;
+                self.request_deadline = null;
+                self.retry_at = null;
+                self.write_pending = false;
+                self.reconnect_at = self.source.now() + 1000;
                 std.log.warn("wallpaper connection unavailable: {s}", .{@errorName(err)});
-                const ready = try wait(&source, null, stop.fd, 1000);
-                if (ready.stop) return;
-                if (ready.rotate) {
-                    _ = source.receiveRotation() catch false;
-                    source.replyRotation(false);
-                }
-                continue;
             },
             else => return err,
-        };
-        return;
+        }
     }
-}
 
-fn serve(display: *Display, source: *Source, allocator: std.mem.Allocator, catalog: *wallpaper.Catalog, selected: *wallpaper.EncodedImage, schedule: *wallpaper.Schedule, stop_fd: std.posix.fd_t) !void {
-    var direct = false;
-    var request_deadline: ?u64 = null;
-    var retry_at: ?u64 = null;
-    while (true) {
+    fn turn(self: *Service, stop_fd: std.posix.fd_t) !void {
+        const display = &self.display;
+        const source = &self.source;
+        const allocator = self.allocator;
+        const catalog = &self.catalog;
+        const selected = &self.selected;
+        const schedule = &self.schedule;
+        try display.dispatch();
+        // Only the display fd is read here. The common loop owns the command
+        // socket and never competes with libwayland for event dispatch.
+        const connection = display.connection.?;
+        if (wl.wl_display_prepare_read(connection) == 0) {
+            var descriptor = [_]std.posix.pollfd{.{ .fd = wl.wl_display_get_fd(connection), .events = std.posix.POLL.IN, .revents = 0 }};
+            _ = std.posix.poll(&descriptor, 0) catch |err| {
+                wl.wl_display_cancel_read(connection);
+                return err;
+            };
+            if (descriptor[0].revents & std.posix.POLL.IN != 0) {
+                if (wl.wl_display_read_events(connection) < 0) return displayError(connection);
+            } else {
+                wl.wl_display_cancel_read(connection);
+                if (descriptor[0].revents & poll_failure != 0) return displayError(connection);
+            }
+        }
         try display.dispatch();
         const now = source.now();
         try display.ensureRoles(now);
-        if (request_deadline) |end| {
-            if (now >= end or (direct and display.ready and display.count() == 0)) {
-                source.replyRotation(false);
-                direct = false;
-                request_deadline = null;
+        if (self.request_deadline) |end| {
+            if (now >= end or (self.direct and display.ready and display.count() == 0)) {
+                self.rotation_result = false;
+                self.direct = false;
+                self.request_deadline = null;
             }
         }
         // A direct request may expedite recovery of a closed background role.
-        if (direct or schedule.due(now, display.allReady())) {
+        if (self.direct or schedule.due(now, display.allReady())) {
             if (display.allReady()) {
                 const success = rotate(display, source, allocator, catalog, selected, stop_fd) catch |err| switch (err) {
                     error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
@@ -1077,20 +1158,20 @@ fn serve(display: *Display, source: *Source, allocator: std.mem.Allocator, catal
                         break :blk false;
                     },
                 };
-                try schedule.attempted(source.now(), direct, success);
-                if (direct) {
-                    source.replyRotation(success);
-                    direct = false;
-                    request_deadline = null;
+                try schedule.attempted(source.now(), self.direct, success);
+                if (self.direct) {
+                    self.rotation_result = success;
+                    self.direct = false;
+                    self.request_deadline = null;
                 }
             }
         }
-        if (retry_at == null or now >= retry_at.?) {
-            retry_at = null;
+        if (self.retry_at == null or now >= self.retry_at.?) {
+            self.retry_at = null;
             const pending = display.plan(false) catch |err| {
                 std.log.warn("wallpaper geometry refused: {s}", .{@errorName(err)});
-                retry_at = now + 1000;
-                continue;
+                self.retry_at = now + 1000;
+                return;
             };
             if (pending.count != 0) {
                 const result = result: {
@@ -1102,41 +1183,78 @@ fn serve(display: *Display, source: *Source, allocator: std.mem.Allocator, catal
                     error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
                     else => {
                         std.log.warn("wallpaper publication refused: {s}", .{@errorName(err)});
-                        retry_at = source.now() + 1000;
+                        self.retry_at = source.now() + 1000;
                     },
                 };
-                if (retry_at == null and schedule.deadline == null) try schedule.advance(source.now());
+                if (self.retry_at == null and schedule.deadline == null) try schedule.advance(source.now());
             }
         }
-        const current = source.now();
-        var timeout = schedule.wake(current, display.allReady());
-        for ([_]?u64{ request_deadline, retry_at }) |deadline| if (deadline) |end| {
-            timeout = if (timeout) |old| @min(old, end -| current) else end -| current;
+
+        const sent = wl.wl_display_flush(connection);
+        self.write_pending = sent < 0;
+        if (sent < 0 and std.posix.errno(sent) != .AGAIN) return displayError(connection);
+    }
+};
+
+pub fn run(init_process: std.process.Init, root_path: []const u8) !void {
+    const stop = try Stop.open();
+    defer stop.close();
+    var service = try Service.init(init_process, root_path);
+    defer service.deinit();
+    const signature = try sessionIdentifier(init_process.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing, init_process.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing);
+    try service.source.openRotation(&signature);
+    var partial_deadline: ?u64 = null;
+    while (true) {
+        service.advance(stop.fd) catch |err| switch (err) {
+            error.Stopped => return,
+            else => return err,
         };
-        if (display.roleWake(current)) |delay| timeout = if (timeout) |old| @min(old, delay) else delay;
-        const ready = try wait(source, display.connection, stop_fd, timeout);
-        if (ready.stop) return error.Stopped;
-        if (ready.rotate) {
-            if (direct) {
-                source.rejectBusy();
-                if (ready.client) {
-                    source.replyRotation(false);
-                    direct = false;
-                    request_deadline = null;
+        if (service.takeResult()) |success| {
+            service.source.replyRotation(success);
+            partial_deadline = null;
+        }
+        const now = service.source.now();
+        if (partial_deadline) |end| if (!service.direct and now >= end) {
+            service.source.replyRotation(false);
+            partial_deadline = null;
+        };
+        var timeout = service.wake(now);
+        if (partial_deadline) |end| if (!service.direct) {
+            timeout = if (timeout) |old| @min(old, end -| now) else end -| now;
+        };
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = stop.fd, .events = std.posix.POLL.IN, .revents = 0 },
+            service.pollFd(),
+            .{ .fd = service.source.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = service.source.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        _ = try std.posix.poll(&fds, if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1);
+        if (fds[0].revents != 0) {
+            try Stop.consume(init_process.io, stop.fd);
+            return;
+        }
+        if (fds[2].revents & poll_failure != 0) return error.RotationListenerLost;
+        if (fds[2].revents != 0 or fds[3].revents != 0) {
+            if (service.direct) {
+                if (fds[2].revents != 0) service.source.rejectBusy();
+                if (fds[3].revents != 0) {
+                    service.source.replyRotation(false);
+                    service.direct = false;
+                    service.request_deadline = null;
+                    partial_deadline = null;
                 }
             } else {
-                direct = source.receiveRotation() catch |err| blk: {
+                const complete = service.source.receiveRotation() catch |err| blk: {
                     std.log.warn("wallpaper rotation request refused: {s}", .{@errorName(err)});
-                    source.replyRotation(false);
+                    service.source.replyRotation(false);
                     break :blk false;
                 };
-                if (source.rotate_client < 0) {
-                    request_deadline = null;
-                } else if (request_deadline == null) request_deadline = source.now() + 2000;
-                if (direct) for (&display.records) |*output| {
-                    output.suspended = false;
-                    output.reopen_at = null;
+                if (service.source.rotate_client >= 0 and partial_deadline == null) partial_deadline = service.source.now() + 2000;
+                if (complete) service.request() catch {
+                    service.source.replyRotation(false);
+                    partial_deadline = null;
                 };
+                if (service.source.rotate_client < 0) partial_deadline = null;
             }
         }
     }

@@ -5,6 +5,8 @@ test {
     _ = @import("cli.zig");
     _ = @import("picker/clock.zig");
     _ = @import("cmd.zig");
+    _ = @import("control.zig");
+    _ = @import("resident.zig");
     _ = @import("apps/desktop_files.zig");
     _ = @import("picker/icon.zig");
     _ = @import("picker/image.zig");

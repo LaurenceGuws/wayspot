@@ -7,6 +7,9 @@ const cmd = @import("cmd.zig");
 pub const help =
     \\usage:
     \\  wayspot
+    \\  wayspot resident CONFIG
+    \\  wayspot resident status
+    \\  wayspot picker [dismiss]
     \\  wayspot tray
     \\  wayspot wallpaper ROOT
     \\  wayspot wallpaper rotate
@@ -66,6 +69,14 @@ pub fn writeBash(output: anytype) !void {
         \\            mapfile -t directories < <(compgen -d -- "$current")
         \\            COMPREPLY+=("${directories[@]}")
         \\            compopt -o filenames 2>/dev/null || true
+        \\            ;;
+        \\        resident)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'status' -- "$current")
+        \\            ;;
+        \\        picker)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'dismiss' -- "$current")
         \\            ;;
         \\    esac
         \\}
@@ -142,7 +153,7 @@ test "Bash definition uses current Cmd words without exposing an engine command"
         \\    local current=${COMP_WORDS[COMP_CWORD]}
         \\    local -a directories
         \\    if (( COMP_CWORD == 1 )); then
-        \\        mapfile -t COMPREPLY < <(compgen -W 'apps notifications wallpaper tray' -- "$current")
+        \\        mapfile -t COMPREPLY < <(compgen -W 'apps notifications wallpaper tray resident picker' -- "$current")
         \\        return
         \\    fi
         \\    case ${COMP_WORDS[1]-} in
@@ -161,6 +172,14 @@ test "Bash definition uses current Cmd words without exposing an engine command"
         \\            mapfile -t directories < <(compgen -d -- "$current")
         \\            COMPREPLY+=("${directories[@]}")
         \\            compopt -o filenames 2>/dev/null || true
+        \\            ;;
+        \\        resident)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'status' -- "$current")
+        \\            ;;
+        \\        picker)
+        \\            (( COMP_CWORD == 2 )) || return 0
+        \\            mapfile -t COMPREPLY < <(compgen -W 'dismiss' -- "$current")
         \\            ;;
         \\    esac
         \\}

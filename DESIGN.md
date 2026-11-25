@@ -15,7 +15,7 @@ picker is therefore the primary product path.
 
 Changes touching startup should preserve these properties:
 
-- a fresh process is the normal picker lifecycle;
+- the direct standalone path and resident summon both discover fresh applications;
 - unrelated modes do not add work before the app picker;
 - application discovery has no dependency on notification or wallpaper state;
 - input is enabled before the picker waits for user interaction;
@@ -25,9 +25,9 @@ Changes touching startup should preserve these properties:
 - queued user input takes priority over decorative background work;
 - startup latency is measured when the critical path changes.
 
-A resident launcher, warm summon protocol, startup cache, or pre-indexer must
-solve a measured problem large enough to justify the lifecycle and invalidation
-cost it introduces. At present, none is required.
+The accepted shared resident avoids a second long-lived launcher owner. Its
+summon endpoint does not justify a startup cache or pre-indexer. Measure both
+summons with no video lease and summons while another surface owns SDL.
 
 ## 2. Rediscover external facts instead of persisting shadows
 
@@ -87,7 +87,7 @@ Wayspot currently contains four product modes:
 1. `apps` - the default application picker and direct CLI app access;
 2. `notifications` - freedesktop notification ownership and retained history;
 3. `wallpaper` - per-monitor background surfaces and rotation;
-4. `tray` - a small windowless StatusNotifierWatcher resident. Icons, menus
+4. `tray` - a small windowless StatusNotifierWatcher capability. Icons, menus
    and user actions live in the on-demand picker, not a persistent panel.
 
 The local clock is part of the picker header, not a separate resident. Tray
@@ -163,12 +163,11 @@ This is a known polish issue, not a reason to invent a DPI framework. Fix it
 when the visual cost is worth the additional implementation, and measure the
 change against the startup path.
 
-## Accepted next runtime
+## 8. Shared resident ownership
 
-The user has accepted consolidating the picker, notifications, wallpaper and
-tray watcher into one individually configurable Zig resident. This supersedes
-the fresh-process-only requirement as the target architecture, not as a claim
-about the current executable. Preserve fresh application discovery and
+The picker, notifications, wallpaper and tray watcher can now share one
+individually configurable Zig resident. This supersedes the fresh-process-only
+requirement; the standalone entrypoints remain for compatibility. Preserve fresh application discovery and
 independent capability lifecycles. Prefer one sequential state owner, native
 readiness and real deadlines; introduce bounded concurrency only for proven
 blocking external work. Picker surfaces and transient resources may be
@@ -180,8 +179,8 @@ and quits on its last. Route window and renderer events to their actual
 window, not the currently active capability. Picker input advances in bounded
 batches with a draw/finish action. Notification D-Bus intake, newest-only
 presentation, history and expiry share one sequential service owner; hidden
-notifications need no video lease or periodic bus polling. Standalone
-entrypoints still drive these same operations until the common loop lands.
+notifications need no video lease or periodic bus polling. Standalone entrypoints drive the same service turns; the combined loop routes
+actual readiness and deadlines, not generic broadcasts to every capability.
 
 Wallpaper now owns one persistent background surface per output on one Wayland
 connection. Replace buffers only for rotation or meaningful geometry changes;
@@ -192,8 +191,22 @@ buffer proxy does not require a release wait. Bound work and retained
 resources, not the lifetime count of valid events. The real Wayland gate
 checks zero publications on unrelated toplevel and layer-shell churn,
 continued surface identity and correct pixels after rotation/fullscreen exit.
-The unified resident remains unimplemented. Reconcile the current README and
-DOMAIN process-lifecycle declarations on real migration acceptance.
+The resident uses one authenticated seqpacket command listener, explicit
+configuration and one primary thread. A legacy wallpaper identity reservation
+prevents a competing standalone publisher. The existing tray fetch worker
+returns completion through an eventfd; its lifetime is bounded by the picker.
+SDL still owns key repeat: pump at most 8ms apart only while keys are held,
+and preserve its 200ms IME fallback while focused without text-input-v3.
+There is no hidden-picker polling. Application selection retires the surface
+before an exact-argv short-lived helper launches the app and exits; the
+resident waits only for the helper and does not retain application children.
+The helper unblocks inherited termination signals before launch.
+
+Private combined acceptance is available through `zig build resident-live`.
+Physical deployment and key-repeat/IME acceptance are separate. Some external
+effects (image decode/scale, native compositor calls, menu calls and launch)
+remain synchronous. Measure responsiveness under those effects before adding
+concurrency. No source/runtime cutover implies physical endurance acceptance.
 
 ## Review questions for future work
 

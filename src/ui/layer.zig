@@ -61,6 +61,7 @@ registry: ?*wl.wl_registry = null,
 manager: ?*wl.zwlr_layer_shell_v1 = null,
 layer: ?*wl.zwlr_layer_surface_v1 = null,
 configured: bool = false,
+text_input_v3: bool = false,
 closed: bool = false,
 width: u32 = 0,
 height: u32 = 0,
@@ -127,7 +128,9 @@ const registry_listener = wl.wl_registry_listener{
 };
 fn onGlobal(data: ?*anyopaque, registry: ?*wl.wl_registry, name: u32, interface: [*c]const u8, version: u32) callconv(.c) void {
     const self: *Self = @ptrCast(@alignCast(data));
-    if (self.manager != null or version < 1 or !std.mem.eql(u8, std.mem.span(interface), "zwlr_layer_shell_v1")) return;
+    const name_bytes = std.mem.span(interface);
+    if (std.mem.eql(u8, name_bytes, "zwp_text_input_manager_v3") and version >= 1) self.text_input_v3 = true;
+    if (self.manager != null or version < 1 or !std.mem.eql(u8, name_bytes, "zwlr_layer_shell_v1")) return;
     // Version 3 permits explicit manager destruction; older versions use
     // the wrapper's local-only proxy cleanup.
     self.manager = @ptrCast(wl.wl_registry_bind(registry, name, wl.wayspot_layer_shell_interface(), @min(version, 3)) orelse return);

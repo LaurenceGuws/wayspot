@@ -187,6 +187,41 @@ pub const Native = struct {
     }
 };
 
+/// A resident cannot abandon direct children as the one-shot picker can.
+/// Run the exact already-validated argv through a short-lived launch helper;
+/// wait only for that helper, never for the desktop application. No shell.
+pub const Detached = struct {
+    io: std.Io,
+
+    pub fn spawn(self: *Detached, argv: []const []const u8, cwd: ?[]const u8) !void {
+        if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
+        var args: [argument_capacity + 2][]const u8 = undefined;
+        args[0] = "/proc/self/exe";
+        args[1] = "--launch-plan";
+        @memcpy(args[2..][0..argv.len], argv);
+        var child = try std.process.spawn(self.io, .{
+            .argv = args[0 .. argv.len + 2],
+            .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .inherit,
+        });
+        if (!(try child.wait(self.io)).success()) return error.DetachedLaunchFailed;
+    }
+};
+
+pub fn runPlan(io: std.Io, argv: []const []const u8) !void {
+    if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
+    // The resident uses signalfd; do not export its blocked termination signals
+    // to unrelated desktop applications.
+    var mask = std.posix.sigemptyset();
+    std.posix.sigaddset(&mask, .INT);
+    std.posix.sigaddset(&mask, .TERM);
+    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &mask, null);
+    var native: Native = .{ .io = io };
+    try native.spawn(argv, null);
+}
+
 /// Starts one complete plan without keeping Wayspot attached to the application.
 pub fn spawn(
     operations: anytype,
