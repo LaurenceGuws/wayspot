@@ -87,7 +87,10 @@ pub const Display = struct {
     pub const Status = enum { discovering, ready, unavailable, failed };
 
     pub fn open(allocator: Allocator, io: std.Io, env: *const std.process.Environ.Map) !*Display {
-        return adopt(allocator, try Connection.connect(allocator, io, env));
+        const display = try adopt(allocator, try Connection.connect(allocator, io, env));
+        errdefer display.destroy();
+        try display.input.rememberComposeLocale(allocator, env);
+        return display;
     }
 
     /// Takes the connection even on failure. Also used by deterministic
@@ -110,8 +113,8 @@ pub const Display = struct {
 
     pub fn destroy(self: *Display) void {
         std.debug.assert(self.surfaces == 0);
+        self.input.deinit(&self.conn);
         if (self.shm) |shm| shm.destroy();
-        self.input.deinit();
         self.conn.deinit();
         self.allocator.destroy(self);
     }
@@ -166,6 +169,7 @@ pub const Display = struct {
                 // A removed bound manager invalidates this display owner;
                 // ordinary output hotplug does not.
                 for (self.globals) |name| if (name == r.name) return error.NativeGlobalRemoved;
+                try self.input.cursor.removeManager(r.name);
                 try self.input.removeSeat(conn, r.name);
                 for (&self.outputs, 0..) |*slot, i| {
                     const output = slot.* orelse continue;
@@ -187,10 +191,12 @@ pub const Display = struct {
             if (global.version < 4) return error.NativeCompositorVersion;
             self.compositor = try registry.bind(session, global.name, wl.Compositor, @min(global.version, 6));
             self.globals[0] = global.name;
+            self.input.cursor.compositor = self.compositor;
         } else if (std.mem.eql(u8, global.interface, "wl_shm") and self.shm == null) {
             const object = try registry.bind(session, global.name, wl.Shm, 1);
             self.shm = try .create(self.allocator, conn, object);
             self.globals[1] = global.name;
+            self.input.cursor.shm = self.shm;
         } else if (std.mem.eql(u8, global.interface, "zwlr_layer_shell_v1") and self.manager == null) {
             self.manager = try registry.bind(session, global.name, zwlr.LayerShellV1, 1);
             self.globals[2] = global.name;
@@ -200,6 +206,10 @@ pub const Display = struct {
         } else if (std.mem.eql(u8, global.interface, "wp_fractional_scale_manager_v1") and self.fractional_manager == null) {
             self.fractional_manager = try registry.bind(session, global.name, wp.FractionalScaleManagerV1, 1);
             self.globals[4] = global.name;
+        } else if (std.mem.eql(u8, global.interface, "zwp_text_input_manager_v3")) {
+            try self.input.bindImeManager(conn, registry, global.name);
+        } else if (std.mem.eql(u8, global.interface, "wp_cursor_shape_manager_v1")) {
+            try self.input.cursor.bindManager(conn, registry, global.name, self.input.pointer);
         } else if (std.mem.eql(u8, global.interface, "wl_seat")) {
             try self.input.bindSeat(conn, registry, global.name, global.version);
         } else if (std.mem.eql(u8, global.interface, "wl_output") and global.version >= 3) {
@@ -335,7 +345,7 @@ pub const Surface = struct {
             },
             .closed => {
                 self.closed = true;
-                self.display.input.forget(@backingInt(self.role));
+                try self.display.input.forget(conn, @backingInt(self.role));
             },
         }
     }
@@ -445,7 +455,9 @@ pub const Surface = struct {
             display.occupied[@backingInt(self.role)] = null;
             display.allocator.destroy(self);
         }
-        display.input.forget(@backingInt(self.role));
+        display.input.forget(conn, @backingInt(self.role)) catch {
+            display.failed = true;
+        };
         if (self.presenter) |presenter| presenter.destroy();
         if (self.layer) |layer| {
             conn.clearListener(layer) catch {};

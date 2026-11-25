@@ -14,6 +14,8 @@ const present = @import("wayland-present");
 const sdl = @import("sdl_c");
 const Painter = @import("text.zig").Painter;
 const Input = native.Input;
+const zwp = @import("wayland-protocols").zwp;
+const xkb = @import("xkb_c");
 
 const endian = @import("builtin").cpu.arch.endian();
 const size = native.Extent{ .width = 64, .height = 32 };
@@ -495,7 +497,7 @@ test "invalid fractional hints and physical extent bounds fail before allocating
 
 // Self-contained XKB map, including modifiers. No host layout or locale
 // participates in the socket transcript.
-const input_keymap = "xkb_keymap { xkb_keycodes { minimum=8; maximum=255; <AC01>=38; <TAB>=23; <LFSH>=50; <LCTL>=37; }; xkb_types { type \"ONE_LEVEL\" { modifiers=None; level_name[Level1]=\"Any\"; }; type \"TWO_LEVEL\" { modifiers=Shift; map[Shift]=Level2; level_name[Level1]=\"Base\"; level_name[Level2]=\"Shift\"; }; }; xkb_compatibility {}; xkb_symbols { key <AC01> { type=\"TWO_LEVEL\", [ a, A ] }; key <TAB> { type=\"ONE_LEVEL\", [ Tab ] }; key <LFSH> { type=\"ONE_LEVEL\", [ Shift_L ] }; key <LCTL> { type=\"ONE_LEVEL\", [ Control_L ] }; modifier_map Shift { <LFSH> }; modifier_map Control { <LCTL> }; }; };\x00";
+const input_keymap = "xkb_keymap { xkb_keycodes { minimum=8; maximum=255; <AC01>=38; <AC02>=39; <TAB>=23; <LFSH>=50; <LCTL>=37; }; xkb_types { type \"ONE_LEVEL\" { modifiers=None; level_name[Level1]=\"Any\"; }; type \"TWO_LEVEL\" { modifiers=Shift; map[Shift]=Level2; level_name[Level1]=\"Base\"; level_name[Level2]=\"Shift\"; }; }; xkb_compatibility {}; xkb_symbols { key <AC01> { type=\"TWO_LEVEL\", [ a, A ] }; key <AC02> { type=\"ONE_LEVEL\", [ dead_acute ] }; key <TAB> { type=\"ONE_LEVEL\", [ Tab ] }; key <LFSH> { type=\"ONE_LEVEL\", [ Shift_L ] }; key <LCTL> { type=\"ONE_LEVEL\", [ Control_L ] }; modifier_map Shift { <LFSH> }; modifier_map Control { <LCTL> }; }; };\x00";
 
 fn seatEvent(f: *Fixture, seat: wl.Seat, name: [:0]const u8) !void {
     try f.event(seat.id, &wl.Seat.interface, 1, &.{.{ .string = name }});
@@ -682,6 +684,228 @@ test "bounded native input queue refuses overflow instead of dropping a release"
     try testing.expectEqual(@as(f64, Input.max_events * 2 - 1), (try nextInput(&f, picker, .motion)).value.motion.x);
     for (0..Input.max_events) |i| try buttonEvent(&f, i % 2 == 0);
     try testing.expectError(error.NativeInputOverflow, buttonEvent(&f, true));
+    try testing.expectEqual(native.Display.Status.failed, f.display.status());
+}
+
+test "repeat follows one monotonic deadline, current modifiers and focus cancellation" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 5, &.{ .{ .int = 25 }, .{ .int = 400 } });
+    try keyboardEnter(&f, picker, &.{});
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try testing.expect(f.display.input.repeatDeadline() == null);
+    try keyEvent(&f, 30, true);
+    const first = f.display.input.repeatDeadline().?;
+    try testing.expect(!try f.display.input.advanceRepeat(first)); // actual input first
+    const pressed = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expect(!pressed.repeated);
+    try testing.expect(!try f.display.input.advanceRepeat(first.subDuration(.fromNanoseconds(1))));
+    try testing.expect(try f.display.input.advanceRepeat(first));
+    const repeated = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expect(repeated.pressed and repeated.repeated and repeated.code == 30);
+    try testing.expectEqualStrings("a", repeated.utf8());
+    try testing.expectEqual(first.addDuration(.fromMilliseconds(40)), f.display.input.repeatDeadline().?);
+    try modifiers(&f, 1);
+    const late = first.addDuration(.fromMilliseconds(1000));
+    try testing.expect(try f.display.input.advanceRepeat(late));
+    try testing.expectEqualStrings("A", (try nextInput(&f, picker, .key)).value.key.utf8());
+    try testing.expect(!try f.display.input.advanceRepeat(late));
+    try testing.expectEqual(late.addDuration(.fromMilliseconds(40)), f.display.input.repeatDeadline().?);
+    try keyEvent(&f, 30, false);
+    _ = try nextInput(&f, picker, .key);
+    try testing.expect(f.display.input.repeatDeadline() == null);
+    try modifiers(&f, 0);
+    try keyEvent(&f, 15, true);
+    _ = try nextInput(&f, picker, .key);
+    try testing.expect(f.display.input.repeatDeadline() == null); // Tab is one shot
+    try keyEvent(&f, 15, false);
+    _ = try nextInput(&f, picker, .key);
+    try keyEvent(&f, 30, true);
+    _ = try nextInput(&f, picker, .key);
+    try testing.expect(f.display.input.repeatDeadline() != null);
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 2, &.{ .{ .uint = 4 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .keyboard_leave);
+    try testing.expect(f.display.input.repeatDeadline() == null);
+    try testing.expect(!try f.display.input.advanceRepeat(late));
+}
+
+test "compose preparation waits for editable keyboard focus" {
+    var f = try Fixture.open();
+    defer f.close();
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("LC_ALL", "");
+    try env.put("LC_CTYPE", "C.UTF-8");
+    try env.put("LANG", "ignored");
+    try f.display.input.rememberComposeLocale(testing.allocator, &env);
+    try testing.expectEqualStrings("C.UTF-8", f.display.input.compose_locale.?);
+    try localInput(&f);
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    try keyboardEnter(&f, banner, &.{});
+    try testing.expect(f.display.input.compose == null and f.display.input.compose_locale != null);
+    try keyboardEnter(&f, picker, &.{});
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try testing.expect(f.display.input.compose_locale == null);
+}
+
+test "local compose produces one UTF8 result and cancels on leave" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    const context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse return error.ComposeFixture;
+    defer xkb.xkb_context_unref(context);
+    const source = "<dead_acute> <a> : \"á\" U00E1\n";
+    const table = xkb.xkb_compose_table_new_from_buffer(context, source.ptr, source.len, "C.UTF-8", xkb.XKB_COMPOSE_FORMAT_TEXT_V1, xkb.XKB_COMPOSE_COMPILE_NO_FLAGS) orelse return error.ComposeFixture;
+    defer xkb.xkb_compose_table_unref(table);
+    f.display.input.compose = xkb.xkb_compose_state_new(table, xkb.XKB_COMPOSE_STATE_NO_FLAGS) orelse return error.ComposeFixture;
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 5, &.{ .{ .int = 25 }, .{ .int = 400 } });
+    try keyboardEnter(&f, picker, &.{});
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try keyEvent(&f, 31, true);
+    const dead = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expect(dead.compose_consumed and dead.text_len == 0 and f.display.input.repeatDeadline() == null);
+    try keyEvent(&f, 31, false);
+    _ = try nextInput(&f, picker, .key);
+    try keyEvent(&f, 30, true);
+    const composed = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqualStrings("á", composed.utf8());
+    try testing.expect(composed.compose_consumed and f.display.input.repeatDeadline() == null);
+    try keyEvent(&f, 30, false);
+    _ = try nextInput(&f, picker, .key);
+    try keyEvent(&f, 31, true);
+    _ = try nextInput(&f, picker, .key);
+    try f.event(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 2, &.{ .{ .uint = 4 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .keyboard_leave);
+    try keyboardEnter(&f, picker, &.{});
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try keyEvent(&f, 30, true);
+    try testing.expectEqualStrings("a", (try nextInput(&f, picker, .key)).value.key.utf8());
+}
+
+test "cursor shape uses enter serial; immutable SHM fallback retains one buffer" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try pointerEnter(&f, picker, 5, 6);
+    _ = try nextInput(&f, picker, .pointer_enter);
+    const cursor = &f.display.input.cursor;
+    const pointer = f.display.input.pointer.?.id;
+    const initial = try f.take();
+    try testing.expectEqual(@as(u32, 1), try initial.word(pointer, 0, 0));
+    try testing.expectEqual(@backingInt(cursor.surface.?.id), try initial.word(pointer, 0, 1));
+    const buffer = cursor.pool.?.buffers.items[0];
+    try testing.expectEqual(@as(usize, 1), cursor.pool.?.count());
+    try testing.expectEqual(@as(u32, 48), buffer.width);
+    try testing.expectEqual(@as(u32, 48), buffer.height);
+    try testing.expectEqual(present.Format.argb8888, buffer.format);
+    try testing.expectEqual(@as(u32, 2), try initial.firstWord(cursor.surface.?.id, 8));
+    const original = try testing.allocator.dupe(u8, buffer.pixels());
+    defer testing.allocator.free(original);
+    // The compositor has not released the cursor, but re-enter does not
+    // allocate or modify its immutable contents.
+    try f.event(pointer, &wl.Pointer.interface, 1, &.{ .{ .uint = 8 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .pointer_leave);
+    try pointerEnter(&f, picker, 8, 9);
+    _ = try nextInput(&f, picker, .pointer_enter);
+    const again = try f.take();
+    try testing.expectEqual(@as(usize, 1), again.count(pointer, 0));
+    try testing.expectEqual(@as(usize, 0), again.count(cursor.surface.?.id, 6));
+    try testing.expectEqualSlices(u8, original, buffer.pixels());
+    try f.global(21, "wp_cursor_shape_manager_v1", 1);
+    _ = try f.take();
+    try f.event(pointer, &wl.Pointer.interface, 1, &.{ .{ .uint = 9 }, .{ .object = picker.surface.?.id } });
+    _ = try nextInput(&f, picker, .pointer_leave);
+    try f.event(pointer, &wl.Pointer.interface, 0, &.{ .{ .uint = 42 }, .{ .object = picker.surface.?.id }, .{ .fixed = .fromInt(5) }, .{ .fixed = .fromInt(6) } });
+    _ = try nextInput(&f, picker, .pointer_enter);
+    const shape = try f.take();
+    try testing.expectEqual(@as(u32, 42), try shape.word(cursor.device.?.id, 1, 0));
+    try testing.expectEqual(@as(u32, 1), try shape.word(cursor.device.?.id, 1, 1));
+    try testing.expectEqual(@as(usize, 0), shape.count(pointer, 0));
+}
+
+test "IME batches apply only on done and do not suppress forwarded keys" {
+    var f = try Fixture.open();
+    defer f.close();
+    try f.global(21, "zwp_text_input_manager_v3", 1);
+    try localInput(&f);
+    var picker: ?*native.Surface = try native.Surface.create(f.display, .picker, size, null);
+    defer if (picker) |s| s.destroy() catch {};
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    const object = f.display.input.ime_object.?.id;
+    try keyboardEnter(&f, picker.?, &.{});
+    _ = try nextInput(&f, picker.?, .keyboard_enter);
+    try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.?.surface.?.id }});
+    const enabled = try f.take();
+    try testing.expectEqual(@as(usize, 1), enabled.count(object, 1));
+    try testing.expectEqual(@as(usize, 1), enabled.count(object, 7));
+    try keyEvent(&f, 30, true);
+    try testing.expectEqualStrings("a", (try nextInput(&f, picker.?, .key)).value.key.utf8());
+    try keyEvent(&f, 30, false);
+    _ = try nextInput(&f, picker.?, .key);
+    try f.event(object, &zwp.TextInputV3.interface, 2, &.{ .{ .string = "漢" }, .{ .int = 3 }, .{ .int = 3 } });
+    try f.event(object, &zwp.TextInputV3.interface, 3, &.{.{ .string = "é" }});
+    try f.event(object, &zwp.TextInputV3.interface, 4, &.{ .{ .uint = 2 }, .{ .uint = 0 } });
+    try testing.expect(f.display.input.pop() == null);
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 0 }});
+    const batch = (try nextInput(&f, picker.?, .ime)).value.ime;
+    try testing.expectEqualStrings("é", batch.commit.slice());
+    try testing.expectEqualStrings("漢", batch.preedit.slice());
+    try testing.expectEqual(@as(i32, 3), batch.cursor_begin);
+    try testing.expectEqual(@as(u32, 2), batch.delete_before);
+    try testing.expect(!batch.serial_matches);
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 1 }});
+    const clear = (try nextInput(&f, picker.?, .ime)).value.ime;
+    try testing.expect(clear.serial_matches and clear.preedit.len == 0 and clear.commit.len == 0 and clear.delete_before == 0);
+    try f.event(object, &zwp.TextInputV3.interface, 1, &.{.{ .object = picker.?.surface.?.id }});
+    _ = try nextInput(&f, picker.?, .ime_cancel);
+    try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = banner.surface.?.id }});
+    try testing.expectEqual(@as(usize, 0), (try f.take()).count(object, 1));
+    try f.event(object, &zwp.TextInputV3.interface, 3, &.{.{ .string = "ignored" }});
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 1 }});
+    try testing.expect(f.display.input.pop() == null);
+    try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.?.surface.?.id }});
+    _ = try f.take();
+    try f.event(object, &zwp.TextInputV3.interface, 3, &.{.{ .string = "retired" }});
+    const old = picker.?;
+    picker = null;
+    try old.destroy();
+    const retired = try f.take();
+    try testing.expectEqual(@as(usize, 1), retired.count(object, 2));
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 2 }});
+    try testing.expect(f.display.input.pop() == null);
+}
+
+test "IME rejects a preedit cursor in the middle of a UTF8 code point" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    try f.global(21, "zwp_text_input_manager_v3", 1);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    const object = f.display.input.ime_object.?.id;
+    try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.surface.?.id }});
+    try testing.expectError(error.NativeImeCursor, f.event(object, &zwp.TextInputV3.interface, 2, &.{ .{ .string = "é" }, .{ .int = 1 }, .{ .int = 1 } }));
     try testing.expectEqual(native.Display.Status.failed, f.display.status());
 }
 
@@ -1003,6 +1227,46 @@ fn awaitInput(display: *native.Display, surface: wire.ObjectId, tag: std.meta.Ta
     }
 }
 
+/// The private actor places the cursor on a flat picker-color region. A
+/// capture with the cursor must contain the fallback arrow's light interior
+/// and dark outline; a capture without it must contain only the picker color.
+fn expectCursorPixels(env: *const std.process.Environ.Map, enabled: bool) !void {
+    const args: []const []const u8 = if (enabled) &.{ "/usr/bin/grim", "-c", "-o", "HEADLESS-1", "-s", "1.75", "-t", "ppm", "-" } else &.{ "/usr/bin/grim", "-o", "HEADLESS-1", "-s", "1.75", "-t", "ppm", "-" };
+    const start = std.Io.Clock.awake.now(testing.io);
+    while (start.durationTo(std.Io.Clock.awake.now(testing.io)).toMilliseconds() < 3000) {
+        const result = try std.process.run(testing.allocator, testing.io, .{
+            .argv = args,
+            .environ_map = env,
+            .stdout_limit = .limited(12 * 1024 * 1024),
+            .stderr_limit = .limited(4096),
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+        });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return error.NativeFixtureCapture;
+        const offset = (std.mem.indexOf(u8, result.stdout[0..@min(result.stdout.len, 150)], "\n255\n") orelse return error.NativeFixtureCapture) + 5;
+        var fields = std.mem.tokenizeAny(u8, result.stdout[0..offset], " \r\n\t");
+        try testing.expectEqualStrings("P6", fields.next() orelse "");
+        const width = try std.fmt.parseInt(usize, fields.next() orelse "", 10);
+        const height = try std.fmt.parseInt(usize, fields.next() orelse "", 10);
+        if (width != 2240 or height != 1260 or result.stdout.len - offset != width * height * 3) return error.NativeFixtureSize;
+        const pixels = result.stdout[offset..];
+        var white: usize = 0;
+        var dark: usize = 0;
+        var changed: usize = 0;
+        for (622..675) |y| {
+            for (552..605) |x| {
+                const rgb = pixels[(y * width + x) * 3 ..][0..3];
+                if (!std.mem.eql(u8, rgb, &.{ 20, 110, 60 })) changed += 1;
+                if (rgb[0] > 220 and rgb[1] > 220 and rgb[2] > 220) white += 1;
+                if (rgb[0] < 45 and rgb[1] < 45 and rgb[2] < 45) dark += 1;
+            }
+        }
+        if (if (enabled) white >= 10 and dark >= 10 else changed == 0) return;
+    }
+    return error.NativeCursorPixels;
+}
+
 test "private actual Wayland keyboard and pointer reach the native fractional picker" {
     if (getenv("WAYSPOT_NATIVE_INPUT_TEST") == null) return;
     var env = (try privateEnvironment()) orelse return error.PrivateRuntimeRequired;
@@ -1033,6 +1297,11 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
     while (display.input.pointer_focus != id or @abs(display.input.point.x - 40) > 2 or @abs(display.input.point.y - 260) > 2) try readBefore(display, motion_start);
     try testing.expectApproxEqAbs(@as(f64, 40), display.input.point.x, 2);
     try testing.expectApproxEqAbs(@as(f64, 260), display.input.point.y, 2);
+    try testing.expect(display.input.cursor.surface != null);
+    try barrier(display);
+    try expectCursorPixels(&env, false);
+    try expectCursorPixels(&env, true);
+    std.debug.print("NATIVE_CURSOR_LIVE_PASS immutable fallback arrow, actual cursor-inclusive pixels\n", .{});
     while (display.input.pop()) |_| {}
     try actor.stdin.?.writeStreamingAll(testing.io, "key-and-click\n");
     const press = (try awaitInput(display, id, .key)).value.key;
@@ -1055,7 +1324,7 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
     picker = null;
     try old.destroy();
     try barrier(display);
-    try testing.expect(display.input.keyboard_focus == null and display.input.pointer_focus == null and display.input.count == 0);
+    try testing.expect(display.input.keyboard_focus == null and display.input.pointer_focus == null and display.input.count == 0 and display.input.repeatDeadline() == null);
     try actor.stdin.?.writeStreamingAll(testing.io, "exit\n");
     const term = try actor.wait(testing.io);
     try testing.expect(term == .exited and term.exited == 0);

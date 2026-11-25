@@ -169,8 +169,14 @@ and retire the corresponding keyboard and pointer objects. Keymap FDs are
 owned, read with an exact 1 MiB maximum and closed even on error. XKB state
 uses compositor modifier/group masks and the Wayland keycode offset; inherited
 held keys do not produce presses. Key events carry symbols, modifiers and
-bounded direct UTF-8; repeat facts are retained but not yet scheduled, and
-compose/IME are separate. The pointer uses surface-local logical coordinates;
+bounded direct UTF-8. One optional monotonic repeat deadline belongs to the
+visible event loop. Process real readiness and queued transitions first;
+late wakes emit at most one repeat and schedule from now. Use the current
+modifier state, cap the compositor rate at 100 Hz, never repeat Tab, Escape
+or Enter, and cancel on release, focus loss, keymap/rate change or retirement.
+The locale's XKB compose table is loaded on first editable keyboard focus,
+not for a banner-only connection. Compose consumes its sequence and emits
+one UTF-8 result; focus loss resets it. The pointer uses surface-local logical coordinates;
 matched releases cannot cross focus or role lifetimes. Adjacent motion can
 coalesce, but never across key, button, focus or scroll transitions. Scroll
 frames prefer value120, then discrete detents, then continuous distance (ten
@@ -179,8 +185,25 @@ per frame. The 128-event queue reports overflow rather than dropping a
 transition. Retiring a surface discards its queued input and cancels its
 focus without altering a sibling. The private real-input gate delivers
 native key and pointer events to a 1.75x picker through Snowman's existing
-virtual-input fixture, without initializing SDL video. Cursor presentation,
-repeat, IME/compose and the actual picker action adapter remain separate.
+virtual-input fixture, without initializing SDL video. The cursor uses the
+latest pointer enter serial with cursor-shape v1 when available; otherwise
+one immutable 48x48 ARGB SHM buffer represents a 24x24 logical arrow at 2x.
+It is not repainted or animated, and retirement never waits for its release.
+The real input fixture witnesses cursor-inclusive and cursor-free pixels.
+
+Text-input-v3 binds only the selected seat, enables the editable role on
+text-input focus, and exposes bounded 256-byte preedit/commit strings,
+deletion lengths and validated UTF-8 cursor offsets as a single done batch.
+An unmatched done serial still carries edits but forbids a surrounding-state
+update until a matching serial. Leave and retirement discard pending edits.
+Ordinary compositor-forwarded keys remain authoritative: do not suppress
+all keyboard text just because a text-input manager exists, and do not
+synthesize a key from an IME commit. IME edits cancel repeat and local
+compose. The actual picker must still consume these batches atomically,
+render preedit, and supply surrounding text and cursor geometry. Snowman
+currently lacks the text-input manager, so this protocol boundary has wire
+proof, not end-to-end IME acceptance. Product input integration remains a
+separate gate.
 
 The pinned native Wayland snapshot carries a six-site raw Linux errno fix
 for libc-linked executables, with its retirement criterion in UPSTREAM.md.

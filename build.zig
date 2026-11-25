@@ -144,6 +144,9 @@ pub fn build(b: *std.Build) void {
             layer_xml,
             b.path("protocols/viewporter.xml"),
             native_wayland.namedLazyPath("wayland-protocols").path(b, "staging/fractional-scale/fractional-scale-v1.xml"),
+            native_wayland.namedLazyPath("wayland-protocols").path(b, "unstable/text-input/text-input-unstable-v3.xml"),
+            native_wayland.namedLazyPath("wayland-protocols").path(b, "stable/tablet/tablet-v2.xml"),
+            native_wayland.namedLazyPath("wayland-protocols").path(b, "staging/cursor-shape/cursor-shape-v1.xml"),
         },
     });
     const native_present = @import("wayland").addPresent(b, native_wayland, native_protocols);
@@ -151,7 +154,7 @@ pub fn build(b: *std.Build) void {
     source_tests.root_module.addImport("wayland-protocols", native_protocols);
     source_tests.root_module.addImport("wayland-present", native_present);
     source_tests.root_module.addImport("wayland-wire", native_wayland.module("protocol"));
-    const xkb_header = headers.add("wayspot-xkb.h", "#include <xkbcommon/xkbcommon.h>\n#include <xkbcommon/xkbcommon-names.h>\n");
+    const xkb_header = headers.add("wayspot-xkb.h", "#include <xkbcommon/xkbcommon.h>\n#include <xkbcommon/xkbcommon-names.h>\n#include <xkbcommon/xkbcommon-compose.h>\n");
     const xkb_translate = b.addTranslateC(.{ .root_source_file = xkb_header, .target = target, .optimize = optimize });
     xkb_translate.linkSystemLibrary("xkbcommon", .{});
     source_tests.root_module.addImport("xkb_c", xkb_translate.createModule());

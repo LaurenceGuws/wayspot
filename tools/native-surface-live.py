@@ -144,6 +144,8 @@ try:
             "logical_output": [1280, 720],
         }
         if input_test:
+            assert "NATIVE_CURSOR_LIVE_PASS" in report, "cursor capture not exercised"
+            receipt["actual_cursor_pixels"] = True
             receipt.update(
                 {
                     "actual_wayland_input": True,

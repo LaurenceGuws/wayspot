@@ -1,10 +1,12 @@
 //! One local Wayland seat, with protocol-owned focus and bounded event storage.
-//! No key injection, SDL events, repeat timer or text-input protocol here.
+//! No key injection, SDL events, polling timer or background thread.
 const std = @import("std");
 const linux = std.os.linux;
 const Connection = @import("wayland-client").Connection;
 const wl = @import("wayland-protocols").wl;
 const wire = @import("wayland-wire");
+const Cursor = @import("native_cursor.zig");
+const zwp = @import("wayland-protocols").zwp;
 const xkb = @import("xkb_c");
 const Self = @This();
 
@@ -19,6 +21,8 @@ pub const Key = struct {
     symbol: u32,
     pressed: bool,
     repeatable: bool,
+    repeated: bool = false,
+    compose_consumed: bool = false,
     modifiers: Modifiers,
     text: [64]u8 = @splat(0),
     text_len: u8 = 0,
@@ -27,12 +31,48 @@ pub const Key = struct {
         return self.text[0..self.text_len];
     }
 };
+pub const ImeText = struct {
+    bytes: [256]u8 = undefined,
+    len: u16 = 0,
+
+    pub fn slice(self: *const ImeText) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    fn set(self: *ImeText, text: ?[:0]const u8) !void {
+        const value = text orelse "";
+        if (value.len > self.bytes.len or !std.unicode.utf8ValidateSlice(value)) return error.NativeImeText;
+        @memcpy(self.bytes[0..value.len], value);
+        self.len = @intCast(value.len);
+    }
+
+    fn boundary(self: *const ImeText, offset: i32) bool {
+        if (offset < 0 or offset > self.len) return false;
+        return offset == self.len or self.bytes[@intCast(offset)] & 0xc0 != 0x80;
+    }
+};
+
+/// One text-input-v3 done transaction, not individual string callbacks.
+/// The future picker adapter applies deletion, commit, then preedit; only
+/// serial_matches allows a new surrounding-state update to be sent.
+pub const ImeBatch = struct {
+    preedit: ImeText = .{},
+    commit: ImeText = .{},
+    cursor_begin: i32 = 0,
+    cursor_end: i32 = 0,
+    delete_before: u32 = 0,
+    delete_after: u32 = 0,
+    serial_matches: bool = false,
+};
+
 pub const Event = struct {
     surface: wire.ObjectId,
     value: union(enum) {
         keyboard_enter,
         keyboard_leave,
         key: Key,
+        ime: ImeBatch,
+        ime_cancel,
         pointer_enter: Point,
         pointer_leave,
         motion: Point,
@@ -42,6 +82,7 @@ pub const Event = struct {
 };
 const Seat = struct { global: u32, object: wl.Seat, selected: bool = false, caps: wl.Seat.Capability = .{} };
 const Target = struct { id: wire.ObjectId, keyboard: bool };
+const Repeat = struct { code: u32, deadline: std.Io.Timestamp, interval: std.Io.Duration };
 const Masks = struct { depressed: u32 = 0, latched: u32 = 0, locked: u32 = 0, group: u32 = 0 };
 
 seats: [max_seats]?Seat = @splat(null),
@@ -60,6 +101,17 @@ state: ?*xkb.struct_xkb_state = null,
 masks: Masks = .{},
 repeat_rate: i32 = 0,
 repeat_delay: i32 = 0,
+repeat: ?Repeat = null,
+compose: ?*xkb.struct_xkb_compose_state = null,
+compose_locale: ?[:0]const u8 = null,
+cursor: Cursor = .{},
+ime_manager: ?zwp.TextInputManagerV3 = null,
+ime_global: ?u32 = null,
+ime_object: ?zwp.TextInputV3 = null,
+ime_focus: ?wire.ObjectId = null,
+ime_serial: u32 = 0,
+ime_pending: ImeBatch = .{},
+ime_preedit: bool = false,
 axis_units: i64 = 0,
 axis_distance: f64 = 0,
 axis_steps: ?i64 = null,
@@ -67,8 +119,13 @@ axis_highres: ?i64 = null,
 queue: [max_events]Event = undefined,
 count: usize = 0,
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Self, conn: *Connection) void {
+    self.cursor.deinit(conn);
     self.clearKeymap();
+    if (self.compose) |state| xkb.xkb_compose_state_unref(state);
+    self.compose = null;
+    if (self.compose_locale) |locale| conn.gpa.free(locale);
+    self.compose_locale = null;
 }
 
 pub fn register(self: *Self, slot: usize, surface: wl.Surface, keyboard: bool) void {
@@ -77,9 +134,11 @@ pub fn register(self: *Self, slot: usize, surface: wl.Surface, keyboard: bool) v
 }
 
 /// Retire pending input for the exact destroyed role, not its sibling.
-pub fn forget(self: *Self, slot: usize) void {
+pub fn forget(self: *Self, conn: *Connection, slot: usize) !void {
     const retired = self.targets[slot] orelse return;
     self.targets[slot] = null;
+    const disable_ime = self.ime_focus == retired.id;
+    if (disable_ime) self.resetIme();
     if (self.keyboard_focus == retired.id) self.resetKeyboard();
     if (self.pointer_focus == retired.id) self.resetPointer();
     var kept: usize = 0;
@@ -89,6 +148,10 @@ pub fn forget(self: *Self, slot: usize) void {
         kept += 1;
     }
     self.count = kept;
+    if (disable_ime) {
+        try self.ime_object.?.disable(&conn.session);
+        try self.commitIme(conn);
+    }
 }
 
 pub fn pop(self: *Self) ?Event {
@@ -134,10 +197,19 @@ pub fn bindSeat(self: *Self, conn: *Connection, registry: wl.Registry, global: u
 }
 
 pub fn removeSeat(self: *Self, conn: *Connection, global: u32) !void {
+    if (self.ime_global == global) return error.NativeImeManagerRemoved;
     for (&self.seats) |*slot| {
         const seat = slot.* orelse continue;
         if (seat.global != global) continue;
         if (self.selected != null and self.selected.?.id == seat.object.id) {
+            if (self.ime_focus) |focus| try self.push(.{ .surface = focus, .value = .ime_cancel });
+            self.resetIme();
+            if (self.ime_object) |object| {
+                try conn.clearListener(object);
+                try object.destroy(&conn.session);
+                self.ime_object = null;
+                self.ime_serial = 0;
+            }
             try self.devices(conn, seat.object, .{});
             self.selected = null;
         }
@@ -160,10 +232,88 @@ fn onSeat(self: *Self, conn: *Connection, seat: wl.Seat, event: wl.Seat.Event) !
             if (self.selected != null and self.selected.?.id != seat.id) return error.NativeSeatAmbiguous;
             self.selected = seat;
             slot.selected = true;
+            try self.bindImeSeat(conn, seat);
         },
         .capabilities => |caps| slot.caps = caps.capabilities,
     }
     if (slot.selected) try self.devices(conn, seat, slot.caps);
+}
+
+pub fn bindImeManager(self: *Self, conn: *Connection, registry: wl.Registry, global: u32) !void {
+    if (self.ime_manager != null) return;
+    self.ime_manager = try registry.bind(&conn.session, global, zwp.TextInputManagerV3, 1);
+    self.ime_global = global;
+    if (self.selected) |seat| try self.bindImeSeat(conn, seat);
+}
+
+fn bindImeSeat(self: *Self, conn: *Connection, seat: wl.Seat) !void {
+    if (self.ime_manager) |manager| if (self.ime_object == null) {
+        const object = try manager.getTextInput(&conn.session, seat);
+        self.ime_object = object;
+        try conn.setListener(object, self, onIme);
+    };
+}
+
+fn commitIme(self: *Self, conn: *Connection) !void {
+    try self.ime_object.?.commit(&conn.session);
+    self.ime_serial +%= 1;
+}
+
+fn resetIme(self: *Self) void {
+    self.ime_focus = null;
+    self.ime_pending = .{};
+    self.ime_preedit = false;
+    self.repeat = null;
+    self.resetCompose();
+}
+
+fn onIme(self: *Self, conn: *Connection, object: zwp.TextInputV3, event: zwp.TextInputV3.Event) !void {
+    switch (event) {
+        .enter => |entered| {
+            if (self.ime_focus) |focus| try self.push(.{ .surface = focus, .value = .ime_cancel });
+            self.resetIme();
+            if (!self.target(entered.surface.id, true)) return;
+            self.ime_focus = entered.surface.id;
+            try object.enable(&conn.session);
+            // Surrounding text and cursor geometry belong to the actual
+            // editable widget, not this transport. Advertise neither until
+            // the picker adapter supplies them.
+            try self.commitIme(conn);
+        },
+        .leave => |left| if (self.ime_focus == left.surface.id) {
+            self.resetIme();
+            try self.push(.{ .surface = left.surface.id, .value = .ime_cancel });
+        },
+        else => {
+            const focus = self.ime_focus orelse return;
+            switch (event) {
+                .preedit_string => |value| {
+                    try self.ime_pending.preedit.set(value.text);
+                    const text = &self.ime_pending.preedit;
+                    if (!(value.cursor_begin == -1 and value.cursor_end == -1) and (!text.boundary(value.cursor_begin) or !text.boundary(value.cursor_end))) return error.NativeImeCursor;
+                    self.ime_pending.cursor_begin = value.cursor_begin;
+                    self.ime_pending.cursor_end = value.cursor_end;
+                },
+                .commit_string => |value| try self.ime_pending.commit.set(value.text),
+                .delete_surrounding_text => |value| {
+                    if (value.before_length > 256 or value.after_length > 256) return error.NativeImeText;
+                    self.ime_pending.delete_before = value.before_length;
+                    self.ime_pending.delete_after = value.after_length;
+                },
+                .done => |value| {
+                    // The v3 specification applies edits even for a stale
+                    // serial, but forbids updating client state until matched.
+                    self.ime_pending.serial_matches = value.serial == self.ime_serial;
+                    self.ime_preedit = self.ime_pending.preedit.len != 0;
+                    self.repeat = null;
+                    self.resetCompose();
+                    try self.push(.{ .surface = focus, .value = .{ .ime = self.ime_pending } });
+                    self.ime_pending = .{};
+                },
+                else => {}, // v2 events are not negotiated
+            }
+        },
+    }
 }
 
 fn devices(self: *Self, conn: *Connection, seat: wl.Seat, caps: wl.Seat.Capability) !void {
@@ -187,9 +337,11 @@ fn devices(self: *Self, conn: *Connection, seat: wl.Seat, caps: wl.Seat.Capabili
             const pointer = try seat.getPointer(&conn.session);
             self.pointer = pointer;
             try conn.setListener(pointer, self, onPointer);
+            try self.cursor.bindPointer(conn, pointer);
         }
     } else if (self.pointer) |pointer| {
         try self.leavePointer();
+        try self.cursor.releasePointer(conn);
         try conn.clearListener(pointer);
         try pointer.release(&conn.session);
         self.pointer = null;
@@ -201,6 +353,8 @@ fn clearKeymap(self: *Self) void {
     if (self.keymap) |map| xkb.xkb_keymap_unref(map);
     self.state = null;
     self.keymap = null;
+    self.repeat = null;
+    self.resetCompose();
 }
 
 fn loadKeymap(self: *Self, allocator: std.mem.Allocator, fd: i32, size: u32, format: wl.Keyboard.KeymapFormat) !void {
@@ -238,6 +392,8 @@ fn applyMasks(self: *Self) void {
 
 fn resetKeyboard(self: *Self) void {
     self.keyboard_focus = null;
+    self.repeat = null;
+    self.resetCompose();
     self.keys = .empty;
     self.emitted = .empty;
     self.masks = .{};
@@ -261,6 +417,7 @@ fn onKeyboard(self: *Self, conn: *Connection, _: wl.Keyboard, event: wl.Keyboard
             try self.leaveKeyboard();
             if (!self.target(entered.surface.id, true)) return;
             if (entered.keys.len % 4 != 0 or entered.keys.len > max_keys * 4) return error.NativeKeyArray;
+            try self.ensureCompose(conn.gpa);
             self.keyboard_focus = entered.surface.id;
             // Inherited held keys are facts, not presses to replay.
             var at: usize = 0;
@@ -281,11 +438,12 @@ fn onKeyboard(self: *Self, conn: *Connection, _: wl.Keyboard, event: wl.Keyboard
             if (repeat.rate < 0 or repeat.delay < 0) return error.NativeRepeatInfo;
             self.repeat_rate = repeat.rate;
             self.repeat_delay = repeat.delay;
+            self.repeat = null;
         },
         .key => |key| {
             const focus = self.keyboard_focus orelse return;
             if (key.key >= max_keys) return;
-            const state = self.state orelse return error.NativeKeymapMissing;
+            if (self.state == null) return error.NativeKeymapMissing;
             switch (key.state) {
                 .pressed => {
                     if (self.keys.isSet(key.key)) return;
@@ -293,6 +451,7 @@ fn onKeyboard(self: *Self, conn: *Connection, _: wl.Keyboard, event: wl.Keyboard
                     self.emitted.set(key.key);
                 },
                 .released => {
+                    if (self.repeat != null and self.repeat.?.code == key.key) self.repeat = null;
                     if (!self.keys.isSet(key.key)) return;
                     self.keys.unset(key.key);
                     if (!self.emitted.isSet(key.key)) return;
@@ -300,25 +459,139 @@ fn onKeyboard(self: *Self, conn: *Connection, _: wl.Keyboard, event: wl.Keyboard
                 },
                 else => return,
             }
-            const code = key.key + 8;
-            var translated: Key = .{
-                .code = key.key,
-                .symbol = xkb.xkb_state_key_get_one_sym(state, code),
-                .pressed = key.state == .pressed,
-                .repeatable = xkb.xkb_keymap_key_repeats(self.keymap.?, code) != 0,
-                .modifiers = .{ .shift = modifier(state, "Shift"), .control = modifier(state, "Control"), .alt = modifier(state, "Mod1"), .logo = modifier(state, "Mod4") },
-            };
-            if (translated.pressed and !translated.modifiers.control and !translated.modifiers.alt and !translated.modifiers.logo) {
-                const n = xkb.xkb_state_key_get_utf8(state, code, &translated.text, translated.text.len);
-                if (n > 0 and n < translated.text.len) {
-                    const bytes = translated.text[0..@intCast(n)];
-                    // Navigation/control keys are key events, not text.
-                    if (bytes[0] >= 32 and bytes[0] != 127 and std.unicode.utf8ValidateSlice(bytes)) translated.text_len = @intCast(n);
+            const translated = self.translateKey(key.key, key.state == .pressed, false);
+            if (translated.pressed and (translated.repeatable or translated.compose_consumed or translated.symbol == xkb.XKB_KEY_Escape or translated.symbol == xkb.XKB_KEY_Tab or translated.symbol == xkb.XKB_KEY_Return or translated.symbol == xkb.XKB_KEY_KP_Enter)) {
+                self.repeat = null;
+                if (self.repeat_rate > 0 and !self.ime_preedit and repeatEligible(translated)) {
+                    self.repeat = .{
+                        .code = key.key,
+                        .deadline = std.Io.Clock.awake.now(conn.io).addDuration(.fromMilliseconds(self.repeat_delay)),
+                        .interval = .fromNanoseconds(@divTrunc(std.time.ns_per_s, @as(i64, @min(self.repeat_rate, 100)))),
+                    };
                 }
             }
             try self.push(.{ .surface = focus, .value = .{ .key = translated } });
         },
     }
+}
+
+/// A single repeat deadline, owned by the visible event loop. Real input
+/// readiness and queued transitions take priority over this timer. No catch-up
+/// bursts: a late wake emits one repeat, then schedules from the current time.
+pub fn repeatDeadline(self: *const Self) ?std.Io.Timestamp {
+    return if (self.repeat) |held| held.deadline else null;
+}
+
+pub fn advanceRepeat(self: *Self, now: std.Io.Timestamp) !bool {
+    const held = self.repeat orelse return false;
+    if (now.nanoseconds < held.deadline.nanoseconds or self.count != 0) return false;
+    const focus = self.keyboard_focus orelse {
+        self.repeat = null;
+        return false;
+    };
+    if (!self.keys.isSet(held.code) or !self.emitted.isSet(held.code) or self.state == null) {
+        self.repeat = null;
+        return false;
+    }
+    const key = self.translateKey(held.code, true, true);
+    if (!repeatEligible(key)) {
+        self.repeat = null;
+        return false;
+    }
+    try self.push(.{ .surface = focus, .value = .{ .key = key } });
+    self.repeat.?.deadline = now.addDuration(held.interval);
+    return true;
+}
+
+fn repeatEligible(key: Key) bool {
+    if (!key.repeatable or key.compose_consumed or key.modifiers.control or key.modifiers.alt or key.modifiers.logo) return false;
+    // Enter, Tab and Escape are one-shot picker actions even if a keymap
+    // describes them as repeating. Only editing/navigation or text repeats.
+    return key.text_len != 0 or switch (key.symbol) {
+        xkb.XKB_KEY_BackSpace, xkb.XKB_KEY_Up, xkb.XKB_KEY_Down, xkb.XKB_KEY_Left, xkb.XKB_KEY_Right, xkb.XKB_KEY_Delete => true,
+        else => false,
+    };
+}
+
+/// Retain the locale choice but do not open a compose table for a banner-only
+/// connection. The first editable keyboard focus prepares it before keys.
+pub fn rememberComposeLocale(self: *Self, allocator: std.mem.Allocator, env: *const std.process.Environ.Map) !void {
+    std.debug.assert(self.compose == null and self.compose_locale == null);
+    const locale = for ([_][]const u8{ "LC_ALL", "LC_CTYPE", "LANG" }) |name| {
+        if (env.get(name)) |value| if (value.len != 0) break value;
+    } else "C.UTF-8";
+    self.compose_locale = try allocator.dupeSentinel(u8, locale, 0);
+}
+
+fn ensureCompose(self: *Self, allocator: std.mem.Allocator) !void {
+    const locale = self.compose_locale orelse return;
+    self.compose_locale = null;
+    defer allocator.free(locale);
+    std.debug.assert(self.compose == null);
+    const context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse return error.NativeXkbContext;
+    defer xkb.xkb_context_unref(context);
+    const table = xkb.xkb_compose_table_new_from_locale(context, locale.ptr, xkb.XKB_COMPOSE_COMPILE_NO_FLAGS) orelse {
+        std.log.warn("native compose table unavailable; using direct XKB text", .{});
+        return;
+    };
+    defer xkb.xkb_compose_table_unref(table);
+    self.compose = xkb.xkb_compose_state_new(table, xkb.XKB_COMPOSE_STATE_NO_FLAGS) orelse return error.NativeComposeState;
+}
+
+fn resetCompose(self: *Self) void {
+    if (self.compose) |state| xkb.xkb_compose_state_reset(state);
+}
+
+fn translateKey(self: *Self, raw: u32, pressed: bool, repeated: bool) Key {
+    const state = self.state.?;
+    const code = raw + 8;
+    var key: Key = .{
+        .code = raw,
+        .symbol = xkb.xkb_state_key_get_one_sym(state, code),
+        .pressed = pressed,
+        .repeated = repeated,
+        .repeatable = xkb.xkb_keymap_key_repeats(self.keymap.?, code) != 0,
+        .modifiers = .{ .shift = modifier(state, "Shift"), .control = modifier(state, "Control"), .alt = modifier(state, "Mod1"), .logo = modifier(state, "Mod4") },
+    };
+    if (!pressed) return key;
+    if (key.modifiers.control or key.modifiers.alt or key.modifiers.logo) {
+        self.resetCompose();
+        return key;
+    }
+    // A compositor forwards keys the input method did not consume. Do not
+    // disable direct XKB text merely because a text-input global exists.
+    if (!repeated and !self.ime_preedit) if (self.compose) |compose| {
+        _ = xkb.xkb_compose_state_feed(compose, key.symbol);
+        switch (xkb.xkb_compose_state_get_status(compose)) {
+            xkb.XKB_COMPOSE_COMPOSING => {
+                key.repeatable = false;
+                key.compose_consumed = true;
+                return key;
+            },
+            xkb.XKB_COMPOSE_COMPOSED => {
+                acceptText(&key, xkb.xkb_compose_state_get_utf8(compose, &key.text, key.text.len));
+                self.resetCompose();
+                key.repeatable = false;
+                key.compose_consumed = true;
+                return key;
+            },
+            xkb.XKB_COMPOSE_CANCELLED => {
+                self.resetCompose();
+                key.repeatable = false;
+                key.compose_consumed = true;
+                return key;
+            },
+            else => {},
+        }
+    };
+    acceptText(&key, xkb.xkb_state_key_get_utf8(state, code, &key.text, key.text.len));
+    return key;
+}
+
+fn acceptText(key: *Key, len: i32) void {
+    if (len <= 0 or len >= key.text.len) return;
+    const bytes = key.text[0..@intCast(len)];
+    if (bytes[0] >= 32 and bytes[0] != 127 and std.unicode.utf8ValidateSlice(bytes)) key.text_len = @intCast(len);
 }
 
 fn resetPointer(self: *Self) void {
@@ -336,12 +609,13 @@ fn leavePointer(self: *Self) !void {
     if (focus) |id| try self.push(.{ .surface = id, .value = .pointer_leave });
 }
 
-fn onPointer(self: *Self, _: *Connection, _: wl.Pointer, event: wl.Pointer.Event) !void {
+fn onPointer(self: *Self, conn: *Connection, pointer: wl.Pointer, event: wl.Pointer.Event) !void {
     switch (event) {
         .enter => |entered| {
             try self.leavePointer();
             if (!self.target(entered.surface.id, false)) return;
             self.pointer_focus = entered.surface.id;
+            try self.cursor.show(conn, pointer, entered.serial);
             self.point = .{ .x = entered.surface_x.toDouble(), .y = entered.surface_y.toDouble() };
             try self.push(.{ .surface = entered.surface.id, .value = .{ .pointer_enter = self.point } });
         },
