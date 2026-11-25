@@ -169,25 +169,31 @@ Request an immediate rotation:
 wayspot wallpaper rotate
 ```
 
-Wallpaper discovery is also fresh at process start. The resident owns one
-background surface per current monitor and reconciles those surfaces when the
-monitor topology changes. Merely moving focus between monitors, workspaces, or
-windows does not change the current wallpaper round.
+Wallpaper discovery is fresh at process start. One Wayland connection owns
+one persistent background layer per current output. Its physical buffer size
+comes from committed `wl_output` mode/transform facts and the logical destination
+comes from that layer's configure event. Output coordinates, workspace state,
+window focus and input events are irrelevant. Unchanged configure events are
+acknowledged without republishing. Rotation replaces immutable buffers, not
+surfaces or connections; adding/removing an output affects only its layer.
+An explicitly closed layer on a still-advertised output is retired and retried
+after five seconds, or sooner on explicit rotation or changed output geometry.
+A lost transport reconnects to the selected endpoint; protocol faults are not
+treated as ordinary disconnects.
+The selected encoded image is retained for output changes, even if the file
+is removed. Failed image preparation preserves the current content.
 
-The wallpaper resident now observes `wl_output` and `zxdg_output_v1` directly:
-physical dimensions, exact logical origin, fractional logical size, and
-output add/remove all come from the active Wayland session. Its existing
-layer-shell/viewporter surfaces and transactional image/rotation engine are
-unchanged. `wayspot wallpaper rotate` addresses an authenticated per-display
-socket derived from `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`; neither operation
-requires `HYPRLAND_INSTANCE_SIGNATURE`, Hyprland monitor JSON, or Hyprland IPC.
+The hourly deadline sleeps when no outputs are available. On return, a due
+rotation runs once rather than catching up. A manual rotation without an
+available output is refused. The authenticated per-display rotation socket
+uses `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`; no Hyprland IPC is required.
 
-A disposable Snowman Wayland session has passed two-output publication,
-1.5x fractional scale, output disable/re-enable, zero-output recovery,
-manual rotation, and clean termination. Hyprland and attended physical-screen
-acceptance remain separate from this isolated proof. Wallpaper portability does
-not imply that the picker/window-finder and tray workflows are compositor
-neutral.
+The opt-in real Wayland gate uses isolated Snowman, Foot and grim. It checks
+actual background role/attachment identity, pixel colors across rotation and
+fullscreen exit, fractional scale, output removal/re-add, zero-output idle
+cost and cleanup. Long physical-session endurance is a separate acceptance
+obligation. Wallpaper portability does not imply that the picker/window-finder
+and tray workflows are compositor neutral.
 
 ### Bash completion
 

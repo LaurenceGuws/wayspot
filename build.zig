@@ -67,8 +67,6 @@ pub fn build(b: *std.Build) void {
     );
     const layer_code = waylandCode(b, layer_xml, "wlr-layer-shell-unstable-v1");
     const viewport_header = waylandHeader(b, b.path("protocols/viewporter.xml"), "viewporter");
-    const xdg_output_xml = b.path("protocols/xdg-output-unstable-v1.xml");
-    const xdg_output_header = waylandHeader(b, xdg_output_xml, "xdg-output-unstable-v1");
     const wayland_protocol_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -77,7 +75,6 @@ pub fn build(b: *std.Build) void {
     wayland_protocol_module.addIncludePath(layer_header.dirname());
     wayland_protocol_module.addIncludePath(layer_code.dirname());
     wayland_protocol_module.addIncludePath(viewport_header.dirname());
-    wayland_protocol_module.addIncludePath(xdg_output_header.dirname());
     wayland_protocol_module.addIncludePath(b.path("src/wayland"));
     wayland_protocol_module.addCSourceFile(.{ .file = b.path("src/wayland/protocol.c") });
     wayland_protocol_module.linkSystemLibrary("wayland-client", .{});
@@ -123,28 +120,6 @@ pub fn build(b: *std.Build) void {
     source_tests.use_llvm = false;
     source_tests.use_lld = false;
 
-    // Explicit diagnostic: only invoked by an isolated Wayland test harness.
-    const output_probe_module = b.createModule(.{
-        .root_source_file = b.path("tools/wallpaper-output-probe.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const output_observer_module = b.createModule(.{
-        .root_source_file = b.path("src/wallpaper/outputs.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    output_observer_module.addImport("wayland_c", wayland_c);
-    output_probe_module.addImport("wayspot_wallpaper_outputs", output_observer_module);
-    output_probe_module.addImport("wayland_c", wayland_c);
-    output_probe_module.linkLibrary(wayland_protocol);
-    output_probe_module.linkLibrary(sdl.artifact("SDL3"));
-    const output_probe = b.addExecutable(.{ .name = "wayspot-wallpaper-output-probe", .root_module = output_probe_module });
-    const output_probe_install = b.addInstallArtifact(output_probe, .{});
-    b.step("wallpaper-output-probe", "Build private Wayland-native output observation probe")
-        .dependOn(&output_probe_install.step);
     // Optional source-built integration; requires explicitly provided private
     // Snowman executable/CLI from a matching external test fixture.
     const live_wallpaper = b.addSystemCommand(&.{"bash"});

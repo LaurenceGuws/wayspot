@@ -1,4 +1,4 @@
-//! Owns native file, SDL image, Wayland, Hyprland socket, poll, and stop operations for wallpaper.
+//! One Wayland connection and one persistent background surface per output.
 
 const std = @import("std");
 const wallpaper = @import("root.zig");
@@ -55,60 +55,39 @@ const Discovery = struct {
     }
 };
 
-/// Owns one Wayland display and its resources; resident stop/socket2/path state is always borrowed.
-pub const Native = struct {
+/// File/image I/O and the existing per-display rotation endpoint.
+const Source = struct {
     io: std.Io,
     file: ?std.Io.File = null,
     rotate_listener: std.posix.fd_t = -1,
     rotate_client: std.posix.fd_t = -1,
     rotate_bytes: [16]u8 = undefined,
     rotate_length: u8 = 0,
-    observer: outputs.Observer = .{},
-    display: ?*wl.wl_display = null,
-    registry_proxy: ?*wl.wl_registry = null,
-    compositor: ?*wl.wl_compositor = null,
-    shm: ?*wl.wl_shm = null,
-    viewporter: ?*wl.wp_viewporter = null,
-    layer_shell: ?*wl.zwlr_layer_shell_v1 = null,
-    output_globals: [wallpaper.monitor_capacity]u32 = undefined,
-    output_global_count: u8 = 0,
-    outputs: [wallpaper.monitor_capacity]?*wl.wl_output = @splat(null),
-    output_snapshot: ?wallpaper.Snapshot = null,
-    compositor_global: u32 = 0,
-    shm_global: u32 = 0,
-    viewporter_global: u32 = 0,
-    layer_shell_global: u32 = 0,
-    outputs_changed: bool = false,
-    probe: OutputProbe = .{},
-    failed: bool = false,
-    surfaces: [wallpaper.surface_resource_capacity]Surface = @splat(.{}),
-    next_surface_generation: u32 = 1,
-
-    pub fn open(native: *Native, path: []const u8) !void {
-        std.debug.assert(native.file == null);
-        native.file = if (std.fs.path.isAbsolute(path))
-            try std.Io.Dir.openFileAbsolute(native.io, path, .{})
+    pub fn open(source: *Source, path: []const u8) !void {
+        std.debug.assert(source.file == null);
+        source.file = if (std.fs.path.isAbsolute(path))
+            try std.Io.Dir.openFileAbsolute(source.io, path, .{})
         else
-            try std.Io.Dir.cwd().openFile(native.io, path, .{});
+            try std.Io.Dir.cwd().openFile(source.io, path, .{});
     }
 
-    pub fn stat(native: *Native) !struct { kind: std.Io.File.Kind, size: u64 } {
-        const value = try (native.file orelse unreachable).stat(native.io);
+    pub fn stat(source: *Source) !struct { kind: std.Io.File.Kind, size: u64 } {
+        const value = try (source.file orelse unreachable).stat(source.io);
         return .{ .kind = value.kind, .size = value.size };
     }
 
-    pub fn read(native: *Native, bytes: []u8) !usize {
-        return (native.file orelse unreachable).readPositionalAll(native.io, bytes, 0);
+    pub fn read(source: *Source, bytes: []u8) !usize {
+        return (source.file orelse unreachable).readPositionalAll(source.io, bytes, 0);
     }
 
-    pub fn close(native: *Native) void {
-        const file = native.file orelse unreachable;
-        file.close(native.io);
-        native.file = null;
+    pub fn close(source: *Source) void {
+        const file = source.file orelse unreachable;
+        file.close(source.io);
+        source.file = null;
     }
 
-    pub fn openRotation(native: *Native, signature: []const u8) !void {
-        std.debug.assert(native.rotate_listener < 0 and native.rotate_client < 0);
+    pub fn openRotation(source: *Source, signature: []const u8) !void {
+        std.debug.assert(source.rotate_listener < 0 and source.rotate_client < 0);
         const address = try abstractAddress(signature);
         const result = std.posix.system.socket(
             std.posix.AF.UNIX,
@@ -128,45 +107,45 @@ pub const Native = struct {
         if (std.posix.errno(std.posix.system.listen(fd, 4)) != .SUCCESS) {
             return error.RotationSocketListenFailed;
         }
-        native.rotate_listener = fd;
+        source.rotate_listener = fd;
     }
 
-    pub fn closeRotation(native: *Native) void {
-        if (native.rotate_client >= 0) _ = std.posix.system.close(native.rotate_client);
-        if (native.rotate_listener >= 0) _ = std.posix.system.close(native.rotate_listener);
-        native.rotate_client = -1;
-        native.rotate_listener = -1;
-        native.rotate_length = 0;
+    pub fn closeRotation(source: *Source) void {
+        if (source.rotate_client >= 0) _ = std.posix.system.close(source.rotate_client);
+        if (source.rotate_listener >= 0) _ = std.posix.system.close(source.rotate_listener);
+        source.rotate_client = -1;
+        source.rotate_listener = -1;
+        source.rotate_length = 0;
     }
 
-    pub fn receiveRotation(native: *Native) !bool {
-        if (native.rotate_client >= 0) native.rejectBusy();
-        if (native.rotate_client < 0) {
+    pub fn receiveRotation(source: *Source) !bool {
+        if (source.rotate_client >= 0) source.rejectBusy();
+        if (source.rotate_client < 0) {
             const accepted = std.os.linux.accept4(
-                native.rotate_listener,
+                source.rotate_listener,
                 null,
                 null,
                 std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
             );
-            native.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS)
+            source.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS)
                 @intCast(accepted)
             else
                 return error.RotationAcceptFailed;
             errdefer {
-                _ = std.posix.system.close(native.rotate_client);
-                native.rotate_client = -1;
+                _ = std.posix.system.close(source.rotate_client);
+                source.rotate_client = -1;
             }
-            try authenticatePeer(native.rotate_client, std.os.linux.geteuid());
+            try authenticatePeer(source.rotate_client, std.os.linux.geteuid());
         }
-        const file: std.Io.File = .{ .handle = native.rotate_client, .flags = .{ .nonblocking = true } };
-        const suffix = native.rotate_bytes[native.rotate_length..];
-        const count = file.readStreaming(native.io, &.{suffix}) catch |err| switch (err) {
+        const file: std.Io.File = .{ .handle = source.rotate_client, .flags = .{ .nonblocking = true } };
+        const suffix = source.rotate_bytes[source.rotate_length..];
+        const count = file.readStreaming(source.io, &.{suffix}) catch |err| switch (err) {
             error.WouldBlock => return false,
             error.EndOfStream => return error.RotationRequestIncomplete,
             else => return err,
         };
-        native.rotate_length += @intCast(count);
-        const bytes = native.rotate_bytes[0..native.rotate_length];
+        source.rotate_length += @intCast(count);
+        const bytes = source.rotate_bytes[0..source.rotate_length];
         return switch (wallpaper.classifyRotationRequest(bytes)) {
             .incomplete => false,
             .rotate => true,
@@ -174,9 +153,9 @@ pub const Native = struct {
         };
     }
 
-    fn rejectBusy(native: *Native) void {
+    fn rejectBusy(source: *Source) void {
         const accepted = std.os.linux.accept4(
-            native.rotate_listener,
+            source.rotate_listener,
             null,
             null,
             std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
@@ -186,548 +165,25 @@ pub const Native = struct {
         defer _ = std.posix.system.close(fd);
         authenticatePeer(fd, std.os.linux.geteuid()) catch return;
         const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        file.writeStreamingAll(native.io, "error\n") catch {};
+        file.writeStreamingAll(source.io, "error\n") catch {};
     }
 
-    pub fn replyRotation(native: *Native, success: bool) void {
-        if (native.rotate_client < 0) return;
-        const file: std.Io.File = .{ .handle = native.rotate_client, .flags = .{ .nonblocking = true } };
-        file.writeStreamingAll(native.io, if (success) "ok\n" else "error\n") catch {};
-        _ = std.posix.system.close(native.rotate_client);
-        native.rotate_client = -1;
-        native.rotate_length = 0;
+    pub fn replyRotation(source: *Source, success: bool) void {
+        if (source.rotate_client < 0) return;
+        const file: std.Io.File = .{ .handle = source.rotate_client, .flags = .{ .nonblocking = true } };
+        file.writeStreamingAll(source.io, if (success) "ok\n" else "error\n") catch {};
+        _ = std.posix.system.close(source.rotate_client);
+        source.rotate_client = -1;
+        source.rotate_length = 0;
     }
 
     /// Returns the borrowed I/O clock in monotonic milliseconds for bounded waits.
-    pub fn now(native: *Native) u64 {
-        return @intCast(std.Io.Clock.awake.now(native.io).toMilliseconds());
-    }
-
-    /// Allocates one stable candidate display owner; allocation failure publishes nothing.
-    pub fn createNative(native: *Native, allocator: std.mem.Allocator) !*Native {
-        const candidate = try allocator.create(Native);
-        candidate.* = .{ .io = native.io };
-        return candidate;
-    }
-
-    /// Disconnects and frees one candidate or retired display owner exactly once.
-    pub fn destroyNative(_: *Native, allocator: std.mem.Allocator, native: *Native) void {
-        native.disconnect();
-        allocator.destroy(native);
-    }
-
-    /// Connect to the native Wayland output registry. The descriptor remains
-    /// owned by Observer and is only borrowed by the resident poll loop.
-    pub fn reconnectEvent(native: *Native, event_fd: *std.posix.fd_t, _: std.posix.fd_t, _: u64) !void {
-        std.debug.assert(event_fd.* < 0);
-        native.observer.disconnect();
-        try native.observer.connect();
-        event_fd.* = native.observer.fd();
-    }
-
-    /// Stop borrowing the display's output-event fd before releasing it.
-    pub fn closeEvent(native: *Native, event_fd: *std.posix.fd_t) void {
-        native.observer.disconnect();
-        event_fd.* = -1;
-    }
-
-    /// Output changes are committed Wayland events, not IPC text from Hyprland.
-    pub fn outputEvent(native: *Native, event_fd: std.posix.fd_t) !bool {
-        if (native.observer.fd() != event_fd) return error.EventSocketLost;
-        return native.observer.dispatch() catch return error.EventSocketLost;
-    }
-
-    /// Snapshot actual output facts, replacing the observer when outputs are
-    /// added/removed. Its fd may change and must update the borrowed slot.
-    pub fn observeSnapshot(native: *Native, _: std.mem.Allocator, event_fd: *std.posix.fd_t, _: u64) !wallpaper.Snapshot {
-        // A topology refresh may replace or lose the observer socket before
-        // producing a complete snapshot. Never leave a stale borrowed fd in
-        // the poll loop after the old Wayland connection has been destroyed.
-        errdefer event_fd.* = native.observer.fd();
-        const value = try native.observer.refresh();
-        event_fd.* = native.observer.fd();
-        return value;
-    }
-
-    pub fn openOutputs(native: *Native, snapshot: *const wallpaper.Snapshot) !void {
-        if (native.display != null) {
-            if (native.output_snapshot == null or !native.output_snapshot.?.eql(snapshot)) {
-                return error.WaylandOutputChanged;
-            }
-            return;
-        }
-        std.debug.assert(native.display == null);
-        native.display = wl.wl_display_connect(null) orelse return error.WaylandConnectFailed;
-        errdefer native.disconnect();
-        native.registry_proxy = wl.wl_display_get_registry(native.display.?) orelse
-            return error.WaylandRegistryFailed;
-        if (wl.wl_registry_add_listener(native.registry_proxy, &registry_listener, native) != 0) {
-            return error.WaylandRegistryFailed;
-        }
-        try native.roundtrip();
-        if (native.compositor == null or native.shm == null or native.viewporter == null or
-            native.layer_shell == null or native.output_global_count == 0)
-        {
-            return error.WaylandGlobalMissing;
-        }
-        for (native.output_globals[0..native.output_global_count]) |global| {
-            native.probe = .{};
-            const proxy: *wl.wl_output = @ptrCast(wl.wl_registry_bind(
-                native.registry_proxy,
-                global,
-                &wl.wl_output_interface,
-                4,
-            ) orelse return error.WaylandOutputMissing);
-            var retained = false;
-            defer if (!retained) wl.wl_output_release(proxy);
-            if (wl.wl_output_add_listener(proxy, &output_listener, &native.probe) != 0) {
-                return error.WaylandOutputInvalid;
-            }
-            try native.roundtrip();
-            if (!native.probe.name_seen or !native.probe.done or native.probe.invalid) {
-                return error.WaylandOutputIncomplete;
-            }
-            const probe_name = native.probe.name_bytes[0..native.probe.name_length];
-            const index = monitorIndex(snapshot, probe_name) orelse return error.WaylandOutputChanged;
-            if (native.outputs[index] != null) return error.WaylandOutputDuplicate;
-            native.outputs[index] = proxy;
-            retained = true;
-        }
-        for (native.outputs[0..snapshot.count]) |output| if (output == null) {
-            return error.WaylandOutputMissing;
-        };
-        native.output_snapshot = snapshot.*;
-        native.outputs_changed = false;
-    }
-
-    pub fn disconnect(native: *Native) void {
-        if (native.display == null) return;
-        for (&native.surfaces) |*surface| std.debug.assert(surface.state == .vacant);
-        for (native.outputs) |proxy| if (proxy) |output| wl.wl_output_release(output);
-        if (native.layer_shell) |proxy| wl.wayspot_layer_shell_destroy(proxy);
-        if (native.viewporter) |proxy| wl.wayspot_viewporter_destroy(proxy);
-        if (native.shm) |proxy| wl.wl_shm_destroy(proxy);
-        if (native.compositor) |proxy| wl.wl_compositor_destroy(proxy);
-        if (native.registry_proxy) |proxy| wl.wl_registry_destroy(proxy);
-        wl.wl_display_disconnect(native.display.?);
-        native.clearDisplay();
-    }
-
-    pub fn prepare(
-        native: *Native,
-        monitor_index: u8,
-        monitor: *const wallpaper.Monitor,
-        pixels: *const wallpaper.Image,
-    ) !wallpaper.SurfaceHandle {
-        const snapshot = native.output_snapshot orelse return error.WaylandOutputMissing;
-        if (monitor_index >= snapshot.count or native.outputs[monitor_index] == null) {
-            return error.WaylandOutputMissing;
-        }
-        if (!snapshot.monitors[monitor_index].eql(monitor)) return error.WaylandOutputChanged;
-        if (native.next_surface_generation == std.math.maxInt(u32)) return error.SurfaceGenerationExhausted;
-        const surface_index = for (&native.surfaces, 0..) |*surface, index| {
-            if (surface.state == .vacant) break index;
-        } else return error.SurfaceCapacityExceeded;
-        const handle = wallpaper.SurfaceHandle{
-            .index = @intCast(surface_index),
-            .generation = native.next_surface_generation,
-        };
-        native.next_surface_generation += 1;
-        const surface = &native.surfaces[surface_index];
-        surface.* = .{ .owner = native, .state = .prepared, .generation = handle.generation };
-        errdefer native.discardPrepared(handle);
-        surface.surface = wl.wl_compositor_create_surface(native.compositor.?) orelse
-            return error.SurfaceCreateFailed;
-        const region = wl.wl_compositor_create_region(native.compositor.?) orelse
-            return error.SurfaceRegionFailed;
-        wl.wl_surface_set_input_region(surface.surface.?, region);
-        wl.wl_region_destroy(region);
-        surface.layer = wl.wayspot_layer_shell_get_surface(
-            native.layer_shell.?,
-            surface.surface.?,
-            native.outputs[monitor_index].?,
-            wl.WAYSPOT_LAYER_BACKGROUND,
-            "wayspot-wallpaper",
-        ) orelse return error.SurfaceLayerFailed;
-        if (wl.wayspot_layer_surface_add_listener(surface.layer, &layer_listener, surface) != 0) {
-            return error.SurfaceLayerFailed;
-        }
-        const layer = surface.layer.?;
-        wl.wayspot_layer_surface_set_size(layer, 0, 0);
-        wl.wayspot_layer_surface_set_anchor(
-            layer,
-            wl.WAYSPOT_ANCHOR_TOP |
-                wl.WAYSPOT_ANCHOR_BOTTOM |
-                wl.WAYSPOT_ANCHOR_LEFT |
-                wl.WAYSPOT_ANCHOR_RIGHT,
-        );
-        wl.wayspot_layer_surface_set_exclusive_zone(layer, -1);
-        wl.wayspot_layer_surface_set_keyboard(
-            layer,
-            wl.WAYSPOT_KEYBOARD_NONE,
-        );
-        surface.viewport = wl.wayspot_viewporter_get_viewport(native.viewporter.?, surface.surface.?) orelse
-            return error.SurfaceViewportFailed;
-        wl.wl_surface_commit(surface.surface.?);
-        const configure_deadline = try std.math.add(u64, native.now(), wallpaper.wayland_wait_milliseconds);
-        var count: u8 = 0;
-        while (surface.configure == null and count < wallpaper.wayland_configure_capacity) : (count += 1) {
-            const current_time = native.now();
-            if (current_time >= configure_deadline) break;
-            const ready = try native.wait(native, -1, -1, configure_deadline - current_time);
-            if (ready.wayland) _ = try native.drainWayland(native);
-        }
-        if (surface.closed) return error.SurfaceClosed;
-        const configured = surface.configure orelse return error.SurfaceConfigureMissing;
-        _ = try wallpaper.surfacePixelCount(configured.width, configured.height);
-        wl.wayspot_layer_surface_ack_configure(layer, configured.serial);
-        surface.configured_width = configured.width;
-        surface.configured_height = configured.height;
-        wl.wayspot_viewport_set_destination(
-            surface.viewport.?,
-            @intCast(configured.width),
-            @intCast(configured.height),
-        );
-        const length = pixels.pixels.len * @sizeOf(u32);
-        // Pixels are written once; wl_buffer retains server backing after client fd/map/pool cleanup.
-        const shm_fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
-        defer _ = std.posix.system.close(shm_fd);
-        try (std.Io.File{
-            .handle = shm_fd,
-            .flags = .{ .nonblocking = false },
-        }).setLength(native.io, length);
-        const mapping = try std.posix.mmap(
-            null,
-            length,
-            .{ .READ = true, .WRITE = true },
-            .{ .TYPE = .SHARED },
-            shm_fd,
-            0,
-        );
-        defer std.posix.munmap(mapping);
-        @memcpy(mapping[0..length], std.mem.sliceAsBytes(pixels.pixels));
-        const pool = wl.wl_shm_create_pool(native.shm.?, shm_fd, @intCast(length)) orelse
-            return error.SurfacePoolFailed;
-        defer wl.wl_shm_pool_destroy(pool);
-        surface.buffer = wl.wl_shm_pool_create_buffer(
-            pool,
-            0,
-            @intCast(pixels.width),
-            @intCast(pixels.height),
-            @intCast(pixels.pitch),
-            wl.WL_SHM_FORMAT_XRGB8888,
-        ) orelse return error.SurfaceBufferFailed;
-        if (wl.wl_buffer_add_listener(surface.buffer, &buffer_listener, surface) != 0) {
-            return error.SurfaceBufferFailed;
-        }
-        return handle;
-    }
-
-    pub fn validatePublication(
-        native: *Native,
-        old: []const wallpaper.SurfaceHandle,
-        next: []const wallpaper.SurfaceHandle,
-    ) !void {
-        if (old.len > wallpaper.monitor_capacity or next.len > wallpaper.monitor_capacity or
-            old.len + next.len == 0)
-        {
-            return error.RoundHandleCountInvalid;
-        }
-        for (old, 0..) |handle, index| {
-            if ((try native.checkedSurface(handle)).state != .published) return error.SurfaceStateInvalid;
-            if (contains(old[0..index], handle) or contains(next, handle)) return error.SurfaceHandleDuplicate;
-        }
-        for (next, 0..) |handle, index| {
-            if ((try native.checkedSurface(handle)).state != .prepared) return error.SurfaceStateInvalid;
-            if (contains(next[0..index], handle)) return error.SurfaceHandleDuplicate;
-        }
-    }
-
-    pub fn queueMap(native: *Native, handle: wallpaper.SurfaceHandle) void {
-        const surface = native.checkedSurface(handle) catch unreachable;
-        std.debug.assert(surface.state == .prepared);
-        wl.wl_surface_attach(surface.surface.?, surface.buffer, 0, 0);
-        wl.wl_surface_damage_buffer(surface.surface.?, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
-        wl.wl_surface_commit(surface.surface.?);
-        surface.state = .queued;
-    }
-
-    pub fn queueUnmap(native: *Native, handle: wallpaper.SurfaceHandle) void {
-        const surface = native.checkedSurface(handle) catch unreachable;
-        std.debug.assert(surface.state == .published);
-        wl.wl_surface_attach(surface.surface.?, null, 0, 0);
-        wl.wl_surface_commit(surface.surface.?);
-        surface.state = .retiring;
-    }
-
-    pub fn flushPublication(native: *Native, stop_fd: std.posix.fd_t) !void {
-        const deadline = try std.math.add(u64, native.now(), wallpaper.wayland_wait_milliseconds);
-        var flush_count: u8 = 0;
-        var poll_count: u8 = 0;
-        while (flush_count < wallpaper.publication_flush_capacity) {
-            if (native.now() >= deadline) return error.WaylandFlushTimeout;
-            flush_count += 1;
-            const result = wl.wl_display_flush(native.display.?);
-            if (result >= 0) return;
-            const flush_error = std.posix.errno(result);
-            if (flush_error == .INTR) continue;
-            if (flush_error != .AGAIN) return error.WaylandFlushFailed;
-            while (poll_count < wallpaper.publication_poll_capacity) {
-                poll_count += 1;
-                var descriptors = [_]std.posix.pollfd{
-                    .{
-                        .fd = wl.wl_display_get_fd(native.display.?),
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    },
-                    .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-                };
-                const ready = native.pollOnce(&descriptors, deadline, false) catch |err| switch (err) {
-                    error.SignalInterrupt => continue,
-                    else => return err,
-                };
-                if (ready == 0) return error.WaylandFlushTimeout;
-                const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
-                if (descriptors[1].revents != 0) return error.WaylandFlushStopped;
-                if (descriptors[0].revents & failed != 0) return error.WaylandFlushFailed;
-                if (descriptors[0].revents & std.posix.POLL.OUT != 0) break;
-            } else return error.WaylandFlushAttemptsExceeded;
-        }
-        return error.WaylandFlushAttemptsExceeded;
-    }
-
-    pub fn finishPublication(
-        native: *Native,
-        old: []const wallpaper.SurfaceHandle,
-        next: []const wallpaper.SurfaceHandle,
-    ) void {
-        for (next) |handle| {
-            const surface = native.checkedSurface(handle) catch unreachable;
-            std.debug.assert(surface.state == .queued);
-            surface.state = .published;
-        }
-        for (old) |handle| std.debug.assert((native.checkedSurface(handle) catch unreachable).state == .retiring);
-    }
-
-    /// Waits at most one second for release, then destroys one retired surface or fails visibly.
-    pub fn releaseRetired(
-        native: *Native,
-        handle: wallpaper.SurfaceHandle,
-        stop_fd: std.posix.fd_t,
-    ) !void {
-        const surface = try native.checkedSurface(handle);
-        if (surface.state != .retiring) return error.SurfaceStateInvalid;
-        const release_started = std.Io.Clock.awake.now(native.io);
-        var count: u8 = 0;
-        while (!surface.released and count < wallpaper.wayland_release_capacity) : (count += 1) {
-            const elapsed = release_started.durationTo(std.Io.Clock.awake.now(native.io)).toMilliseconds();
-            if (elapsed >= wallpaper.wayland_wait_milliseconds) break;
-            const ready = try native.wait(
-                native,
-                stop_fd,
-                -1,
-                @intCast(wallpaper.wayland_wait_milliseconds - elapsed),
-            );
-            if (ready.stop) return error.WaylandFlushStopped;
-            if (ready.wayland) _ = try native.drainWayland(native);
-        }
-        if (!surface.released) return error.SurfaceReleaseMissing;
-        surface.destroyConnected();
-    }
-
-    pub fn discardPrepared(native: *Native, handle: wallpaper.SurfaceHandle) void {
-        const surface = native.checkedSurface(handle) catch unreachable;
-        std.debug.assert(surface.state == .prepared);
-        if (native.display != null) surface.destroyConnected() else surface.* = .{};
-    }
-
-    pub fn disconnectAfterDisplayLoss(native: *Native) void {
-        if (native.display) |display| wl.wl_display_disconnect(display);
-        for (&native.surfaces) |*surface| surface.* = .{};
-        native.clearDisplay();
-    }
-
-    fn clearDisplay(native: *Native) void {
-        std.debug.assert(native.file == null);
-        const io = native.io;
-        const next_surface_generation = native.next_surface_generation;
-        native.* = .{ .io = io, .next_surface_generation = next_surface_generation };
-    }
-
-    fn checkedSurface(native: *Native, handle: wallpaper.SurfaceHandle) !*Surface {
-        if (handle.index >= wallpaper.surface_resource_capacity) return error.SurfaceHandleInvalid;
-        const surface = &native.surfaces[handle.index];
-        if (surface.state == .vacant or surface.generation == 0 or surface.generation != handle.generation) {
-            return error.SurfaceHandleInvalid;
-        }
-        return surface;
-    }
-
-    fn roundtrip(native: *Native) !void {
-        if (wl.wl_display_roundtrip(native.display.?) < 0 or native.failed) {
-            return error.WaylandRoundtripFailed;
-        }
-    }
-
-    /// Reports the sticky output/configure change marker owned by this display.
-    pub fn outputsChanged(_: *Native, native: *Native) bool {
-        return native.outputs_changed;
-    }
-
-    /// Dispatches already-read Wayland events and reports change; protocol failure is fatal.
-    pub fn drainWayland(_: *Native, native: *Native) !bool {
-        if (wl.wl_display_dispatch_pending(native.display.?) < 0 or native.failed) {
-            return error.WaylandDispatchFailed;
-        }
-        const changed = native.outputs_changed;
-        return changed;
-    }
-
-    /// Borrows resident fds for one bounded poll; stop wins and timeout zero still polls once.
-    pub fn wait(
-        resident: *Native,
-        native: *Native,
-        stop_fd: std.posix.fd_t,
-        event_fd: std.posix.fd_t,
-        timeout_ms: ?u64,
-    ) !wallpaper.Ready {
-        const deadline = if (timeout_ms) |milliseconds|
-            try std.math.add(u64, resident.now(), milliseconds)
-        else
-            null;
-        if (native.display == null) {
-            var fds = [_]std.posix.pollfd{
-                .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = resident.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = resident.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-            _ = try resident.pollUntil(&fds, deadline, timeout_ms == 0);
-            if (fds[0].revents != 0) {
-                var record: [128]u8 = undefined;
-                const stop: std.Io.File = .{ .handle = stop_fd, .flags = .{ .nonblocking = true } };
-                if (fds[0].revents & std.posix.POLL.IN != 0 and
-                    try stop.readStreaming(resident.io, &.{&record}) != record.len)
-                {
-                    return error.StopRecordIncomplete;
-                }
-                return .{ .stop = true };
-            }
-            const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
-            if (fds[1].revents & failed != 0) return error.EventSocketLost;
-            if (fds[2].revents & failed != 0) return error.RotationListenerLost;
-            if (fds[3].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationClientLost;
-            return .{
-                .event = fds[1].revents & std.posix.POLL.IN != 0,
-                .rotate = fds[2].revents != 0 or fds[3].revents != 0,
-            };
-        }
-        var dispatches: u8 = 0;
-        var write_deadline: ?u64 = null;
-        var ready: wallpaper.Ready = .{};
-        for (0..wallpaper.publication_flush_capacity) |_| {
-            if (write_deadline) |end| if (resident.now() >= end) return error.WaylandFlushTimeout;
-            while (wl.wl_display_prepare_read(native.display.?) != 0) {
-                if (dispatches == 128) return error.WaylandDispatchExceeded;
-                dispatches += 1;
-                _ = try resident.drainWayland(native);
-            }
-            var prepared = true;
-            errdefer if (prepared) wl.wl_display_cancel_read(native.display.?);
-            const flush = wl.wl_display_flush(native.display.?);
-            const write = flush < 0 and std.posix.errno(flush) == .AGAIN;
-            if (flush < 0 and !write) return error.WaylandFlushFailed;
-            if (write and write_deadline == null) {
-                write_deadline = try std.math.add(u64, resident.now(), wallpaper.wayland_wait_milliseconds);
-            }
-            var fds = [_]std.posix.pollfd{
-                .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-                .{
-                    .fd = wl.wl_display_get_fd(native.display.?),
-                    .events = std.posix.POLL.IN | if (write) std.posix.POLL.OUT else @as(i16, 0),
-                    .revents = 0,
-                },
-                .{ .fd = event_fd, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = resident.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
-                .{ .fd = resident.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-            const poll_deadline = if (write_deadline) |flush_end|
-                if (deadline) |wait_end| @min(flush_end, wait_end) else flush_end
-            else
-                deadline;
-            const count = try resident.pollUntil(&fds, poll_deadline, timeout_ms == 0);
-            const failed = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
-            if (fds[0].revents != 0) {
-                wl.wl_display_cancel_read(native.display.?);
-                prepared = false;
-                var record: [128]u8 = undefined;
-                const stop: std.Io.File = .{ .handle = stop_fd, .flags = .{ .nonblocking = true } };
-                if (fds[0].revents & std.posix.POLL.IN != 0 and
-                    try stop.readStreaming(resident.io, &.{&record}) != record.len)
-                {
-                    return error.StopRecordIncomplete;
-                }
-                return .{ .stop = true };
-            }
-            if (fds[1].revents & failed != 0) {
-                prepared = false;
-                return error.WaylandDisplayLost;
-            }
-            if (fds[1].revents & std.posix.POLL.IN != 0) {
-                prepared = false;
-                if (wl.wl_display_read_events(native.display.?) < 0) return error.WaylandDisplayLost;
-                ready.wayland = true;
-            } else {
-                wl.wl_display_cancel_read(native.display.?);
-                prepared = false;
-            }
-            if (fds[2].revents & failed != 0) return error.EventSocketLost;
-            ready.event = ready.event or fds[2].revents & std.posix.POLL.IN != 0;
-            if (fds[3].revents & failed != 0) return error.RotationListenerLost;
-            if (fds[4].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) return error.RotationClientLost;
-            ready.rotate = ready.rotate or fds[3].revents != 0 or fds[4].revents != 0;
-            if (count == 0) {
-                if (write and (deadline == null or write_deadline.? <= deadline.?)) {
-                    return error.WaylandFlushTimeout;
-                }
-                return ready;
-            }
-            if (!write or fds[1].revents & std.posix.POLL.OUT == 0) return ready;
-        }
-        return error.WaylandFlushAttemptsExceeded;
-    }
-
-    // Polls through at most 16 interruptions; zero means one nonblocking attempt, not no poll.
-    fn pollUntil(native: *Native, fds: []std.posix.pollfd, deadline: ?u64, zero: bool) !usize {
-        for (0..16) |_| {
-            return native.pollOnce(fds, deadline, zero) catch |err| switch (err) {
-                error.SignalInterrupt => continue,
-                else => return err,
-            };
-        }
-        return error.PollInterruptExceeded;
-    }
-
-    fn pollOnce(native: *Native, fds: []std.posix.pollfd, deadline: ?u64, zero: bool) !usize {
-        var timeout: std.posix.timespec = undefined;
-        const timeout_ptr = if (zero) blk: {
-            timeout = .{ .sec = 0, .nsec = 0 };
-            break :blk &timeout;
-        } else if (deadline) |end| blk: {
-            const current_time = native.now();
-            if (current_time >= end) return 0;
-            const left = end - current_time;
-            timeout = .{
-                .sec = @intCast(left / 1000),
-                .nsec = @intCast(left % 1000 * std.time.ns_per_ms),
-            };
-            break :blk &timeout;
-        } else null;
-        return std.posix.ppoll(fds, timeout_ptr, null);
+    pub fn now(source: *Source) u64 {
+        return @intCast(std.Io.Clock.awake.now(source.io).toMilliseconds());
     }
 
     pub fn decode(
-        _: *Native,
+        _: *Source,
         allocator: std.mem.Allocator,
         format: wallpaper.ImageFormat,
         bytes: []const u8,
@@ -761,7 +217,7 @@ pub const Native = struct {
     }
 
     pub fn scale(
-        _: *Native,
+        _: *Source,
         image: *const wallpaper.Image,
         crop: wallpaper.Crop,
         width: u32,
@@ -956,215 +412,6 @@ pub fn closeStop(stop: Stop) void {
     std.posix.sigprocmask(std.posix.SIG.SETMASK, &stop.prior_mask, null);
 }
 
-const OutputProbe = struct {
-    name_bytes: [wallpaper.monitor_name_capacity]u8 = undefined,
-    name_length: u8 = 0,
-    name_seen: bool = false,
-    done: bool = false,
-    invalid: bool = false,
-};
-
-const Surface = struct {
-    owner: ?*Native = null,
-    state: enum { vacant, prepared, queued, published, retiring } = .vacant,
-    generation: u32 = 0,
-    surface: ?*wl.wl_surface = null,
-    layer: ?*wl.zwlr_layer_surface_v1 = null,
-    viewport: ?*wl.wp_viewport = null,
-    buffer: ?*wl.wl_buffer = null,
-    configure: ?wallpaper.Configure = null,
-    configured_width: u32 = 0,
-    configured_height: u32 = 0,
-    closed: bool = false,
-    released: bool = false,
-
-    fn destroyConnected(surface: *Surface) void {
-        if (surface.buffer) |proxy| wl.wl_buffer_destroy(proxy);
-        if (surface.viewport) |proxy| wl.wayspot_viewport_destroy(proxy);
-        if (surface.layer) |proxy| wl.wayspot_layer_surface_destroy(proxy);
-        if (surface.surface) |proxy| wl.wl_surface_destroy(proxy);
-        surface.* = .{};
-    }
-};
-
-const registry_listener = wl.wl_registry_listener{
-    .global = registryGlobal,
-    .global_remove = registryRemove,
-};
-
-fn registryGlobal(
-    data: ?*anyopaque,
-    registry: ?*wl.wl_registry,
-    name: u32,
-    interface: [*c]const u8,
-    version: u32,
-) callconv(.c) void {
-    const native: *Native = @ptrCast(@alignCast(data));
-    const interface_name = std.mem.span(interface);
-    if (std.mem.eql(u8, interface_name, "wl_compositor")) {
-        if (!bindGlobal(&native.compositor, registry, name, version, 4, &wl.wl_compositor_interface)) {
-            native.failed = true;
-        } else native.compositor_global = name;
-    } else if (std.mem.eql(u8, interface_name, "wl_shm")) {
-        if (!bindGlobal(&native.shm, registry, name, version, 1, &wl.wl_shm_interface)) {
-            native.failed = true;
-        } else native.shm_global = name;
-    } else if (std.mem.eql(u8, interface_name, "wp_viewporter")) {
-        if (!bindGlobal(&native.viewporter, registry, name, version, 1, wl.wayspot_viewporter_interface())) {
-            native.failed = true;
-        } else native.viewporter_global = name;
-    } else if (std.mem.eql(u8, interface_name, "zwlr_layer_shell_v1")) {
-        if (!bindGlobal(
-            &native.layer_shell,
-            registry,
-            name,
-            version,
-            3,
-            wl.wayspot_layer_shell_interface(),
-        )) native.failed = true else native.layer_shell_global = name;
-    } else if (std.mem.eql(u8, interface_name, "wl_output")) {
-        if (version < 4 or native.output_global_count == wallpaper.monitor_capacity) {
-            native.failed = true;
-            return;
-        }
-        native.output_globals[native.output_global_count] = name;
-        native.output_global_count += 1;
-        if (native.output_snapshot != null) native.outputs_changed = true;
-    }
-}
-
-fn bindGlobal(
-    current: anytype,
-    registry: ?*wl.wl_registry,
-    name: u32,
-    advertised: u32,
-    required: u32,
-    interface: *const wl.wl_interface,
-) bool {
-    if (current.* != null or advertised < required) return false;
-    current.* = @ptrCast(wl.wl_registry_bind(registry, name, interface, required));
-    return current.* != null;
-}
-
-// Marks a retained output/global loss; the resident loop replaces the whole display.
-fn registryRemove(data: ?*anyopaque, _: ?*wl.wl_registry, name: u32) callconv(.c) void {
-    const native: *Native = @ptrCast(@alignCast(data));
-    if (name == native.compositor_global or name == native.shm_global or
-        name == native.viewporter_global or name == native.layer_shell_global)
-    {
-        native.failed = true;
-        return;
-    }
-    for (native.output_globals[0..native.output_global_count]) |global| if (name == global) {
-        native.outputs_changed = true;
-        return;
-    };
-}
-
-const output_listener = wl.wl_output_listener{
-    .geometry = outputGeometry,
-    .mode = outputMode,
-    .done = outputDone,
-    .scale = outputScale,
-    .name = outputName,
-    .description = outputDescription,
-};
-
-fn outputGeometry(
-    data: ?*anyopaque,
-    _: ?*wl.wl_output,
-    _: i32,
-    _: i32,
-    _: i32,
-    _: i32,
-    _: i32,
-    _: [*c]const u8,
-    _: [*c]const u8,
-    _: i32,
-) callconv(.c) void {
-    _ = data;
-}
-
-fn outputMode(
-    data: ?*anyopaque,
-    _: ?*wl.wl_output,
-    _: u32,
-    _: i32,
-    _: i32,
-    _: i32,
-) callconv(.c) void {
-    _ = data;
-}
-
-fn outputDone(data: ?*anyopaque, _: ?*wl.wl_output) callconv(.c) void {
-    const probe: *OutputProbe = @ptrCast(@alignCast(data));
-    if (!probe.name_seen) {
-        probe.invalid = true;
-        return;
-    }
-    probe.done = true;
-}
-
-fn outputScale(_: ?*anyopaque, _: ?*wl.wl_output, _: i32) callconv(.c) void {}
-
-fn outputName(data: ?*anyopaque, _: ?*wl.wl_output, name: [*c]const u8) callconv(.c) void {
-    const probe: *OutputProbe = @ptrCast(@alignCast(data));
-    const bytes = std.mem.span(name);
-    if (probe.name_seen or bytes.len == 0 or bytes.len > wallpaper.monitor_name_capacity or
-        !std.unicode.utf8ValidateSlice(bytes))
-    {
-        probe.invalid = true;
-        return;
-    }
-    @memcpy(probe.name_bytes[0..bytes.len], bytes);
-    probe.name_length = @intCast(bytes.len);
-    probe.name_seen = true;
-}
-
-fn outputDescription(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
-
-const layer_listener = wl.wayspot_layer_listener{
-    .configure = layerConfigure,
-    .closed = layerClosed,
-};
-
-fn layerConfigure(
-    data: ?*anyopaque,
-    layer: ?*wl.zwlr_layer_surface_v1,
-    serial: u32,
-    width: u32,
-    height: u32,
-) callconv(.c) void {
-    const surface: *Surface = @ptrCast(@alignCast(data));
-    const owner = surface.owner;
-    // Bound the initial configure wait, not the lifetime of a healthy surface.
-    if (width == 0 or height == 0) {
-        surface.closed = true;
-        if (owner) |native| native.failed = true;
-        return;
-    }
-    if (surface.state == .published) {
-        if (layer) |proxy| wl.wayspot_layer_surface_ack_configure(proxy, serial);
-        if (width != surface.configured_width or height != surface.configured_height) {
-            if (owner) |native| native.outputs_changed = true;
-        }
-    }
-    surface.configure = .{ .serial = serial, .width = width, .height = height };
-}
-
-fn layerClosed(data: ?*anyopaque, _: ?*wl.zwlr_layer_surface_v1) callconv(.c) void {
-    const surface: *Surface = @ptrCast(@alignCast(data));
-    surface.closed = true;
-    if (surface.owner) |native| native.failed = true;
-}
-
-const buffer_listener = wl.wl_buffer_listener{ .release = bufferRelease };
-
-fn bufferRelease(data: ?*anyopaque, _: ?*wl.wl_buffer) callconv(.c) void {
-    const surface: *Surface = @ptrCast(@alignCast(data));
-    surface.released = true;
-}
-
 fn surfaceSide(value: c_int) !u32 {
     if (value <= 0) return error.ImageDimensionsZero;
     if (value > wallpaper.image_side_capacity) return error.ImageDimensionsTooLarge;
@@ -1206,72 +453,6 @@ fn rect(x: u32, y: u32, width: u32, height: u32) sdl.SDL_Rect {
     return .{ .x = @intCast(x), .y = @intCast(y), .w = @intCast(width), .h = @intCast(height) };
 }
 
-fn monitorIndex(snapshot: *const wallpaper.Snapshot, name: []const u8) ?u8 {
-    for (snapshot.slice(), 0..) |monitor, index| {
-        if (std.mem.eql(u8, monitor.name(), name)) return @intCast(index);
-    }
-    return null;
-}
-
-fn contains(handles: []const wallpaper.SurfaceHandle, needle: wallpaper.SurfaceHandle) bool {
-    for (handles) |handle| if (handle == needle) return true;
-    return false;
-}
-
-test "absent display zero wait polls no Wayland descriptor" {
-    var native = Native{ .io = std.testing.io };
-    const ready = try native.wait(&native, -1, -1, 0);
-    try std.testing.expectEqual(wallpaper.Ready{}, ready);
-}
-
-test "surface retains no client buffer backing" {
-    try std.testing.expect(!@hasField(Surface, "shm_fd"));
-    try std.testing.expect(!@hasField(Surface, "mapping"));
-    try std.testing.expect(!@hasField(Surface, "pool"));
-}
-
-fn surfaceParity(
-    native: *Native,
-    allocator: std.mem.Allocator,
-    snapshot: *const wallpaper.Snapshot,
-    image: *const wallpaper.Image,
-    stop_fd: std.posix.fd_t,
-) !void {
-    var next = try wallpaper.prepareRound(native, allocator, snapshot, image);
-    var current: wallpaper.Round = .{};
-    try wallpaper.publishRound(native, &current, &next, stop_fd);
-    try wallpaper.releaseRound(native, &current, stop_fd);
-}
-
-// Compiles every resident Native operation through the same concrete theorem as Transcript.
-fn reconcileParity(
-    native: *Native,
-    allocator: std.mem.Allocator,
-    image: *const wallpaper.Image,
-    current: *wallpaper.Current(Native),
-    stop_fd: std.posix.fd_t,
-    event_fd: *std.posix.fd_t,
-) !void {
-    var work: wallpaper.Work = .refresh;
-    _ = try wallpaper.reconcile(
-        native,
-        allocator,
-        .{ .decoded = image },
-        false,
-        current,
-        stop_fd,
-        event_fd,
-        &work,
-    );
-}
-
-test "native adapter reaches every one-surface operation without a display" {
-    _ = surfaceParity;
-    _ = reconcileParity;
-    _ = openStop;
-    _ = closeStop;
-}
-
 test "rotation socket identity is stable per Wayland display and rejects malformed context" {
     const one = try sessionIdentifier("/run/user/1000", "wayland-0");
     const same = try sessionIdentifier("/run/user/1000", "wayland-0");
@@ -1283,126 +464,38 @@ test "rotation socket identity is stable per Wayland display and rejects malform
     try std.testing.expectError(error.InvalidWaylandSession, sessionIdentifier("/run/user/1000", ""));
 }
 
-test "output probe owns only one exact name and done identity" {
-    var probe: OutputProbe = .{};
-    outputName(&probe, null, "DP-1");
-    outputDone(&probe, null);
-    try std.testing.expect(probe.name_seen);
-    try std.testing.expect(probe.done);
-    try std.testing.expectEqualStrings("DP-1", probe.name_bytes[0..probe.name_length]);
-    outputName(&probe, null, "DP-1");
-    try std.testing.expect(probe.invalid);
-    probe = .{};
-    outputDone(&probe, null);
-    try std.testing.expect(probe.invalid);
-}
-
-test "surface handles reject absent stale and wrong generations" {
-    var native = Native{ .io = std.testing.io };
-    native.surfaces[3] = .{ .state = .prepared, .generation = 7 };
-    _ = try native.checkedSurface(.{ .index = 3, .generation = 7 });
-    try std.testing.expectError(
-        error.SurfaceHandleInvalid,
-        native.checkedSurface(.{ .index = 3, .generation = 8 }),
-    );
-    try std.testing.expectError(
-        error.SurfaceHandleInvalid,
-        native.checkedSurface(.{ .index = 4, .generation = 7 }),
-    );
-    native.surfaces[3] = .{};
-    try std.testing.expectError(
-        error.SurfaceHandleInvalid,
-        native.checkedSurface(.{ .index = 3, .generation = 7 }),
-    );
-}
-
-test "unchanged configure events never exhaust a live wallpaper surface" {
-    var native: Native = .{ .io = std.testing.io };
-    var surface: Surface = .{
-        .owner = &native,
-        .state = .published,
-        .configured_width = 2,
-        .configured_height = 2,
-    };
-    for (1..1001) |serial| layerConfigure(&surface, null, @intCast(serial), 2, 2);
-    try std.testing.expect(!native.outputs_changed);
-    try std.testing.expect(!surface.closed);
-    try std.testing.expect(!native.failed);
-    try std.testing.expectEqual(@as(u32, 1000), surface.configure.?.serial);
-    layerConfigure(&surface, null, 1001, 3, 2);
-    try std.testing.expect(native.outputs_changed);
-    try std.testing.expect(!native.failed);
-    layerConfigure(&surface, null, 1002, 0, 1);
-    try std.testing.expect(surface.closed);
-    try std.testing.expect(native.failed);
-}
-
-test "irrelevant registry announcements never exhaust a live wallpaper display" {
-    var native: Native = .{ .io = std.testing.io };
-    for (1..1001) |id| registryGlobal(&native, null, @intCast(id), "wl_seat", 9);
-    try std.testing.expect(!native.failed);
-    try std.testing.expect(!native.outputs_changed);
-    try std.testing.expectEqual(@as(u8, 0), native.output_global_count);
-}
-
-test "zero-time poll observes readiness with absent borrowed descriptors" {
-    var sockets: [2]std.posix.fd_t = undefined;
-    const result = std.posix.system.socketpair(
-        std.posix.AF.UNIX,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
-        0,
-        &sockets,
-    );
-    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
-    const writer = std.Io.File{ .handle = sockets[0], .flags = .{ .nonblocking = false } };
-    const reader = std.Io.File{ .handle = sockets[1], .flags = .{ .nonblocking = false } };
-    defer writer.close(std.testing.io);
-    defer reader.close(std.testing.io);
-    try writer.writeStreamingAll(std.testing.io, "x");
-    var fds = [_]std.posix.pollfd{
-        .{ .fd = -1, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = sockets[1], .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = -1, .events = std.posix.POLL.IN, .revents = 0 },
-    };
-    var native: Native = .{ .io = std.testing.io };
-    try std.testing.expectEqual(@as(usize, 1), try native.pollUntil(&fds, native.now(), true));
-    try std.testing.expectEqual(@as(i16, 0), fds[0].revents);
-    try std.testing.expect(fds[1].revents & std.posix.POLL.IN != 0);
-    try std.testing.expectEqual(@as(i16, 0), fds[2].revents);
-}
-
-test "native PNG decode and linear cover scaling" {
+test "source PNG decode and linear cover scaling" {
     const png =
         "\x89PNG\r\n\x1a\n" ++
         "\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
         "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xd0\x00\x00\x04\x81\x01\x80\x2c\x55\xce\xb0" ++
         "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
-    var native = Native{ .io = std.testing.io };
-    var image = try native.decode(std.testing.allocator, .png, png);
+    var source = Source{ .io = std.testing.io };
+    var image = try source.decode(std.testing.allocator, .png, png);
     defer image.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
     try std.testing.expectEqual(@as(u32, 0xff800000), image.pixels[0]);
-    var pixels = try wallpaper.coverImage(&native, std.testing.allocator, &image, 3, 2);
+    var pixels = try wallpaper.coverImage(&source, std.testing.allocator, &image, 3, 2);
     defer pixels.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 12), pixels.pitch);
     for (pixels.pixels) |pixel| try std.testing.expectEqual(@as(u32, 0xff800000), pixel);
 }
 
-test "native malformed PNG publishes no image" {
+test "source malformed PNG publishes no image" {
     var png: [24]u8 = @splat(0);
     @memcpy(png[0..8], "\x89PNG\r\n\x1a\n");
     @memcpy(png[12..16], "IHDR");
     std.mem.writeInt(u32, png[16..20], 1, .big);
     std.mem.writeInt(u32, png[20..24], 1, .big);
-    var native = Native{ .io = std.testing.io };
+    var source = Source{ .io = std.testing.io };
     try std.testing.expectError(
         error.ImageDecodeFailed,
-        native.decode(std.testing.allocator, .png, &png),
+        source.decode(std.testing.allocator, .png, &png),
     );
 }
 
-test "native JPEG memory boundary decodes and frees one bounded image" {
+test "source JPEG memory boundary decodes and frees one bounded image" {
     const encoded =
         "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4R" ++
         "DgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU" ++
@@ -1411,8 +504,8 @@ test "native JPEG memory boundary decodes and frees one bounded image" {
         "/aAAwDAQACEQMRAD8APg3Lr//Z";
     var bytes: [285]u8 = undefined;
     try std.base64.standard.Decoder.decode(&bytes, encoded);
-    var native = Native{ .io = std.testing.io };
-    var image = try native.decode(std.testing.allocator, .jpeg, &bytes);
+    var source = Source{ .io = std.testing.io };
+    var image = try source.decode(std.testing.allocator, .jpeg, &bytes);
     defer image.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
@@ -1428,14 +521,14 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
     );
     try std.testing.expectEqual(@as(u8, 0), address.value.path[0]);
     try std.testing.expectEqualStrings("wayspot-wallpaper:" ++ signature, address.value.path[1..][0..80]);
-    var resident = Native{ .io = std.testing.io };
+    var resident = Source{ .io = std.testing.io };
     try resident.openRotation(&signature);
     defer resident.closeRotation();
-    var duplicate = Native{ .io = std.testing.io };
+    var duplicate = Source{ .io = std.testing.io };
     try std.testing.expectError(error.RotationNameInUse, duplicate.openRotation(&signature));
     var requester = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, &signature });
     while (true) {
-        const ready = try resident.wait(&resident, -1, -1, 100);
+        const ready = try wait(&resident, null, -1, 100);
         if (ready.rotate and try resident.receiveRotation()) break;
     }
     resident.replyRotation(true);
@@ -1447,21 +540,21 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
 
 test "partial request client HUP busy peer and closed fd ownership are exact" {
     const signature = "partial-test";
-    var resident = Native{ .io = std.testing.io };
+    var resident = Source{ .io = std.testing.io };
     try resident.openRotation(signature);
     defer resident.closeRotation();
     const client = try connectRotationTest(signature);
     defer _ = std.posix.system.close(client);
     const file: std.Io.File = .{ .handle = client, .flags = .{ .nonblocking = true } };
     try file.writeStreamingAll(std.testing.io, "rot");
-    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    while (!(try wait(&resident, null, -1, 100)).rotate) {}
     try std.testing.expect(!try resident.receiveRotation());
     try file.writeStreamingAll(std.testing.io, "ate\n");
-    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    while (!(try wait(&resident, null, -1, 100)).rotate) {}
     try std.testing.expect(try resident.receiveRotation());
 
     var busy = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, signature });
-    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    while (!(try wait(&resident, null, -1, 100)).rotate) {}
     resident.rejectBusy();
     if (busy.await(std.testing.io)) |_| return error.BusyRequestAccepted else |err| {
         try std.testing.expect(err == error.RotationRejected or err == error.RotationSocketFailed);
@@ -1470,10 +563,10 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
 
     const disconnected = try connectRotationTest(signature);
     _ = std.posix.system.close(disconnected);
-    while (!(try resident.wait(&resident, -1, -1, 100)).rotate) {}
+    while (!(try wait(&resident, null, -1, 100)).rotate) {}
     try std.testing.expectError(error.RotationRequestIncomplete, resident.receiveRotation());
     resident.replyRotation(false);
-    const ready = try resident.wait(&resident, -1, -1, 0);
+    const ready = try wait(&resident, null, -1, 0);
     try std.testing.expect(!ready.rotate);
 }
 
@@ -1520,12 +613,12 @@ test "socket credential transcript rejects either wrong uid before protocol byte
     }
 }
 
-test "native unsupported IO acquires no file" {
-    var native = Native{ .io = std.Io.failing };
-    if (native.open("wallpaper.png")) |_| {
+test "source unsupported IO acquires no file" {
+    var source = Source{ .io = std.Io.failing };
+    if (source.open("wallpaper.png")) |_| {
         return error.ExpectedOpenFailure;
     } else |_| {}
-    try std.testing.expect(native.file == null);
+    try std.testing.expect(source.file == null);
 }
 
 test "bounded malformed image data publishes no partial image" {
@@ -1538,8 +631,8 @@ test "bounded malformed image data publishes no partial image" {
 fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
     var bytes: [4096]u8 = undefined;
     const input = bytes[0..smith.slice(&bytes)];
-    var native = Native{ .io = std.Io.failing };
-    if (native.decode(std.testing.allocator, format, input)) |value| {
+    var source = Source{ .io = std.Io.failing };
+    if (source.decode(std.testing.allocator, format, input)) |value| {
         var image = value;
         defer image.deinit(std.testing.allocator);
         try std.testing.expect(image.width > 0 and image.width <= wallpaper.image_side_capacity);
@@ -1548,6 +641,671 @@ fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
     } else |_| {}
 }
 
-test "Wayland output observer contracts" {
-    _ = @import("outputs.zig");
+// A stable array entry owns the wl_output and its layer. Geometry changes
+// replace pixels, never the surface. Only registry removal or layer.closed
+// retires that role. The array is never moved while callbacks borrow entries.
+const Output = struct {
+    id: ?u32 = null,
+    proxy: ?*wl.wl_output = null,
+    surface: ?*wl.wl_surface = null,
+    layer: ?*wl.zwlr_layer_surface_v1 = null,
+    viewport: ?*wl.wp_viewport = null,
+    buffer: ?*wl.wl_buffer = null,
+    facts: outputs.Facts = .{},
+    suspended: bool = false,
+    reopen_at: ?u64 = null,
+
+    fn destroyRole(self: *Output) void {
+        if (self.buffer) |buffer| wl.wl_buffer_destroy(buffer);
+        if (self.viewport) |viewport| wl.wayspot_viewport_destroy(viewport);
+        if (self.layer) |layer| wl.wayspot_layer_surface_destroy(layer);
+        if (self.surface) |surface| wl.wl_surface_destroy(surface);
+        self.buffer = null;
+        self.viewport = null;
+        self.layer = null;
+        self.surface = null;
+        self.facts.logical = null;
+        self.facts.published = null;
+    }
+
+    fn destroy(self: *Output) void {
+        self.destroyRole();
+        if (self.proxy) |proxy| wl.wl_output_release(proxy);
+        self.* = .{};
+    }
+
+    fn mayCreate(self: *Output, now: u64) bool {
+        if (self.id == null or self.facts.pixels == null or self.surface != null) return false;
+        if (!self.suspended) return true;
+        // A closed role on a still-advertised output is exceptional.
+        // Recover at a bounded deadline, not immediately in the callback.
+        const end = self.reopen_at orelse blk: {
+            self.reopen_at = now + 5000;
+            break :blk self.reopen_at.?;
+        };
+        if (now < end) return false;
+        self.suspended = false;
+        self.reopen_at = null;
+        return true;
+    }
+
+    fn createRole(self: *Output, display: *Display) !void {
+        std.debug.assert(self.surface == null and self.proxy != null);
+        self.surface = wl.wl_compositor_create_surface(display.compositor.?) orelse return error.SurfaceCreateFailed;
+        errdefer self.destroyRole();
+        const region = wl.wl_compositor_create_region(display.compositor.?) orelse return error.SurfaceRegionFailed;
+        wl.wl_surface_set_input_region(self.surface.?, region);
+        wl.wl_region_destroy(region);
+        self.layer = wl.wayspot_layer_shell_get_surface(display.shell.?, self.surface.?, self.proxy.?, wl.WAYSPOT_LAYER_BACKGROUND, "wayspot-wallpaper") orelse return error.SurfaceLayerFailed;
+        if (wl.wayspot_layer_surface_add_listener(self.layer.?, &layer_listener, self) != 0) return error.SurfaceLayerFailed;
+        const layer = self.layer.?;
+        wl.wayspot_layer_surface_set_size(layer, 0, 0);
+        wl.wayspot_layer_surface_set_anchor(layer, wl.WAYSPOT_ANCHOR_TOP | wl.WAYSPOT_ANCHOR_BOTTOM | wl.WAYSPOT_ANCHOR_LEFT | wl.WAYSPOT_ANCHOR_RIGHT);
+        wl.wayspot_layer_surface_set_exclusive_zone(layer, -1);
+        wl.wayspot_layer_surface_set_keyboard(layer, wl.WAYSPOT_KEYBOARD_NONE);
+        self.viewport = wl.wayspot_viewporter_get_viewport(display.viewporter.?, self.surface.?) orelse return error.SurfaceViewportFailed;
+        wl.wl_surface_commit(self.surface.?);
+    }
+};
+
+const Display = struct {
+    connection: ?*wl.wl_display = null,
+    registry: ?*wl.wl_registry = null,
+    initial_sync: ?*wl.wl_callback = null,
+    compositor: ?*wl.wl_compositor = null,
+    shm: ?*wl.wl_shm = null,
+    viewporter: ?*wl.wp_viewporter = null,
+    shell: ?*wl.zwlr_layer_shell_v1 = null,
+    records: [wallpaper.monitor_capacity]Output = @splat(.{}),
+    ready: bool = false,
+    failed: bool = false,
+
+    fn connect(self: *Display) !void {
+        self.connection = wl.wl_display_connect(null) orelse return error.WaylandConnectFailed;
+        errdefer self.deinit();
+        self.registry = wl.wl_display_get_registry(self.connection.?) orelse return error.WaylandRegistryFailed;
+        if (wl.wl_registry_add_listener(self.registry.?, &registry_listener, self) != 0) return error.WaylandRegistryFailed;
+        self.initial_sync = wl.wl_display_sync(self.connection.?) orelse return error.WaylandSyncFailed;
+        if (wl.wl_callback_add_listener(self.initial_sync.?, &sync_listener, self) != 0) return error.WaylandSyncFailed;
+    }
+
+    fn deinit(self: *Display) void {
+        if (self.connection) |connection| {
+            // Never retain or recycle backing memory; even a compositor that
+            // still references a retired wl_buffer owns its immutable SHM.
+            for (&self.records) |*output| output.destroy();
+            if (self.initial_sync) |sync| wl.wl_callback_destroy(sync);
+            if (self.shell) |shell| wl.wayspot_layer_shell_destroy(shell);
+            if (self.viewporter) |viewporter| wl.wayspot_viewporter_destroy(viewporter);
+            if (self.shm) |shm| wl.wl_shm_destroy(shm);
+            if (self.compositor) |compositor| wl.wl_compositor_destroy(compositor);
+            if (self.registry) |registry| wl.wl_registry_destroy(registry);
+            _ = wl.wl_display_flush(connection);
+            wl.wl_display_disconnect(connection);
+        }
+        self.* = .{};
+    }
+
+    fn dispatch(self: *Display) !void {
+        if (wl.wl_display_dispatch_pending(self.connection.?) < 0) return displayError(self.connection.?);
+        if (self.failed) return error.WaylandOutputRegistrationFailed;
+        if (self.ready and (self.compositor == null or self.shm == null or self.viewporter == null or self.shell == null)) return error.WaylandGlobalMissing;
+    }
+
+    fn ensureRoles(self: *Display, now: u64) !void {
+        if (!self.ready) return;
+        for (&self.records) |*output| {
+            if (output.mayCreate(now)) try output.createRole(self);
+        }
+    }
+
+    fn roleWake(self: *const Display, now: u64) ?u64 {
+        var result: ?u64 = null;
+        for (&self.records) |*output| if (output.reopen_at) |end| {
+            result = if (result) |old| @min(old, end -| now) else end -| now;
+        };
+        return result;
+    }
+
+    fn count(self: *const Display) usize {
+        var n: usize = 0;
+        for (&self.records) |*output| if (output.id != null) {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn allReady(self: *const Display) bool {
+        if (!self.ready) return false;
+        var n: usize = 0;
+        for (&self.records) |*output| {
+            if (output.id == null) continue;
+            if (output.suspended or output.facts.geometry() == null) return false;
+            n += 1;
+        }
+        return n > 0;
+    }
+
+    const Plan = struct {
+        targets: [wallpaper.monitor_capacity]?outputs.Geometry = @splat(null),
+        count: usize = 0,
+    };
+
+    fn plan(self: *const Display, force: bool) !Plan {
+        var result: Plan = .{};
+        var pixels: u64 = 0;
+        for (&self.records, 0..) |*output, i| {
+            if (output.id == null or output.suspended) continue;
+            const geometry = output.facts.geometry() orelse continue;
+            pixels += @as(u64, geometry.pixels.width) * geometry.pixels.height;
+            if (pixels > wallpaper.round_pixel_capacity) return error.RoundPixelsTooMany;
+            if (!force and !output.facts.needsBuffer()) continue;
+            result.targets[i] = geometry;
+            result.count += 1;
+        }
+        return result;
+    }
+
+    fn publish(self: *Display, source: *Source, allocator: std.mem.Allocator, image: *const wallpaper.Image, pending: Plan, stop_fd: std.posix.fd_t) !void {
+        try publishBuffers(*wl.wl_buffer, self, source, allocator, image, pending);
+        try flush(source, self.connection.?, stop_fd);
+        if (pending.count != 0) std.log.info("wallpaper published {d} output surfaces", .{self.publishedCount()});
+    }
+
+    fn discardBuffer(_: *Display, buffer: *wl.wl_buffer) void {
+        wl.wl_buffer_destroy(buffer);
+    }
+
+    fn commitBuffer(self: *Display, index: usize, geometry: outputs.Geometry, buffer: *wl.wl_buffer) void {
+        const output = &self.records[index];
+        wl.wayspot_viewport_set_destination(output.viewport.?, @intCast(geometry.logical.width), @intCast(geometry.logical.height));
+        wl.wl_surface_attach(output.surface.?, buffer, 0, 0);
+        wl.wl_surface_damage_buffer(output.surface.?, 0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+        wl.wl_surface_commit(output.surface.?);
+        // wl_surface.attach permits destroying a committed wl_buffer before
+        // release when its backing storage is never reused. No NULL attach,
+        // release wait, frame callback, or second layer is necessary.
+        if (output.buffer) |old| wl.wl_buffer_destroy(old);
+        output.buffer = buffer;
+        output.facts.published = geometry;
+    }
+
+    fn publishedCount(self: *const Display) usize {
+        var n: usize = 0;
+        for (&self.records) |*output| if (output.facts.published != null) {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn createBuffer(self: *Display, io: std.Io, pixels: *const wallpaper.Image) !*wl.wl_buffer {
+        const length = pixels.pixels.len * @sizeOf(u32);
+        const fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
+        defer _ = std.posix.system.close(fd);
+        try (std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } }).setLength(io, length);
+        const mapping = try std.posix.mmap(null, length, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
+        defer std.posix.munmap(mapping);
+        @memcpy(mapping[0..length], std.mem.sliceAsBytes(pixels.pixels));
+        const pool = wl.wl_shm_create_pool(self.shm.?, fd, @intCast(length)) orelse return error.SurfacePoolFailed;
+        defer wl.wl_shm_pool_destroy(pool);
+        const buffer = wl.wl_shm_pool_create_buffer(pool, 0, @intCast(pixels.width), @intCast(pixels.height), @intCast(pixels.pitch), wl.WL_SHM_FORMAT_XRGB8888) orelse return error.SurfaceBufferFailed;
+        errdefer wl.wl_buffer_destroy(buffer);
+        if (wl.wl_buffer_add_listener(buffer, &buffer_listener, null) != 0) return error.SurfaceBufferFailed;
+        return buffer;
+    }
+};
+
+// Prepare every required immutable buffer before touching any displayed
+// content. Failed allocation/scale/buffer creation retires only candidates.
+// The same bounded transaction is exercised by the failure-injection test.
+fn publishBuffers(comptime Buffer: type, destination: anytype, source: anytype, allocator: std.mem.Allocator, image: *const wallpaper.Image, plan: Display.Plan) !void {
+    var buffers: [wallpaper.monitor_capacity]?Buffer = @splat(null);
+    errdefer for (&buffers) |*buffer| {
+        if (buffer.*) |value| destination.discardBuffer(value);
+    };
+    for (plan.targets, 0..) |target, index| {
+        const geometry = target orelse continue;
+        var pixels = try wallpaper.coverImage(source, allocator, image, geometry.pixels.width, geometry.pixels.height);
+        defer pixels.deinit(allocator);
+        buffers[index] = try destination.createBuffer(source.io, &pixels);
+    }
+    for (plan.targets, 0..) |target, index| {
+        const geometry = target orelse continue;
+        destination.commitBuffer(index, geometry, buffers[index].?);
+        buffers[index] = null;
+    }
+}
+
+fn displayError(connection: *wl.wl_display) error{ WaylandDisplayLost, WaylandProtocolError } {
+    return if (wl.wl_display_get_error(connection) == @backingInt(std.posix.E.PROTO)) error.WaylandProtocolError else error.WaylandDisplayLost;
+}
+
+const registry_listener = wl.wl_registry_listener{ .global = registryGlobal, .global_remove = registryRemove };
+const sync_listener = wl.wl_callback_listener{ .done = registryReady };
+fn registryReady(data: ?*anyopaque, callback: ?*wl.wl_callback, _: u32) callconv(.c) void {
+    const self: *Display = @ptrCast(@alignCast(data));
+    wl.wl_callback_destroy(callback);
+    self.initial_sync = null;
+    self.ready = true;
+}
+
+fn registryGlobal(data: ?*anyopaque, registry: ?*wl.wl_registry, id: u32, interface: [*c]const u8, version: u32) callconv(.c) void {
+    const self: *Display = @ptrCast(@alignCast(data));
+    const name = std.mem.span(interface);
+    if (std.mem.eql(u8, name, "wl_output")) {
+        if (version < 3) {
+            self.failed = true;
+            return;
+        }
+        const output = for (&self.records) |*entry| {
+            if (entry.id == null) break entry;
+        } else {
+            self.failed = true;
+            return;
+        };
+        output.* = .{ .id = id };
+        output.proxy = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_output_interface, @min(version, 4)));
+        if (output.proxy == null or wl.wl_output_add_listener(output.proxy.?, &output_listener, output) != 0) self.failed = true;
+    } else if (std.mem.eql(u8, name, "wl_compositor") and self.compositor == null and version >= 4) {
+        self.compositor = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_compositor_interface, 4));
+    } else if (std.mem.eql(u8, name, "wl_shm") and self.shm == null and version >= 1) {
+        self.shm = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_shm_interface, 1));
+    } else if (std.mem.eql(u8, name, "wp_viewporter") and self.viewporter == null and version >= 1) {
+        self.viewporter = @ptrCast(wl.wl_registry_bind(registry, id, wl.wayspot_viewporter_interface(), 1));
+    } else if (std.mem.eql(u8, name, "zwlr_layer_shell_v1") and self.shell == null and version >= 1) {
+        self.shell = @ptrCast(wl.wl_registry_bind(registry, id, wl.wayspot_layer_shell_interface(), @min(version, 3)));
+    }
+}
+
+fn registryRemove(data: ?*anyopaque, _: ?*wl.wl_registry, id: u32) callconv(.c) void {
+    const self: *Display = @ptrCast(@alignCast(data));
+    for (&self.records) |*output| if (output.id == id) {
+        output.destroy();
+        return;
+    };
+}
+
+const output_listener = wl.wl_output_listener{ .geometry = outputGeometry, .mode = outputMode, .done = outputDone, .scale = outputScale, .name = outputName, .description = outputDescription };
+fn outputGeometry(data: ?*anyopaque, _: ?*wl.wl_output, _: i32, _: i32, _: i32, _: i32, _: i32, _: [*c]const u8, _: [*c]const u8, transform: i32) callconv(.c) void {
+    const output: *Output = @ptrCast(@alignCast(data));
+    output.facts.transform = std.math.cast(u3, transform);
+}
+fn outputMode(data: ?*anyopaque, _: ?*wl.wl_output, flags: u32, width: i32, height: i32, _: i32) callconv(.c) void {
+    if (flags & wl.WL_OUTPUT_MODE_CURRENT == 0) return;
+    const output: *Output = @ptrCast(@alignCast(data));
+    output.facts.mode = if (width > 0 and height > 0) .{ .width = @intCast(width), .height = @intCast(height) } else null;
+}
+fn outputDone(data: ?*anyopaque, _: ?*wl.wl_output) callconv(.c) void {
+    const output: *Output = @ptrCast(@alignCast(data));
+    if (output.facts.done() catch |err| {
+        std.log.warn("wallpaper output geometry refused: {s}", .{@errorName(err)});
+        return;
+    }) {
+        output.suspended = false;
+        output.reopen_at = null;
+    }
+}
+fn outputScale(_: ?*anyopaque, _: ?*wl.wl_output, _: i32) callconv(.c) void {}
+fn outputName(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
+fn outputDescription(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
+
+const layer_listener = wl.wayspot_layer_listener{ .configure = layerConfigure, .closed = layerClosed };
+fn layerConfigure(data: ?*anyopaque, layer: ?*wl.zwlr_layer_surface_v1, serial: u32, width: u32, height: u32) callconv(.c) void {
+    const output: *Output = @ptrCast(@alignCast(data));
+    if (layer) |proxy| wl.wayspot_layer_surface_ack_configure(proxy, serial);
+    // A zero dimension means the client may choose. This fully anchored role
+    // needs a real output size; keep existing content until it is available.
+    _ = wallpaper.surfacePixelCount(width, height) catch {
+        output.facts.logical = null;
+        return;
+    };
+    output.facts.logical = .{ .width = width, .height = height };
+}
+fn layerClosed(data: ?*anyopaque, _: ?*wl.zwlr_layer_surface_v1) callconv(.c) void {
+    const output: *Output = @ptrCast(@alignCast(data));
+    output.destroyRole();
+    output.suspended = true;
+    output.reopen_at = null;
+    std.log.warn("wallpaper role closed on output {d}", .{output.id orelse 0});
+}
+const buffer_listener = wl.wl_buffer_listener{ .release = bufferReleased };
+fn bufferReleased(_: ?*anyopaque, _: ?*wl.wl_buffer) callconv(.c) void {}
+
+const Ready = struct { stop: bool = false, rotate: bool = false, client: bool = false };
+const poll_failure = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
+
+fn readStop(source: *Source, fd: std.posix.fd_t) !void {
+    var record: [128]u8 = undefined;
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    if (try file.readStreaming(source.io, &.{&record}) != record.len) return error.StopRecordIncomplete;
+}
+
+// One blocking wait over real readiness. No frame callback or periodic poll.
+fn wait(source: *Source, connection: ?*wl.wl_display, stop_fd: std.posix.fd_t, timeout: ?u64) !Ready {
+    var prepared = false;
+    defer if (prepared) wl.wl_display_cancel_read(connection.?);
+    var events: i16 = std.posix.POLL.IN;
+    if (connection) |display| {
+        if (wl.wl_display_prepare_read(display) != 0) return .{};
+        prepared = true;
+        const result = wl.wl_display_flush(display);
+        if (result < 0) {
+            if (std.posix.errno(result) != .AGAIN) return displayError(display);
+            events |= std.posix.POLL.OUT;
+        }
+    }
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = if (connection) |display| wl.wl_display_get_fd(display) else -1, .events = events, .revents = 0 },
+        .{ .fd = source.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = source.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    _ = try std.posix.poll(&fds, if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1);
+    if (fds[0].revents != 0) {
+        try readStop(source, stop_fd);
+        return .{ .stop = true };
+    }
+    if (connection) |display| {
+        if (fds[1].revents & std.posix.POLL.IN != 0) {
+            prepared = false;
+            if (wl.wl_display_read_events(display) < 0) return displayError(display);
+        } else if (fds[1].revents & poll_failure != 0) return displayError(display);
+    }
+    if (fds[2].revents & poll_failure != 0) return error.RotationListenerLost;
+    return .{ .rotate = fds[2].revents != 0 or fds[3].revents != 0, .client = fds[3].revents != 0 };
+}
+
+// Receipt means the commit requests were written, not a frame was displayed.
+fn flush(source: *Source, connection: *wl.wl_display, stop_fd: std.posix.fd_t) !void {
+    const deadline = source.now() + 1000;
+    while (true) {
+        const result = wl.wl_display_flush(connection);
+        if (result >= 0) return;
+        if (std.posix.errno(result) != .AGAIN) return displayError(connection);
+        const remaining = deadline -| source.now();
+        if (remaining == 0) return error.WaylandDisplayLost;
+        var fds = [_]std.posix.pollfd{
+            .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = wl.wl_display_get_fd(connection), .events = std.posix.POLL.OUT, .revents = 0 },
+        };
+        if (try std.posix.poll(&fds, @intCast(remaining)) == 0) return error.WaylandDisplayLost;
+        if (fds[0].revents != 0) {
+            try readStop(source, stop_fd);
+            return error.Stopped;
+        }
+        if (fds[1].revents & poll_failure != 0) return displayError(connection);
+    }
+}
+
+pub fn run(init: std.process.Init, root_path: []const u8) !void {
+    var catalog = try discoverCatalog(init.io, init.gpa, root_path);
+    defer catalog.deinit();
+    const signature = try sessionIdentifier(init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing, init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing);
+    var source: Source = .{ .io = init.io };
+    try source.openRotation(&signature);
+    defer source.closeRotation();
+    const stop = try openStop();
+    defer closeStop(stop);
+    var first = try wallpaper.choose(&source, init.gpa, &catalog);
+    first.image.deinit(init.gpa);
+    var selected = first.encoded;
+    defer selected.deinit(init.gpa);
+    catalog.published = first.index;
+    var schedule: wallpaper.Schedule = .{};
+    // Recover the selected endpoint on transport loss. A protocol fault is
+    // not a recoverable disconnect. Session teardown stops this process.
+    while (true) {
+        var display: Display = .{};
+        const result = result: {
+            display.connect() catch |err| break :result err;
+            break :result serve(&display, &source, init.gpa, &catalog, &selected, &schedule, stop.fd);
+        };
+        display.deinit();
+        result catch |err| switch (err) {
+            error.Stopped => return,
+            error.WaylandDisplayLost, error.WaylandConnectFailed => {
+                source.replyRotation(false);
+                std.log.warn("wallpaper connection unavailable: {s}", .{@errorName(err)});
+                const ready = try wait(&source, null, stop.fd, 1000);
+                if (ready.stop) return;
+                if (ready.rotate) {
+                    _ = source.receiveRotation() catch false;
+                    source.replyRotation(false);
+                }
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+}
+
+fn serve(display: *Display, source: *Source, allocator: std.mem.Allocator, catalog: *wallpaper.Catalog, selected: *wallpaper.EncodedImage, schedule: *wallpaper.Schedule, stop_fd: std.posix.fd_t) !void {
+    var direct = false;
+    var request_deadline: ?u64 = null;
+    var retry_at: ?u64 = null;
+    while (true) {
+        try display.dispatch();
+        const now = source.now();
+        try display.ensureRoles(now);
+        if (request_deadline) |end| {
+            if (now >= end or (direct and display.ready and display.count() == 0)) {
+                source.replyRotation(false);
+                direct = false;
+                request_deadline = null;
+            }
+        }
+        // A direct request may expedite recovery of a closed background role.
+        if (direct or schedule.due(now, display.allReady())) {
+            if (display.allReady()) {
+                const success = rotate(display, source, allocator, catalog, selected, stop_fd) catch |err| switch (err) {
+                    error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
+                    else => blk: {
+                        std.log.warn("wallpaper rotation refused: {s}", .{@errorName(err)});
+                        break :blk false;
+                    },
+                };
+                try schedule.attempted(source.now(), direct, success);
+                if (direct) {
+                    source.replyRotation(success);
+                    direct = false;
+                    request_deadline = null;
+                }
+            }
+        }
+        if (retry_at == null or now >= retry_at.?) {
+            retry_at = null;
+            const pending = display.plan(false) catch |err| {
+                std.log.warn("wallpaper geometry refused: {s}", .{@errorName(err)});
+                retry_at = now + 1000;
+                continue;
+            };
+            if (pending.count != 0) {
+                const result = result: {
+                    var image = wallpaper.decodeImage(source, allocator, selected) catch |err| break :result err;
+                    defer image.deinit(allocator);
+                    break :result display.publish(source, allocator, &image, pending, stop_fd);
+                };
+                result catch |err| switch (err) {
+                    error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
+                    else => {
+                        std.log.warn("wallpaper publication refused: {s}", .{@errorName(err)});
+                        retry_at = source.now() + 1000;
+                    },
+                };
+                if (retry_at == null and schedule.deadline == null) try schedule.advance(source.now());
+            }
+        }
+        const current = source.now();
+        var timeout = schedule.wake(current, display.allReady());
+        for ([_]?u64{ request_deadline, retry_at }) |deadline| if (deadline) |end| {
+            timeout = if (timeout) |old| @min(old, end -| current) else end -| current;
+        };
+        if (display.roleWake(current)) |delay| timeout = if (timeout) |old| @min(old, delay) else delay;
+        const ready = try wait(source, display.connection, stop_fd, timeout);
+        if (ready.stop) return error.Stopped;
+        if (ready.rotate) {
+            if (direct) {
+                source.rejectBusy();
+                if (ready.client) {
+                    source.replyRotation(false);
+                    direct = false;
+                    request_deadline = null;
+                }
+            } else {
+                direct = source.receiveRotation() catch |err| blk: {
+                    std.log.warn("wallpaper rotation request refused: {s}", .{@errorName(err)});
+                    source.replyRotation(false);
+                    break :blk false;
+                };
+                if (source.rotate_client < 0) {
+                    request_deadline = null;
+                } else if (request_deadline == null) request_deadline = source.now() + 2000;
+                if (direct) for (&display.records) |*output| {
+                    output.suspended = false;
+                    output.reopen_at = null;
+                };
+            }
+        }
+    }
+}
+
+fn rotate(display: *Display, source: *Source, allocator: std.mem.Allocator, catalog: *wallpaper.Catalog, selected: *wallpaper.EncodedImage, stop_fd: std.posix.fd_t) !bool {
+    std.debug.assert(display.allReady());
+    const pending = try display.plan(true);
+    var candidate = try wallpaper.choose(source, allocator, catalog);
+    defer candidate.image.deinit(allocator);
+    errdefer candidate.encoded.deinit(allocator);
+    try display.publish(source, allocator, &candidate.image, pending, stop_fd);
+    selected.deinit(allocator);
+    selected.* = candidate.encoded;
+    catalog.published = candidate.index;
+    return true;
+}
+
+test "unrelated globals and repeated configure events do not invalidate a background" {
+    var display: Display = .{ .ready = true };
+    const output = &display.records[0];
+    output.* = .{ .id = 1, .facts = .{ .pixels = .{ .width = 1920, .height = 1080 }, .logical = .{ .width = 1280, .height = 720 } } };
+    output.facts.published = output.facts.geometry();
+    for (1..1001) |id| {
+        registryGlobal(&display, null, @intCast(id), "wl_seat", 9);
+        layerConfigure(output, null, @intCast(id), 1280, 720);
+        try std.testing.expectEqual(@as(usize, 0), (try display.plan(false)).count);
+    }
+    try std.testing.expect(!display.failed and display.allReady());
+    layerConfigure(output, null, 1001, 1920, 1080);
+    try std.testing.expectEqual(@as(usize, 1), (try display.plan(false)).count);
+}
+
+test "plan retains survivors and rotates all current outputs without recreating roles" {
+    var display: Display = .{ .ready = true };
+    const facts: outputs.Facts = .{ .pixels = .{ .width = 1920, .height = 1080 }, .logical = .{ .width = 1280, .height = 720 } };
+    display.records[0] = .{ .id = 1, .facts = facts };
+    display.records[0].facts.published = facts.geometry();
+    display.records[1] = .{ .id = 2, .facts = facts };
+    const add = try display.plan(false);
+    try std.testing.expectEqual(@as(usize, 1), add.count);
+    try std.testing.expect(add.targets[0] == null and add.targets[1] != null);
+    try std.testing.expectEqual(@as(usize, 2), (try display.plan(true)).count);
+    registryRemove(&display, null, 2);
+    try std.testing.expectEqual(@as(usize, 0), (try display.plan(false)).count);
+    registryRemove(&display, null, 1);
+    try std.testing.expect(!display.allReady());
+    try std.testing.expectEqual(@as(usize, 0), (try display.plan(true)).count);
+}
+
+test "closed role recovery has a deadline and disappears with its output" {
+    var display: Display = .{ .ready = true };
+    const output = &display.records[0];
+    output.* = .{ .id = 1, .facts = .{ .pixels = .{ .width = 1280, .height = 720 } }, .suspended = true };
+    try std.testing.expect(!output.mayCreate(10));
+    try std.testing.expectEqual(@as(?u64, 5000), display.roleWake(10));
+    try std.testing.expect(!output.mayCreate(5009));
+    try std.testing.expect(output.mayCreate(5010));
+    try std.testing.expect(display.roleWake(5010) == null);
+    output.suspended = true;
+    try std.testing.expect(!output.mayCreate(6000));
+    registryRemove(&display, null, 1);
+    try std.testing.expect(display.roleWake(6000) == null);
+    try std.testing.expect(!output.mayCreate(12000));
+}
+
+test "total output bound refuses a rotation without changing existing geometry" {
+    var display: Display = .{ .ready = true };
+    const facts: outputs.Facts = .{
+        .pixels = .{ .width = 7680, .height = 4320 },
+        .logical = .{ .width = 3840, .height = 2160 },
+    };
+    for (display.records[0..3], 0..) |*output, index| {
+        output.* = .{ .id = @intCast(index + 1), .facts = facts };
+        output.facts.published = facts.geometry();
+    }
+    try std.testing.expectError(error.RoundPixelsTooMany, display.plan(true));
+    for (display.records[0..3]) |output| try std.testing.expect(!output.facts.needsBuffer());
+}
+
+test "stop readiness takes priority over rotation" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const result = std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0, &fds);
+    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+    const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+    try writer.writeStreamingAll(std.testing.io, &(@as([128]u8, @splat(0))));
+    var source: Source = .{ .io = std.testing.io };
+    try source.openRotation("wallpaper-stop-priority-test");
+    defer source.closeRotation();
+    const client = try connectRotationTest("wallpaper-stop-priority-test");
+    defer _ = std.posix.system.close(client);
+    const ready = try wait(&source, null, fds[0], 100);
+    try std.testing.expect(ready.stop and !ready.rotate);
+}
+
+test "all buffer preparation precedes every commit and failures discard only candidates" {
+    const Target = struct {
+        created: usize = 0,
+        committed: usize = 0,
+        discarded: usize = 0,
+        fail_at: ?usize = null,
+
+        fn createBuffer(self: *@This(), _: std.Io, _: *const wallpaper.Image) !usize {
+            if (self.fail_at == self.created) return error.SurfaceBufferFailed;
+            self.created += 1;
+            return self.created;
+        }
+        fn discardBuffer(self: *@This(), buffer: usize) void {
+            std.debug.assert(buffer > 0 and buffer <= self.created);
+            self.discarded += 1;
+        }
+        fn commitBuffer(self: *@This(), _: usize, _: outputs.Geometry, buffer: usize) void {
+            std.debug.assert(self.created == 3 and self.discarded == 0);
+            std.debug.assert(buffer == self.committed + 1);
+            self.committed += 1;
+        }
+    };
+    var source: Source = .{ .io = std.testing.io };
+    var pixel = [_]u32{0xff203040};
+    const image: wallpaper.Image = .{ .width = 1, .height = 1, .pitch = 4, .pixels = &pixel };
+    const geometry: outputs.Geometry = .{ .pixels = .{ .width = 2, .height = 2 }, .logical = .{ .width = 2, .height = 2 } };
+    var plan: Display.Plan = .{ .count = 3 };
+    plan.targets[0] = geometry;
+    plan.targets[2] = geometry;
+    plan.targets[5] = geometry;
+    for (0..3) |failure| {
+        var target: Target = .{ .fail_at = failure };
+        try std.testing.expectError(error.SurfaceBufferFailed, publishBuffers(usize, &target, &source, std.testing.allocator, &image, plan));
+        try std.testing.expectEqual(failure, target.created);
+        try std.testing.expectEqual(failure, target.discarded);
+        try std.testing.expectEqual(@as(usize, 0), target.committed);
+        target = .{};
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure });
+        try std.testing.expectError(error.OutOfMemory, publishBuffers(usize, &target, &source, failing.allocator(), &image, plan));
+        try std.testing.expectEqual(failure, target.discarded);
+        try std.testing.expectEqual(@as(usize, 0), target.committed);
+    }
+    var success: Target = .{};
+    try publishBuffers(usize, &success, &source, std.testing.allocator, &image, plan);
+    try std.testing.expectEqual(@as(usize, 3), success.committed);
+    try std.testing.expectEqual(@as(usize, 0), success.discarded);
 }

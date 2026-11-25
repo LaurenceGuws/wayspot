@@ -75,14 +75,17 @@ scope:
         - notification history
     wallpaper:
       purpose: discover, show, and rotate monitor wallpapers
-      output_authority: native wl_output plus zxdg_output_v1 logical geometry
-      presentation: layer-shell surfaces plus wp_viewporter per output
+      output_authority: wl_output mode and transform plus layer configure logical size
+      presentation: persistent layer-shell surface plus wp_viewporter per output on one Wayland connection
       rotation_scope: XDG_RUNTIME_DIR plus WAYLAND_DISPLAY
       independent_headless_acceptance: Snowman two-output and zero-output reconciliation
       resident_process: true
       persistent_derived_state: false
       invariants:
-        - monitor focus never changes the current wallpaper round
+        - rotation replaces immutable buffers, never healthy output surfaces
+        - output add/remove affects only the corresponding surface
+        - unchanged configure, focus and input never republish wallpaper
+        - zero outputs suspend the hourly timer; return performs at most one due rotation
         - each process start receives a fresh random sequence
         - the process remains alive while the desktop session is alive
 

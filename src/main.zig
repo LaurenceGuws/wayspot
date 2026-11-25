@@ -11,8 +11,7 @@ const notification = @import("notifications/root.zig");
 const navigator = @import("picker/navigator.zig");
 const picker = @import("picker/root.zig");
 const sdl = @import("picker/view.zig");
-const wallpaper = @import("wallpaper/root.zig");
-const wallpaper_native = @import("wallpaper/wayland.zig");
+const wallpaper = @import("wallpaper/wayland.zig");
 
 var notification_stop: std.atomic.Value(bool) = .init(false);
 
@@ -167,11 +166,11 @@ fn perform(
         .wallpaper => |wallpaper_command| switch (wallpaper_command) {
             .run => |root| try runWallpaper(init, root),
             .rotate => {
-                const identifier = try wallpaper_native.sessionIdentifier(
+                const identifier = try wallpaper.sessionIdentifier(
                     init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
                     init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,
                 );
-                try wallpaper_native.requestRotation(init.io, &identifier);
+                try wallpaper.requestRotation(init.io, &identifier);
             },
         },
         .apps => |app| switch (app) {
@@ -196,57 +195,8 @@ fn perform(
     return 0;
 }
 
-/// Owns one image and resident lifetime; teardown disconnects before local owners are freed.
 fn runWallpaper(init: std.process.Init, root: []const u8) !void {
-    var catalog = try wallpaper_native.discoverCatalog(init.io, init.gpa, root);
-    defer catalog.deinit();
-    const identifier = try wallpaper_native.sessionIdentifier(
-        init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
-        init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,
-    );
-    var resident = wallpaper_native.Native{ .io = init.io };
-    try resident.openRotation(&identifier);
-    defer resident.closeRotation();
-    const native = try resident.createNative(init.gpa);
-    var current = wallpaper.Current(wallpaper_native.Native){ .native = native, .round = .{} };
-    defer init.gpa.destroy(current.native);
-    var image: ?wallpaper.EncodedImage = null;
-    for (0..catalog.paths.items.len) |_| {
-        var candidate = wallpaper.readEncodedImage(&resident, init.gpa, try catalog.next()) catch continue;
-        // Reject unusable files before choosing the initial round. Publication
-        // will decode again, but only encoded bytes remain resident afterwards.
-        var decoded = wallpaper.decodeImage(&resident, init.gpa, &candidate) catch {
-            candidate.deinit(init.gpa);
-            continue;
-        };
-        decoded.deinit(init.gpa);
-        image = candidate;
-        break;
-    }
-    if (image == null) return error.WallpaperCatalogUnusable;
-    catalog.published = catalog.last;
-    var selected = image.?;
-    defer selected.deinit(init.gpa);
-    const stop = try wallpaper_native.openStop();
-    defer wallpaper_native.closeStop(stop);
-    var event_fd: std.posix.fd_t = -1;
-    defer {
-        current.native.disconnectAfterDisplayLoss();
-        current.round = .{};
-        if (event_fd >= 0) resident.closeEvent(&event_fd);
-    }
-    wallpaper.runRotation(
-        &resident,
-        init.gpa,
-        &catalog,
-        &selected,
-        &current,
-        stop.fd,
-        &event_fd,
-        wallpaper.rotation_interval_milliseconds,
-    ) catch |err| {
-        if (err != error.Stopped) return err;
-    };
+    try wallpaper.run(init, root);
 }
 
 fn runNotifications(init: std.process.Init) !void {

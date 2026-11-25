@@ -163,7 +163,7 @@ This is a known polish issue, not a reason to invent a DPI framework. Fix it
 when the visual cost is worth the additional implementation, and measure the
 change against the startup path.
 
-## Accepted next runtime (not implemented)
+## Accepted next runtime
 
 The user has accepted consolidating the picker, notifications, wallpaper and
 tray watcher into one individually configurable Zig resident. This supersedes
@@ -175,15 +175,17 @@ blocking external work. Picker surfaces and transient resources may be
 retired independently of the resident. Do not restore the discarded Rust UI
 or create a general capability framework.
 
-Wallpaper's target is one persistent background surface per output, replacing
-buffers only for rotation or meaningful geometry changes. Add/remove outputs
-locally, ignore unrelated window/input state, acknowledge unchanged configure
-without republication, and keep live protocol events distinct from redraw
-requests. Bound work and retained resources, not the lifetime count of valid
-events. Test zero publications on unrelated toplevel and layer-shell churn.
-The current renderer still replaces entire rounds on rotation/topology change;
-its removal and the unified resident remain unimplemented. Reconcile the
-current README and DOMAIN lifecycle declarations on real migration acceptance.
+Wallpaper now owns one persistent background surface per output on one Wayland
+connection. Replace buffers only for rotation or meaningful geometry changes;
+add/remove outputs locally, ignore unrelated window/input state, acknowledge
+unchanged configure without republication, and distinguish protocol events
+from redraw requests. Immutable SHM backing is never reused, so a retired
+buffer proxy does not require a release wait. Bound work and retained
+resources, not the lifetime count of valid events. The real Wayland gate
+checks zero publications on unrelated toplevel and layer-shell churn,
+continued surface identity and correct pixels after rotation/fullscreen exit.
+The unified resident remains unimplemented. Reconcile the current README and
+DOMAIN process-lifecycle declarations on real migration acceptance.
 
 ## Review questions for future work
 

@@ -1,10 +1,8 @@
-//! Owns bounded wallpaper facts, parsing, image meaning, round publication, and resident reconciliation.
+//! Wallpaper catalogue, image validation, and hourly rotation policy.
 
 const std = @import("std");
 
 pub const monitor_capacity = 16;
-pub const monitor_name_capacity = 128;
-pub const monitor_side_capacity = 16_384;
 pub const monitor_pixel_capacity = 33_177_600;
 pub const round_pixel_capacity = 67_108_864;
 pub const image_path_capacity = 4095;
@@ -14,24 +12,9 @@ pub const catalog_entry_capacity = 32 * 1024;
 pub const catalog_path_capacity = 1024;
 pub const image_side_capacity = 16_384;
 pub const image_pixel_capacity = 67_108_864;
-pub const wayland_configure_capacity = 16;
-pub const wayland_release_capacity = 128;
-pub const wayland_wait_milliseconds = 1000;
-pub const surface_resource_capacity = monitor_capacity * 2;
-pub const publication_flush_capacity = 16;
-pub const publication_poll_capacity = 16;
-/// One reconciliation may compare at most eight complete monitor snapshots.
-pub const reconcile_attempt_capacity = 8;
-/// Transient protocol mismatch waits at most 250ms before another snapshot.
-pub const reconcile_wait_milliseconds = 250;
-/// One reconciliation fails visibly after two seconds.
-pub const reconcile_deadline_milliseconds = 2000;
 /// The resident attempts one automatic rotation per hour.
 pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 
-/// Collapses resident work without retaining individual external events.
-pub const Work = enum { idle, refresh, reconnect, rotate };
-pub const ReconcileOutcome = enum { unchanged, published, published_cleanup_failed };
 pub const RotationRequest = enum { incomplete, rotate, invalid };
 
 pub fn classifyRotationRequest(bytes: []const u8) RotationRequest {
@@ -40,13 +23,6 @@ pub fn classifyRotationRequest(bytes: []const u8) RotationRequest {
     return if (bytes.len == "rotate\n".len) .rotate else .incomplete;
 }
 pub const ImageFormat = enum { png, jpeg };
-/// One classified wait result; stop has priority over every other bit.
-pub const Ready = packed struct {
-    stop: bool = false,
-    wayland: bool = false,
-    event: bool = false,
-    rotate: bool = false,
-};
 pub const Catalog = struct {
     paths: std.ArrayList([]u8) = .empty,
     order: std.ArrayList(u16) = .empty,
@@ -138,60 +114,6 @@ pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: 
     return catalog;
 }
 
-/// Owns one published Round and its replaceable native pointer behind callbacks.
-pub fn Current(comptime Native: type) type {
-    return struct { native: *Native, round: Round };
-}
-
-pub const Transform = enum(u3) {
-    normal,
-    rotate_90,
-    rotate_180,
-    rotate_270,
-    flipped,
-    flipped_90,
-    flipped_180,
-    flipped_270,
-};
-
-pub const Monitor = struct {
-    name_bytes: [monitor_name_capacity]u8,
-    name_len: u8,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    scale: f64,
-    transform: Transform,
-
-    pub fn name(monitor: *const Monitor) []const u8 {
-        return monitor.name_bytes[0..monitor.name_len];
-    }
-
-    pub fn eql(a: *const Monitor, b: *const Monitor) bool {
-        return std.mem.eql(u8, a.name(), b.name()) and a.x == b.x and a.y == b.y and
-            a.width == b.width and a.height == b.height and a.scale == b.scale and
-            a.transform == b.transform;
-    }
-};
-
-pub const Snapshot = struct {
-    monitors: [monitor_capacity]Monitor = undefined,
-    count: u8 = 0,
-
-    pub fn slice(snapshot: *const Snapshot) []const Monitor {
-        return snapshot.monitors[0..snapshot.count];
-    }
-
-    pub fn eql(a: *const Snapshot, b: *const Snapshot) bool {
-        if (a.count != b.count) return false;
-        for (a.slice(), b.slice()) |left, right| {
-            if (!left.eql(&right)) return false;
-        }
-        return true;
-    }
-};
-
 pub const Image = struct {
     width: u32,
     height: u32,
@@ -205,9 +127,8 @@ pub const Image = struct {
 };
 
 /// Retains the selected wallpaper's original bytes, not a decoded pixel grid.
-/// A new Wayland surface round may need to be rebuilt after the source file
-/// disappears, so the resident cannot keep only the path. Decoding is scoped
-/// to publication and the encoded bytes survive until the next rotation.
+/// Newly connected outputs may need the selected image after the file disappears.
+/// Decode only for a publication; retain the encoded bytes between rotations.
 pub const EncodedImage = struct {
     format: ImageFormat,
     bytes: []u8,
@@ -218,503 +139,64 @@ pub const EncodedImage = struct {
     }
 };
 
-/// Rotation candidates already have decoded pixels; the retained resident
-/// image is decoded lazily, only when a changed round needs publication.
-pub const ImageSource = union(enum) {
-    decoded: *const Image,
-    encoded: *const EncodedImage,
-};
-
 pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
-pub const SurfaceHandle = packed struct { index: u8, generation: u32 };
-pub const Configure = struct { serial: u32, width: u32, height: u32 };
 
-pub const Round = struct {
-    monitors: Snapshot = .{},
-    handles: [monitor_capacity]SurfaceHandle = undefined,
+/// A candidate has independent ownership until all requested buffers are prepared.
+pub const Candidate = struct {
+    encoded: EncodedImage,
+    image: Image,
+    index: u16,
 
-    pub fn handleSlice(round: *const Round) []const SurfaceHandle {
-        return round.handles[0..round.monitors.count];
+    pub fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+        self.image.deinit(allocator);
+        self.encoded.deinit(allocator);
     }
 };
 
-comptime {
-    std.debug.assert(surface_resource_capacity == monitor_capacity * 2);
-    std.debug.assert(surface_resource_capacity <= std.math.maxInt(u8));
-}
-
-pub fn openOutputs(source: anytype, snapshot: *const Snapshot) !void {
-    if (snapshot.count == 0 or snapshot.count > monitor_capacity) return error.OutputSnapshotInvalid;
-    try source.openOutputs(snapshot);
-}
-
-pub fn prepareRound(
-    source: anytype,
-    allocator: std.mem.Allocator,
-    snapshot: *const Snapshot,
-    image: *const Image,
-) !Round {
-    try openOutputs(source, snapshot);
-    var round = Round{ .monitors = snapshot.* };
-    round.monitors.count = 0;
-    errdefer discardRound(source, &round);
-    for (snapshot.slice(), 0..) |*monitor, index| {
-        var pixels = try coverImage(source, allocator, image, monitor.width, monitor.height);
-        defer pixels.deinit(allocator);
-        round.handles[index] = try source.prepare(@intCast(index), monitor, &pixels);
-        round.monitors.count = @intCast(index + 1);
-    }
-    round.monitors = snapshot.*;
-    return round;
-}
-
-pub fn publishRound(source: anytype, current: *Round, next: *Round, stop: anytype) !void {
-    if (next.monitors.count == 0) return error.RoundEmpty;
-    if (current.monitors.count != 0 and !current.monitors.eql(&next.monitors)) {
-        return error.RoundSnapshotChanged;
-    }
-    try transitionRound(source, current, next, stop);
-}
-
-pub fn releaseRound(source: anytype, current: *Round, stop: anytype) !void {
-    if (current.monitors.count == 0) return;
-    var next: Round = .{};
-    try transitionRound(source, current, &next, stop);
-}
-
-fn transitionRound(source: anytype, current: *Round, next: *Round, stop: anytype) !void {
-    const old_handles = current.handleSlice();
-    const next_handles = next.handleSlice();
-    try source.validatePublication(old_handles, next_handles);
-    for (next_handles) |handle| source.queueMap(handle);
-    var index = current.monitors.count;
-    while (index > 0) {
-        index -= 1;
-        source.queueUnmap(current.handles[index]);
-    }
-    source.flushPublication(stop) catch |err| {
-        source.disconnectAfterDisplayLoss();
-        return err;
-    };
-    source.finishPublication(old_handles, next_handles);
-    const old = current.*;
-    current.* = next.*;
-    next.* = .{};
-    index = old.monitors.count;
-    while (index > 0) {
-        index -= 1;
-        source.releaseRetired(old.handles[index], stop) catch |err| {
-            source.disconnectAfterDisplayLoss();
-            return err;
-        };
-    }
-}
-
-pub fn discardRound(source: anytype, round: *Round) void {
-    var index = round.monitors.count;
-    while (index > 0) {
-        index -= 1;
-        source.discardPrepared(round.handles[index]);
-    }
-    round.* = .{};
-}
-
-/// Tries at most eight snapshots in two seconds; Current changes only after candidate publication.
-pub fn reconcile(
-    resident: anytype,
-    allocator: std.mem.Allocator,
-    image: ImageSource,
-    force_publication: bool,
-    current: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    work: *Work,
-) !ReconcileOutcome {
-    const deadline = try std.math.add(u64, resident.now(), reconcile_deadline_milliseconds);
-    var decoded: ?Image = null;
-    defer if (decoded) |*pixels| pixels.deinit(allocator);
-    for (0..reconcile_attempt_capacity) |attempt| {
-        const failure: ?anyerror = attempt_work: {
-            var reconnect = work.* == .reconnect;
-            _ = try waitCurrent(resident, current, stop_fd, event_fd, work, 0);
-            if (work.* == .rotate) return .unchanged;
-            reconnect = reconnect or work.* == .reconnect;
-            if (reconnect) {
-                resident.reconnectEvent(event_fd, stop_fd, deadline) catch |err| {
-                    work.* = .reconnect;
-                    break :attempt_work err;
-                };
-                if (work.* == .reconnect) work.* = .refresh;
-            }
-            // The source of truth is the current Wayland output registry and
-            // its committed logical/output geometry, not compositor IPC JSON.
-            const snapshot = resident.observeSnapshot(allocator, event_fd, deadline) catch |err| break :attempt_work err;
-            if (try waitCurrent(resident, current, stop_fd, event_fd, work, 0)) {
-                break :attempt_work null;
-            }
-            if (!force_publication and
-                snapshot.eql(&current.round.monitors) and
-                !resident.outputsChanged(current.native))
-            {
-                work.* = .idle;
-                return .unchanged;
-            }
-            const pixels: *const Image = switch (image) {
-                .decoded => |value| value,
-                .encoded => |value| blk: {
-                    if (decoded == null) decoded = try decodeImage(resident, allocator, value);
-                    break :blk &decoded.?;
-                },
-            };
-            const candidate = try resident.createNative(allocator);
-            var candidate_round: Round = .{};
-            var candidate_owned = true;
-            defer if (candidate_owned) {
-                discardRound(candidate, &candidate_round);
-                resident.destroyNative(allocator, candidate);
-            };
-            candidate_round = prepareRound(candidate, allocator, &snapshot, pixels) catch |err| {
-                break :attempt_work err;
-            };
-            var published: Round = .{};
-            publishRound(candidate, &published, &candidate_round, stop_fd) catch |err| {
-                candidate_round = .{};
-                return err;
-            };
-            const old_native = current.native;
-            var old_round = current.round;
-            current.* = .{ .native = candidate, .round = published };
-            candidate_owned = false;
-            releaseRound(old_native, &old_round, stop_fd) catch |err| {
-                old_native.disconnectAfterDisplayLoss();
-                resident.destroyNative(allocator, old_native);
-                if (err == error.WaylandFlushStopped) {
-                    releaseRound(current.native, &current.round, stop_fd) catch {
-                        current.native.disconnectAfterDisplayLoss();
-                        current.round = .{};
-                    };
-                    return error.Stopped;
-                }
-                work.* = .idle;
-                return .published_cleanup_failed;
-            };
-            resident.destroyNative(allocator, old_native);
-            // One bounded record per committed round, never a focus/workspace event.
-            std.log.info("wallpaper published {d} output surfaces", .{snapshot.count});
-            work.* = .idle;
-            return .published;
-        };
-        if (failure) |err| {
-            if (err == error.EventSocketLost) {
-                resident.closeEvent(event_fd);
-                work.* = .reconnect;
-            }
-            if (!transient(err)) return err;
-            if (attempt + 1 == reconcile_attempt_capacity) return err;
-        } else if (attempt + 1 == reconcile_attempt_capacity) return error.ReconcileExhausted;
-        const now = resident.now();
-        if (now >= deadline) return error.ReconcileTimeout;
-        _ = try waitCurrent(resident, current, stop_fd, event_fd, work, @min(
-            reconcile_wait_milliseconds,
-            deadline - now,
-        ));
-    }
-    return error.ReconcileExhausted;
-}
-
-/// Owns direct-request image replacement; acknowledgement follows complete publication only.
-pub fn runRotation(
-    resident: anytype,
-    allocator: std.mem.Allocator,
-    catalog: *Catalog,
-    image: *EncodedImage,
-    current: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    comptime interval_milliseconds: u64,
-) !void {
-    comptime std.debug.assert(interval_milliseconds > 0);
-    var work: Work = .reconnect;
-    var deadline: ?u64 = null;
-    while (true) {
-        if (work == .idle) {
-            const now = resident.now();
-            const timeout = if (deadline) |end| end -| now else null;
-            _ = waitCurrent(resident, current, stop_fd, event_fd, &work, timeout) catch |err| {
-                if (!recoverableTopology(err)) return err;
-                continue;
-            };
-        }
-        if (work != .rotate) {
-            if (work != .idle) {
-                const outcome = reconcile(
-                    resident,
-                    allocator,
-                    .{ .encoded = image },
-                    false,
-                    current,
-                    stop_fd,
-                    event_fd,
-                    &work,
-                ) catch |err| {
-                    if (!recoverableTopology(err)) return err;
-                    _ = waitCurrent(
-                        resident,
-                        current,
-                        stop_fd,
-                        event_fd,
-                        &work,
-                        reconcile_wait_milliseconds,
-                    ) catch |wait_err| {
-                        if (!recoverableTopology(wait_err)) return wait_err;
-                        continue;
-                    };
-                    continue;
-                };
-                if (deadline == null and outcome != .unchanged) {
-                    deadline = try nextRotationDeadline(resident, interval_milliseconds);
-                }
-                continue;
-            }
-            if (deadline == null or resident.now() < deadline.?) continue;
-            _ = try rotateOnce(
-                resident,
-                allocator,
-                catalog,
-                image,
-                current,
-                stop_fd,
-                event_fd,
-                &work,
-                false,
-            );
-            deadline = try nextRotationDeadline(resident, interval_milliseconds);
-            continue;
-        }
-        const rotated = try rotateOnce(
-            resident,
-            allocator,
-            catalog,
-            image,
-            current,
-            stop_fd,
-            event_fd,
-            &work,
-            true,
-        );
-        if (rotated) deadline = try nextRotationDeadline(resident, interval_milliseconds);
-    }
-}
-
-fn nextRotationDeadline(resident: anytype, interval_milliseconds: u64) !u64 {
-    return std.math.add(u64, resident.now(), interval_milliseconds);
-}
-
-test "rotation deadline accepts max endpoint and rejects one-step overflow" {
-    const Clock = struct {
-        value: u64,
-
-        fn now(clock: *const @This()) u64 {
-            return clock.value;
-        }
-    };
-    const interval = rotation_interval_milliseconds;
-    var clock = Clock{ .value = std.math.maxInt(u64) - interval };
-    try std.testing.expectEqual(std.math.maxInt(u64), try nextRotationDeadline(&clock, interval));
-    try std.testing.expectEqual(std.math.maxInt(u64) - interval, clock.value);
-
-    clock.value += 1;
-    const before = clock.value;
-    try std.testing.expectError(error.Overflow, nextRotationDeadline(&clock, interval));
-    try std.testing.expectEqual(before, clock.value);
-}
-
-fn rotateOnce(
-    resident: anytype,
-    allocator: std.mem.Allocator,
-    catalog: *Catalog,
-    image: *EncodedImage,
-    current: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    work: *Work,
-    direct: bool,
-) !bool {
-    if (direct) {
-        const complete = resident.receiveRotation() catch {
-            resident.replyRotation(false);
-            work.* = .idle;
-            return false;
-        };
-        if (!complete) {
-            work.* = .idle;
-            return false;
-        }
-    }
+pub fn choose(source: anytype, allocator: std.mem.Allocator, catalog: *Catalog) !Candidate {
+    if (catalog.paths.items.len == 0) return error.WallpaperCatalogEmpty;
     var attempted: [catalog_file_capacity]bool = @splat(false);
-    var alternatives: usize = 0;
-    var rotated = false;
-    const selection_limit = alternativeSelectionLimit(catalog.paths.items.len);
-    for (0..selection_limit) |_| {
-        if (alternatives == catalog.paths.items.len - 1) break;
+    for (0..alternativeSelectionLimit(catalog.paths.items.len)) |_| {
         const path = try catalog.next();
         const index = catalog.last.?;
-        if (index == catalog.published.? or attempted[index]) continue;
+        if (catalog.published == index or attempted[index]) continue;
         attempted[index] = true;
-        alternatives += 1;
-        var next = readEncodedImage(resident, allocator, path) catch continue;
-        var published = false;
-        defer if (!published) next.deinit(allocator);
-        // Reject bad candidates before setting refresh work. A failed image
-        // must not disturb the selected round or its rotation deadline.
-        var pixels = decodeImage(resident, allocator, &next) catch continue;
-        defer pixels.deinit(allocator);
-        work.* = .refresh;
-        const outcome = reconcile(
-            resident,
-            allocator,
-            .{ .decoded = &pixels },
-            true,
-            current,
-            stop_fd,
-            event_fd,
-            work,
-        ) catch |err| {
-            if (err == error.Stopped) {
-                if (direct) resident.replyRotation(false);
-                return err;
-            }
+        var encoded = readEncodedImage(source, allocator, path) catch |err| {
+            if (err == error.OutOfMemory) return err;
             continue;
         };
-        if (outcome == .unchanged) continue;
-        std.debug.assert(current.round.monitors.count > 0);
-        image.deinit(allocator);
-        image.* = next;
-        catalog.published = index;
-        published = true;
-        rotated = true;
-        if (direct) resident.replyRotation(true);
-        break;
-    }
-    std.debug.assert(rotated or alternatives == catalog.paths.items.len - 1);
-    if (!rotated) {
-        if (direct) resident.replyRotation(false);
-        work.* = .refresh;
-    }
-    return rotated;
-}
-
-// Classifies one native Wayland output event; focus/workspace events never
-// cause a wallpaper publication, and the renderer has its own display owner.
-fn waitForWork(
-    resident: anytype,
-    native: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    work: *Work,
-    timeout: ?u64,
-) !bool {
-    var lost = false;
-    defer if (lost) {
-        resident.closeEvent(event_fd);
-        work.* = .reconnect;
-    };
-    const ready = resident.wait(native, stop_fd, event_fd.*, timeout) catch |err| {
-        if (err != error.EventSocketLost) return err;
-        lost = true;
-        return true;
-    };
-    if (ready.stop) return error.Stopped;
-    var changed = false;
-    if (ready.wayland and try resident.drainWayland(native)) {
-        work.* = .refresh;
-        changed = true;
-    }
-    if (ready.event) {
-        const output_changed = resident.outputEvent(event_fd.*) catch |err| {
-            if (err != error.EventSocketLost) return err;
-            lost = true;
-            return true;
+        const image = decodeImage(source, allocator, &encoded) catch |err| {
+            encoded.deinit(allocator);
+            if (err == error.OutOfMemory) return err;
+            continue;
         };
-        if (output_changed) {
-            work.* = .refresh;
-            changed = true;
-        }
+        return .{ .encoded = encoded, .image = image, .index = index };
     }
-    if (ready.rotate and work.* == .idle) {
-        work.* = .rotate;
-        changed = true;
+    return error.WallpaperCatalogUnusable;
+}
+
+/// No display means no timer wake. When outputs return, rotate at most once;
+/// a failed automatic rotation also advances the deadline, not a retry storm.
+pub const Schedule = struct {
+    deadline: ?u64 = null,
+
+    pub fn advance(self: *Schedule, now: u64) !void {
+        self.deadline = try std.math.add(u64, now, rotation_interval_milliseconds);
     }
-    return changed;
-}
 
-// A lost compositor connection retires only renderer state; the resident
-// observer and selected image remain available for a future publication.
-fn waitCurrent(
-    resident: anytype,
-    current: anytype,
-    stop_fd: anytype,
-    event_fd: anytype,
-    work: *Work,
-    timeout: ?u64,
-) !bool {
-    return waitForWork(resident, current.native, stop_fd, event_fd, work, timeout) catch |err| {
-        if (currentDisplayUnusable(err)) {
-            current.native.disconnectAfterDisplayLoss();
-            current.round = .{};
-            if (work.* != .reconnect) work.* = .refresh;
-        }
-        return err;
-    };
-}
+    pub fn attempted(self: *Schedule, now: u64, direct: bool, success: bool) !void {
+        if (success or !direct) try self.advance(now);
+    }
 
-// Topology disagreement ends one bounded attempt, never the resident.
-fn recoverableTopology(err: anyerror) bool {
-    return transient(err) or currentDisplayUnusable(err) or switch (err) {
-        error.ReconcileExhausted,
-        error.ReconcileTimeout,
-        => true,
-        else => false,
-    };
-}
+    pub fn due(self: Schedule, now: u64, ready: bool) bool {
+        return ready and if (self.deadline) |end| now >= end else false;
+    }
 
-// These wait failures mean the current Wayland connection cannot safely be reused.
-fn currentDisplayUnusable(err: anyerror) bool {
-    return switch (err) {
-        error.WaylandDisplayLost,
-        error.WaylandDispatchFailed,
-        error.WaylandFlushFailed,
-        error.WaylandFlushTimeout,
-        error.WaylandDispatchExceeded,
-        error.WaylandFlushAttemptsExceeded,
-        => true,
-        else => false,
-    };
-}
-
-// Names only protocol-order failures that another complete snapshot may resolve.
-fn transient(err: anyerror) bool {
-    return switch (err) {
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionTimedOut,
-        error.ConnectionInterrupted,
-        error.EventSocketLost,
-        error.NoEnabledMonitors,
-        error.OutputSnapshotInvalid,
-        error.WaylandConnectFailed,
-        error.WaylandRegistryFailed,
-        error.WaylandRoundtripFailed,
-        error.WaylandGlobalMissing,
-        error.WaylandOutputDuplicate,
-        error.WaylandOutputMissing,
-        error.WaylandOutputChanged,
-        error.WaylandOutputInvalid,
-        error.WaylandOutputIncomplete,
-        => true,
-        else => false,
-    };
-}
+    pub fn wake(self: Schedule, now: u64, ready: bool) ?u64 {
+        if (!ready) return null;
+        return if (self.deadline) |end| end -| now else null;
+    }
+};
 
 pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
     var encoded = try readEncodedImage(source, allocator, path);
@@ -826,32 +308,6 @@ fn inspectPng(bytes: []const u8) !struct { width: u32, height: u32 } {
     const height = std.mem.readInt(u32, bytes[20..24], .big);
     _ = try surfacePixelCount(width, height);
     return .{ .width = width, .height = height };
-}
-
-test "wallpaper output snapshots compare every retained display fact" {
-    var one: Snapshot = .{};
-    one.count = 1;
-    one.monitors[0] = .{
-        .name_bytes = undefined,
-        .name_len = 3,
-        .x = -1920,
-        .y = 0,
-        .width = 1920,
-        .height = 1080,
-        .scale = 1.5,
-        .transform = .normal,
-    };
-    @memcpy(one.monitors[0].name_bytes[0..3], "DP1");
-    var same = one;
-    try std.testing.expect(one.eql(&same));
-    same.monitors[0].x += 1;
-    try std.testing.expect(!one.eql(&same));
-    same = one;
-    same.monitors[0].scale = 1.25;
-    try std.testing.expect(!one.eql(&same));
-    same = one;
-    same.monitors[0].transform = .rotate_90;
-    try std.testing.expect(!one.eql(&same));
 }
 
 const FileStat = struct { kind: std.Io.File.Kind, size: u64 };
