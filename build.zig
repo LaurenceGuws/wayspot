@@ -3,28 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = optimizeOption(b);
-    const egl_manifest = b.option([]const u8, "egl_vendor_manifest", "Restrict this build's GUI to one absolute GLVND EGL vendor manifest (default: unrestricted)");
-    const settings = b.addOptions();
-    const native_ui_option = b.option(bool, "native_ui", "Use native Wayland SHM for picker and notifications");
-    const legacy_picker_option = b.option(bool, "native_picker", "Compatibility alias for native_ui; both graphical roles migrate together");
-    if (native_ui_option != null and legacy_picker_option != null and native_ui_option.? != legacy_picker_option.?) {
-        std.log.err("native_ui and native_picker must agree", .{});
-        std.process.exit(1);
-    }
-    const native_ui = native_ui_option orelse legacy_picker_option orelse false;
-    settings.addOption(bool, "native_picker", native_ui);
-    const egl_manifest_z: ?[:0]const u8 = if (egl_manifest) |path| blk: {
-        if (!std.fs.path.isAbsolute(path) or std.mem.indexOfAny(u8, path, ":\x00\r\n") != null) {
-            std.log.err("-Degl_vendor_manifest requires one absolute manifest path", .{});
-            std.process.exit(1);
-        }
-        break :blk b.allocator.dupeSentinel(u8, path, 0) catch {
-            std.log.err("unable to retain EGL vendor manifest path", .{});
-            std.process.exit(1);
-        };
-    } else null;
-    settings.addOption(?[:0]const u8, "egl_vendor_manifest", egl_manifest_z);
-
     // The non-product Zig build/tooling source is fully covered here.
     // Application source has its own pending review, not a blanket baseline.
     const audit = b.step("audit", "Audit build and maintenance Zig source");
@@ -35,6 +13,27 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .preferred_linkage = .static,
+        // Wayspot only needs SDL surfaces, image decoding and the software
+        // rasterizer. No video subsystem or accelerated renderer is available.
+        .build_config_h_overrides = @as([]const []const u8, &.{
+            "-DSDL_VIDEO_DISABLED=1",
+            "-DSDL_GPU_DISABLED=1",
+            "-USDL_VIDEO_DRIVER_DUMMY",
+            "-USDL_VIDEO_DRIVER_OFFSCREEN",
+            "-USDL_VIDEO_DRIVER_WAYLAND",
+            "-USDL_VIDEO_DRIVER_X11",
+            "-USDL_VIDEO_DRIVER_KMSDRM",
+            "-USDL_VIDEO_RENDER_GPU",
+            "-USDL_VIDEO_RENDER_VULKAN",
+            "-USDL_VIDEO_RENDER_OGL",
+            "-USDL_VIDEO_RENDER_OGL_ES2",
+            "-USDL_VIDEO_OPENGL",
+            "-USDL_VIDEO_OPENGL_ES",
+            "-USDL_VIDEO_OPENGL_ES2",
+            "-USDL_VIDEO_OPENGL_GLX",
+            "-USDL_VIDEO_OPENGL_EGL",
+            "-USDL_VIDEO_VULKAN",
+        }),
     });
     const howl_text = b.dependency("howl_text", .{ .target = target, .optimize = optimize });
     const headers = b.addWriteFiles();
@@ -113,7 +112,6 @@ pub fn build(b: *std.Build) void {
     });
     wayland_translate.linkSystemLibrary("wayland-client", .{});
     const wayland_c = wayland_translate.createModule();
-    wayspot.addOptions("build_options", settings);
     wayspot.addImport("sdl_c", sdl_c);
     wayspot.addImport("howl_text", howl_text.module("howl_text"));
     wayspot.addImport("dbus_c", dbus_c);
@@ -138,10 +136,9 @@ pub fn build(b: *std.Build) void {
     }) });
     source_tests.root_module.addIncludePath(b.path("vendor/stb"));
     source_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
-    source_tests.root_module.addOptions("build_options", settings);
     source_tests.root_module.addImport("time_c", time_c);
     addNotificationLibraries(b, source_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
-    // The native surface owner is qualified before it replaces SDL video.
+    // Both graphical roles use the native surface owner.
     // Use the exact pinned native Wayland package already used by Snowman's
     // simulator. No second compositor-specific protocol implementation.
     const native_wayland = b.dependency("wayland", .{ .target = target, .optimize = optimize });
@@ -167,14 +164,12 @@ pub fn build(b: *std.Build) void {
     xkb_translate.linkSystemLibrary("xkbcommon", .{});
     source_tests.root_module.addImport("xkb_c", xkb_translate.createModule());
     source_tests.root_module.linkSystemLibrary("xkbcommon", .{});
-    if (native_ui) {
-        wayspot.addImport("wayland-client", native_wayland.module("client"));
-        wayspot.addImport("wayland-protocols", native_protocols);
-        wayspot.addImport("wayland-present", native_present);
-        wayspot.addImport("wayland-wire", native_wayland.module("protocol"));
-        wayspot.addImport("xkb_c", xkb_translate.createModule());
-        wayspot.linkSystemLibrary("xkbcommon", .{});
-    }
+    wayspot.addImport("wayland-client", native_wayland.module("client"));
+    wayspot.addImport("wayland-protocols", native_protocols);
+    wayspot.addImport("wayland-present", native_present);
+    wayspot.addImport("wayland-wire", native_wayland.module("protocol"));
+    wayspot.addImport("xkb_c", xkb_translate.createModule());
+    wayspot.linkSystemLibrary("xkbcommon", .{});
     source_tests.use_llvm = false;
     source_tests.use_lld = false;
     const live_native = b.addSystemCommand(&.{"python3"});
@@ -216,11 +211,6 @@ pub fn build(b: *std.Build) void {
     live_resident.addFileArg(executable.getEmittedBin());
     live_resident.setCwd(b.path("."));
     live_resident.has_side_effects = true;
-    if (native_ui) {
-        live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_PICKER", "1");
-        live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_UI", "1");
-    }
-    if (!native_ui) if (egl_manifest) |path| live_resident.setEnvironmentVariable("WAYSPOT_EXPECT_EGL_MANIFEST", path);
     b.step("resident-live", "Prove all capabilities in an explicit isolated session")
         .dependOn(&live_resident.step);
 

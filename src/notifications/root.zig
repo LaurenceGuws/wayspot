@@ -3,13 +3,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl_c");
-const sdl_layer = @import("../ui/layer.zig");
 const text_draw = @import("../ui/text.zig");
 const dbus = @import("dbus_c");
-const Video = @import("../ui/video.zig");
+const UiOwner = @import("../ui/owner.zig");
 const Stop = @import("../stop.zig");
-const native_ui = Video.native_ui;
-const shm = if (native_ui) @import("../ui/native_surface.zig") else struct {};
+const shm = @import("../ui/native_surface.zig");
 
 pub const app_name_capacity = 256;
 pub const app_icon_capacity = 1024;
@@ -147,109 +145,40 @@ const banner_width = 420;
 const banner_height = 120;
 const banner_font_size = 16;
 
-const UiResource = enum(u8) { sdl, window, renderer, text };
-
-const UiResources = struct {
-    count: u8 = 0,
-
-    fn acquired(resources: *UiResources, resource: UiResource) void {
-        std.debug.assert(resources.count == @backingInt(resource));
-        resources.count += 1;
-    }
-
-    fn release(resources: *UiResources) ?UiResource {
-        if (resources.count == 0) return null;
-        resources.count -= 1;
-        return @fromBackingInt(@intCast(resources.count));
-    }
-};
-
 const Banner = struct {
-    native_display: if (native_ui) ?*shm.Display else void = if (native_ui) null else {},
-    native_surface: if (native_ui) ?*shm.Surface else void = if (native_ui) null else {},
+    native_display: ?*shm.Display = null,
+    native_surface: ?*shm.Surface = null,
     presented: ?Key = null,
-    window: ?*sdl.SDL_Window = null,
-    layer: sdl_layer = .{},
-    renderer: ?*sdl.SDL_Renderer = null,
-    text: ?text_draw.Painter = null,
-    resources: UiResources = .{},
-
-    fn init(banner: *Banner, video: *Video, allocator: std.mem.Allocator, io: std.Io) !void {
-        errdefer banner.deinit(video);
-        if (native_ui) {
-            banner.native_display = try video.acquireNative(allocator, io);
-            banner.native_surface = try shm.Surface.create(banner.native_display.?, .notification, .{ .width = banner_width, .height = banner_height }, null);
-            return;
-        }
-        try video.acquire();
-        banner.resources.acquired(.sdl);
-        banner.window = try sdl_layer.createWindow("wayspot notification", banner_width, banner_height);
-        banner.resources.acquired(.window);
-        // A noninteractive top-right layer never enters the tiling set.
-        try banner.layer.init(banner.window.?, .notification, banner_width, banner_height);
-        banner.renderer = sdl.SDL_CreateRenderer(banner.window, null) orelse return error.SdlRendererCreateFailed;
-        banner.resources.acquired(.renderer);
-        if (!sdl.SDL_SetRenderLogicalPresentation(
-            banner.renderer,
-            banner_width,
-            banner_height,
-            sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
-        )) return error.SdlLogicalPresentationFailed;
-        banner.text = try text_draw.Painter.init(allocator, banner.renderer.?, banner_font_size);
-        banner.resources.acquired(.text);
+    fn init(banner: *Banner, ui_owner: *UiOwner, allocator: std.mem.Allocator, io: std.Io) !void {
+        errdefer banner.deinit(ui_owner);
+        banner.native_display = try ui_owner.acquireNative(allocator, io);
+        banner.native_surface = try shm.Surface.create(banner.native_display.?, .notification, .{ .width = banner_width, .height = banner_height }, null);
     }
 
-    fn deinit(banner: *Banner, video: *Video) void {
-        if (native_ui) {
-            if (banner.native_surface) |surface| {
-                surface.destroy() catch |err| std.log.warn("native notification retirement failed: {s}", .{@errorName(err)});
-                std.log.info("native notification retired", .{});
-            }
-            if (banner.native_display != null) video.releaseNative();
-            banner.* = .{};
-            return;
+    fn deinit(banner: *Banner, ui_owner: *UiOwner) void {
+        if (banner.native_surface) |surface| {
+            surface.destroy() catch |err| std.log.warn("native notification retirement failed: {s}", .{@errorName(err)});
+            std.log.info("native notification retired", .{});
         }
-        while (banner.resources.release()) |resource| switch (resource) {
-            .text => {
-                if (banner.text) |*painter| painter.deinit();
-            },
-            .renderer => sdl.SDL_DestroyRenderer(banner.renderer.?),
-            .window => {
-                banner.layer.deinit();
-                sdl.SDL_DestroyWindow(banner.window.?);
-            },
-            .sdl => video.release(),
-        };
+        if (banner.native_display != null) ui_owner.releaseNative();
         banner.* = .{};
     }
 
     fn exists(banner: *const Banner) bool {
-        if (native_ui) return banner.native_surface != null;
-        return banner.window != null;
+        return banner.native_surface != null;
     }
 
     fn visibleNow(banner: *const Banner) bool {
-        if (native_ui) return banner.presented != null and banner.native_surface != null;
-        return banner.window != null;
+        return banner.presented != null and banner.native_surface != null;
     }
 
     fn closed(banner: *const Banner) bool {
-        if (native_ui) return if (banner.native_surface) |surface| surface.closed or surface.display.failed else false;
-        return banner.layer.closed;
+        return if (banner.native_surface) |surface| surface.closed or surface.display.failed else false;
     }
 
     fn draw(banner: *Banner, allocator: std.mem.Allocator, item: *const Presentation) !void {
-        if (native_ui) {
-            banner.native_surface.?.invalidate();
-            try banner.drawNative(allocator, item);
-            return;
-        }
-        try banner.layer.update(banner.window.?);
-        const renderer = banner.renderer orelse unreachable;
-        const painter = if (banner.text) |*value| value else return error.TextNotInitialized;
-        try drawContents(renderer, painter, item);
-        if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
-        if (!sdl.SDL_ShowWindow(banner.window)) return error.SdlShowFailed;
+        banner.native_surface.?.invalidate();
+        try banner.drawNative(allocator, item);
     }
 
     fn drawNative(banner: *Banner, allocator: std.mem.Allocator, item: *const Presentation) !void {
@@ -373,55 +302,31 @@ const Ui = struct {
     state: UiState = .{},
     visible: ?Presentation = null,
 
-    fn clear(self: *Ui, video: *Video, allocator: std.mem.Allocator) void {
-        self.banner.deinit(video);
+    fn clear(self: *Ui, ui_owner: *UiOwner, allocator: std.mem.Allocator) void {
+        self.banner.deinit(ui_owner);
         if (self.visible) |*value| value.deinit(allocator);
         self.* = .{};
     }
 
-    fn apply(self: *Ui, video: *Video, allocator: std.mem.Allocator, io: std.Io, desired: Desired) !void {
+    fn apply(self: *Ui, ui_owner: *UiOwner, allocator: std.mem.Allocator, io: std.Io, desired: Desired) !void {
         switch (desired) {
             .hidden => |key| {
                 _ = decideUi(&self.state, .{ .hidden = key });
-                self.clear(video, allocator);
+                self.clear(ui_owner, allocator);
             },
             .shown => |value| {
                 _ = decideUi(&self.state, .{ .shown = .{ .id = value.id, .generation = value.generation } });
                 if (self.visible) |*prior| prior.deinit(allocator);
                 self.visible = value;
-                // Establish an expiry even if video initialization or drawing fails.
+                // Establish an expiry even if display initialization or drawing fails.
                 _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
-                if (!self.banner.exists()) try self.banner.init(video, allocator, io);
-                try self.banner.draw(allocator, &self.visible.?);
-                if (!native_ui) _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
-            },
-        }
-    }
-
-    fn event(self: *Ui, allocator: std.mem.Allocator, input: *const sdl.SDL_Event) !?Closed {
-        const window = self.banner.window orelse return null;
-        if (sdl.SDL_GetWindowFromEvent(input) != window) return null;
-        switch (input.type) {
-            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => if (input.button.button == sdl.SDL_BUTTON_LEFT) {
-                return self.state.close(.dismissed);
-            },
-            sdl.SDL_EVENT_WINDOW_EXPOSED,
-            sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
-            sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
-            sdl.SDL_EVENT_RENDER_TARGETS_RESET,
-            => try self.banner.draw(allocator, &self.visible.?),
-            sdl.SDL_EVENT_RENDER_DEVICE_RESET => {
-                self.banner.text.?.reset();
+                if (!self.banner.exists()) try self.banner.init(ui_owner, allocator, io);
                 try self.banner.draw(allocator, &self.visible.?);
             },
-            sdl.SDL_EVENT_RENDER_DEVICE_LOST => return error.SdlDeviceLost,
-            else => {},
         }
-        return null;
     }
 
     fn nativeTurn(self: *Ui, allocator: std.mem.Allocator) !?Closed {
-        if (!native_ui) return null;
         const surface = self.banner.native_surface orelse return null;
         if (self.banner.closed()) return error.NativeBannerClosed;
         const input = &surface.display.input;
@@ -1333,12 +1238,9 @@ test "generation never wraps and exhaustion changes no state" {
 
 const UiOperation = union(enum) {
     decision: UiDecision,
-    acquire: UiResource,
-    release: UiResource,
     draw: Key,
     wait: i32,
     closed: Closed,
-    failure: anyerror,
 };
 
 const UiTranscript = struct {
@@ -1356,17 +1258,13 @@ const UiTranscript = struct {
     }
 };
 
-test "strict UI transcript follows newest draw deadline close and cleanup policy" {
+test "strict UI transcript follows newest draw deadline and close policy" {
     const one = Key{ .id = 1, .generation = 1 };
     const two = Key{ .id = 1, .generation = 2 };
     const three = Key{ .id = 2, .generation = 3 };
     var transcript = UiTranscript{ .expected = &.{
         .{ .decision = .none },
         .{ .decision = .initialize },
-        .{ .acquire = .sdl },
-        .{ .acquire = .window },
-        .{ .acquire = .renderer },
-        .{ .acquire = .text },
         .{ .decision = .none },
         .{ .draw = two },
         .{ .wait = 100 },
@@ -1374,10 +1272,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
         .{ .draw = three },
         .{ .wait = 200 },
         .{ .closed = .{ .key = three, .reason = .expired } },
-        .{ .release = .text },
-        .{ .release = .renderer },
-        .{ .release = .window },
-        .{ .release = .sdl },
         .{ .decision = .initialize },
         .{ .draw = one },
         .{ .closed = .{ .key = one, .reason = .dismissed } },
@@ -1388,11 +1282,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
     var state: UiState = .{};
     try transcript.observe(.{ .decision = decideUi(&state, .{ .hidden = one }) });
     try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = one }) });
-    var resources: UiResources = .{};
-    inline for (std.meta.tags(UiResource)) |resource| {
-        resources.acquired(resource);
-        try transcript.observe(.{ .acquire = resource });
-    }
     try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = two }) });
     try std.testing.expectEqual(UiAction.draw, state.drawn(10, 100));
     try transcript.observe(.{ .draw = state.key.? });
@@ -1403,7 +1292,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
     try transcript.observe(.{ .wait = state.remaining(20) });
     try transcript.observe(.{ .closed = state.close(.expired).? });
     try std.testing.expect(state.close(.dismissed) == null);
-    while (resources.release()) |resource| try transcript.observe(.{ .release = resource });
     var dismissed: UiState = .{};
     try transcript.observe(.{ .decision = decideUi(&dismissed, .{ .shown = one }) });
     try std.testing.expectEqual(UiAction.draw, dismissed.drawn(0, 100));
@@ -1416,61 +1304,6 @@ test "strict UI transcript follows newest draw deadline close and cleanup policy
     try transcript.observe(.{ .draw = hidden.key.? });
     try transcript.observe(.{ .decision = decideUi(&hidden, .{ .hidden = one }) });
     try transcript.done();
-}
-
-test "strict UI cleanup transcript reverses every partial acquisition" {
-    const resources = std.meta.tags(UiResource);
-    for (0..resources.len + 1) |acquired| {
-        var expected: [resources.len * 2]UiOperation = undefined;
-        var count: usize = 0;
-        for (resources[0..acquired]) |resource| {
-            expected[count] = .{ .acquire = resource };
-            count += 1;
-        }
-        var remaining = acquired;
-        while (remaining > 0) {
-            remaining -= 1;
-            expected[count] = .{ .release = resources[remaining] };
-            count += 1;
-        }
-        var transcript = UiTranscript{ .expected = expected[0..count] };
-        var owned: UiResources = .{};
-        for (resources[0..acquired]) |resource| {
-            owned.acquired(resource);
-            try transcript.observe(.{ .acquire = resource });
-        }
-        while (owned.release()) |resource| try transcript.observe(.{ .release = resource });
-        try transcript.done();
-    }
-}
-
-test "strict UI transcript cleans every resource after draw and wait failures" {
-    const resources = std.meta.tags(UiResource);
-    inline for (.{ error.SdlDrawFailed, error.SdlDeviceLost }) |failure| {
-        var expected: [resources.len * 2 + 1]UiOperation = undefined;
-        var count: usize = 0;
-        for (resources) |resource| {
-            expected[count] = .{ .acquire = resource };
-            count += 1;
-        }
-        expected[count] = .{ .failure = failure };
-        count += 1;
-        var remaining = resources.len;
-        while (remaining > 0) {
-            remaining -= 1;
-            expected[count] = .{ .release = resources[remaining] };
-            count += 1;
-        }
-        var transcript = UiTranscript{ .expected = expected[0..count] };
-        var owned: UiResources = .{};
-        for (resources) |resource| {
-            owned.acquired(resource);
-            try transcript.observe(.{ .acquire = resource });
-        }
-        try transcript.observe(.{ .failure = failure });
-        while (owned.release()) |resource| try transcript.observe(.{ .release = resource });
-        try transcript.done();
-    }
 }
 
 test "strict UI transcript rejects unexpected missing and extra operations" {
@@ -2392,23 +2225,23 @@ test "only external connection failures retry; persistence failures remain stick
 /// owner at a stable address after first showing a banner (Wayland callbacks).
 pub const Service = struct {
     owner: Owner,
-    video: *Video,
+    ui_owner: *UiOwner,
     dbus_owner: Dbus = .{},
     owns_history: bool = false,
     retry_at: u64 = 0,
     pending: Pending,
     ui: Ui = .{},
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, video: *Video) !Service {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, ui_owner: *UiOwner) !Service {
         return .{
             .owner = try Owner.init(allocator, io, state_home, home),
-            .video = video,
+            .ui_owner = ui_owner,
             .pending = .{ .allocator = allocator },
         };
     }
 
     pub fn deinit(self: *Service) void {
-        self.ui.clear(self.video, self.owner.allocator);
+        self.ui.clear(self.ui_owner, self.owner.allocator);
         self.pending.clear();
         self.dbus_owner.close();
         self.owner.deinit();
@@ -2427,7 +2260,7 @@ pub const Service = struct {
             std.debug.assert(self.owner.close(.{ .id = active.notification_id, .generation = active.generation }));
         }
         self.pending.clear();
-        self.ui.clear(self.video, self.owner.allocator);
+        self.ui.clear(self.ui_owner, self.owner.allocator);
         try self.flush();
     }
 
@@ -2478,21 +2311,12 @@ pub const Service = struct {
         const more = try intake(&self.dbus_owner, self);
         try self.flush();
         if (self.pending.take()) |desired| {
-            self.ui.apply(self.video, self.owner.allocator, self.owner.io, desired) catch |err| self.bannerFailed(err);
+            self.ui.apply(self.ui_owner, self.owner.allocator, self.owner.io, desired) catch |err| self.bannerFailed(err);
         }
         return more;
     }
 
-    pub fn handleEvent(self: *Service, input: *const sdl.SDL_Event) !void {
-        const closed = self.ui.event(self.owner.allocator, input) catch |err| {
-            self.bannerFailed(err);
-            return;
-        };
-        if (closed) |value| self.complete(value) catch |err| try self.recoverTurn(err);
-    }
-
     pub fn nativeTurn(self: *Service) !void {
-        if (!native_ui) return;
         const closed = self.ui.nativeTurn(self.owner.allocator) catch |err| {
             self.bannerFailed(err);
             return;
@@ -2512,18 +2336,18 @@ pub const Service = struct {
     }
 
     pub fn displayLost(self: *Service) void {
-        self.bannerFailed(if (native_ui) error.NativeDisplayLost else error.SdlDisplayLost);
+        self.bannerFailed(error.NativeDisplayLost);
     }
 
     fn bannerFailed(self: *Service, err: anyerror) void {
         std.log.err("notification banner failed: {s}", .{@errorName(err)});
-        self.ui.banner.deinit(self.video);
+        self.ui.banner.deinit(self.ui_owner);
     }
 
     fn complete(self: *Service, closed: Closed) !void {
         if (!currentClose(self.owner.history.active, closed)) return;
         std.debug.assert(self.owner.close(closed.key));
-        self.ui.clear(self.video, self.owner.allocator);
+        self.ui.clear(self.ui_owner, self.owner.allocator);
         try self.dbus_owner.signalClosed(closed.key.id, closed.reason);
         try self.flush();
     }
@@ -2636,12 +2460,12 @@ fn reconnectWait(err: anyerror) ?i64 {
 }
 
 /// Standalone compatibility entrypoint, driven by the same sequential service
-/// that the unified resident will own. When hidden, SDL is not initialized.
+/// used by the unified resident. When hidden, no graphical connection is retained.
 pub fn run(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, env: *const std.process.Environ.Map) !void {
     const stop = try Stop.open();
     defer stop.close();
-    var video: Video = .{ .env = env };
-    var service = try Service.init(allocator, io, state_home, home, &video);
+    var ui_owner: UiOwner = .{ .env = env };
+    var service = try Service.init(allocator, io, state_home, home, &ui_owner);
     defer service.deinit();
     const result = serve(&service, stop.fd);
     // Preserve the original error if a final durability attempt also fails.
@@ -2662,27 +2486,21 @@ fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
             try Stop.consume(service.owner.io, stop_fd);
             return;
         }
-        service.video.pumpNative() catch |err| {
+        service.ui_owner.pumpNative() catch |err| {
             std.log.warn("native notification display failed: {s}", .{@errorName(err)});
             service.displayLost();
         };
         try service.expire(nowMilliseconds(service.owner.io));
         try service.nativeTurn();
         const more_bus = try service.tick(nowMilliseconds(service.owner.io));
-        var count: usize = 0;
-        while (service.video.users != 0 and count < intake_batch_max) : (count += 1) {
-            var input: sdl.SDL_Event = undefined;
-            if (!sdl.SDL_PollEvent(&input)) break;
-            try service.handleEvent(&input);
-        }
         try service.expire(nowMilliseconds(service.owner.io));
-        if (more_bus or count == intake_batch_max or (service.video.users != 0 and sdl.SDL_PollEvent(null))) continue;
+        if (more_bus) continue;
         const current = nowMilliseconds(service.owner.io);
         const deadline = service.wake();
         var fds = [_]std.posix.pollfd{
             .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = try service.fd(), .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = if (native_ui) service.video.nativeFd() else try service.video.fd(), .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = service.ui_owner.nativeFd(), .events = std.posix.POLL.IN, .revents = 0 },
         };
         _ = try std.posix.poll(&fds, if (deadline) |end| @intCast(@min(end -| current, std.math.maxInt(i32))) else -1);
         if (fds[0].revents != 0) {

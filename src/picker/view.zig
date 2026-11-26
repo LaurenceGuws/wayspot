@@ -1,4 +1,4 @@
-//! Owns native SDL startup, input, drawing, and reverse-order cleanup.
+//! Native layer-shell picker; SDL supplies CPU drawing only.
 
 const std = @import("std");
 const apps = @import("../apps/catalog.zig");
@@ -7,20 +7,18 @@ const icon_path = @import("icon.zig");
 const image = @import("image.zig");
 const navigator = @import("navigator.zig");
 const picker = @import("root.zig");
-const sdl_event = @import("input.zig");
-const sdl_layer = @import("../ui/layer.zig");
 const pixels = @import("geometry.zig");
 const text_draw = @import("../ui/text.zig");
-const Video = @import("../ui/video.zig");
+const UiOwner = @import("../ui/owner.zig");
 const tray = @import("../tray/host.zig");
 const tray_menu = @import("../tray/menu.zig");
 const sdl = @import("sdl_c");
 const time = @import("time_c");
-const use_shm = @import("build_options").native_picker;
-const shm = if (use_shm) @import("../ui/native_surface.zig") else struct {};
-const Input = if (use_shm) shm.Input else struct {};
+const shm = @import("../ui/native_surface.zig");
+const Input = shm.Input;
+const xkb = @import("xkb_c");
 
-/// Native is the production realization of the picker's exact SDL operations.
+/// Native owns one layer and its CPU canvas for the picker lifetime.
 pub const Native = struct {
     const font_size = 16;
 
@@ -42,10 +40,9 @@ pub const Native = struct {
         texture: Texture,
     };
 
-    pub const native_picker = use_shm;
-    video: *Video,
-    native_display: if (use_shm) ?*shm.Display else void = if (use_shm) null else {},
-    native_surface: if (use_shm) ?*shm.Surface else void = if (use_shm) null else {},
+    ui_owner: *UiOwner,
+    native_display: ?*shm.Display = null,
+    native_surface: ?*shm.Surface = null,
     canvas: ?*sdl.SDL_Surface = null,
     canvas_scale: f32 = 1,
     first_attach: bool = false,
@@ -55,17 +52,13 @@ pub const Native = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     home: []const u8,
-    window: ?*sdl.SDL_Window = null,
-    layer: sdl_layer = .{},
     renderer: ?*sdl.SDL_Renderer = null,
     text: ?text_draw.Painter = null,
     icons: [picker.visible_row_capacity]Icon = undefined,
     icon_count: usize = 0,
     pending_icons: bool = false,
-    events_pending: bool = false,
     initialized: bool = false,
     text_started: bool = false,
-    tray_event: u32 = 0,
     tray_enabled: bool = true,
     tray_wake_fd: std.posix.fd_t = -1,
     tray_fetched: bool = false,
@@ -82,179 +75,71 @@ pub const Native = struct {
     menu_hover: ?usize = null,
     pressed_row: ?usize = null,
 
-    /// Initializes exactly the SDL video subsystem.
+    /// Acquires the shared display and a tray completion eventfd.
     pub fn init(native: *Native) !void {
         std.debug.assert(!native.initialized);
-        if (use_shm) {
-            native.native_display = try native.video.acquireNative(native.allocator, native.io);
-            errdefer {
-                native.video.releaseNative();
-                native.native_display = null;
-            }
-            if (native.tray_enabled and native.tray_wake_fd < 0) {
-                const wake_fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
-                if (std.os.linux.errno(wake_fd) != .SUCCESS) return error.TrayWakeOpenFailed;
-                native.tray_wake_fd = @intCast(wake_fd);
-                native.owned_wake = true;
-            }
-            native.initialized = true;
-            return;
+        native.native_display = try native.ui_owner.acquireNative(native.allocator, native.io);
+        errdefer {
+            native.ui_owner.releaseNative();
+            native.native_display = null;
         }
-        try native.video.acquire();
-        errdefer native.video.release();
-        if (native.tray_enabled) native.tray_event = try native.video.trayEvent();
+        if (native.tray_enabled and native.tray_wake_fd < 0) {
+            const wake_fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
+            if (std.os.linux.errno(wake_fd) != .SUCCESS) return error.TrayWakeOpenFailed;
+            native.tray_wake_fd = @intCast(wake_fd);
+            native.owned_wake = true;
+        }
         native.initialized = true;
     }
 
-    /// Create the picker SDL window with an explicit non-XDG overlay role.
+    /// Create and configure the native overlay before its first pixels.
     pub fn create(native: *Native) !void {
         std.debug.assert(native.initialized);
-        std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         comptime std.debug.assert(picker.visible_row_capacity == pixels.visible_rows);
-        if (use_shm) {
-            const display = native.native_display.?;
-            const start = std.Io.Clock.awake.now(native.io);
-            while (display.status() == .discovering) try native.readUntil(start);
-            if (display.status() != .ready) return error.NativeDisplayNotReady;
-            native.native_surface = try shm.Surface.create(display, .picker, .{ .width = pixels.window_width, .height = pixels.window_height }, null);
-            errdefer {
-                native.native_surface.?.destroy() catch {};
-                native.native_surface = null;
-            }
-            while (native.native_surface.?.extent == null and !native.native_surface.?.closed) try native.readUntil(start);
-            if (native.native_surface.?.closed) return error.NativePickerClosed;
-            return;
-        }
-        // SDL still owns the wl_surface and all rendering/input. Layer-shell
-        // supplies its overlay role without an XDG/libdecor window.
-        native.window = try sdl_layer.createWindow("wayspot", pixels.window_width, pixels.window_height);
+        const display = native.native_display.?;
+        const start = std.Io.Clock.awake.now(native.io);
+        while (display.status() == .discovering) try native.readUntil(start);
+        if (display.status() != .ready) return error.NativeDisplayNotReady;
+        native.native_surface = try shm.Surface.create(display, .picker, .{ .width = pixels.window_width, .height = pixels.window_height }, null);
         errdefer {
-            native.clearText();
-            if (native.renderer) |renderer| sdl.SDL_DestroyRenderer(renderer);
-            native.layer.deinit();
-            sdl.SDL_DestroyWindow(native.window);
-            native.renderer = null;
-            native.window = null;
+            native.native_surface.?.destroy() catch {};
+            native.native_surface = null;
         }
-        try native.layer.init(native.window.?, .picker, pixels.window_width, pixels.window_height);
-        native.renderer = sdl.SDL_CreateRenderer(native.window.?, null) orelse return error.SdlRendererCreateFailed;
-        if (!sdl.SDL_SetRenderLogicalPresentation(
-            native.renderer,
-            pixels.window_width,
-            pixels.window_height,
-            sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX,
-        )) return error.SdlLogicalPresentationFailed;
-        native.text = try text_draw.Painter.init(native.allocator, native.renderer.?, font_size);
+        while (native.native_surface.?.extent == null and !native.native_surface.?.closed) try native.readUntil(start);
+        if (native.native_surface.?.closed) return error.NativePickerClosed;
     }
 
     /// Enables UTF-8 text events before the picker can wait for input.
     pub fn startText(native: *Native) !void {
         std.debug.assert(!native.text_started);
-        if (use_shm) {
-            native.text_started = true;
-            return;
-        }
-        std.debug.assert(native.window != null);
-        if (!sdl.SDL_StartTextInput(native.window)) return error.SdlStartTextFailed;
         native.text_started = true;
     }
 
-    /// Waits for input, then drains one bounded portion of SDL's event queue.
+    /// Waits on native readiness and bounded visible deadlines.
     pub fn read(native: *Native) !picker.Events {
         std.debug.assert(native.text_started);
-        if (use_shm) return native.readShm();
-        native.refreshTrayIfDue();
-        var events: picker.Events = .{};
-        while (events.count < picker.event_capacity) {
-            var native_event: sdl.SDL_Event = undefined;
-            if (events.count > 0 or native.events_pending) {
-                if (!sdl.SDL_PollEvent(&native_event)) {
-                    native.events_pending = false;
-                    break;
-                }
-            } else {
-                _ = sdl.SDL_ClearError();
-                if (!sdl.SDL_WaitEventTimeout(&native_event, native.waitTimeout())) {
-                    if (std.mem.span(sdl.SDL_GetError()).len != 0) return error.SdlWaitFailed;
-                    events.items[0] = native.onDeadline();
-                    events.count = 1;
-                    return events;
-                }
-            }
-            events.items[events.count] = try native.handleEvent(native_event);
-            events.count += 1;
-        }
-        events.more = sdl.SDL_PollEvent(null);
-        native.events_pending = events.more;
-        return events;
+        return native.readShm();
     }
 
-    /// Handle one already-received SDL event. Never consume another window's
-    /// text, pointer, close, or renderer events in a shared event loop.
-    pub fn handleEvent(native: *Native, input: sdl.SDL_Event) !picker.Event {
-        if (use_shm) return .ignored;
-        if (input.type != native.tray_event and input.type != sdl.SDL_EVENT_QUIT and
-            sdl.SDL_GetWindowFromEvent(&input) != native.window) return .ignored;
-        var converted = input;
-        if (!sdl.SDL_ConvertEventToRenderCoordinates(native.renderer, &converted)) return error.SdlCoordinateConversionFailed;
-        return native.translate(converted);
-    }
-
-    fn translate(native: *Native, event: sdl.SDL_Event) !picker.Event {
-        if (event.type == native.tray_event) {
-            try native.receiveTray();
-            return .redraw;
-        }
-        switch (event.type) {
-            sdl.SDL_EVENT_KEY_DOWN, sdl.SDL_EVENT_TEXT_INPUT, sdl.SDL_EVENT_MOUSE_WHEEL, sdl.SDL_EVENT_WINDOW_MOUSE_LEAVE => native.pressed_row = null,
-            else => {},
-        }
-        return switch (event.type) {
-            sdl.SDL_EVENT_QUIT => .quit,
-            sdl.SDL_EVENT_WINDOW_CLOSE_REQUESTED => .quit,
-            sdl.SDL_EVENT_WINDOW_EXPOSED,
-            sdl.SDL_EVENT_WINDOW_RESIZED,
-            sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
-            sdl.SDL_EVENT_WINDOW_DISPLAY_CHANGED,
-            sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
-            sdl.SDL_EVENT_RENDER_TARGETS_RESET,
-            => .redraw,
-            sdl.SDL_EVENT_RENDER_DEVICE_RESET => reset: {
-                native.clearIcons();
-                native.resetText();
-                native.resetTrayTextures();
-                break :reset .redraw;
-            },
-            sdl.SDL_EVENT_RENDER_DEVICE_LOST => error.SdlRenderDeviceLost,
-            sdl.SDL_EVENT_KEY_DOWN => native.keyAction(event.key.key),
-            sdl.SDL_EVENT_TEXT_INPUT => try native.textAction(std.mem.span(event.text.text)),
-            sdl.SDL_EVENT_MOUSE_MOTION => native.motionAction(event.motion.x, event.motion.y),
-            sdl.SDL_EVENT_MOUSE_BUTTON_DOWN => native.buttonDown(event.button.button, event.button.x, event.button.y),
-            sdl.SDL_EVENT_MOUSE_BUTTON_UP => native.buttonUp(event.button.button, event.button.x, event.button.y),
-            sdl.SDL_EVENT_MOUSE_WHEEL => native.scrollAction(sdl_event.wheelRows(event.wheel.integer_y, event.wheel.direction == sdl.SDL_MOUSEWHEEL_FLIPPED)),
-            else => .ignored,
-        };
-    }
-
-    fn keyAction(native: *Native, key: sdl.SDL_Keycode) picker.Event {
+    fn keyAction(native: *Native, key: u32) picker.Event {
         native.pressed_row = null;
         return switch (key) {
-            sdl.SDLK_ESCAPE => if (native.menu != null) blk: {
+            xkb.XKB_KEY_Escape => if (native.menu != null) blk: {
                 native.menu = null;
                 break :blk .redraw;
             } else .escape,
-            sdl.SDLK_BACKSPACE => if (native.menu != null) blk: {
+            xkb.XKB_KEY_BackSpace => if (native.menu != null) blk: {
                 native.menu = null;
                 break :blk .redraw;
             } else .backspace,
-            sdl.SDLK_TAB => blk: {
+            xkb.XKB_KEY_Tab, xkb.XKB_KEY_ISO_Left_Tab => blk: {
                 native.menu = null;
                 break :blk .tab;
             },
-            sdl.SDLK_UP => if (native.menu != null) native.moveMenu(-1) else .up,
-            sdl.SDLK_DOWN => if (native.menu != null) native.moveMenu(1) else .down,
-            sdl.SDLK_RETURN => if (native.menu != null) native.selectMenu() else .enter,
+            xkb.XKB_KEY_Up => if (native.menu != null) native.moveMenu(-1) else .up,
+            xkb.XKB_KEY_Down => if (native.menu != null) native.moveMenu(1) else .down,
+            xkb.XKB_KEY_Return, xkb.XKB_KEY_KP_Enter => if (native.menu != null) native.selectMenu() else .enter,
             else => .ignored,
         };
     }
@@ -306,23 +191,16 @@ pub const Native = struct {
 
     /// Replaces the frame with the current terminated query.
     pub fn draw(native: *Native, frame: *const picker.Frame) !void {
-        if (use_shm) {
-            const surface = native.native_surface.?;
-            surface.invalidate();
-            const result = try surface.draw(.{ .view = native, .frame = frame }, paintShm);
-            if (result == .presented) {
-                if (!native.first_attach) {
-                    native.first_attach = true;
-                    std.log.info("native picker first attach", .{});
-                }
-                try native.afterDraw(frame);
+        const surface = native.native_surface.?;
+        surface.invalidate();
+        const result = try surface.draw(.{ .view = native, .frame = frame }, paintShm);
+        if (result == .presented) {
+            if (!native.first_attach) {
+                native.first_attach = true;
+                std.log.info("native picker first attach", .{});
             }
-            return;
+            try native.afterDraw(frame);
         }
-        try native.layer.update(native.window.?);
-        try native.drawContents(frame);
-        if (!sdl.SDL_RenderPresent(native.renderer.?)) return error.SdlDrawFailed;
-        try native.afterDraw(frame);
     }
 
     fn drawContents(native: *Native, frame: *const picker.Frame) !void {
@@ -343,9 +221,9 @@ pub const Native = struct {
         if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
         var failure_text: [160]u8 = undefined;
         const query: []const u8 = if (frame.table == .windows and frame.window_error != null and
-            (frame.window_status == .unavailable or frame.window_status == .focus_failed))
+            frame.window_status == .unavailable)
             std.fmt.bufPrint(&failure_text, "{s}: {s}  ·  Tab: applications", .{
-                if (frame.window_status == .unavailable) @as([]const u8, "Windows unavailable") else "Window focus failed",
+                @as([]const u8, "Windows unavailable"),
                 frame.window_error.?,
             }) catch return error.SdlDrawFailed
         else if (frame.query.len == 0) switch (frame.table) {
@@ -355,7 +233,6 @@ pub const Native = struct {
                 .dormant, .ready => "Search windows   ·   Tab: applications",
                 .empty => "No windows   ·   Tab: applications",
                 .unavailable => "Windows unavailable   ·   Tab: applications",
-                .focus_failed => "Window focus failed   ·   Tab: applications",
             },
             .notifications => "Notification history",
         } else frame.query;
@@ -377,7 +254,7 @@ pub const Native = struct {
         if (try native.firstMissing(frame)) |app_index| {
             native.pending_icons = true;
             try native.load(app_index);
-            if (use_shm) native.native_surface.?.invalidate();
+            native.native_surface.?.invalidate();
         } else {
             native.pending_icons = false;
         }
@@ -478,16 +355,10 @@ pub const Native = struct {
     pub fn stopText(native: *Native) !void {
         std.debug.assert(native.text_started);
         native.text_started = false;
-        if (use_shm) return;
-        if (!sdl.SDL_StopTextInput(native.window)) return error.SdlStopTextFailed;
     }
 
-    /// Destroys the renderer and window after text input has stopped.
+    /// Retires the renderer and surface after text input has stopped.
     pub fn destroy(native: *Native) void {
-        if (!use_shm) {
-            std.debug.assert(native.window != null);
-            std.debug.assert(native.renderer != null);
-        }
         std.debug.assert(!native.text_started);
         if (native.tray_worker) |worker| {
             native.tray_stop.store(true, .release);
@@ -496,105 +367,71 @@ pub const Native = struct {
             native.tray_worker_snapshot.deinit(std.heap.page_allocator);
         }
         native.clearTray();
-        native.clearIcons();
-        native.clearText();
-        if (use_shm) {
-            native.dropCanvas();
-            if (native.native_surface) |surface| {
-                native.native_surface = null;
-                surface.destroy() catch |err| {
-                    native.native_display.?.failed = true;
-                    std.log.warn("native picker retirement failed: {s}", .{@errorName(err)});
-                };
-                std.log.info("native picker retired", .{});
-            }
-            return;
+        native.dropCanvas();
+        if (native.native_surface) |surface| {
+            native.native_surface = null;
+            surface.destroy() catch |err| {
+                native.native_display.?.failed = true;
+                std.log.warn("native picker retirement failed: {s}", .{@errorName(err)});
+            };
+            std.log.info("native picker retired", .{});
         }
-        sdl.SDL_DestroyRenderer(native.renderer);
-        native.layer.deinit();
-        sdl.SDL_DestroyWindow(native.window);
-        native.renderer = null;
-        native.window = null;
     }
 
-    /// The next Snowman command travels over a different socket. Flush and
-    /// wait for a server sync after destroying the layer AND its SDL surface,
-    /// while our video lease still retains the original display connection.
+    /// Fence exclusive-layer retirement on the original connection before
+    /// dispatching a compositor-native focus command.
     pub fn destroyForFocus(native: *Native) !void {
-        if (use_shm) {
-            native.destroy();
-            const display = native.native_display.?;
-            try display.requestSync();
-            const start = std.Io.Clock.awake.now(native.io);
-            while (display.sync_pending) try native.readUntil(start);
-            std.log.info("native picker dismissal sync", .{});
-            return;
-        }
-        const display = native.layer.display;
         native.destroy();
-        const connection = display orelse return error.SdlWaylandDisplayMissing;
-        try sdl_layer.synchronize(connection, native.io);
+        const display = native.native_display.?;
+        try display.requestSync();
+        const start = std.Io.Clock.awake.now(native.io);
+        while (display.sync_pending) try native.readUntil(start);
+        std.log.info("native picker dismissal sync", .{});
     }
 
-    /// Quits SDL after every native object has been destroyed.
+    /// Releases the display after destroying the role and its CPU canvas.
     pub fn quit(native: *Native) void {
         std.debug.assert(native.initialized);
-        std.debug.assert(native.window == null);
         std.debug.assert(native.renderer == null);
         std.debug.assert(!native.text_started);
-        // The tray worker is joined before this; its old wake must not enter
-        // a later picker lifetime when another window keeps SDL alive.
-        if (use_shm) {
-            std.debug.assert(native.native_surface == null);
-            native.video.releaseNative();
-            native.native_display = null;
-            if (native.owned_wake) {
-                _ = std.os.linux.close(native.tray_wake_fd);
-                native.tray_wake_fd = -1;
-            }
-            native.initialized = false;
-            return;
+        // The tray worker is joined before its wake descriptor is retired.
+        std.debug.assert(native.native_surface == null);
+        native.ui_owner.releaseNative();
+        native.native_display = null;
+        if (native.owned_wake) {
+            _ = std.os.linux.close(native.tray_wake_fd);
+            native.tray_wake_fd = -1;
         }
-        if (native.tray_event != 0) sdl.SDL_FlushEvent(native.tray_event);
-        native.video.release();
         native.initialized = false;
     }
 
     fn ticks(native: *Native) u64 {
-        if (use_shm) return @intCast(std.Io.Clock.awake.now(native.io).toMilliseconds());
-        return sdl.SDL_GetTicks();
+        return @intCast(std.Io.Clock.awake.now(native.io).toMilliseconds());
     }
 
     fn readUntil(native: *Native, start: std.Io.Timestamp) !void {
-        try Video.readBefore(native.native_display.?, native.io, start);
+        try UiOwner.readBefore(native.native_display.?, native.io, start);
     }
 
     pub fn fd(native: *const Native) std.posix.fd_t {
-        if (use_shm) return if (native.native_display) |display| display.fd() else -1;
-        return -1;
+        return if (native.native_display) |display| display.fd() else -1;
     }
 
     pub fn closed(native: *const Native) bool {
-        if (use_shm) return native.native_surface.?.closed or native.native_display.?.failed;
-        return native.layer.closed;
+        return native.native_surface.?.closed or native.native_display.?.failed;
     }
 
     pub fn repeatWake(native: *const Native) ?u64 {
-        if (use_shm) {
-            const deadline = native.native_display.?.input.repeatDeadline() orelse return null;
-            const delta = @max(0, std.Io.Clock.awake.now(native.io).durationTo(deadline).toNanoseconds());
-            return @intCast(@divTrunc(delta + std.time.ns_per_ms - 1, std.time.ns_per_ms));
-        }
-        return null;
+        const deadline = native.native_display.?.input.repeatDeadline() orelse return null;
+        const delta = @max(0, std.Io.Clock.awake.now(native.io).durationTo(deadline).toNanoseconds());
+        return @intCast(@divTrunc(delta + std.time.ns_per_ms - 1, std.time.ns_per_ms));
     }
 
     pub fn hasPendingDraw(native: *const Native) bool {
-        if (use_shm) return native.native_surface.?.dirty and native.canDraw();
-        return false;
+        return native.native_surface.?.dirty and native.canDraw();
     }
 
     fn canDraw(native: *const Native) bool {
-        if (!use_shm) return true;
         const surface = native.native_surface orelse return false;
         if (surface.closed or surface.extent == null or !surface.presenter.?.ready()) return false;
         var busy: usize = 0;
@@ -605,7 +442,6 @@ pub const Native = struct {
     }
 
     pub fn nativeEvents(native: *Native, batch: *picker.Events) !void {
-        if (!use_shm) return;
         const display = native.native_display.?;
         if (native.closed()) {
             if (batch.count < batch.items.len) {
@@ -630,7 +466,7 @@ pub const Native = struct {
     fn readShm(native: *Native) !picker.Events {
         while (true) {
             var batch: picker.Events = .{};
-            try native.video.pumpNative();
+            try native.ui_owner.pumpNative();
             try native.nativeEvents(&batch);
             if (try native.drainTrayWake()) {
                 if (batch.count < batch.items.len) {
@@ -690,16 +526,7 @@ pub const Native = struct {
                 native.pressed_row = null;
                 if (key.text_len != 0) break :blk try native.textAction(key.utf8());
                 if (key.compose_consumed) break :blk .ignored;
-                const xkb = @import("xkb_c");
-                break :blk native.keyAction(switch (key.symbol) {
-                    xkb.XKB_KEY_Escape => sdl.SDLK_ESCAPE,
-                    xkb.XKB_KEY_BackSpace => sdl.SDLK_BACKSPACE,
-                    xkb.XKB_KEY_Tab, xkb.XKB_KEY_ISO_Left_Tab => sdl.SDLK_TAB,
-                    xkb.XKB_KEY_Up => sdl.SDLK_UP,
-                    xkb.XKB_KEY_Down => sdl.SDLK_DOWN,
-                    xkb.XKB_KEY_Return, xkb.XKB_KEY_KP_Enter => sdl.SDLK_RETURN,
-                    else => 0,
-                });
+                break :blk native.keyAction(key.symbol);
             },
             .ime => |edit| blk: {
                 native.menu = null;
@@ -751,7 +578,7 @@ pub const Native = struct {
             native.canvas_scale = scale;
             native.createTrayTextures();
         }
-        if (native.video.users == 0 and sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO) != 0) return error.NativePickerUnexpectedVideo;
+        if (sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO) != 0) return error.NativePickerUnexpectedVideo;
         try native.drawContents(context.frame);
         const display = native.native_display.?;
         if (display.input.ime_manager != null) {
@@ -816,10 +643,6 @@ pub const Native = struct {
         native.pending_icons = false;
     }
 
-    fn resetText(native: *Native) void {
-        if (native.text) |*painter| painter.reset();
-    }
-
     fn clearText(native: *Native) void {
         if (native.text) |*painter| painter.deinit();
         native.text = null;
@@ -871,15 +694,10 @@ pub const Native = struct {
         };
     }
 
-    fn refreshTrayIfDue(native: *Native) void {
-        if (native.tray_fetched and native.tray_worker == null and
-            native.ticks() >= native.tray_next_refresh) native.startTrayFetch();
-    }
-
     /// A visible picker supplies a relative wake bound to its caller.
     /// There is no picker deadline while its window is absent.
     pub fn waitTimeout(native: *Native) c_int {
-        if (native.hasPendingDraw() or (native.pending_icons and (!use_shm or native.canDraw()))) return 1;
+        if (native.hasPendingDraw() or (native.pending_icons and native.canDraw())) return 1;
         const next_clock = clockTimeout();
         if (!native.tray_fetched or native.tray_worker != null) return next_clock;
         const remaining = native.tray_next_refresh -| native.ticks();
@@ -887,7 +705,7 @@ pub const Native = struct {
     }
 
     pub fn onDeadline(native: *Native) picker.Event {
-        if (native.pending_icons and (!use_shm or native.canDraw())) return .idle;
+        if (native.pending_icons and native.canDraw()) return .idle;
         const tray_due = native.tray_fetched and native.tray_worker == null and
             native.ticks() >= native.tray_next_refresh;
         if (tray_due) native.startTrayFetch();
@@ -899,11 +717,6 @@ pub const Native = struct {
             if (value.*) |texture| sdl.SDL_DestroyTexture(texture);
             value.* = null;
         }
-    }
-
-    fn resetTrayTextures(native: *Native) void {
-        native.destroyTrayTextures();
-        native.createTrayTextures();
     }
 
     fn clearTray(native: *Native) void {
@@ -967,10 +780,7 @@ pub const Native = struct {
     }
 
     fn trayClick(native: *Native, index: usize, button: u8, x: f32, y: f32) void {
-        var position_x: c_int = 0;
-        var position_y: c_int = 0;
-        if (!use_shm) _ = sdl.SDL_GetWindowPosition(native.window, &position_x, &position_y);
-        native.tray_snapshot.activate(index, position_x + @as(i32, @intFromFloat(x)), position_y + @as(i32, @intFromFloat(y)), button) catch |err| {
+        native.tray_snapshot.activate(index, @intFromFloat(x), @intFromFloat(y), button) catch |err| {
             std.log.warn("tray activation failed: {s}", .{@errorName(err)});
         };
     }
@@ -1186,8 +996,8 @@ pub const Native = struct {
     }
 };
 
-// A completion event or eventfd is the only cross-thread UI boundary. The worker never
-// touches SDL textures or the window and cannot invalidate live picker state.
+// The eventfd is the sole cross-thread UI completion boundary. The worker
+// never touches renderer or Wayland state.
 fn trayFetch(native: *Native) void {
     native.tray_worker_snapshot = tray.Snapshot.read(std.heap.page_allocator, &native.tray_stop) catch .{};
     native.tray_worker_ready.store(true, .release);
@@ -1198,9 +1008,7 @@ fn trayFetch(native: *Native) void {
         if (std.os.linux.errno(result) != .SUCCESS) std.log.warn("tray completion wake failed", .{});
         return;
     }
-    var event = std.mem.zeroes(sdl.SDL_Event);
-    event.type = native.tray_event;
-    _ = sdl.SDL_PushEvent(&event);
+    unreachable; // Every tray worker owns a completion eventfd.
 }
 
 fn clockTimeout() c_int {
@@ -1384,10 +1192,9 @@ test "single window metadata stays quiet" {
 
 test "native key events expose the window finder mode toggle" {
     var native: Native = undefined;
-    var event = std.mem.zeroes(sdl.SDL_Event);
-    event.type = sdl.SDL_EVENT_KEY_DOWN;
-    event.key.key = sdl.SDLK_TAB;
-    try std.testing.expectEqual(picker.Event.tab, try native.translate(event));
+    native.menu = null;
+    const event: Input.Event = .{ .surface = .display, .value = .{ .key = .{ .code = 15, .symbol = xkb.XKB_KEY_Tab, .pressed = true, .repeatable = false, .modifiers = .{} } } };
+    try std.testing.expectEqual(picker.Event.tab, try native.translateShm(event));
 }
 
 test "native app and icon lookup preserve the exact checked row index" {
@@ -1444,8 +1251,8 @@ test "tray menu overlays only its bounded picker rectangle and remains navigable
     defer sdl.SDL_DestroySurface(surface);
     const renderer = sdl.SDL_CreateSoftwareRenderer(surface) orelse return error.SdlTestRendererFailed;
     defer sdl.SDL_DestroyRenderer(renderer);
-    var video: Video = .{};
-    var native = Native{ .video = &video, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "/home/test", .renderer = renderer };
+    var ui_owner: UiOwner = .{};
+    var native = Native{ .ui_owner = &ui_owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "/home/test", .renderer = renderer };
     native.text = try text_draw.Painter.init(std.testing.allocator, renderer, 16);
     defer native.clearText();
     var menu: tray_menu.Menu = .{};
@@ -1474,26 +1281,19 @@ test "tray menu overlays only its bounded picker rectangle and remains navigable
 }
 
 test "Tab, Backspace, and Escape dismiss tray menus without stealing picker controls" {
-    var video: Video = .{};
-    var native = Native{ .video = &video, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
-    var event = std.mem.zeroes(sdl.SDL_Event);
-    event.type = sdl.SDL_EVENT_KEY_DOWN;
+    var ui_owner: UiOwner = .{};
+    var native = Native{ .ui_owner = &ui_owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
     native.menu = .{};
-    event.key.key = sdl.SDLK_TAB;
-    try std.testing.expectEqual(picker.Event.tab, try native.translate(event));
+    try std.testing.expectEqual(picker.Event.tab, native.keyAction(xkb.XKB_KEY_Tab));
     try std.testing.expect(native.menu == null);
-
     native.menu = .{};
-    event.key.key = sdl.SDLK_BACKSPACE;
-    try std.testing.expectEqual(picker.Event.redraw, try native.translate(event));
+    try std.testing.expectEqual(picker.Event.redraw, native.keyAction(xkb.XKB_KEY_BackSpace));
     try std.testing.expect(native.menu == null);
-    try std.testing.expectEqual(picker.Event.backspace, try native.translate(event));
-
+    try std.testing.expectEqual(picker.Event.backspace, native.keyAction(xkb.XKB_KEY_BackSpace));
     native.menu = .{};
-    event.key.key = sdl.SDLK_ESCAPE;
-    try std.testing.expectEqual(picker.Event.redraw, try native.translate(event));
+    try std.testing.expectEqual(picker.Event.redraw, native.keyAction(xkb.XKB_KEY_Escape));
     try std.testing.expect(native.menu == null);
-    try std.testing.expectEqual(picker.Event.escape, try native.translate(event));
+    try std.testing.expectEqual(picker.Event.escape, native.keyAction(xkb.XKB_KEY_Escape));
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
@@ -1504,9 +1304,9 @@ test "private-bus picker pointer events open the real tray menu and send its act
     // production StatusNotifierWatcher or graphical seat.
     const enabled = getenv("WAYSPOT_TRAY_PRIVATE_TEST") orelse return;
     if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return;
-    var video: Video = .{};
+    var ui_owner: UiOwner = .{};
     var native = Native{
-        .video = &video,
+        .ui_owner = &ui_owner,
         .applications = &.{},
         .allocator = std.testing.allocator,
         .io = undefined,
@@ -1516,40 +1316,20 @@ test "private-bus picker pointer events open the real tray menu and send its act
     defer native.tray_snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), native.tray_snapshot.count);
 
-    var pointer = std.mem.zeroes(sdl.SDL_Event);
-    pointer.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
-    pointer.button.button = sdl.SDL_BUTTON_RIGHT;
-    pointer.button.x = 495;
-    pointer.button.y = 23;
-    try std.testing.expectEqual(picker.Event.redraw, try native.translate(pointer));
+    try std.testing.expectEqual(picker.Event.redraw, native.buttonDown(sdl.SDL_BUTTON_RIGHT, 495, 23));
     try std.testing.expect(native.menu != null);
     try std.testing.expectEqualStrings("Open Mock Settings", native.menu.?.rows[0].text());
-
-    // The following click targets only the menu row within Wayspot's window,
-    // exercising the same SDL pointer path as a physical right-click then
-    // left-click without relying on an unreliable seat-injection helper.
-    pointer.button.button = sdl.SDL_BUTTON_LEFT;
-    pointer.button.x = 420;
-    pointer.button.y = 50;
-    try std.testing.expectEqual(picker.Event.redraw, try native.translate(pointer));
+    // The actual action adapter is exercised against the private mock menu.
+    try std.testing.expectEqual(picker.Event.redraw, native.buttonDown(sdl.SDL_BUTTON_LEFT, 420, 50));
     try std.testing.expect(native.menu == null);
 }
 
 test "row selection waits for its matching left-button release" {
-    var video: Video = .{};
-    var native = Native{ .video = &video, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
-    var event = std.mem.zeroes(sdl.SDL_Event);
-    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
-    event.button.button = sdl.SDL_BUTTON_LEFT;
-    event.button.x = 20;
-    event.button.y = 100;
-    try std.testing.expectEqual(picker.Event{ .hover = 0 }, try native.translate(event));
-    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_UP;
-    try std.testing.expectEqual(picker.Event{ .click = 0 }, try native.translate(event));
-    try std.testing.expectEqual(picker.Event.ignored, try native.translate(event));
-    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN;
-    try std.testing.expectEqual(picker.Event{ .hover = 0 }, try native.translate(event));
-    event.type = sdl.SDL_EVENT_MOUSE_BUTTON_UP;
-    event.button.y = 140;
-    try std.testing.expectEqual(picker.Event.ignored, try native.translate(event));
+    var ui_owner: UiOwner = .{};
+    var native = Native{ .ui_owner = &ui_owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event{ .click = 0 }, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 140));
 }

@@ -85,8 +85,9 @@ The first three capabilities default to enabled; set any to `false` to disable
 it. Wallpaper defaults to `null` (disabled) and otherwise requires an absolute
 image-directory path. Configuration is read at startup; unknown fields are
 rejected. Disabling tray also disables picker tray discovery. A hidden picker
-retains no application catalogue, window, renderer or tray textures. SDL is
-initialized on the first graphical surface and retired on the last. Wallpaper
+retains no application catalogue, surface, renderer or tray textures. The
+on-demand native UI connection opens on the first graphical role and retires
+on the last. Wallpaper
 and D-Bus owners advance on their own readiness or deadlines; the only
 application-owned worker is the bounded visible-picker tray fetcher.
 
@@ -122,26 +123,19 @@ including the rendered fallback cursor. The source-test graph links
 libxkbcommon for native keyboard decoding and compose. Socketpair tests also
 exercise repeat deadlines, compose, cursor-shape and text-input-v3 done
 transactions. The actual picker edit adapter is covered by source tests;
-real IME remains outstanding. The installed default remains the SDL build
-until native UI physical acceptance.
+real IME remains outstanding. Both picker and notification roles now use
+the native UI by default, without an accelerated backend.
 
 ### Application picker
 
-Build the opt-in native SHM graphical UI with:
-
-```sh
-zig build -Dnative_ui=true
-```
-
-Both standalone and resident picker/notification roles use this backend.
-`-Dnative_picker=true` remains an alias for the new option, enabling both
-roles; the transitional mixed SDL/SHM build is retired. The native build
-never initializes SDL video and ignores EGL manifest specialization. SDL's
-CPU drawing primitives remain. The portable default build remains the
-accepted SDL UI until physical acceptance. The resident-live fixture checks
-actual role pixels, independent retirement, original application launch
-environment and window focus. With an explicit installed accelerated
-baseline it also compares the picker-only and full combined resident scopes.
+Build the native SHM graphical UI with `zig build`. Both standalone and
+resident picker/notification roles use this backend. SDL supplies only CPU
+surfaces, image decoding and the software renderer. The build disables its
+video subsystem and accelerated renderers, with no EGL specialization or
+runtime fallback. The resident-live fixture checks actual role pixels,
+independent retirement, original application launch environment and window
+focus. An explicit baseline executable permits matched picker-only and
+full-resident comparisons.
 
 Run the default graphical picker:
 
@@ -156,8 +150,10 @@ available. The clock updates at the next minute while the window is open.
 It uses the existing picker renderer and does not start a separate desktop bar.
 On layer-shell-capable Wayland compositors (including Snowman), the picker is a
 centered **overlay surface** with exclusive keyboard focus while visible: no
-XDG toplevel, window decoration, or tile slot. SDL still handles its rendering,
-input, and output scaling. Its first useful frame remains the latency target.
+XDG toplevel, window decoration, or tile slot. It is summoned and dismissed,
+not dragged as a normal window. Native Wayland owns input and output scaling;
+SDL rasterizes the admitted CPU pixels. The first useful frame remains the
+latency target.
 
 Applications are discovered directly from the current XDG application
 directories. Ordinary typing filters the current list; selecting a row launches
@@ -170,9 +166,8 @@ current workspaces and monitors; they use Hyprland focus-history order when
 available and show workspace as location metadata. `Up` and `Down` select,
 typing filters, and `Enter` focuses the exact selected address using
 the Hyprland 0.56+ Lua dispatcher `hl.dsp.focus({ window = "address:<id>" })`. Wayspot then checks that
-`hyprctl -j activewindow` reports that same address. The native UI first
-retires its exclusive layer and receives a bounded display sync; the
-legacy SDL path retains its existing verify-before-close behavior.
+`hyprctl -j activewindow` reports that same address. The UI first retires its
+exclusive layer and receives a bounded display sync.
 On Snowman, `Tab` reads `snowman window list --mapped` and `snowman seat get 1`,
 including mapped hidden and unpresented windows. The local seat supplies focus
 recency. Selecting a window retains its exact numeric ID, retires the picker
@@ -196,9 +191,8 @@ match (`Hyprland` or `Snowman`), not a desktop compatibility list or compositor
 signature. The finder is lazy: opening the application picker does not start a
 compositor CLI, cache windows, or run a persistent watcher. When Hyprland CLI
 observation or focus fails, the window finder reports the failure without
-focusing another target. On Snowman, discovery failure remains visible in
-window mode; focus refusal after dismissal does not reopen the picker or
-retry. The two on-demand observations are not a joint atomic snapshot. The
+focusing another target. Discovery failure remains visible in window mode; focus refusal after
+dismissal does not reopen the picker or retry. The two on-demand observations are not a joint atomic snapshot. The
 finder is bounded to 128 windows; oversized or malformed replies refuse
 rather than silently dropping windows. No backend substitutions occur.
 
@@ -317,11 +311,9 @@ release tag are stable.
 ## Building
 
 Wayspot is developed and tested with official Zig `0.17.0` on Arch Linux, also
-recorded in `.zigversion` and the Zig package manifest. SDL3 is vendored for
-windowing and drawing. Text shaping and glyph rasterization come from an exact,
+recorded in `.zigversion` and the Zig package manifest. SDL3 is vendored for CPU drawing and image decoding. Text shaping and glyph rasterization come from an exact,
 provenance-recorded snapshot of Howl Text in
-`vendor/howl-text`, using system FreeType and HarfBuzz. Wayland and D-Bus are
-also system dependencies.
+`vendor/howl-text`, using system FreeType and HarfBuzz. Wayland, libxkbcommon and D-Bus are also system dependencies.
 
 Normal desktop build (`ReleaseSafe`):
 
@@ -329,18 +321,10 @@ Normal desktop build (`ReleaseSafe`):
 zig build
 ```
 
-An explicitly specialized build can restrict GUI EGL discovery to one
-installed GLVND vendor manifest, for example on an NVIDIA-only workstation:
-
-```bash
-zig build -Degl_vendor_manifest=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
-```
-
-The option is absent by default. It selects a single absolute path, not a
-GPU brand or runtime detector; the selected file must be readable at graphical
-process startup. The GUI process uses the selected manifest, while application
-launches, focus commands and notification helpers receive the original
-session environment. No global EGL configuration or driver selection changes.
+The build exposes only SDL's software renderer and refuses video
+initialization. Wayland owns surfaces, scaling, input and presentation. All
+external commands and application launches inherit the original session
+environment unchanged.
 
 Wayspot deliberately defaults to an optimized build with runtime safety checks.
 Use an explicit mode when debugging or measuring the fastest release shape:
@@ -370,8 +354,8 @@ does not claim to audit the product's `src/` files yet.
 
 ## Scope
 
-Wayspot's native window finder remains Hyprland-first; Snowman window discovery
-and focus are not yet available. The picker, notifications and wallpaper use
+Wayspot's native window finder supports Snowman and Hyprland. The picker,
+notifications and wallpaper use
 Wayland layer-shell and do not require Hyprland. Wayspot is not a compositor
 abstraction, plugin platform, general search framework, or full desktop
 environment.

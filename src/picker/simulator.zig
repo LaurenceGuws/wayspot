@@ -1,4 +1,4 @@
-//! Strict SDL operation transcript and deterministic picker simulations.
+//! Strict native operation transcript and deterministic picker simulations.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,7 +8,6 @@ const navigator = @import("navigator.zig");
 const picker = @import("root.zig");
 
 const step_capacity = 32;
-const native_ui = @import("build_options").native_picker;
 
 const Result = enum { ok, fail };
 
@@ -459,7 +458,7 @@ test "Tab lazily opens a global MRU window finder and exact Enter focuses select
     };
     const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{} } };
     const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
-    const steps = if (native_ui) prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus else prefix ++ focus ++ cleanup ++ [_]Step{.quit};
+    const steps = prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus;
     try simulate(&steps);
 }
 
@@ -492,7 +491,7 @@ test "typing in window finder filters windows instead of returning to applicatio
     };
     const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{} } };
     const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
-    const steps = if (native_ui) prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus else prefix ++ focus ++ cleanup ++ [_]Step{.quit};
+    const steps = prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus;
     try simulate(&steps);
 }
 
@@ -614,32 +613,10 @@ test "stale exact window focus never activates another target" {
     };
     const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{ .bytes = "{\"address\":\"0x2\"}" } } };
     const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
-    if (native_ui) {
-        const steps = prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus;
-        try std.testing.expectError(error.CompositorFocusMismatch, simulate(&steps));
-        const failed_sync = prefix ++ cleanup ++ [_]Step{ .{ .sync = .fail }, .quit };
-        try std.testing.expectError(error.PickerDismissalSyncFailed, simulate(&failed_sync));
-        return;
-    }
-    const steps = prefix ++ focus ++ [_]Step{
-        .{ .draw = .{
-            .table = .windows,
-            .query = "",
-            .rows = .{ .windows = &.{
-                .{ .stable_id = "0x2" },
-                .{ .stable_id = "0x3" },
-                .{ .stable_id = "0x4" },
-            } },
-            .selected_row = 1,
-            .window_status = .focus_failed,
-            .window_error = "CompositorFocusMismatch",
-        } },
-        .{ .wait = .{ .event = .escape } },
-        .{ .stop_text = .ok },
-        .destroy,
-        .quit,
-    };
-    try simulate(&steps);
+    const steps = prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus;
+    try std.testing.expectError(error.CompositorFocusMismatch, simulate(&steps));
+    const failed_sync = prefix ++ cleanup ++ [_]Step{ .{ .sync = .fail }, .quit };
+    try std.testing.expectError(error.PickerDismissalSyncFailed, simulate(&failed_sync));
 }
 
 const snowman_windows = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_list\",\"serial\":5,\"data\":[{\"id\":42,\"workspace_id\":2,\"output_id\":null,\"mapped\":true,\"app_id\":\"kitty\",\"title\":\"Terminal\",\"geometry\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"mode\":\"tiled\",\"fullscreen\":false,\"scene\":{\"status\":\"workspace_unpresented\"}}]}";
@@ -651,7 +628,7 @@ const snowman_selection_prefix = [_]Step{
     .{ .wait = .{ .event = .enter } }, .{ .stop_text = .ok },                                     .destroy,
 };
 
-test "Snowman selects the exact window only after destruction, sync and SDL release" {
+test "Snowman selects the exact window only after destruction, sync and display release" {
     const steps = snowman_selection_prefix ++ [_]Step{ .{ .sync = .ok }, .quit, .{ .navigator_focus = .{ .stable_id = "42", .bytes = snowman_applied } } };
     try std.testing.expectEqual(@as(?usize, null), try simulateHistoryBackend(&steps, &.{}, null, .snowman));
 }
@@ -701,7 +678,7 @@ test "each startup failure cleans only completed acquisitions" {
     }));
 }
 
-test "wait and draw failures clean text window and SDL" {
+test "wait and draw failures clean text surface and display" {
     try std.testing.expectError(error.SdlWaitFailed, simulate(&.{
         .{ .init = .ok },
         .{ .create = .ok },
@@ -945,7 +922,7 @@ test "notification rows are newest first and never close or launch" {
     try std.testing.expectEqual(@as(?usize, null), selected);
 }
 
-test "missing history is empty and read failures clean SDL exactly" {
+test "missing history is empty and read failures clean display exactly" {
     try simulate(&.{
         .{ .init = .ok },
         .{ .create = .ok },
@@ -1009,7 +986,7 @@ fn testApp(name: []const u8) apps.App {
     };
 }
 
-test "text stop failure still destroys the window and quits SDL" {
+test "text stop failure still destroys the surface and releases the display" {
     try std.testing.expectError(error.SdlStopTextFailed, simulate(&.{
         .{ .init = .ok },
         .{ .create = .ok },
@@ -1038,7 +1015,7 @@ test "transcript rejects its first over-bound history" {
     try std.testing.expectError(error.TranscriptTooLong, simulate(&steps));
 }
 
-test "structured SDL histories preserve cleanup" {
+test "structured picker histories preserve cleanup" {
     if (builtin.fuzz) {
         try std.testing.fuzz({}, fuzzHistory, .{});
         return;

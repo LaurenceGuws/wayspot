@@ -50,7 +50,8 @@ vendored sources where present, otherwise use an available upstream checkout or
 the upstream project itself. Do not encode one developer machine's filesystem
 layout into Wayspot's product or contributor contract.
 
-SDL3 used for windowing/drawing is vendored under `vendor/sdl/`.
+SDL3 used only for CPU drawing and image decoding is vendored under
+`vendor/sdl/`. Native Wayland owns UI presentation and input.
 The Howl Text font/shaping/rasterization source is a pinned upstream snapshot
 under `vendor/howl-text/`; Wayspot owns only presentation, clipping and SDL
 glyph textures, not font shaping or a terminal renderer. The original upstream

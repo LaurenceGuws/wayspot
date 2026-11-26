@@ -27,7 +27,7 @@ Changes touching startup should preserve these properties:
 
 The accepted shared resident avoids a second long-lived launcher owner. Its
 summon endpoint does not justify a startup cache or pre-indexer. Measure both
-summons with no video lease and summons while another surface owns SDL.
+summons with no UI connection and summons while a sibling surface retains it.
 
 ## 2. Rediscover external facts instead of persisting shadows
 
@@ -111,7 +111,7 @@ mode: the mapped window list and the local seat's MRU history. Scene
 participation is not a claim of unobscured pixels. The picker retains exact
 session-local IDs, including hidden and unpresented windows. Selecting a
 Snowman row ends the picker lifetime; a bounded server sync on its original
-SDL connection proves that the role and surface destruction were processed
+native connection proves that the role and surface destruction were processed
 before issuing the compositor's greedy focus command. Validate the exact ID
 and both native focus flags. Failure produces a notification without waiting
 for our own notification service, retrying, or guessing a different target.
@@ -123,27 +123,22 @@ That makes Wayspot useful as a small Hyprland desktop toolbox, but the toolbox
 shape came after the original launcher problem. Adding another desktop tool does
 not redefine the primary latency requirement or justify a generic framework.
 
-The picker and notifications use SDL's custom Wayland surface role with
-Wayland layer-shell, rather than XDG toplevel decorations or compositor-specific
-floating exceptions. The picker uses a centered keyboard-exclusive overlay;
-notification banners use noninteractive top-right surfaces and reserve no tile
-space. SDL still owns rendering and input, not the role's Wayland lifetime.
-Wallpaper uses the same protocol family for its per-output background surfaces.
-These roles work on Snowman and other layer-shell-capable Wayland compositors.
+The picker and notifications use native Wayland layer-shell rather than
+XDG toplevel decorations or compositor-specific floating exceptions. The
+picker is a centered keyboard-exclusive overlay, summoned on the target
+output rather than dragged as a normal window. Notification banners use
+noninteractive top-right surfaces and reserve no tile space. Wallpaper uses
+the same protocol family for its per-output background surfaces.
 Snowman is the intended sole product target once mature; Hyprland remains
-supported during that transition. Prefer compile-time specialization at a
-real compositor-specific boundary, such as window discovery and focus, over
-runtime probing or a permanent compositor plugin abstraction. Shared protocol
-behavior has no reason to specialize.
+supported during that transition. Prefer specialization at real compositor
+boundaries such as window discovery and focus. Shared protocol behavior has
+no reason to specialize.
 
-The `-Dnative_ui=true` candidate routes both the actual picker and
-notification banner through the native SHM surface owner, for standalone and
-resident invocation. The existing application catalog, query, navigator,
-tray/menu actions, notification identity/history, draw geometry and lazy icon
-work remain shared with the SDL build. No runtime backend fallback or
-compositor plugin is introduced. Native UI never initializes SDL video or
-applies an EGL vendor environment override. It is not the installed default
-yet. Its one on-demand visible-session connection
+Both standalone and resident invocation use native SHM. SDL remains the CPU
+rasterizer and image decoder, with video initialization disabled and no
+accelerated renderer or video driver exposed by the build. No backend
+fallback, EGL vendor override or compositor plugin is introduced. One
+on-demand visible-session connection
 owns at most one picker and one notification, with at most three buffers per
 surface across all extents. A frame callback permits presentation pacing;
 only wl_buffer.release permits writing into an already-submitted buffer.
@@ -269,13 +264,12 @@ this document only when they illustrate a durable product boundary.
 
 ## 7. Known tradeoffs are allowed to remain small
 
-The picker currently renders through a fixed `720x520` logical SDL geometry with
-high-DPI support. On a 4K display at fractional scaling around `1.6x`, text and
-other presentation can look softer than native-resolution rendering.
-
-This is a known polish issue, not a reason to invent a DPI framework. Fix it
-when the visual cost is worth the additional implementation, and measure the
-change against the startup path.
+The picker retains a fixed `720x520` logical layout, with density-specific
+CPU rasterization at the admitted physical extent. The staging canvas adds
+one bounded copy so ordinary redraws retain glyph and icon textures. The
+banner instead paints directly into the borrowed buffer. Native Wayland
+input remains logical even at fractional scale. Measure before adding a
+more general widget or renderer framework.
 
 ## 8. Shared resident ownership
 
@@ -288,20 +282,17 @@ blocking external work. Picker surfaces and transient resources may be
 retired independently of the resident. Do not restore the discarded Rust UI
 or create a general capability framework.
 
-The shared main-thread video owner initializes SDL on its first surface lease
-and quits on its last. Every first video lease disables SDL's libdecor
-loader before initialization: all product windows have custom layer-shell
-roles and never need XDG decoration negotiation or its GTK plugin. EGL
-provider selection remains machine policy: an optional compile-time manifest
-path restricts the GUI process before library initialization. All external
-processes receive the original entrypoint environment, not that specialization.
-The default build performs no EGL environment mutation. Route
-window and renderer events to their actual
-window, not the currently active capability. Picker input advances in bounded
-batches with a draw/finish action. Notification D-Bus intake, newest-only
-presentation, history and expiry share one sequential service owner; hidden
-notifications need no video lease or periodic bus polling. Standalone entrypoints drive the same service turns; the combined loop routes
-actual readiness and deadlines, not generic broadcasts to every capability.
+The shared main-thread UI owner acquires one native connection on its first
+surface lease and releases it on the last. CPU drawing resources retire
+before final SDL cleanup. Every external application and CLI receives the
+original entrypoint environment. Picker input advances in bounded batches
+with a draw/finish action. Notification D-Bus intake, newest-only presentation,
+history and expiry share one sequential service owner; hidden notifications
+need no UI lease or periodic bus polling. Standalone entrypoints drive the
+same service turns; the combined loop routes actual readiness and deadlines,
+not generic broadcasts to every capability. The `video_users` field in the
+resident/v1 status stays zero for existing consumers; `native_ui_users`
+reports the actual graphical leases.
 
 Wallpaper now owns one persistent background surface per output on one Wayland
 connection. Replace buffers only for rotation or meaningful geometry changes;
@@ -316,15 +307,16 @@ The resident uses one authenticated seqpacket command listener, explicit
 configuration and one primary thread. A legacy wallpaper identity reservation
 prevents a competing standalone publisher. The existing tray fetch worker
 returns completion through an eventfd; its lifetime is bounded by the picker.
-SDL still owns key repeat: pump at most 8ms apart only while keys are held,
-and preserve its 200ms IME fallback while focused without text-input-v3.
+Native key repeat supplies a single monotonic deadline while a repeatable
+key is held; text-input-v3 and XKB compose do not require a polling fallback.
 There is no hidden-picker polling. Application selection retires the surface
 before an exact-argv short-lived helper launches the app and exits; the
 resident waits only for the helper and does not retain application children.
 The helper unblocks inherited termination signals before launch.
 
 Private combined acceptance is available through `zig build resident-live`.
-Physical deployment and key-repeat/IME acceptance are separate. Some external
+The promoted SHM backend passed physical standalone acceptance on Snowman
+and Hyprland; live IME and physical tray placement remain separate gates. Some external
 effects (image decode/scale, native compositor calls, menu calls and launch)
 remain synchronous. Measure responsiveness under those effects before adding
 concurrency. No source/runtime cutover implies physical endurance acceptance.

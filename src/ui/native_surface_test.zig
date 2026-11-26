@@ -1427,3 +1427,84 @@ test "Hyprland selects its named seat even when seat0 is advertised first" {
     try buttonEvent(&f, true);
     try testing.expect((try nextInput(&f, picker, .button)).value.button.pressed);
 }
+
+test "native picker and banner roles reserve no tile space on the wire" {
+    var f = try Fixture.open();
+    defer f.close();
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    const p = try f.take();
+    const manager = f.display.manager.?.id;
+    const pl = picker.layer.?.id;
+    try testing.expectEqual(@as(u32, 3), try p.word(manager, 0, 3)); // overlay
+    try testing.expectEqual(@as(u32, 0), try p.firstWord(pl, 1)); // center
+    try testing.expectEqual(std.math.maxInt(u32), try p.firstWord(pl, 2)); // zone -1
+    try testing.expectEqual(@as(u32, 1), try p.firstWord(pl, 4)); // exclusive keyboard
+    try testing.expectEqual(@as(usize, 0), p.count(pl, 3));
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    const b = try f.take();
+    const bl = banner.layer.?.id;
+    try testing.expectEqual(@as(u32, 2), try b.word(manager, 0, 3)); // top
+    try testing.expectEqual(@as(u32, 9), try b.firstWord(bl, 1)); // top + right
+    try testing.expectEqual(std.math.maxInt(u32), try b.firstWord(bl, 2));
+    try testing.expectEqual(@as(u32, 0), try b.firstWord(bl, 4)); // no keyboard focus
+    try testing.expectEqual(@as(u32, 16), try b.word(bl, 3, 0));
+    try testing.expectEqual(@as(u32, 16), try b.word(bl, 3, 1));
+}
+
+test "actual shared display lease survives sibling retirement and rejects failed acquisition" {
+    const Owner = @import("owner.zig");
+    var cold: Owner = .{};
+    try testing.expectError(error.NativeDisplayEnvironment, cold.acquireNative(testing.allocator, testing.io));
+    try testing.expect(cold.native == null and cold.native_users == 0 and cold.nativeFd() == -1);
+    var f = try Fixture.open();
+    // Transfer the ready fixture display to the real lease owner.
+    defer _ = linux.close(f.server);
+    var owner: Owner = .{ .native = f.display, .native_users = 1 };
+    defer while (owner.native_users > 0) owner.releaseNative();
+    var picker: ?*native.Surface = try native.Surface.create(f.display, .picker, size, null);
+    defer if (picker) |surface| surface.destroy() catch {};
+    const same = try owner.acquireNative(testing.allocator, testing.io);
+    try testing.expect(same == f.display and owner.native_users == 2);
+    // A rejected partial role acquisition releases only its own lease.
+    try testing.expectError(error.NativeRoleAlreadyOwned, native.Surface.create(same, .picker, size, null));
+    owner.releaseNative();
+    try testing.expect(owner.native_users == 1 and owner.native == f.display);
+    _ = try owner.acquireNative(testing.allocator, testing.io);
+    var banner: ?*native.Surface = try native.Surface.create(same, .notification, size, null);
+    defer if (banner) |surface| surface.destroy() catch {};
+    _ = try f.take();
+    try f.configure(banner.?, 1, size);
+    const retired = picker.?;
+    picker = null;
+    try retired.destroy();
+    owner.releaseNative();
+    try testing.expectEqual(@as(u8, 1), owner.native_users);
+    var paint: Paint = .{};
+    _ = try submitted(&f, banner.?, &paint);
+    const last = banner.?;
+    banner = null;
+    try last.destroy();
+    f.display.failed = true;
+    try testing.expectError(error.NativeConnectionFailed, owner.acquireNative(testing.allocator, testing.io));
+    try testing.expectEqual(@as(u8, 1), owner.native_users);
+    owner.releaseNative();
+    try testing.expect(owner.native == null and owner.nativeFd() == -1 and owner.native_users == 0);
+}
+
+test "SDL artifact exposes only CPU rendering and refuses video initialization" {
+    defer sdl.SDL_Quit();
+    try testing.expectEqual(@as(c_int, 0), sdl.SDL_GetNumVideoDrivers());
+    try testing.expectEqual(@as(c_int, 1), sdl.SDL_GetNumRenderDrivers());
+    try testing.expectEqualStrings("software", std.mem.span(sdl.SDL_GetRenderDriver(0)));
+    try testing.expect(!sdl.SDL_Init(sdl.SDL_INIT_VIDEO));
+    try testing.expectEqual(@as(u32, 0), sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO));
+    const canvas = sdl.SDL_CreateSurface(8, 8, sdl.SDL_PIXELFORMAT_XRGB8888) orelse return error.CpuCanvas;
+    defer sdl.SDL_DestroySurface(canvas);
+    const renderer = sdl.SDL_CreateSoftwareRenderer(canvas) orelse return error.CpuRenderer;
+    defer sdl.SDL_DestroyRenderer(renderer);
+    try testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 20, 30, 40, 255));
+    try testing.expect(sdl.SDL_RenderClear(renderer));
+    try testing.expect(sdl.SDL_FlushRenderer(renderer));
+}

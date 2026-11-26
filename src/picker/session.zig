@@ -1,4 +1,4 @@
-//! A picker invocation owns its fresh application facts and its SDL surface.
+//! A picker invocation owns its fresh application facts and native layer.
 //! Allocate at a stable address; close the surface before executing selection.
 const std = @import("std");
 const apps = @import("../apps/catalog.zig");
@@ -8,8 +8,7 @@ const notification = @import("../notifications/root.zig");
 const picker = @import("root.zig");
 const navigator = @import("navigator.zig");
 const View = @import("view.zig").Native;
-const Video = @import("../ui/video.zig");
-const sdl = @import("sdl_c");
+const UiOwner = @import("../ui/owner.zig");
 const Self = @This();
 
 process: std.process.Init,
@@ -20,7 +19,7 @@ state: picker.State,
 view: View,
 deadline: u64 = 0,
 
-pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
+pub fn open(init: std.process.Init, ui_owner: *UiOwner, tray_enabled: bool) !*Self {
     const self = try init.gpa.create(Self);
     errdefer init.gpa.destroy(self);
     const home = init.environ_map.get("HOME") orelse return error.HomeMissing;
@@ -46,7 +45,7 @@ pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
     };
     errdefer self.state.deinit();
     self.view = .{
-        .video = video,
+        .ui_owner = ui_owner,
         .applications = self.applications.slice(),
         .allocator = init.gpa,
         .io = init.io,
@@ -125,19 +124,9 @@ pub fn trayReady(self: *Self) !bool {
     return self.view.trayReady();
 }
 
-/// SDL's Wayland backend owns key-repeat generation. When a key is held,
-/// keep pumping it with at most an 8ms gap; no repeat timer while idle.
+/// A held native key supplies its exact repeat deadline; none while idle.
 pub fn repeatWake(self: *const Self) ?u64 {
-    if (View.native_picker) return self.view.repeatWake();
-    if (sdl.SDL_GetKeyboardFocus() != self.view.window) return null;
-    var count: c_int = 0;
-    const keys = sdl.SDL_GetKeyboardState(&count);
-    if (keys == null or count <= 0) return null;
-    for (keys[0..@intCast(count)]) |pressed| if (pressed) return 8;
-    // The pinned SDL Wayland backend pumps a D-Bus IME every 200ms
-    // when no text-input-v3 manager is available. Keep that visible-only
-    // deadline too; the hidden picker has neither timer.
-    return if (!self.view.layer.text_input_v3 and sdl.SDL_TextInputActive(self.view.window)) 200 else null;
+    return self.view.repeatWake();
 }
 
 fn now(io: std.Io) u64 {

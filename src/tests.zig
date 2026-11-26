@@ -15,15 +15,12 @@ test {
     _ = @import("notifications/root.zig");
     _ = @import("picker/root.zig");
     _ = @import("picker/view.zig");
-    _ = @import("picker/input.zig");
-    _ = @import("ui/layer.zig");
     _ = @import("picker/geometry.zig");
     _ = @import("picker/simulator.zig");
     _ = @import("ui/text.zig");
-    _ = @import("ui/video.zig");
+    _ = @import("ui/owner.zig");
     _ = @import("ui/native_surface.zig");
     _ = @import("ui/native_surface_test.zig");
-    _ = @import("ui/integration.zig");
     _ = @import("tray/host.zig");
     _ = @import("tray/menu.zig");
     _ = @import("tray/watcher.zig");

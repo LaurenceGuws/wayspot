@@ -14,20 +14,8 @@ snow = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve()
 cli = Path(os.environ["SNOWMAN_CLI"]).resolve()
 baseline = Path(os.environ.get("WAYSPOT_BASELINE", str(candidate))).resolve()
 egl_variable = "__EGL_VENDOR_LIBRARY_FILENAMES"
-expected_egl = os.environ.get("WAYSPOT_EXPECT_EGL_MANIFEST")
+# Explicit inherited value is a launch-environment test, never a GPU policy.
 inherited_egl = os.environ.get("WAYSPOT_TEST_INHERITED_EGL")
-native_picker = os.environ.get("WAYSPOT_TEST_NATIVE_PICKER") == "1"
-native_ui = os.environ.get("WAYSPOT_TEST_NATIVE_UI") == "1"
-picker_lease = 0 if native_picker else 1
-banner_lease = 0 if native_ui else 1
-if expected_egl:
-    assert Path(expected_egl).is_absolute() and Path(expected_egl).is_file()
-    expected_library = (
-        Path(
-            json.loads(Path(expected_egl).read_text())["ICD"]["library_path"]
-        ).name.split(".so", 1)[0]
-        + ".so"
-    )
 
 actor_path = os.environ.get("SNOWMAN_SIM_CLIENT")
 actor = Path(actor_path).resolve() if actor_path else None
@@ -289,8 +277,7 @@ def mem(proc):
 
 
 def assert_no_libdecor(proc):
-    # All product windows use custom Wayland roles. Check the actual loaded
-    # objects while the video lease is alive, not merely an SDL hint value.
+    # No native UI surface needs a window-decoration library.
     maps = Path(f"/proc/{proc.pid}/maps").read_text()
     assert not re.search(r"/libdecor(?:[-_./]|$)", maps), "unneeded libdecor mapped"
 
@@ -300,23 +287,6 @@ def assert_no_gpu(proc):
     assert not re.search(r"/lib(EGL|GLX|nvidia|LLVM)", maps), (
         "unexpected GPU driver in native UI process"
     )
-
-
-def assert_egl_vendor(proc):
-    if native_ui:
-        assert_no_gpu(proc)
-        return
-    if not expected_egl:
-        return
-    assert f"EGL vendor manifest: {expected_egl}" in log("resident")
-    paths = [
-        line.split()[-1]
-        for line in Path(f"/proc/{proc.pid}/maps").read_text().splitlines()
-        if "/libEGL_" in line
-    ]
-    assert any(Path(path).name.startswith(expected_library) for path in paths), paths
-    if expected_library == "libEGL_nvidia.so":
-        assert not any("libEGL_mesa.so" in path for path in paths), paths
 
 
 def sample(procs):
@@ -413,9 +383,9 @@ def full_resident_ab(names):
     # architecture. Alternate order, fresh processes, identical config and
     # actual two roles visible, then retire each independently.
     rows = []
-    for rep, order in enumerate((("sdl", "shm"), ("shm", "sdl"))):
+    for rep, order in enumerate((("baseline", "candidate"), ("candidate", "baseline"))):
         for mode in order:
-            binary = candidate if mode == "shm" else baseline
+            binary = candidate if mode == "candidate" else baseline
             label = f"full-{mode}-{rep}"
             q = start([binary, "resident", root / "resident.json"], label, True)
             wait(
@@ -427,6 +397,8 @@ def full_resident_ab(names):
                 ),
                 label + " all owners",
             )
+            baseline_native = "native_ui_users" in status()
+            assert mode != "candidate" or baseline_native
             cold = mem(q)
             cycles = []
             for cycle in range(3):
@@ -454,7 +426,7 @@ def full_resident_ab(names):
                 observed = (time.monotonic_ns() - begin) / 1e6
                 time.sleep(0.4)
                 visible = mem(q)
-                if mode == "shm":
+                if baseline_native:
                     assert (
                         status()["native_ui_users"] == 2
                         and status()["video_users"] == 0
@@ -488,7 +460,7 @@ def full_resident_ab(names):
                     ),
                     label + " both retired",
                 )
-                if mode == "shm":
+                if baseline_native:
                     assert status()["native_ui_users"] == 0
                 time.sleep(0.1)
                 hidden = mem(q)
@@ -508,18 +480,26 @@ def full_resident_ab(names):
                 and idle["cpu_ticks_delta"] <= 1
                 and idle["voluntary_switch_delta"] <= 2
             )
-            if mode == "shm":
+            if baseline_native:
                 assert_no_gpu(q)
             assert stop(q) == 0
             rows.append(
-                {"mode": mode, "rep": rep, "cold": cold, "cycles": cycles, "idle": idle}
+                {
+                    "mode": mode,
+                    "native": baseline_native,
+                    "rep": rep,
+                    "cold": cold,
+                    "cycles": cycles,
+                    "idle": idle,
+                }
             )
             print("FULL_RESIDENT_AB_PASS", label, flush=True)
     summary = {}
-    for mode in ("sdl", "shm"):
+    for mode in ("baseline", "candidate"):
         r = [x for x in rows if x["mode"] == mode]
         c = [x for y in r for x in y["cycles"]]
         summary[mode] = {
+            "native": all(x["native"] for x in r),
             "processes": len(r),
             "cycles": len(c),
             "cold_pss_kib": statistics.median(x["cold"]["Pss"] for x in r),
@@ -690,12 +670,14 @@ def picker_only_ab(names):
         )
     )
     rows = []
-    for rep, order in enumerate((("sdl", "shm"), ("shm", "sdl"))):
+    for rep, order in enumerate((("baseline", "candidate"), ("candidate", "baseline"))):
         for mode in order:
-            binary = candidate if mode == "shm" else baseline
+            binary = candidate if mode == "candidate" else baseline
             label = f"picker-{mode}-{rep}"
             q = start([binary, "resident", cfg], label, True)
             wait(lambda: status()["pid"] == q.pid, label + " ready")
+            baseline_native = "native_ui_users" in status()
+            assert mode != "candidate" or baseline_native
             cold = mem(q)
             cycles = []
             for cycle in range(3):
@@ -708,19 +690,19 @@ def picker_only_ab(names):
                 attach = (time.monotonic_ns() - begin) / 1e6
                 wait(lambda: picker_pixels(names), label + " actual picker pixels")
                 observed = (time.monotonic_ns() - begin) / 1e6
-                assert status()["video_users"] == (0 if mode == "shm" else 1)
+                assert status()["video_users"] == (0 if baseline_native else 1)
                 # Allow the bounded deferred icon work to settle. No tray worker.
                 time.sleep(0.35)
                 visible = mem(q)
                 maps = Path(f"/proc/{q.pid}/maps").read_text()
-                if mode == "shm":
+                if baseline_native:
                     assert not re.search(r"/lib(EGL|GLX|nvidia|LLVM)", maps), (
                         "GPU mapped in fresh SHM picker"
                     )
                     assert visible["threads"] == 1
                 else:
                     assert "/libEGL_nvidia" in maps, (
-                        "baseline not the specialized accelerated build"
+                        "legacy baseline not the specialized accelerated build"
                     )
                 run(candidate, "picker", "dismiss")
                 wait(lambda: not status()["picker_visible"], label + " retired")
@@ -742,14 +724,22 @@ def picker_only_ab(names):
             )
             assert stop(q) == 0
             rows.append(
-                {"mode": mode, "rep": rep, "cold": cold, "cycles": cycles, "idle": idle}
+                {
+                    "mode": mode,
+                    "native": baseline_native,
+                    "rep": rep,
+                    "cold": cold,
+                    "cycles": cycles,
+                    "idle": idle,
+                }
             )
             print("PICKER_ONLY_PASS", label, flush=True)
     summary = {}
-    for mode in ("sdl", "shm"):
+    for mode in ("baseline", "candidate"):
         r = [x for x in rows if x["mode"] == mode]
         c = [x for y in r for x in y["cycles"]]
         summary[mode] = {
+            "native": all(x["native"] for x in r),
             "processes": len(r),
             "cycles": len(c),
             "cold_pss_kib": statistics.median(x["cold"]["Pss"] for x in r),
@@ -763,7 +753,7 @@ def picker_only_ab(names):
     result = {
         "summary": summary,
         "samples": rows,
-        "no_gpu_in_shm": True,
+        "no_gpu_in_candidate": True,
         "scope": "same actual picker product, 2 fresh processes/backend, 3 cycles/process, headless scale-1, tray/notification/wallpaper disabled; observed pixels includes grim and CLI overhead",
     }
     (out / "picker-only-ab.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -878,31 +868,23 @@ def verify_window_finder(resident):
         assert not status()["picker_visible"]
         assert seat()["focused_window"] == ids[target]
         wire = log("resident")[offset:]
-        if native_picker:
-            assert (
-                wire.index("native picker retired")
-                < wire.index("native picker dismissal sync")
-                < wire.index("window focus applied")
-            )
-        else:
-            assert "wayspot-picker" in wire and re.search(
-                r"zwlr_layer_surface_v1[#@]\d+\.destroy\(", wire
-            )
-            assert "wl_display#1.sync(" in wire or re.search(
-                r"wl_display[#@]\d+\.sync\(", wire
-            )
+        assert (
+            wire.index("native picker retired")
+            < wire.index("native picker dismissal sync")
+            < wire.index("window focus applied")
+        )
         assert "exclusive_layer" not in wire and "window selection failed" not in wire
 
-    # Shared SDL display remains alive through the picker dismissal barrier.
+    # Shared native display remains alive through the picker dismissal barrier.
     hold = notify("Selection with a live banner", ms=60000)
     wait(lambda: status()["notification_visible"], "banner before selection")
     offset = open_windows("red")
-    assert status()["video_users"] == banner_lease + picker_lease
+    assert status()["video_users"] == 0
     expect_applied("red", offset)
     assert presentations() == {1: 2, 2: 1}
     assert windows()["red"]["scene"]["status"] == "scene_enabled"
     assert windows()["green"]["scene"]["status"] == "layout_hidden"
-    assert status()["video_users"] == banner_lease and status()["notification_visible"]
+    assert status()["video_users"] == 0 and status()["notification_visible"]
     close(hold)
     wait(
         lambda: not status()["notification_visible"] and status()["video_users"] == 0,
@@ -984,7 +966,7 @@ def verify_window_finder(resident):
     run(candidate, "picker")
     wait(lambda: new_attach("resident", "picker", offset), "application picker mapped")
     wait(
-        lambda: status()["video_users"] == banner_lease + picker_lease,
+        lambda: status()["video_users"] == 0,
         "independent picker and banner ownership",
     )
     key("enter")
@@ -1004,7 +986,7 @@ def verify_window_finder(resident):
     ), launched
     assert (
         not status()["picker_visible"]
-        and status()["video_users"] == banner_lease
+        and status()["video_users"] == 0
         and status()["notification_visible"]
     )
     (out / "picker-launch-environment.json").write_text(
@@ -1137,13 +1119,12 @@ try:
         first_attach.append((time.monotonic_ns() - t) / 1e6)
         assert (
             status()["picker_visible"]
-            and status()["video_users"] == banner_lease + picker_lease
+            and status()["video_users"] == 0
             and status()["notification_visible"]
         )
         assert_no_libdecor(resident)
-        assert_egl_vendor(resident)
-        if native_ui:
-            assert status()["native_ui_users"] == 2
+        assert_no_gpu(resident)
+        assert status()["native_ui_users"] == 2
         if i == 0:
             wait(lambda: picker_pixels(names), "actual product picker pixels")
             wait(lambda: (root / "action.fetch").exists(), "actual SNI property fetch")
@@ -1154,15 +1135,14 @@ try:
         run(candidate, "picker", "dismiss")
         assert (
             not status()["picker_visible"]
-            and status()["video_users"] == banner_lease
+            and status()["video_users"] == 0
             and status()["notification_visible"]
         )
     assert roles("resident", "wallpaper") == before_wall
-    if native_ui:
-        assert status()["native_ui_users"] == 1
-        assert log("resident").count("native UI connection opened") == 1
-        assert log("resident").count("native UI connection retired") == 0
-        assert_no_gpu(resident)
+    assert status()["native_ui_users"] == 1
+    assert log("resident").count("native UI connection opened") == 1
+    assert log("resident").count("native UI connection retired") == 0
+    assert_no_gpu(resident)
     close(hold)
     wait(
         lambda: not status()["notification_visible"] and status()["video_users"] == 0,
@@ -1190,18 +1170,10 @@ try:
         lambda: not status()["notification_visible"] and status()["picker_visible"],
         "expiry kept picker",
     )
-    if native_picker and not native_ui:
-        wait(
-            lambda: (
-                "native picker resumed after SDL shutdown" in log("resident")[offset:]
-            ),
-            "native picker submitted a fresh canvas after SDL shutdown",
-        )
     wait(lambda: picker_pixels(names), "picker pixels after banner retirement")
-    if native_ui:
-        assert status()["native_ui_users"] == 1
-        assert "native UI connection retired" not in log("resident")[offset:]
-        assert_no_gpu(resident)
+    assert status()["native_ui_users"] == 1
+    assert "native UI connection retired" not in log("resident")[offset:]
+    assert_no_gpu(resident)
     run(candidate, "picker", "dismiss")
     for i in range(4):
         run(candidate, "wallpaper", "rotate")
@@ -1214,12 +1186,11 @@ try:
     stop(mock)
     wait(lambda: status()["tray_items"] == 0, "tray unregister")
     warm = sample([resident])
-    if native_ui:
-        assert status()["native_ui_users"] == 0
-        assert log("resident").count("native UI connection opened") == log(
-            "resident"
-        ).count("native UI connection retired")
-        assert_no_gpu(resident)
+    assert status()["native_ui_users"] == 0
+    assert log("resident").count("native UI connection opened") == log(
+        "resident"
+    ).count("native UI connection retired")
+    assert_no_gpu(resident)
     assert warm["voluntary_switch_delta"] <= 2 and warm["cpu_ticks_delta"] <= 1, warm
     assert (
         resident.poll() is None
@@ -1250,6 +1221,7 @@ try:
             "notification_visible",
             "wallpaper_outputs",
             "video_users",
+            "native_ui_users",
         )
     )
     assert not owner("org.freedesktop.Notifications") and not owner(
@@ -1269,19 +1241,15 @@ try:
     picker_ab = None
     full_ab = None
     notification_acceptance = None
-    if native_picker and baseline != candidate:
+    if baseline != candidate:
         picker_ab = picker_only_ab(names)
-        standalone = start([candidate], "standalone-shm", True)
-        wait(lambda: new_attach("standalone-shm", "picker"), "standalone native attach")
-        wait(lambda: picker_pixels(names), "standalone native pixels")
-        assert not re.search(
-            r"/lib(EGL|GLX|nvidia|LLVM)",
-            Path(f"/proc/{standalone.pid}/maps").read_text(),
-        )
-        assert stop(standalone) == 0
-    if native_ui and baseline != candidate:
         full_ab = full_resident_ab(names)
-    if native_ui and actor:
+    standalone = start([candidate], "standalone-shm", True)
+    wait(lambda: new_attach("standalone-shm", "picker"), "standalone native attach")
+    wait(lambda: picker_pixels(names), "standalone native pixels")
+    assert_no_gpu(standalone)
+    assert stop(standalone) == 0
+    if actor:
         notification_acceptance = native_notification_acceptance(names)
     marker = root / "launch.json"
     helper = subprocess.run(
@@ -1319,12 +1287,11 @@ try:
         "resident_picker_without_banner_ms": cold_summon,
         "resident_pid": resident.pid,
         "picker_cycles": 25,
-        "picker_backend": "shm" if native_picker else "sdl",
+        "picker_backend": "shm",
         "product_picker_pixels": True,
-        "canvas_resumed_after_sdl_shutdown": native_picker and not native_ui,
-        "notification_backend": "shm" if native_ui else "sdl",
-        "shared_native_ui_connection": native_ui,
-        "gpu_free_ui": native_ui,
+        "notification_backend": "shm",
+        "shared_native_ui_connection": True,
+        "gpu_free_ui": True,
         "picker_only_ab": picker_ab,
         "full_resident_ab": full_ab,
         "notification_acceptance": notification_acceptance,
@@ -1334,9 +1301,7 @@ try:
         "detached_launch_mask_pass": True,
         "window_finder": finder,
         "layer_only_libdecor_absent": True,
-        "expected_egl_manifest": expected_egl,
         "inherited_egl_manifest": inherited_egl,
-        "egl_vendor_verified": expected_egl is not None,
     }
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2))
     print("RESIDENT_PASS", json.dumps(receipt), flush=True)

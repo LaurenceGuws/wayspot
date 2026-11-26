@@ -230,7 +230,6 @@ pub const WindowStatus = enum {
     ready,
     empty,
     unavailable,
-    focus_failed,
 };
 
 pub const Frame = struct {
@@ -406,7 +405,7 @@ pub const State = struct {
                     keepSelectedVisible(state);
                 },
                 .enter => {
-                    if (try state.acceptSelection(history_reader, navigator_operations)) |action| return action;
+                    if (try state.acceptSelection(history_reader)) |action| return action;
                 },
                 .text => |text| {
                     state.preedit.len = 0;
@@ -444,7 +443,7 @@ pub const State = struct {
                 },
                 .click => |row| {
                     state.selected = visibleSelection(state, row, state.rows.count()) orelse continue;
-                    if (try state.acceptSelection(history_reader, navigator_operations)) |action| return action;
+                    if (try state.acceptSelection(history_reader)) |action| return action;
                 },
                 .scroll => |rows| scroll(state, state.rows.count(), rows),
                 .redraw, .idle => {},
@@ -460,17 +459,14 @@ pub const State = struct {
         return .draw;
     }
 
-    fn acceptSelection(state: *State, history_reader: anytype, navigator_operations: anytype) !?Action {
+    fn acceptSelection(state: *State, history_reader: anytype) !?Action {
         if (state.finder == .windows) {
             // Native layers exclusively own keyboard focus on both
             // compositors. Retire that role and fence its destruction
             // before requesting a physical toplevel focus transfer.
-            if (state.window_backend == .snowman or (@import("build_options").native_picker and state.window_backend == .hyprland)) {
-                const row = state.rows.row(state.selected) orelse return null;
-                if (row != .window) return error.WindowRowExpected;
-                return .{ .focus = row.window.window.stable_id };
-            }
-            if (try state.focusSelectedWindow(navigator_operations)) return .dismiss;
+            const row = state.rows.row(state.selected) orelse return null;
+            if (row != .window) return error.WindowRowExpected;
+            return .{ .focus = row.window.window.stable_id };
         } else if (try state.selectApplicationRow(history_reader)) |index| {
             return .{ .launch = index };
         }
@@ -555,24 +551,6 @@ pub const State = struct {
         state.rows = rows;
         state.selected = 0;
         state.first = 0;
-    }
-
-    fn focusSelectedWindow(state: *State, operations: anytype) !bool {
-        const selected = state.rows.row(state.selected) orelse return false;
-        const window = switch (selected) {
-            .window => |row| row.window,
-            else => return error.WindowRowExpected,
-        };
-        navigator.focus(operations, state.allocator, state.window_backend, window.stable_id.slice()) catch |failure| switch (failure) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                state.window_error = @errorName(failure);
-                if (!@import("builtin").is_test) std.log.warn("wayspot focus of window {s} failed: {s}", .{ window.stable_id.slice(), state.window_error.? });
-                state.window_status = .focus_failed;
-                return false;
-            },
-        };
-        return true;
     }
 };
 
