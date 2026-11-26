@@ -312,8 +312,23 @@ rasterization. Independent absolute-coordinate pixel tests cover these
 paths at six densities. Only the presenter clears the destination, owns
 SDL resources and commits the admitted SHM frame. `tray-live` exercises
 actual UI/Wayland/D-Bus behavior. No retained label copies, general event
-dispatcher or separate widget surfaces. Retention remains an open measured
-experiment, not a requirement of the spatial composition API.
+dispatcher or separate widget surfaces.
+
+Retention is an independent presenter policy, not a requirement of the
+spatial composition API. A measured experiment against the actual picker
+painter (fixed app, icon, clock and menu facts; three densities; 25,920
+frames) compared immediate drawing, retained shaped glyph runs, partial
+repaint of the existing staging surface, and both combined. Partial repaint
+cut hover draw-plus-copy CPU cost by 73–82% and clock updates by 79–86%;
+query, scroll and menu changes conservatively repainted the whole surface.
+The bounded 165,408-byte shaped-run cache had smaller, inconsistent gains.
+These are isolated CPU rendering measurements, not real presentation latency
+or a full retained command-tree comparison. The experiment did not establish
+a production invalidation contract and neither prototype ships. Prefer
+optional dirty-region painting in the existing presenter over per-widget
+pixel buffers or a required retained command tree. Preserve full SHM buffer
+copies until per-buffer contents and release lifetimes justify another
+change. Keep the present immediate path as the correctness reference.
 
 ## 8. Shared resident ownership
 
