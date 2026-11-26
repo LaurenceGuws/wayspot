@@ -89,6 +89,7 @@ pub const Display = struct {
     pub fn open(allocator: Allocator, io: std.Io, env: *const std.process.Environ.Map) !*Display {
         const display = try adopt(allocator, try Connection.connect(allocator, io, env));
         errdefer display.destroy();
+        display.input.selectSessionSeat(env.get("XDG_SESSION_DESKTOP"));
         try display.input.rememberComposeLocale(allocator, env);
         return display;
     }

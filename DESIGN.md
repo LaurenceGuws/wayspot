@@ -98,7 +98,9 @@ strengthens its original job without becoming a taskbar. On Hyprland, the
 finder reads one bounded `hyprctl -j clients` snapshot only after explicit
 activation, keeps no resident watcher or persistent window shadow, and
 uses exact native window addresses with Hyprland's `hl.dsp.focus` Lua dispatcher and
-subsequent `hyprctl -j activewindow` verification. Workspace/monitor remain
+subsequent `hyprctl -j activewindow` verification. The native UI retires
+its exclusive role and fences destruction before dispatch, as on Snowman.
+Workspace/monitor remain
 location metadata rather than nested navigation. Focus recency is read only
 when the backend supplies it; workspace-local geometry may be rendered as
 a deterministic position such as `2/5` without changing focus order.
@@ -170,8 +172,9 @@ physical extents and the exact scale, so text can be rasterized at native
 pixel density without changing the widget or input coordinate space.
 The mixed-density live gate changes a mapped picker through 1.5x, 1.75x, 2x,
 1x and 1.5x while keeping an independent 1x banner alive. No role is remapped.
-The native input owner selects only the local `seat0` of the supported
-compositors; private/agent seats are not merged. Seat capabilities create
+The native input owner selects the exact local seat for the session: `seat0`
+on Snowman, `Hyprland` on Hyprland (verified on 0.57.2). Private/agent seats
+are not merged; no arbitrary seat fallback. Seat capabilities create
 and retire the corresponding keyboard and pointer objects. Keymap FDs are
 owned, read with an exact 1 MiB maximum and closed even on error. XKB state
 uses compositor modifier/group masks and the Wayland keycode offset; inherited

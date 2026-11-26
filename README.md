@@ -170,7 +170,9 @@ current workspaces and monitors; they use Hyprland focus-history order when
 available and show workspace as location metadata. `Up` and `Down` select,
 typing filters, and `Enter` focuses the exact selected address using
 the Hyprland 0.56+ Lua dispatcher `hl.dsp.focus({ window = "address:<id>" })`. Wayspot then checks that
-`hyprctl -j activewindow` reports that same address before closing.
+`hyprctl -j activewindow` reports that same address. The native UI first
+retires its exclusive layer and receives a bounded display sync; the
+legacy SDL path retains its existing verify-before-close behavior.
 On Snowman, `Tab` reads `snowman window list --mapped` and `snowman seat get 1`,
 including mapped hidden and unpresented windows. The local seat supplies focus
 recency. Selecting a window retains its exact numeric ID, retires the picker

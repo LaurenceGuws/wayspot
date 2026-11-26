@@ -8,6 +8,7 @@ const navigator = @import("navigator.zig");
 const picker = @import("root.zig");
 
 const step_capacity = 32;
+const native_ui = @import("build_options").native_picker;
 
 const Result = enum { ok, fail };
 
@@ -425,7 +426,7 @@ test "text input starts before wait and cleanup is exact" {
 }
 
 test "Tab lazily opens a global MRU window finder and exact Enter focuses selection" {
-    try simulate(&.{
+    const prefix = [_]Step{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -455,16 +456,15 @@ test "Tab lazily opens a global MRU window finder and exact Enter focuses select
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_focus = .{ .stable_id = "0x3" } },
-        .{ .navigator_focus_observation = .{} },
-        .{ .stop_text = .ok },
-        .destroy,
-        .quit,
-    });
+    };
+    const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{} } };
+    const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
+    const steps = if (native_ui) prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus else prefix ++ focus ++ cleanup ++ [_]Step{.quit};
+    try simulate(&steps);
 }
 
 test "typing in window finder filters windows instead of returning to applications" {
-    try simulate(&.{
+    const prefix = [_]Step{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -489,12 +489,11 @@ test "typing in window finder filters windows instead of returning to applicatio
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_focus = .{ .stable_id = "0x3" } },
-        .{ .navigator_focus_observation = .{} },
-        .{ .stop_text = .ok },
-        .destroy,
-        .quit,
-    });
+    };
+    const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{} } };
+    const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
+    const steps = if (native_ui) prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus else prefix ++ focus ++ cleanup ++ [_]Step{.quit};
+    try simulate(&steps);
 }
 
 test "Tab toggles window finder back to a fresh application finder" {
@@ -581,8 +580,8 @@ test "malformed Hyprland client response is visible and recoverable" {
     }, &applications);
 }
 
-test "stale exact window focus remains visible instead of activating another target" {
-    try simulate(&.{
+test "stale exact window focus never activates another target" {
+    const prefix = [_]Step{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -612,8 +611,17 @@ test "stale exact window focus remains visible instead of activating another tar
             .window_status = .ready,
         } },
         .{ .wait = .{ .event = .enter } },
-        .{ .navigator_focus = .{ .stable_id = "0x3" } },
-        .{ .navigator_focus_observation = .{ .bytes = "{\"address\":\"0x2\"}" } },
+    };
+    const focus = [_]Step{ .{ .navigator_focus = .{ .stable_id = "0x3" } }, .{ .navigator_focus_observation = .{ .bytes = "{\"address\":\"0x2\"}" } } };
+    const cleanup = [_]Step{ .{ .stop_text = .ok }, .destroy };
+    if (native_ui) {
+        const steps = prefix ++ cleanup ++ [_]Step{ .{ .sync = .ok }, .quit } ++ focus;
+        try std.testing.expectError(error.CompositorFocusMismatch, simulate(&steps));
+        const failed_sync = prefix ++ cleanup ++ [_]Step{ .{ .sync = .fail }, .quit };
+        try std.testing.expectError(error.PickerDismissalSyncFailed, simulate(&failed_sync));
+        return;
+    }
+    const steps = prefix ++ focus ++ [_]Step{
         .{ .draw = .{
             .table = .windows,
             .query = "",
@@ -630,7 +638,8 @@ test "stale exact window focus remains visible instead of activating another tar
         .{ .stop_text = .ok },
         .destroy,
         .quit,
-    });
+    };
+    try simulate(&steps);
 }
 
 const snowman_windows = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_list\",\"serial\":5,\"data\":[{\"id\":42,\"workspace_id\":2,\"output_id\":null,\"mapped\":true,\"app_id\":\"kitty\",\"title\":\"Terminal\",\"geometry\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"mode\":\"tiled\",\"fullscreen\":false,\"scene\":{\"status\":\"workspace_unpresented\"}}]}";

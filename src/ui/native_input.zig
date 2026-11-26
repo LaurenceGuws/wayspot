@@ -92,6 +92,8 @@ const Repeat = struct { code: u32, deadline: std.Io.Timestamp, interval: std.Io.
 const Masks = struct { depressed: u32 = 0, latched: u32 = 0, locked: u32 = 0, group: u32 = 0 };
 
 seats: [max_seats]?Seat = @splat(null),
+// Exact compositor-specific name; do not merge any other seat.
+seat_name: []const u8 = "seat0",
 selected: ?wl.Seat = null,
 keyboard: ?wl.Keyboard = null,
 pointer: ?wl.Pointer = null,
@@ -210,6 +212,11 @@ fn target(self: *const Self, id: wire.ObjectId, keyboard: bool) bool {
     return false;
 }
 
+pub fn selectSessionSeat(self: *Self, desktop: ?[]const u8) void {
+    std.debug.assert(self.selected == null);
+    self.seat_name = if (std.mem.eql(u8, desktop orelse "", "Hyprland")) "Hyprland" else "seat0";
+}
+
 pub fn bindSeat(self: *Self, conn: *Connection, registry: wl.Registry, global: u32, version: u32) !void {
     if (version < 5) return; // release and pointer frame are required.
     for (&self.seats) |*slot| {
@@ -252,9 +259,10 @@ fn onSeat(self: *Self, conn: *Connection, seat: wl.Seat, event: wl.Seat.Event) !
     } else return;
     switch (event) {
         .name => |name| {
-            // Both supported desktops use seat0. Never merge agent/private
-            // seat input into the user's picker. No implicit seat fallback.
-            if (!std.mem.eql(u8, name.name, "seat0")) return;
+            // Snowman names the local seat seat0; Hyprland 0.57.2 names
+            // its seat Hyprland. Never merge private/agent seats or fall
+            // back to whichever global happened to arrive first.
+            if (!std.mem.eql(u8, name.name, self.seat_name)) return;
             if (self.selected != null and self.selected.?.id != seat.id) return error.NativeSeatAmbiguous;
             self.selected = seat;
             slot.selected = true;

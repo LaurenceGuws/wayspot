@@ -1397,3 +1397,33 @@ test "shared native display drains each role without discarding sibling input" {
     try testing.expectEqual(.pointer_leave, std.meta.activeTag(input.popFor(picker_id).?.value));
     try testing.expect(input.count == 0 and input.popFor(banner_id) == null);
 }
+
+test "Hyprland selects its named seat even when seat0 is advertised first" {
+    var f = try Fixture.open();
+    defer f.close();
+    f.display.input.selectSessionSeat("Hyprland");
+    try f.global(19, "wl_seat", 8);
+    try seatEvent(&f, f.display.input.seats[0].?.object, "seat0");
+    try testing.expect(f.display.input.selected == null and f.display.input.pointer == null and f.display.input.keyboard == null);
+    try f.global(20, "wl_seat", 9);
+    const seat = f.display.input.seats[1].?.object;
+    // Hyprland can report capabilities before the name.
+    try f.event(seat.id, &wl.Seat.interface, 0, &.{.{ .uint = 3 }});
+    try testing.expect(f.display.input.selected == null);
+    try f.event(seat.id, &wl.Seat.interface, 1, &.{.{ .string = "Hyprland" }});
+    try testing.expectEqual(seat.id, f.display.input.selected.?.id);
+    try testing.expect(f.display.input.pointer != null and f.display.input.keyboard != null);
+    _ = try f.take();
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    try keymapEvent(&f, input_keymap, input_keymap.len);
+    try keyboardEnter(&f, picker, &.{});
+    _ = try nextInput(&f, picker, .keyboard_enter);
+    try keyEvent(&f, 30, true);
+    try testing.expectEqualStrings("a", (try nextInput(&f, picker, .key)).value.key.utf8());
+    try pointerEnter(&f, picker, 5, 6);
+    _ = try nextInput(&f, picker, .pointer_enter);
+    try buttonEvent(&f, true);
+    try testing.expect((try nextInput(&f, picker, .button)).value.button.pressed);
+}

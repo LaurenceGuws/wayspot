@@ -462,7 +462,10 @@ pub const State = struct {
 
     fn acceptSelection(state: *State, history_reader: anytype, navigator_operations: anytype) !?Action {
         if (state.finder == .windows) {
-            if (state.window_backend == .snowman) {
+            // Native layers exclusively own keyboard focus on both
+            // compositors. Retire that role and fence its destruction
+            // before requesting a physical toplevel focus transfer.
+            if (state.window_backend == .snowman or (@import("build_options").native_picker and state.window_backend == .hyprland)) {
                 const row = state.rows.row(state.selected) orelse return null;
                 if (row != .window) return error.WindowRowExpected;
                 return .{ .focus = row.window.window.stable_id };
