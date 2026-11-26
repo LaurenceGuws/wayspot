@@ -27,6 +27,17 @@ pub const Rect = struct {
         return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
     }
 
+    /// Half-open logical hit testing. Invalid/non-finite pointer facts miss.
+    pub fn contains(self: Rect, x: f32, y: f32) bool {
+        if (self.w <= 0 or self.h <= 0) return false;
+        return x >= @as(f32, @floatFromInt(self.x)) and x < @as(f32, @floatFromInt(@as(i64, self.x) + self.w)) and
+            y >= @as(f32, @floatFromInt(self.y)) and y < @as(f32, @floatFromInt(@as(i64, self.y) + self.h));
+    }
+
+    fn drawingRect(self: Rect) sdl.SDL_FRect {
+        return .{ .x = @floatFromInt(self.x), .y = @floatFromInt(self.y), .w = @floatFromInt(self.w), .h = @floatFromInt(self.h) };
+    }
+
     fn native(self: Rect) sdl.SDL_Rect {
         return .{ .x = self.x, .y = self.y, .w = self.w, .h = self.h };
     }
@@ -95,6 +106,30 @@ pub const Canvas = struct {
         const rect = clip.native();
         if (!sdl.SDL_SetRenderClipRect(self.renderer, &rect)) return error.SdlClipFailed;
         return scope;
+    }
+
+    /// Fill the view's requested rectangle. An unclipped shape needs no
+    /// extra SDL scissor: the renderer already honors the ambient clip.
+    pub fn fill(self: Canvas, color: [3]u8) !void {
+        const clip = self.clip orelse return;
+        const scope: ?ClipScope = if (std.meta.eql(clip, self.bounds)) null else (try self.beginClip()) orelse return;
+        const rect = self.bounds.drawingRect();
+        const ok = sdl.SDL_SetRenderDrawColor(self.renderer, color[0], color[1], color[2], 255) and
+            sdl.SDL_RenderFillRect(self.renderer, &rect);
+        if (scope) |owned| try owned.restore();
+        if (!ok) return error.SdlDrawFailed;
+    }
+
+    /// Draw one existing texture into the requested view, preserving the
+    /// original sampling geometry if an ancestor clips it. The caller
+    /// retains texture ownership and supplies a texture of this renderer.
+    pub fn texture(self: Canvas, image: *sdl.SDL_Texture) !void {
+        const clip = self.clip orelse return;
+        const scope: ?ClipScope = if (std.meta.eql(clip, self.bounds)) null else (try self.beginClip()) orelse return;
+        const rect = self.bounds.drawingRect();
+        const ok = sdl.SDL_RenderTexture(self.renderer, image, null, &rect);
+        if (scope) |owned| try owned.restore();
+        if (!ok) return error.SdlDrawFailed;
     }
 
     /// Coordinates are relative to this view, not its clipped intersection.
@@ -184,4 +219,48 @@ test "canvas text honors ambient clip and restores it even on invalid UTF8" {
         }
     }
     try std.testing.expect(visible > 0);
+}
+
+test "clipped canvas shapes and textures retain original placement and caller clip" {
+    const surface = sdl.SDL_CreateSurface(40, 20, sdl.SDL_PIXELFORMAT_XRGB8888) orelse return error.SdlTestSurface;
+    defer sdl.SDL_DestroySurface(surface);
+    const renderer = sdl.SDL_CreateSoftwareRenderer(surface) orelse return error.SdlTestRenderer;
+    defer sdl.SDL_DestroyRenderer(renderer);
+    var source = [_]u32{ 0xffff0000, 0xff00ff00 };
+    const image = sdl.SDL_CreateSurfaceFrom(2, 1, sdl.SDL_PIXELFORMAT_ARGB8888, &source, 8) orelse return error.SdlTestSurface;
+    defer sdl.SDL_DestroySurface(image);
+    const texture = sdl.SDL_CreateTextureFromSurface(renderer, image) orelse return error.SdlTestTexture;
+    defer sdl.SDL_DestroyTexture(texture);
+    try std.testing.expect(sdl.SDL_SetTextureScaleMode(texture, sdl.SDL_SCALEMODE_NEAREST));
+    try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255));
+    try std.testing.expect(sdl.SDL_RenderClear(renderer));
+    const root = try Canvas.root(renderer, 40, 20);
+    const parent = try root.child(.{ .x = 8, .y = 4, .w = 12, .h = 10 });
+    const child = try parent.child(.{ .x = -4, .y = 2, .w = 16, .h = 8 });
+    const original: sdl.SDL_Rect = .{ .x = 9, .y = 8, .w = 7, .h = 4 };
+    try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &original));
+    try child.fill(.{ 9, 10, 11 });
+    try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+    const pixels: [*]const u32 = @ptrCast(@alignCast(surface.*.pixels orelse return error.SdlTestPixels));
+    const stride: usize = @intCast(@divExact(surface.*.pitch, 4));
+    for (0..20) |y| {
+        for (0..40) |x| {
+            const inside = x >= 9 and x < 16 and y >= 8 and y < 12;
+            try std.testing.expectEqual(@as(u32, if (inside) 0x090a0b else 0), pixels[y * stride + x] & 0x00ffffff);
+        }
+    }
+    try child.texture(texture);
+    try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+    for (0..20) |y| {
+        for (0..40) |x| {
+            const inside = x >= 9 and x < 16 and y >= 8 and y < 12;
+            // The image starts at x=4, not the ancestor's clip at x=8.
+            const expected: u32 = if (inside) (if (x < 12) 0xff0000 else 0x00ff00) else 0;
+            try std.testing.expectEqual(expected, pixels[y * stride + x] & 0x00ffffff);
+        }
+    }
+    var actual: sdl.SDL_Rect = undefined;
+    try std.testing.expect(sdl.SDL_RenderClipEnabled(renderer));
+    try std.testing.expect(sdl.SDL_GetRenderClipRect(renderer, &actual));
+    try std.testing.expectEqualDeep(original, actual);
 }

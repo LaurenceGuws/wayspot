@@ -280,6 +280,13 @@ The same banner pixels are checked against independent absolute drawing at
 fractional densities. This is spatial composition, not a retained widget
 hierarchy or a commitment to any particular redraw/cache strategy. Introduce
 more primitives only when the picker or banner actually needs them.
+The picker toolbar now uses that same spatial contract for its clock and tray
+slots. Filled regions and borrowed textures preserve requested geometry even
+when an ancestor clips them. Tray painting and pointer admission share the
+same toolbar-local half-open slot rectangles; icons, menus, clock facts and
+activation still belong to the picker. Six-density byte comparisons cover an
+empty and fully populated tray, including transparent textures and missing-icon
+fallbacks. No retained widget tree or generic input dispatcher is introduced.
 
 ## 8. Shared resident ownership
 
