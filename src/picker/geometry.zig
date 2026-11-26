@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const CanvasRect = @import("../ui/canvas.zig").Rect;
+const RowLayout = @import("../ui/row_layout.zig").RowLayout;
 
 pub const window_width = 720;
 pub const window_height = 520;
@@ -15,8 +16,8 @@ pub const Rect = struct {
     h: f32,
 };
 
-const query_height: f32 = 90;
-const row_height: f32 = 30;
+/// Slots preserve the original 30-pixel hit target and 28-pixel painted row.
+pub const results = RowLayout.init(.{ .x = 8, .y = 90, .w = 696, .h = 30 * visible_rows }, 30, 2);
 
 /// The toolbar is part of the existing picker window, not a desktop layer.
 pub const toolbar = CanvasRect{ .x = 8, .y = 8, .w = 704, .h = 30 };
@@ -50,36 +51,11 @@ pub fn trayAt(x: f32, y: f32, count: usize) ?usize {
     return null;
 }
 pub const scrollbar_track = Rect{
-    .x = 708,
-    .y = query_height,
+    .x = @floatFromInt(results.bounds.x + results.bounds.w + 4),
+    .y = @floatFromInt(results.bounds.y),
     .w = 4,
-    .h = row_height * visible_rows,
+    .h = @floatFromInt(results.bounds.h),
 };
-
-pub fn row(index: usize) Rect {
-    std.debug.assert(index < visible_rows);
-    return .{
-        .x = 8,
-        .y = query_height + @as(f32, @floatFromInt(index)) * row_height,
-        .w = 696,
-        .h = row_height - 2,
-    };
-}
-
-pub fn icon(index: usize) Rect {
-    const item = row(index);
-    return .{ .x = 14, .y = item.y + 3, .w = icon_size, .h = icon_size };
-}
-
-pub fn textY(index: usize) f32 {
-    return row(index).y + 5;
-}
-
-pub fn rowAt(x: f32, y: f32) ?usize {
-    if (x < 8 or x >= 704 or y < query_height) return null;
-    const index: usize = @intFromFloat((y - query_height) / row_height);
-    return if (index < visible_rows) index else null;
-}
 
 pub fn scrollbar(first: usize, shown: usize, total: usize) ?Rect {
     if (total <= shown) return null;
@@ -97,16 +73,6 @@ pub fn scrollbar(first: usize, shown: usize, total: usize) ?Rect {
     };
 }
 
-test "rows share exact draw and pointer edges" {
-    const first = row(0);
-    const last = row(visible_rows - 1);
-    try std.testing.expectEqual(@as(usize, 0), rowAt(first.x, first.y).?);
-    try std.testing.expectEqual(@as(usize, visible_rows - 1), rowAt(last.x, last.y).?);
-    try std.testing.expectEqual(null, rowAt(first.x - 1, first.y));
-    try std.testing.expectEqual(null, rowAt(first.x + first.w, first.y));
-    try std.testing.expectEqual(null, rowAt(last.x, last.y + row_height));
-}
-
 test "scrollbar maps first and last pages to track ends" {
     const first = scrollbar(0, visible_rows, 90).?;
     const last = scrollbar(90 - visible_rows, visible_rows, 90).?;
@@ -117,12 +83,13 @@ test "scrollbar maps first and last pages to track ends" {
 
 test "toolbar, search and all fourteen rows stay separate within the window" {
     try std.testing.expect(@as(f32, @floatFromInt(toolbar.y + toolbar.h)) < query.y);
-    try std.testing.expect(query.y + query.h < row(0).y);
-    try std.testing.expect(row(visible_rows - 1).y + row(visible_rows - 1).h <= window_height);
-    try std.testing.expectEqual(@as(?usize, null), rowAt(20, @floatFromInt(toolbar.y + 5)));
-    try std.testing.expectEqual(@as(?usize, null), rowAt(20, query.y + 5));
-    try std.testing.expectEqual(@as(?usize, 0), rowAt(20, row(0).y + 5));
-    try std.testing.expectEqual(@as(?usize, visible_rows - 1), rowAt(20, row(visible_rows - 1).y + 5));
+    try std.testing.expect(query.y + query.h < @as(f32, @floatFromInt(results.bounds.y)));
+    try std.testing.expect(results.bounds.y + results.bounds.h <= window_height);
+    try std.testing.expectEqual(@as(usize, visible_rows), results.count());
+    try std.testing.expectEqual(@as(?usize, null), results.at(20, @floatFromInt(toolbar.y + 5)));
+    try std.testing.expectEqual(@as(?usize, null), results.at(20, query.y + 5));
+    try std.testing.expectEqual(@as(?usize, 0), results.at(20, 95));
+    try std.testing.expectEqual(@as(?usize, visible_rows - 1), results.at(20, 485));
 }
 
 test "tray hitboxes stay within toolbar and never overlap the clock" {

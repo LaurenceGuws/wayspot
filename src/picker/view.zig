@@ -150,7 +150,7 @@ pub const Native = struct {
     }
     fn motionAction(native: *Native, x: f32, y: f32) picker.Event {
         if (native.menu) |*menu| return if (menu.widget.hover(x, y)) .redraw else .ignored;
-        return hoverAt(x, y) orelse .ignored;
+        return if (pixels.results.at(x, y)) |row| .{ .hover = row } else .ignored;
     }
     fn buttonDown(native: *Native, button: u8, x: f32, y: f32) picker.Event {
         return blk: {
@@ -167,7 +167,7 @@ pub const Native = struct {
                 break :blk native.openTray(index, button, x, y);
             }
             if (button == sdl.SDL_BUTTON_LEFT) {
-                native.pressed_row = pixels.rowAt(x, y);
+                native.pressed_row = pixels.results.at(x, y);
                 if (native.pressed_row) |row| break :blk .{ .hover = row };
             }
             break :blk .ignored;
@@ -181,8 +181,8 @@ pub const Native = struct {
             if (button != sdl.SDL_BUTTON_LEFT) break :blk .ignored;
             const pressed = native.pressed_row;
             native.pressed_row = null;
-            if (pressed == null or native.menu != null or pixels.rowAt(x, y) != pressed) break :blk .ignored;
-            break :blk clickAt(x, y) orelse .ignored;
+            if (pressed == null or native.menu != null or pixels.results.at(x, y) != pressed) break :blk .ignored;
+            break :blk .{ .click = pressed.? };
         };
     }
     fn scrollAction(native: *Native, rows: i8) picker.Event {
@@ -241,8 +241,11 @@ pub const Native = struct {
         const query_draw = native.drawQuery(frame, query);
         if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
         try query_draw;
+        const root = try Canvas.root(renderer, pixels.window_width, pixels.window_height);
+        const results = try root.child(pixels.results.bounds);
         for (frame.rowSlice(), 0..) |row, index| {
-            try native.drawRow(row, index, index == frame.selected_row);
+            const cell = try results.child(pixels.results.row(index) orelse return error.PickerRowOutOfBounds);
+            try native.drawRow(cell, row, index == frame.selected_row);
         }
         try drawScrollbar(renderer, frame);
         try native.drawMenu();
@@ -284,66 +287,36 @@ pub const Native = struct {
         }
     }
 
-    fn drawRow(native: *Native, row: picker.Row, index: usize, selected: bool) !void {
-        const renderer = native.renderer orelse unreachable;
-        const row_pixels = pixels.row(index);
-        const row_rect = nativeRect(row_pixels);
+    // Row semantics (application lookup, title and workspace metadata,
+    // history fields) remain here. Only spatial composition is shared.
+    fn drawRow(native: *Native, cell: Canvas, row: picker.Row, selected: bool) !void {
+        const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
         const color: [3]u8 = if (selected) .{ 130, 190, 255 } else .{ 210, 210, 215 };
-        const background: [3]u8 = if (selected) .{ 48, 55, 72 } else .{ 24, 24, 30 };
-        if (!sdl.SDL_SetRenderDrawColor(renderer, background[0], background[1], background[2], 255)) {
-            return error.SdlDrawFailed;
-        }
-        if (!sdl.SDL_RenderFillRect(renderer, &row_rect)) return error.SdlDrawFailed;
-        if (!sdl.SDL_SetRenderDrawColor(renderer, color[0], color[1], color[2], 255)) {
-            return error.SdlDrawFailed;
-        }
+        try cell.fill(if (selected) .{ 48, 55, 72 } else .{ 24, 24, 30 });
         switch (row) {
-            .table => |table| try native.drawText(
-                picker.tableName(table),
-                color,
-                20,
-                pixels.textY(index),
-            ),
+            .table => |table| try cell.text(painter, picker.tableName(table), color, 12, 5),
             .app => |app_index| {
                 const app = try native.application(app_index);
-                try native.drawAppIcon(app_index, index);
-                try native.drawText(app.name, color, 44, pixels.textY(index));
+                try native.drawAppIcon(cell, app_index);
+                try cell.text(painter, app.name, color, 36, 5);
             },
             .window => |window_row| {
-                if (window_row.app_index) |app_index| try native.drawAppIcon(app_index, index);
-                const title = try native.windowTitle(window_row);
-                try native.drawClippedText(title, color, .{
-                    .x = 44,
-                    .y = @intFromFloat(row_pixels.y),
-                    .w = 510,
-                    .h = @intFromFloat(row_pixels.h),
-                });
+                if (window_row.app_index) |app_index| try native.drawAppIcon(cell, app_index);
+                const title = try cell.child(.{ .x = 36, .w = 510, .h = cell.bounds.h });
+                try title.text(painter, try native.windowTitle(window_row), color, 0, 5);
                 const secondary: [3]u8 = if (selected) .{ 185, 200, 220 } else .{ 145, 150, 160 };
                 var meta_buffer: [128]u8 = undefined;
-                const metadata = try formatWindowMetadata(window_row, &meta_buffer);
-                try native.drawClippedText(metadata, secondary, .{
-                    .x = 570,
-                    .y = @intFromFloat(row_pixels.y),
-                    .w = 126,
-                    .h = @intFromFloat(row_pixels.h),
-                });
+                const metadata = try cell.child(.{ .x = 562, .w = 126, .h = cell.bounds.h });
+                try metadata.text(painter, try formatWindowMetadata(window_row, &meta_buffer), secondary, 0, 5);
             },
             .notification => |record| {
                 const secondary: [3]u8 = if (selected) .{ 180, 190, 205 } else .{ 135, 140, 150 };
                 const fields = [_][]const u8{ record.app_name, record.summary, record.body };
-                const x = [_]c_int{ 14, 170, 430 };
-                const width = [_]c_int{ 150, 250, 270 };
+                const x = [_]i32{ 6, 162, 422 };
+                const width = [_]i32{ 150, 250, 270 };
                 for (fields, x, width, 0..) |text, left, field_width, field| {
-                    try native.drawClippedText(
-                        displayText(text),
-                        if (field == 1) color else secondary,
-                        .{
-                            .x = left,
-                            .y = @intFromFloat(row_pixels.y),
-                            .w = field_width,
-                            .h = @intFromFloat(row_pixels.h),
-                        },
-                    );
+                    const column = try cell.child(.{ .x = left, .w = field_width, .h = cell.bounds.h });
+                    try column.text(painter, displayText(text), if (field == 1) color else secondary, 0, 5);
                 }
             },
         }
@@ -599,15 +572,12 @@ pub const Native = struct {
         for (0..frame.extent.height) |y| @memcpy(frame.pixels[y * frame.stride ..][0..row_bytes], source[y * pitch ..][0..row_bytes]);
     }
 
-    fn drawAppIcon(native: *Native, app_index: u16, row_index: usize) !void {
+    fn drawAppIcon(native: *Native, cell: Canvas, app_index: u16) !void {
         if (native.icon(app_index)) |item| switch (item.texture) {
             .missing, .rejected => {},
             .loaded => |texture| {
-                const renderer = native.renderer orelse unreachable;
-                const target = nativeRect(pixels.icon(row_index));
-                if (!sdl.SDL_RenderTexture(renderer, texture, null, &target)) {
-                    return error.SdlDrawFailed;
-                }
+                const icon_region = try cell.child(.{ .x = 6, .y = 3, .w = pixels.icon_size, .h = pixels.icon_size });
+                try icon_region.texture(texture);
             },
         };
     }
@@ -837,7 +807,7 @@ pub const Native = struct {
     fn drawMenu(native: *Native) !void {
         const menu = if (native.menu) |*value| value else return;
         const root = try Canvas.root(native.renderer.?, pixels.window_width, pixels.window_height);
-        const panel = try root.child(menu.widget.bounds);
+        const panel = try root.child(menu.widget.layout.bounds);
         const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
         for (menu.data.rows[0..menu.data.count], 0..) |*row, index| {
             try menu.widget.drawRow(panel, painter, index, .{ .label = row.text(), .enabled = row.enabled, .submenu = row.submenu });
@@ -847,14 +817,6 @@ pub const Native = struct {
     fn drawText(native: *Native, value: []const u8, color: [3]u8, x: f32, y: f32) !void {
         const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
         try painter.draw(value, color, x, y);
-    }
-
-    fn drawClippedText(native: *Native, value: []const u8, color: [3]u8, clip: sdl.SDL_Rect) !void {
-        const renderer = native.renderer orelse unreachable;
-        if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.SdlDrawFailed;
-        const result = native.drawText(value, color, @floatFromInt(clip.x), @floatFromInt(clip.y + 5));
-        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
-        try result;
     }
 
     fn firstMissing(native: *const Native, frame: *const picker.Frame) !?u16 {
@@ -993,14 +955,6 @@ fn destroyIcon(icon: Native.Icon) void {
         .missing, .rejected => {},
         .loaded => |texture| sdl.SDL_DestroyTexture(texture),
     }
-}
-
-fn hoverAt(x: f32, y: f32) ?picker.Event {
-    return .{ .hover = pixels.rowAt(x, y) orelse return null };
-}
-
-fn clickAt(x: f32, y: f32) ?picker.Event {
-    return .{ .click = pixels.rowAt(x, y) orelse return null };
 }
 
 fn drawScrollbar(renderer: *sdl.SDL_Renderer, frame: *const picker.Frame) !void {
@@ -1285,6 +1239,16 @@ test "row selection waits for its matching left-button release" {
     try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 100));
     try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 100));
     try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 140));
+    // A slot owns its trailing two-pixel gap, but never the next slot.
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 119.75));
+    try std.testing.expectEqual(picker.Event{ .click = 0 }, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 118));
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 119.75));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 120));
+    try std.testing.expectEqual(picker.Event{ .hover = 0 }, native.buttonDown(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event{ .scroll = 1 }, native.scrollAction(1));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 20, 100));
+    try std.testing.expectEqual(picker.Event.ignored, native.motionAction(20, std.math.nan(f32)));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonDown(sdl.SDL_BUTTON_LEFT, 704, 100));
 }
 
 test "borrowed toolbar preserves exact direct pixels for zero and full tray at mixed densities" {
@@ -1461,4 +1425,144 @@ test "open menu owns its exact tray identity and clears navigation on replacemen
     try std.testing.expectEqual(@as(?usize, null), native.menu.?.widget.at(420, 77));
     native.clearTray();
     try std.testing.expect(native.menu == null);
+}
+
+test "result canvas preserves all four row forms and contains overflowing app labels" {
+    const Reference = struct {
+        fn text(renderer: *sdl.SDL_Renderer, painter: *text_draw.Painter, label: []const u8, color: [3]u8, x: i32, top: i32, width: ?i32) !void {
+            if (width) |w| {
+                const clip: sdl.SDL_Rect = .{ .x = x, .y = top, .w = w, .h = 28 };
+                try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &clip));
+            }
+            try painter.draw(label, color, @floatFromInt(x), @floatFromInt(top + 5));
+            if (width != null) try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, null));
+        }
+
+        fn draw(native: *Native, value: picker.Row, index: usize, selected: bool) !void {
+            // Independent absolute-coordinate renderer. App label containment
+            // is the sole intended visual change; row 8 explicitly witnesses
+            // its new right edge while the other rows use the old expressions.
+            const renderer = native.renderer.?;
+            const painter = &native.text.?;
+            const top: i32 = 90 + 30 * @as(i32, @intCast(index));
+            const color: [3]u8 = if (selected) .{ 130, 190, 255 } else .{ 210, 210, 215 };
+            const background: [3]u8 = if (selected) .{ 48, 55, 72 } else .{ 24, 24, 30 };
+            const rect: sdl.SDL_FRect = .{ .x = 8, .y = @floatFromInt(top), .w = 696, .h = 28 };
+            try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, background[0], background[1], background[2], 255));
+            try std.testing.expect(sdl.SDL_RenderFillRect(renderer, &rect));
+            if (rowApp(value)) |app_index| {
+                if (native.icon(app_index)) |entry| switch (entry.texture) {
+                    .loaded => |texture| {
+                        const target: sdl.SDL_FRect = .{ .x = 14, .y = @floatFromInt(top + 3), .w = 22, .h = 22 };
+                        try std.testing.expect(sdl.SDL_RenderTexture(renderer, texture, null, &target));
+                    },
+                    else => {},
+                };
+            }
+            switch (value) {
+                .table => |table| try text(renderer, painter, picker.tableName(table), color, 20, top, null),
+                .app => |app_index| try text(renderer, painter, (try native.application(app_index)).name, color, 44, top, if (app_index == 1) 660 else null),
+                .window => |window_row| {
+                    try text(renderer, painter, try native.windowTitle(window_row), color, 44, top, 510);
+                    const secondary: [3]u8 = if (selected) .{ 185, 200, 220 } else .{ 145, 150, 160 };
+                    var buffer: [128]u8 = undefined;
+                    try text(renderer, painter, try formatWindowMetadata(window_row, &buffer), secondary, 570, top, 126);
+                },
+                .notification => |record| {
+                    const secondary: [3]u8 = if (selected) .{ 180, 190, 205 } else .{ 135, 140, 150 };
+                    try text(renderer, painter, displayText(record.app_name), secondary, 14, top, 150);
+                    try text(renderer, painter, displayText(record.summary), color, 170, top, 250);
+                    try text(renderer, painter, displayText(record.body), secondary, 430, top, 270);
+                },
+            }
+        }
+
+        fn paint(frame: shm.Frame, applications: []const apps.App, rows: []const picker.Row, direct: bool) !void {
+            const allocator = std.testing.allocator;
+            const target = sdl.SDL_CreateSurfaceFrom(@intCast(frame.extent.width), @intCast(frame.extent.height), sdl.SDL_PIXELFORMAT_XRGB8888, frame.pixels.ptr, @intCast(frame.stride)) orelse return error.SdlTestSurface;
+            defer sdl.SDL_DestroySurface(target);
+            const renderer = sdl.SDL_CreateSoftwareRenderer(target) orelse return error.SdlTestRenderer;
+            defer sdl.SDL_DestroyRenderer(renderer);
+            try std.testing.expect(sdl.SDL_SetRenderLogicalPresentation(renderer, pixels.window_width, pixels.window_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX));
+            const scale: f32 = @min(@as(f32, @floatFromInt(frame.extent.width)) / pixels.window_width, @as(f32, @floatFromInt(frame.extent.height)) / pixels.window_height);
+            var owner: UiOwner = .{};
+            var native = Native{ .ui_owner = &owner, .applications = applications, .allocator = allocator, .io = undefined, .home = "", .renderer = renderer, .canvas_scale = scale };
+            native.text = try text_draw.Painter.initScaled(allocator, renderer, Native.font_size, scale);
+            defer native.clearText();
+            var icon_pixels = [_]u32{ 0xffff0000, 0x8000ff00, 0xff1f42e0, 0x00000000 };
+            const icon = sdl.SDL_CreateSurfaceFrom(2, 2, sdl.SDL_PIXELFORMAT_ARGB8888, &icon_pixels, 8) orelse return error.SdlTestSurface;
+            defer sdl.SDL_DestroySurface(icon);
+            const texture = sdl.SDL_CreateTextureFromSurface(renderer, icon) orelse return error.SdlTestTexture;
+            defer sdl.SDL_DestroyTexture(texture);
+            try std.testing.expect(sdl.SDL_SetTextureBlendMode(texture, sdl.SDL_BLENDMODE_BLEND));
+            native.icons[0] = .{ .app_index = 0, .texture = .{ .loaded = texture } };
+            native.icon_count = 1;
+            try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
+            try std.testing.expect(sdl.SDL_RenderClear(renderer));
+            const root = try Canvas.root(renderer, pixels.window_width, pixels.window_height);
+            const list = try root.child(pixels.results.bounds);
+            for (rows, 0..) |value, index| {
+                const selected = index < 4;
+                if (direct) {
+                    try draw(&native, value, index, selected);
+                } else {
+                    const cell = try list.child(pixels.results.row(index).?);
+                    try native.drawRow(cell, value, selected);
+                }
+            }
+            try std.testing.expect(!sdl.SDL_RenderClipEnabled(renderer));
+            try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+        }
+    };
+    const long: [180]u8 = @splat('W');
+    const applications = [_]apps.App{ testApp("Native λ application"), testApp(&long) };
+    const window: navigator.Window = .{
+        .stable_id = try navigator.StableId.exact("fixture"),
+        .app_id = try navigator.AppId.display("kitty"),
+        .title = try navigator.Title.display("Window with long title WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"),
+        .workspace_id = try navigator.WorkspaceId.exact("9"),
+        .monitor_id = null,
+        .geometry = .{ .x = 0, .y = 0, .width = 100, .height = 100 },
+        .viewport = .partial,
+        .edges = .{ .right = true },
+        .presentation = .presented,
+        .focus_rank = 1,
+        .active = false,
+        .floating = false,
+        .fullscreen = false,
+    };
+    var app_name = "Canary notification".*;
+    var summary = "Long summary λ WWWWWWWWWWWWWWWWWWWWWWWWWWWW".*;
+    var body = "Body line WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW\nnot painted".*;
+    const record: @import("../notifications/root.zig").Record = .{ .received_unix_seconds = 1, .history_id = 1, .storage = &.{}, .app_name = &app_name, .summary = &summary, .body = &body, .line_bytes = 0 };
+    const window_row: picker.Row = .{ .window = .{ .window = &window, .app_index = 0, .workspace_position = .{ .ordinal = 2, .total = 5 } } };
+    const row_set = [_]picker.Row{ .{ .table = .apps }, .{ .app = 0 }, window_row, .{ .notification = &record } };
+    const rows = row_set ++ row_set ++ [_]picker.Row{ .{ .app = 1 }, .{ .table = .notifications } };
+    const logical: shm.Extent = .{ .width = pixels.window_width, .height = pixels.window_height };
+    for ([_]u32{ 120, 150, 180, 192, 210, 240 }) |scale| {
+        const scaled = try logical.scaled(scale);
+        const extent: shm.Extent = .{ .width = scaled.width, .height = scaled.height + @as(u32, if (scale == 192) 7 else 0) };
+        const stride = extent.width * 4;
+        const expected = try std.testing.allocator.alloc(u8, stride * extent.height);
+        defer std.testing.allocator.free(expected);
+        const actual = try std.testing.allocator.alloc(u8, expected.len);
+        defer std.testing.allocator.free(actual);
+        @memset(expected, 0x5a);
+        @memset(actual, 0x5a);
+        var frame: shm.Frame = .{ .logical_extent = logical, .scale_120 = scale, .extent = extent, .stride = stride, .pixels = expected };
+        try Reference.paint(frame, &applications, &rows, true);
+        frame.pixels = actual;
+        try Reference.paint(frame, &applications, &rows, false);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+        if (scale == 120) {
+            // The long label reaches the row's right edge, but cannot paint
+            // into the adjacent gutter or the scrollbar track.
+            for (330..358) |y| {
+                for (704..720) |x| {
+                    const offset = y * stride + x * 4;
+                    try std.testing.expectEqualSlices(u8, &.{ 24, 18, 18 }, actual[offset..][0..3]);
+                }
+            }
+        }
+    }
 }

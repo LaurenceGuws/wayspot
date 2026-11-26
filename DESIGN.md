@@ -287,16 +287,23 @@ same toolbar-local half-open slot rectangles; icons, menus, clock facts and
 activation still belong to the picker. Six-density byte comparisons cover an
 empty and fully populated tray, including transparent textures and missing-icon
 fallbacks. No retained widget tree or generic input dispatcher is introduced.
-The concrete `ui/menu.zig` widget holds a logical rectangle, row height
-and hover/keyboard position. Rows are drawn through local Canvas children;
-input uses the same half-open geometry. The current fixed menu is entirely
-inside the picker. Its row count is derived from its extent. The picker
-owns the fetched rows, enabled-action checks, originating tray item and
-all D-Bus effects in one optional `OpenMenu`. Replacing or retiring that
-value discards navigation with its corresponding protocol snapshot. Disabled
-rows remain navigable but cannot invoke an action. `tray-live` exercises
-this actual UI/Wayland/D-Bus contract; no general event dispatcher, retained
-label copy or separate menu surface is introduced.
+The menu and result list share `ui/row_layout.zig`: a logical rectangle,
+row pitch and trailing paint gap. Pointer hit testing uses the same slots
+as row composition. The result list preserves its two-pixel clickable gap;
+menus have no gap. This primitive owns no data, selection or scroll state.
+The concrete `ui/menu.zig` widget adds its own hover/keyboard position.
+The picker owns fetched rows, enabled-action checks, the originating tray
+item and all D-Bus effects in one optional `OpenMenu`. Replacement and
+retirement discard navigation with the corresponding protocol snapshot.
+Disabled menu rows remain navigable but cannot invoke an action. Result
+selection, search, scrolling and matched button release remain picker policy.
+The result painter borrows a Canvas child for each visible row and its
+icon/text columns; even a long application name cannot escape its row and
+paint over the scrollbar. The fractional scrollbar and query rendering
+remain separate pending their own migration. Six-density absolute-reference
+pixel tests cover every result form, selected and unselected, including
+label containment. `tray-live` exercises actual UI/Wayland/D-Bus behavior.
+No retained label copies, general event dispatcher or separate menu surface.
 
 ## 8. Shared resident ownership
 
