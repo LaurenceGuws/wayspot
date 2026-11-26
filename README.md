@@ -126,6 +126,21 @@ transactions. The actual picker edit adapter is covered by source tests;
 real IME remains outstanding. Both picker and notification roles now use
 the native UI by default, without an accelerated backend.
 
+The opt-in `zig build tray-live` gate uses the same explicit private fixture
+paths and the matching source-built `SNOWMAN_SIM_CLIENT`. The native Zig
+`wayspot-tray-canary` owns an XDG toplevel, a fixed SNI pixmap and a small
+DBusMenu with enabled, disabled and nested rows. The compositor's disposable
+input actor drives actual pointer and keyboard events; every accepted action
+has an exact JSON receipt and a color change witnessed in the real toplevel.
+The fixture covers left/middle/right activation, menu dismissal, keyboard and
+nested selection, context-only fallback, and removal/re-registration. This
+is a 1x two-output private Snowman test, not physical tray qualification.
+`zig build tray-canary` builds the standalone test artifact in `zig-out/bin`;
+it requires the private fixture's explicit runtime and bus and exits when its
+control pipe closes. Ordinary `zig build check` compiles it and audits its
+source without connecting to any desktop. Neither artifact nor test input
+commands are installed by the product build.
+
 ### Application picker
 
 Build the native SHM graphical UI with `zig build`. Both standalone and

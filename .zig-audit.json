@@ -4,6 +4,7 @@
   "minimum_ruleset": 3,
   "include": [
     "build.zig",
-    "tools/wallpaper_catalog.zig"
+    "tools/wallpaper_catalog.zig",
+    "tools/tray_canary.zig"
   ]
 }

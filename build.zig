@@ -214,6 +214,34 @@ pub fn build(b: *std.Build) void {
     b.step("resident-live", "Prove all capabilities in an explicit isolated session")
         .dependOn(&live_resident.step);
 
+    // The canary owns a real XDG surface and fixed SNI/DBusMenu endpoints.
+    // It is a test artifact, not another installed desktop service.
+    const canary_module = b.createModule(.{
+        .root_source_file = b.path("tools/tray_canary.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    canary_module.addImport("wayland-client", native_wayland.module("client"));
+    canary_module.addImport("wayland-protocols", native_protocols);
+    canary_module.addImport("wayland-present", native_present);
+    canary_module.addImport("dbus_c", dbus_c);
+    canary_module.linkSystemLibrary("dbus-1", .{});
+    const canary = b.addExecutable(.{ .name = "wayspot-tray-canary", .root_module = canary_module });
+    canary.use_llvm = false;
+    canary.use_lld = false;
+    b.step("tray-canary", "Build the disposable native tray canary")
+        .dependOn(&b.addInstallArtifact(canary, .{}).step);
+    const live_tray = b.addSystemCommand(&.{"python3"});
+    live_tray.addFileArg(b.path("tools/resident-live.py"));
+    live_tray.addFileArg(executable.getEmittedBin());
+    live_tray.addArg("--tray-canary");
+    live_tray.addFileArg(canary.getEmittedBin());
+    live_tray.setCwd(b.path("."));
+    live_tray.has_side_effects = true;
+    b.step("tray-live", "Prove native tray and menu actions in an isolated session")
+        .dependOn(&live_tray.step);
+
     // The standalone wallpaper-catalog diagnostic is maintained Zig too.
     // Exercise its source-local tests without making it an installed product.
     const wallpaper_catalog_tests = b.addTest(.{
@@ -226,6 +254,7 @@ pub fn build(b: *std.Build) void {
     const run_wallpaper_catalog_tests = b.addRunArtifact(wallpaper_catalog_tests);
     const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&b.addRunArtifact(source_tests).step);
+    test_step.dependOn(&canary.step);
     test_step.dependOn(&run_wallpaper_catalog_tests.step);
     const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });
     run_bash_completion_test.addArtifactArg2(executable, .{});
@@ -237,6 +266,7 @@ pub fn build(b: *std.Build) void {
             b.path("build.zig.zon"),
             b.path("src"),
             b.path("tools/wallpaper_catalog.zig"),
+            b.path("tools/tray_canary.zig"),
         },
         .check = true,
     });

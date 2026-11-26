@@ -8,6 +8,8 @@ import json, os, re, shutil, statistics, struct, subprocess, tempfile, time, zli
 # baseline is an optional explicit comparison executable.
 import sys
 
+assert len(sys.argv) == 2 or (len(sys.argv) == 4 and sys.argv[2] == "--tray-canary")
+canary = Path(sys.argv[3]).resolve(strict=True) if len(sys.argv) == 4 else None
 candidate = Path(sys.argv[1]).resolve()
 repo = Path(__file__).resolve().parent.parent
 snow = Path(os.environ["SNOWMAN_COMPOSITOR"]).resolve()
@@ -36,6 +38,12 @@ assert all(
 assert not snow.is_relative_to("/usr/local/bin") and not cli.is_relative_to(
     "/usr/local/bin"
 )
+if canary:
+    assert actor is not None and canary.name == "wayspot-tray-canary"
+    assert canary.is_file() and os.access(canary, os.X_OK)
+    assert canary.is_relative_to(repo / ".zig-cache") or canary.is_relative_to(
+        repo / "zig-out"
+    )
 scratch = Path(os.environ["WAYSPOT_TEST_SCRATCH"]).resolve()
 assert scratch.is_dir()
 out = Path(os.environ["WAYSPOT_PROOF_DIR"]).resolve()
@@ -1020,6 +1028,256 @@ def verify_window_finder(resident):
     }
 
 
+def verify_tray_canary(names):
+    """Real clients on both outputs, exact protocol receipts and actual pixels."""
+    import hashlib
+
+    env["WAYSPOT_CANARY_RUNTIME"] = str(runtime)
+    resident = start([candidate, "resident", root / "resident.json"], "resident", True)
+    wait(
+        lambda: (
+            status()["wallpaper_outputs"] == 2
+            and owner("org.kde.StatusNotifierWatcher")
+        ),
+        "resident ready",
+    )
+    monitors = json.loads(run(cli, "monitor", "list").stdout)["data"]
+    outputs = json.loads(run(cli, "output", "list").stdout)["data"]
+    assert sorted(
+        (
+            o["bounds"]["x"],
+            o["bounds"]["y"],
+            o["bounds"]["width"],
+            o["bounds"]["height"],
+        )
+        for o in outputs
+    ) == [(0, 0, 1280, 720), (1280, 0, 1280, 720)]
+    screen = {
+        next(o["bounds"]["x"] for o in outputs if o["id"] == m["logical_output_id"]): m[
+            "name"
+        ]
+        for m in monitors
+    }
+    left, right = screen[0], screen[1280]
+    assert set(screen.values()) == set(names)
+
+    def events(name, event):
+        return [
+            e
+            for line in log(name).splitlines()
+            if line.startswith("{")
+            for e in [json.loads(line)]
+            if e.get("event") == event
+        ]
+
+    def capture(name):
+        raw = subprocess.check_output(
+            ["grim", "-o", name, "-t", "ppm", "-"], env=env, timeout=5
+        )
+        magic, dims, maximum, data = raw.split(b"\n", 3)
+        assert magic == b"P6" and dims == b"1280 720" and maximum == b"255"
+        return raw, data
+
+    def color_at(data, x, y):
+        offset = (y * 1280 + x) * 3
+        return tuple(data[offset : offset + 3])
+
+    def canary_pixels(rgb):
+        # Fixed pixel well inside the actual mapped left-output toplevel.
+        # Do not infer presentation from the canary's commit receipt alone.
+        raw, data = capture(left)
+        if color_at(data, 640, 360) == tuple(rgb.to_bytes(3, "big")):
+            return raw
+
+    def toolbar_pixels():
+        raw, data = capture(right)
+
+        def at(x, y):
+            return color_at(data, 280 + x, 100 + y)
+
+        if (
+            at(12, 12) == (29, 33, 43)
+            and at(491, 20) == (35, 210, 115)
+            and at(496, 22) == (240, 244, 250)
+        ):
+            return raw
+
+    def menu_pixels(count):
+        raw, data = capture(right)
+        # Right margin avoids label and cursor pixels; the last expected row
+        # must exist and the following row must not be menu-colored.
+        colors = ((30, 34, 44), (56, 66, 83))
+        for i in range(count):
+            if color_at(data, 280 + 690, 100 + 42 + 27 * i + 10) not in colors:
+                return None
+        if color_at(data, 280 + 690, 100 + 42 + 27 * count + 10) in colors:
+            return None
+        return raw
+
+    input_actor = start([actor, "tray-input", "ff0000"], "actor", control=True)
+    wait(lambda: events("actor", "frame_done"), "input actor mapped")
+
+    def send(command, event):
+        before = len(events("actor", event))
+        assert input_actor.poll() is None
+        input_actor.stdin.write((command + "\n").encode())
+        input_actor.stdin.flush()
+        wait(lambda: len(events("actor", event)) > before, command)
+
+    def point(x, y):
+        send(f"point {1280 + 280 + x} {100 + y} 2560 720", "motion_processed")
+
+    def click(button, x, y):
+        point(x, y)
+        send(f"button {button} down", "button_processed")
+        send(f"button {button} up", "button_processed")
+
+    def key(name):
+        send("key-" + name, "key_processed")
+
+    def summon(label):
+        send("move-right", "motion_processed")
+        run(candidate, "picker")
+        wait(lambda: status()["picker_visible"], "picker mapped")
+        (out / f"{label}-icon.ppm").write_bytes(
+            wait(toolbar_pixels, "actual SNI icon pixels")
+        )
+        send("move-left", "motion_processed")
+        point(495, 23)
+
+    def action(label, sequence, method, rgb, x=0, y=0, id=0):
+        result = wait(
+            lambda: (a := events(label, "action")) and len(a) >= sequence and a, method
+        )
+        expected = {
+            "event": "action",
+            "method": method,
+            "x": x,
+            "y": y,
+            "id": id,
+            "sequence": sequence,
+        }
+        assert result[-1] == expected and len(result) == sequence, result
+        wait(
+            lambda: any(
+                e["sequence"] == sequence and e["rgb"] == rgb
+                for e in events(label, "committed")
+            ),
+            "action commit",
+        )
+        (out / f"{label}-{sequence}.ppm").write_bytes(
+            wait(lambda: canary_pixels(rgb), "actual action-result window pixels")
+        )
+        assert status()["picker_visible"]
+        return expected
+
+    # The compositor requires a real private input pair for explicit focus.
+    send("input", "input_ready")
+    run(cli, "workspace", "focus", "1", "--sticky")
+    item = start([canary, "menu"], "canary-menu", control=True)
+    wait(
+        lambda: status()["tray_items"] == 1 and events("canary-menu", "registered"),
+        "real SNI registration",
+    )
+    wait(lambda: canary_pixels(0x203040), "actual initial canary pixels")
+    run(cli, "workspace", "focus", "2", "--sticky")
+    summon("menu")
+    actions = []
+    click("left", 495, 23)
+    actions.append(action("canary-menu", 1, "Activate", 0x23D273, 495, 23))
+    click("middle", 495, 23)
+    actions.append(action("canary-menu", 2, "SecondaryActivate", 0xA040D0, 495, 23))
+    click("right", 495, 23)
+    wait(
+        lambda: events("canary-menu", "layout") == [{"event": "layout", "parent": 0}],
+        "root menu request",
+    )
+    (out / "root-menu.ppm").write_bytes(
+        wait(lambda: menu_pixels(3), "actual three-row menu")
+    )
+    click("left", 420, 77)  # disabled row: no action, menu stays open
+    assert menu_pixels(3)
+    key("escape")
+    wait(lambda: menu_pixels(0), "escape closes menu")
+    assert status()["picker_visible"]
+    assert len(events("canary-menu", "action")) == 2
+    click("right", 495, 23)
+    wait(lambda: len(events("canary-menu", "layout")) == 2, "reopen")
+    wait(lambda: menu_pixels(3), "reopened menu pixels")
+    # Direct keyboard activation of the first enabled row.
+    key("down")
+    key("enter")
+    actions.append(action("canary-menu", 3, "Menu", 0x356BFF, id=7))
+    wait(lambda: menu_pixels(0), "menu closed after activation")
+    click("right", 495, 23)
+    wait(lambda: len(events("canary-menu", "layout")) == 3, "third root layout")
+    wait(lambda: menu_pixels(3), "menu visible")
+    click("left", 420, 104)
+    wait(
+        lambda: (
+            events("canary-menu", "layout")[-1:] == [{"event": "layout", "parent": 9}]
+        ),
+        "submenu request",
+    )
+    (out / "submenu.ppm").write_bytes(
+        wait(lambda: menu_pixels(1), "actual nested menu pixels")
+    )
+    click("left", 420, 50)
+    actions.append(action("canary-menu", 4, "Menu", 0x00A0C0, id=10))
+    wait(lambda: menu_pixels(0), "nested menu retired")
+    key("escape")
+    wait(
+        lambda: not status()["picker_visible"] and status()["native_ui_users"] == 0,
+        "picker retired",
+    )
+    assert events("canary-menu", "action") == actions
+    item.stdin.close()
+    assert item.wait(timeout=5) == 0
+    wait(lambda: status()["tray_items"] == 0, "canary unregistered")
+    run(cli, "workspace", "focus", "1", "--sticky")
+    item = start([canary, "context"], "canary-context", control=True)
+    wait(
+        lambda: status()["tray_items"] == 1 and events("canary-context", "registered"),
+        "context-only replacement registered",
+    )
+    wait(lambda: canary_pixels(0x203040), "replacement initial pixels")
+    run(cli, "workspace", "focus", "2", "--sticky")
+    summon("context")
+    click("right", 495, 23)
+    context = action("canary-context", 1, "ContextMenu", 0xF09538, 495, 23)
+    assert not events("canary-context", "layout") and menu_pixels(0)
+    key("escape")
+    wait(
+        lambda: not status()["picker_visible"] and status()["native_ui_users"] == 0,
+        "replacement picker retired",
+    )
+    item.stdin.close()
+    assert item.wait(timeout=5) == 0
+    wait(lambda: status()["tray_items"] == 0, "replacement unregistered")
+    send("exit", "stopped")
+    assert input_actor.wait(timeout=5) == 0
+    assert_no_gpu(resident)
+    assert "error in client communication" not in log("server")
+    assert stop(resident) == 0
+    receipt = {
+        "schema": "wayspot-tray-live/v1",
+        "result": "pass",
+        "candidate_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+        "canary_sha256": hashlib.sha256(canary.read_bytes()).hexdigest(),
+        "actor_sha256": hashlib.sha256(actor.read_bytes()).hexdigest(),
+        "compositor_sha256": hashlib.sha256(snow.read_bytes()).hexdigest(),
+        "actions": actions + [context],
+        "layouts": events("canary-menu", "layout"),
+        "disabled_row_and_escape": True,
+        "actual_icon_menu_and_action_pixels": True,
+        "unregister_and_reregister": True,
+        "private_runtime": True,
+        "output_scale": 1,
+    }
+    (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print("TRAY_CANARY_PASS", json.dumps(receipt), flush=True)
+
+
 try:
     private_bus = start(
         ["dbus-daemon", "--nofork", "--config-file=" + str(root / "bus.conf")],
@@ -1033,6 +1291,9 @@ try:
     )
     names = [x["name"] for x in json.loads(run(cli, "monitor", "list").stdout)["data"]]
     print("PRIVATE_SNOWMAN_READY", names, flush=True)
+    if canary:
+        verify_tray_canary(names)
+        sys.exit(0)
     # Compare the existing deployed standalone architecture in the same fixture.
     oldn = start([baseline, "notifications"], "old-notification", True)
     oldw = start([baseline, "wallpaper", root / "wallpapers"], "old-wallpaper", True)
