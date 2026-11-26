@@ -124,14 +124,14 @@ pub const Painter = struct {
         height_px: u16,
     ) !void {
         if (bytes.len == 0 or width_px == 0 or height_px == 0) return;
-        const step = @as(usize, self.metrics.line_height);
-        if (step == 0) return error.FontLineHeightInvalid;
+        const step = @as(f32, @floatFromInt(self.metrics.line_height)) / self.logical_scale;
+        if (step <= 0) return error.FontLineHeightInvalid;
         var start: usize = 0;
         var line: usize = 0;
-        while (start < bytes.len and line * step < height_px) : (line += 1) {
+        while (start < bytes.len and @as(f32, @floatFromInt(line)) * step < @as(f32, @floatFromInt(height_px))) : (line += 1) {
             const result = try self.nextLine(bytes, start, @floatFromInt(width_px));
             if (result.end > start) {
-                try self.draw(bytes[start..result.end], color, x, y + @as(f32, @floatFromInt(line * step)));
+                try self.draw(bytes[start..result.end], color, x, y + @as(f32, @floatFromInt(line)) * step);
             }
             if (result.next <= start) return error.TextWrapDidNotAdvance;
             start = result.next;

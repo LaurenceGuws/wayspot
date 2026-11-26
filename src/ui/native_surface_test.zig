@@ -1363,3 +1363,37 @@ test "IME surrounding context is committed once and waits for a matching done" {
     try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
     try testing.expectEqual(@as(usize, 0), (try f.take()).len);
 }
+
+test "shared native display drains each role without discarding sibling input" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    const banner = try native.Surface.create(f.display, .notification, size, null);
+    defer banner.destroy() catch {};
+    _ = try f.take();
+    const pointer = f.display.input.pointer.?.id;
+    const picker_id = picker.surface.?.id;
+    const banner_id = banner.surface.?.id;
+    try pointerEnter(&f, picker, 4, 5);
+    try buttonEvent(&f, true);
+    try buttonEvent(&f, false);
+    try f.event(pointer, &wl.Pointer.interface, 1, &.{ .{ .uint = 3 }, .{ .object = picker_id } });
+    try pointerEnter(&f, banner, 6, 7);
+    try buttonEvent(&f, true);
+    try buttonEvent(&f, false);
+    const input = &f.display.input;
+    try testing.expect(input.hasFor(picker_id) and input.hasFor(banner_id));
+    try testing.expectEqual(@as(usize, 7), input.count);
+    try testing.expectEqual(.pointer_enter, std.meta.activeTag(input.popFor(banner_id).?.value));
+    try testing.expect(input.popFor(banner_id).?.value.button.pressed);
+    try testing.expect(!input.popFor(banner_id).?.value.button.pressed);
+    try testing.expect(!input.hasFor(banner_id) and input.hasFor(picker_id));
+    try testing.expectEqual(@as(usize, 4), input.count);
+    try testing.expectEqual(.pointer_enter, std.meta.activeTag(input.popFor(picker_id).?.value));
+    try testing.expect(input.popFor(picker_id).?.value.button.pressed);
+    try testing.expect(!input.popFor(picker_id).?.value.button.pressed);
+    try testing.expectEqual(.pointer_leave, std.meta.activeTag(input.popFor(picker_id).?.value));
+    try testing.expect(input.count == 0 and input.popFor(banner_id) == null);
+}

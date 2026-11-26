@@ -172,6 +172,22 @@ pub fn pop(self: *Self) ?Event {
     return event;
 }
 
+/// Drain only this surface, preserving sibling events and their order.
+pub fn popFor(self: *Self, surface: wire.ObjectId) ?Event {
+    for (self.queue[0..self.count], 0..) |event, index| {
+        if (event.surface != surface) continue;
+        self.count -= 1;
+        std.mem.copyForwards(Event, self.queue[index..self.count], self.queue[index + 1 ..][0 .. self.count - index]);
+        return event;
+    }
+    return null;
+}
+
+pub fn hasFor(self: *const Self, surface: wire.ObjectId) bool {
+    for (self.queue[0..self.count]) |event| if (event.surface == surface) return true;
+    return false;
+}
+
 fn push(self: *Self, event: Event) !void {
     // Pointer storms need only the latest adjacent motion. Never coalesce
     // across a button, focus, key or scroll transition.

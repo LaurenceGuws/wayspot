@@ -134,12 +134,14 @@ real compositor-specific boundary, such as window discovery and focus, over
 runtime probing or a permanent compositor plugin abstraction. Shared protocol
 behavior has no reason to specialize.
 
-The `-Dnative_picker=true` candidate routes the actual picker through the
-native SHM surface owner, for both standalone and resident invocation. The
-existing application catalog, query, navigator, tray/menu actions, draw
-geometry and lazy icon work remain shared with the SDL picker. Notifications
-still use SDL video. No runtime backend fallback or compositor plugin is
-introduced. The native build is not the installed default yet. Its one visible-session connection
+The `-Dnative_ui=true` candidate routes both the actual picker and
+notification banner through the native SHM surface owner, for standalone and
+resident invocation. The existing application catalog, query, navigator,
+tray/menu actions, notification identity/history, draw geometry and lazy icon
+work remain shared with the SDL build. No runtime backend fallback or
+compositor plugin is introduced. Native UI never initializes SDL video or
+applies an EGL vendor environment override. It is not the installed default
+yet. Its one on-demand visible-session connection
 owns at most one picker and one notification, with at most three buffers per
 surface across all extents. A frame callback permits presentation pacing;
 only wl_buffer.release permits writing into an already-submitted buffer.
@@ -147,7 +149,8 @@ Invalidations coalesce while either fence is outstanding. Paint receives a
 scoped writable borrow; failed paint cancels it before attachment. Surface
 retirement abandons mappings without waiting for release and clears callback
 contexts; an asynchronous display sync fence can establish dismissal before
-native focus. The renderer and input migration remain separate gates.
+native focus. The resident drains each role's own input without discarding
+its sibling's events, and releases the connection only after both roles retire.
 
 The native surface keeps layer configure dimensions in logical coordinates.
 Fractional-scale v1 and viewporter are used together: round physical extents
@@ -209,22 +212,26 @@ publishes surrounding text and logical cursor geometry after matching serials.
 Snowman currently lacks the text-input manager, so this path has wire/editor
 proof, not end-to-end IME acceptance.
 
-The transitional picker owns one CPU canvas at the current physical extent.
-SDL's software renderer and Howl Text glyph/icon caches remain stable across
+The picker owns one CPU canvas at the current physical extent. SDL's
+software renderer and Howl Text glyph/icon caches remain stable across
 redraws, and the canvas is copied into an admitted SHM buffer after flushing
-CPU draws. No buffer is written while the compositor owns it. DPI changes
-replace renderer-owned textures and font density, preserving logical geometry.
-SDL's global last-video shutdown destroys even software renderers, so its
-single synchronous retirement hook drops the canvas before shutdown and
-invalidates the picker; the next admitted frame reconstructs it. This hook
-retires with the last SDL video consumer. The native connection and repeat
-wake join the resident's existing sequential poll loop; frame/release
-backpressure, tray completion and deadlines drive drawing. No extra renderer
-worker or polling timer. Wayland does not expose global layer coordinates;
-native SNI activation uses the existing local coordinates when no global
-position is available. The fixture checks actual picker pixels, SDL shutdown
-recovery, application launch and exact window focus; physical and Hyprland
-acceptance remain distinct.
+CPU draws. The infrequently redrawn banner instead draws directly into the
+admitted buffer and retires its borrowed renderer and text resources before
+submission. DPI changes use native font density without changing logical
+geometry; wrapped banner line heights are logical too. No buffer is written
+while the compositor owns it. Both roles share the on-demand native display;
+all CPU renderers retire before final SDL cleanup, so no mixed-video shutdown
+hook is needed. Newest notification content invalidates the existing role;
+expiry is independent of configure, frame and release fences. A click-down
+may dismiss the currently submitted generation, not an undisplayed newer
+one. Banner failure does not terminate D-Bus service or extend the deadline.
+The native connection and repeat wake join the resident's existing sequential
+poll loop; frame/release backpressure, tray completion and deadlines drive
+drawing. No extra renderer worker or periodic polling timer. Wayland does
+not expose global layer coordinates; native SNI activation uses local
+coordinates when no global position is available. Product fixture pixels,
+application launch, window focus and independent role lifetimes qualify on
+private Snowman; physical and Hyprland acceptance remain separate.
 
 The pinned native Wayland snapshot carries a six-site raw Linux errno fix
 for libc-linked executables, with its retirement criterion in UPSTREAM.md.

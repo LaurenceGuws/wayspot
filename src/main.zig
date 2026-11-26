@@ -125,12 +125,11 @@ fn runPicker(
     home: []const u8,
 ) !void {
     logApplications(files, applications);
-    var video: Video = .{};
+    var video: Video = .{ .env = init.environ_map };
     var stop: ?@import("stop.zig") = if (sdl.Native.native_picker) try @import("stop.zig").open() else null;
     defer if (stop) |owner| owner.close();
     var native: sdl.Native = .{
         .video = &video,
-        .env = init.environ_map,
         .stop_fd = if (stop) |owner| owner.fd else -1,
         .applications = applications.slice(),
         .allocator = init.gpa,
@@ -224,7 +223,7 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
 
 fn runNotifications(init: std.process.Init) !void {
     try Video.prepareProcess(init.io);
-    try notification.run(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"));
+    try notification.run(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"), init.environ_map);
 }
 
 fn printNotificationHistory(init: std.process.Init) !void {

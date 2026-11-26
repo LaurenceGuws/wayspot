@@ -17,7 +17,9 @@ egl_variable = "__EGL_VENDOR_LIBRARY_FILENAMES"
 expected_egl = os.environ.get("WAYSPOT_EXPECT_EGL_MANIFEST")
 inherited_egl = os.environ.get("WAYSPOT_TEST_INHERITED_EGL")
 native_picker = os.environ.get("WAYSPOT_TEST_NATIVE_PICKER") == "1"
+native_ui = os.environ.get("WAYSPOT_TEST_NATIVE_UI") == "1"
 picker_lease = 0 if native_picker else 1
+banner_lease = 0 if native_ui else 1
 if expected_egl:
     assert Path(expected_egl).is_absolute() and Path(expected_egl).is_file()
     expected_library = (
@@ -293,7 +295,17 @@ def assert_no_libdecor(proc):
     assert not re.search(r"/libdecor(?:[-_./]|$)", maps), "unneeded libdecor mapped"
 
 
+def assert_no_gpu(proc):
+    maps = Path(f"/proc/{proc.pid}/maps").read_text()
+    assert not re.search(r"/lib(EGL|GLX|nvidia|LLVM)", maps), (
+        "unexpected GPU driver in native UI process"
+    )
+
+
 def assert_egl_vendor(proc):
+    if native_ui:
+        assert_no_gpu(proc)
+        return
     if not expected_egl:
         return
     assert f"EGL vendor manifest: {expected_egl}" in log("resident")
@@ -363,6 +375,307 @@ def picker_pixels(names):
         if any(min(at(x, y)) > 200 for y in range(52, 76) for x in range(20, 420)):
             return True
     return False
+
+
+def banner_pixels(names):
+    # Capture the actual product's top-right banner. Witness both text
+    # regions, rather than treating a layer commit as displayed content.
+    for name in names:
+        data = subprocess.check_output(
+            ["grim", "-o", name, "-t", "ppm", "-"], env=env, timeout=5
+        )
+        magic, dims, maximum, raw = data.split(b"\n", 3)
+        assert magic == b"P6" and maximum == b"255"
+        w, h = map(int, dims.split())
+        if w < 436 or h < 136:
+            continue
+        x0, y0 = w - 436, 16
+
+        def at(x, y):
+            off = ((y0 + y) * w + x0 + x) * 3
+            return tuple(raw[off : off + 3])
+
+        if at(2, 2) != (18, 18, 24) or at(417, 117) != (18, 18, 24):
+            continue
+        if not any(min(at(x, y)) > 200 for x in range(16, 404) for y in range(14, 36)):
+            continue
+        if not any(min(at(x, y)) > 150 for x in range(16, 404) for y in range(44, 68)):
+            continue
+        return b"".join(
+            raw[((y0 + y) * w + x0) * 3 : ((y0 + y) * w + x0 + 420) * 3]
+            for y in range(120)
+        )
+    return None
+
+
+def full_resident_ab(names):
+    # Compare the installed combined resident, not its older three-process
+    # architecture. Alternate order, fresh processes, identical config and
+    # actual two roles visible, then retire each independently.
+    rows = []
+    for rep, order in enumerate((("sdl", "shm"), ("shm", "sdl"))):
+        for mode in order:
+            binary = candidate if mode == "shm" else baseline
+            label = f"full-{mode}-{rep}"
+            q = start([binary, "resident", root / "resident.json"], label, True)
+            wait(
+                lambda: (
+                    status()["pid"] == q.pid
+                    and status()["wallpaper_outputs"] == 2
+                    and owner("org.freedesktop.Notifications")
+                    and owner("org.kde.StatusNotifierWatcher")
+                ),
+                label + " all owners",
+            )
+            cold = mem(q)
+            cycles = []
+            for cycle in range(3):
+                begin = time.monotonic_ns()
+                nid = notify("Matched full resident")
+                wait(
+                    lambda: status()["notification_visible"],
+                    label + " notification visible",
+                )
+                wait(lambda: banner_pixels(names), label + " actual banner pixels")
+                banner_ms = (time.monotonic_ns() - begin) / 1e6
+                banner = mem(q)
+                offset = len(log(label))
+                begin = time.monotonic_ns()
+                run(candidate, "picker")
+                wait(
+                    lambda: new_attach(label, "picker", offset),
+                    label + " picker attach",
+                )
+                attach = (time.monotonic_ns() - begin) / 1e6
+                wait(
+                    lambda: picker_pixels(names) and banner_pixels(names),
+                    label + " both role pixels",
+                )
+                observed = (time.monotonic_ns() - begin) / 1e6
+                time.sleep(0.4)
+                visible = mem(q)
+                if mode == "shm":
+                    assert (
+                        status()["native_ui_users"] == 2
+                        and status()["video_users"] == 0
+                    )
+                    assert_no_gpu(q)
+                else:
+                    assert status()["video_users"] == 2
+                    assert "/libEGL_nvidia" in Path(f"/proc/{q.pid}/maps").read_text()
+                # Both closing orders retain actual pixels of the sibling.
+                if cycle % 2 == 0:
+                    run(candidate, "picker", "dismiss")
+                    wait(
+                        lambda: not status()["picker_visible"] and banner_pixels(names),
+                        label + " banner survives",
+                    )
+                    close(nid)
+                else:
+                    close(nid)
+                    wait(
+                        lambda: (
+                            not status()["notification_visible"]
+                            and picker_pixels(names)
+                        ),
+                        label + " picker survives",
+                    )
+                    run(candidate, "picker", "dismiss")
+                wait(
+                    lambda: (
+                        not status()["picker_visible"]
+                        and not status()["notification_visible"]
+                    ),
+                    label + " both retired",
+                )
+                if mode == "shm":
+                    assert status()["native_ui_users"] == 0
+                time.sleep(0.1)
+                hidden = mem(q)
+                cycles.append(
+                    {
+                        "banner_ms": banner_ms,
+                        "banner": banner,
+                        "attach_ms": attach,
+                        "pixels_ms": observed,
+                        "visible": visible,
+                        "hidden": hidden,
+                    }
+                )
+            idle = sample([q])
+            assert (
+                idle["threads"] == 1
+                and idle["cpu_ticks_delta"] <= 1
+                and idle["voluntary_switch_delta"] <= 2
+            )
+            if mode == "shm":
+                assert_no_gpu(q)
+            assert stop(q) == 0
+            rows.append(
+                {"mode": mode, "rep": rep, "cold": cold, "cycles": cycles, "idle": idle}
+            )
+            print("FULL_RESIDENT_AB_PASS", label, flush=True)
+    summary = {}
+    for mode in ("sdl", "shm"):
+        r = [x for x in rows if x["mode"] == mode]
+        c = [x for y in r for x in y["cycles"]]
+        summary[mode] = {
+            "processes": len(r),
+            "cycles": len(c),
+            "cold_pss_kib": statistics.median(x["cold"]["Pss"] for x in r),
+            "banner_pss_kib": statistics.median(x["banner"]["Pss"] for x in c),
+            "both_visible_pss_kib": statistics.median(x["visible"]["Pss"] for x in c),
+            "hidden_pss_kib": statistics.median(x["hidden"]["Pss"] for x in c),
+            "banner_observed_pixels_ms": statistics.median(x["banner_ms"] for x in c),
+            "picker_attach_ms": statistics.median(x["attach_ms"] for x in c),
+            "both_observed_pixels_ms": statistics.median(x["pixels_ms"] for x in c),
+            "max_idle_ticks_3s": max(x["idle"]["cpu_ticks_delta"] for x in r),
+            "idle_threads": max(x["idle"]["threads"] for x in r),
+        }
+    (out / "full-resident-ab.json").write_text(
+        json.dumps(
+            {
+                "summary": summary,
+                "samples": rows,
+                "scope": "matched combined residents; all four capabilities, same 2-head scale-1 compositor, 2 fresh processes/backend, 3 banner+picker lifetimes/process; no GPU libraries mapped in SHM; PSS only",
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return summary
+
+
+def native_notification_acceptance(names):
+    # Final short private fixture exercises the original click-down policy
+    # using the existing actor's absolute center movement. At 640x240 the
+    # right head's center is within the 420x120 top-right banner.
+    facts = json.loads(run(cli, "session", "status").stdout)["data"]
+    monitors = json.loads(run(cli, "monitor", "list").stdout)["data"]
+    heads = [
+        {
+            "id": x["id"],
+            "enabled": True,
+            "custom_mode": {"width": 640, "height": 240, "refresh_mhz": 60000},
+            "scale": 1,
+            "at": {"x": i * 640, "y": 0},
+        }
+        for i, x in enumerate(monitors)
+    ]
+    cfg = root / "short-heads.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "schema": "snowman-display-config/v1",
+                "display_revision": facts["display_revision"],
+                "heads": heads,
+            }
+        )
+    )
+    assert (
+        json.loads(run(cli, "display", "apply", cfg).stdout)["data"]["status"]
+        == "applied"
+    )
+    n = start([candidate, "notifications"], "native-standalone-notification", True)
+    wait(
+        lambda: owner_pid("org.freedesktop.Notifications") == n.pid,
+        "standalone native notification",
+    )
+    monitor = start(
+        [
+            "stdbuf",
+            "-oL",
+            "gdbus",
+            "monitor",
+            "--session",
+            "--dest",
+            "org.freedesktop.Notifications",
+            "--object-path",
+            "/org/freedesktop/Notifications",
+        ],
+        "notification-signals",
+    )
+    wait(lambda: "is owned by" in log("notification-signals"), "signal monitor ready")
+    q = start(
+        [actor, "notification-input", "ff0000"], "notification-input", control=True
+    )
+    wait(
+        lambda: '"event":"frame_done"' in log("notification-input"),
+        "notification input actor mapped",
+    )
+
+    def send(command, event):
+        marker = '"event":"' + event + '"'
+        count = log("notification-input").count(marker)
+        q.stdin.write((command + "\n").encode())
+        q.stdin.flush()
+        wait(lambda: log("notification-input").count(marker) > count, command)
+
+    def reason(nid, expected, offset):
+        wait(
+            lambda: re.search(
+                r"NotificationClosed \(uint32 "
+                + str(nid)
+                + r", uint32 "
+                + str(expected)
+                + r"\)",
+                log("notification-signals")[offset:],
+            ),
+            f"notification {nid} close reason {expected}",
+        )
+
+    send("input", "input_ready")
+    send("move-right", "motion_processed")
+    nid = notify("First content", ms=60000)
+    old = wait(lambda: banner_pixels(names), "actual standalone banner pixels")
+    offset = len(log("notification-signals"))
+    replaced = notify("Replaced content with different glyphs", ms=60000, replaces=nid)
+    assert replaced == nid
+    wait(lambda: (data := banner_pixels(names)) and data != old, "replacement pixels")
+    assert roles("native-standalone-notification", "notification") == 1
+    assert_no_gpu(n)
+    # The actor already occupied this point before mapping the banner.
+    # Cross an actual output boundary and re-enter the mapped layer; do
+    # not assume a new surface synthesizes pointer-enter on stationary input.
+    send("move-left", "motion_processed")
+    send("move-right", "motion_processed")
+    send("hold", "button_processed")
+    reason(nid, 2, offset)
+    send("release", "button_processed")
+    wait(lambda: not banner_pixels(names), "dismissed pixels retired")
+    offset = len(log("notification-signals"))
+    timed = notify("Timed expiry", ms=400)
+    wait(lambda: banner_pixels(names), "timed banner pixels")
+    reason(timed, 1, offset)
+    wait(lambda: not banner_pixels(names), "expired pixels retired")
+    offset = len(log("notification-signals"))
+    requested = notify("Requested close")
+    wait(lambda: banner_pixels(names), "requested banner pixels")
+    close(requested)
+    reason(requested, 3, offset)
+    wait(lambda: not banner_pixels(names), "requested pixels retired")
+    assert_no_gpu(n)
+    assert log("native-standalone-notification").count(
+        "native UI connection opened"
+    ) == log("native-standalone-notification").count("native UI connection retired")
+    q.stdin.write(b"exit\n")
+    q.stdin.flush()
+    assert q.wait(timeout=5) == 0
+    stop(monitor)
+    assert stop(n) == 0
+    print(
+        "NATIVE_NOTIFICATION_PASS actual replacement pixels and reasons 2/1/3",
+        flush=True,
+    )
+    return {
+        "replacement_pixels": True,
+        "same_id_and_role": True,
+        "actual_pointer_dismissal": True,
+        "expiry": True,
+        "requested_close": True,
+        "closed_reasons": [2, 1, 3],
+        "standalone_gpu_free": True,
+    }
 
 
 def picker_only_ab(names):
@@ -458,16 +771,16 @@ def picker_only_ab(names):
 
 
 def roles(name, role):
-    if role == "picker":
-        return log(name).count("native picker first attach") + log(name).count(
-            '"wayspot-picker")'
+    if role in ("picker", "notification"):
+        return log(name).count(f"native {role} first attach") + log(name).count(
+            f'"wayspot-{role}")'
         )
     return log(name).count(f'"wayspot-{role}")')
 
 
 def new_attach(name, role, offset=0):
     text = log(name)[offset:]
-    if role == "picker" and "native picker first attach" in text:
+    if role in ("picker", "notification") and f"native {role} first attach" in text:
         return True
     m = re.search(
         r'get_layer_surface\(new id zwlr_layer_surface_v1[#@](\d+), wl_surface[#@](\d+),[^\n]+"wayspot-'
@@ -584,14 +897,17 @@ def verify_window_finder(resident):
     hold = notify("Selection with a live banner", ms=60000)
     wait(lambda: status()["notification_visible"], "banner before selection")
     offset = open_windows("red")
-    assert status()["video_users"] == 1 + picker_lease
+    assert status()["video_users"] == banner_lease + picker_lease
     expect_applied("red", offset)
     assert presentations() == {1: 2, 2: 1}
     assert windows()["red"]["scene"]["status"] == "scene_enabled"
     assert windows()["green"]["scene"]["status"] == "layout_hidden"
-    assert status()["video_users"] == 1 and status()["notification_visible"]
+    assert status()["video_users"] == banner_lease and status()["notification_visible"]
     close(hold)
-    wait(lambda: status()["video_users"] == 0, "banner retired")
+    wait(
+        lambda: not status()["notification_visible"] and status()["video_users"] == 0,
+        "banner retired",
+    )
 
     run(cli, "window", "focus", str(ids["green"]))
     send(green, "green", "fullscreen", "request_fullscreen")
@@ -668,7 +984,7 @@ def verify_window_finder(resident):
     run(candidate, "picker")
     wait(lambda: new_attach("resident", "picker", offset), "application picker mapped")
     wait(
-        lambda: status()["video_users"] == 1 + picker_lease,
+        lambda: status()["video_users"] == banner_lease + picker_lease,
         "independent picker and banner ownership",
     )
     key("enter")
@@ -688,14 +1004,17 @@ def verify_window_finder(resident):
     ), launched
     assert (
         not status()["picker_visible"]
-        and status()["video_users"] == 1
+        and status()["video_users"] == banner_lease
         and status()["notification_visible"]
     )
     (out / "picker-launch-environment.json").write_text(
         json.dumps(launched, indent=2) + "\n"
     )
     close(hold)
-    wait(lambda: status()["video_users"] == 0, "launch banner retired")
+    wait(
+        lambda: not status()["notification_visible"] and status()["video_users"] == 0,
+        "launch banner retired",
+    )
     print("PASS: actual app inherited original EGL and session environment", flush=True)
     for q in (red, blue):
         q.stdin.write(b"exit\n")
@@ -818,11 +1137,13 @@ try:
         first_attach.append((time.monotonic_ns() - t) / 1e6)
         assert (
             status()["picker_visible"]
-            and status()["video_users"] == 1 + picker_lease
+            and status()["video_users"] == banner_lease + picker_lease
             and status()["notification_visible"]
         )
         assert_no_libdecor(resident)
         assert_egl_vendor(resident)
+        if native_ui:
+            assert status()["native_ui_users"] == 2
         if i == 0:
             wait(lambda: picker_pixels(names), "actual product picker pixels")
             wait(lambda: (root / "action.fetch").exists(), "actual SNI property fetch")
@@ -833,12 +1154,20 @@ try:
         run(candidate, "picker", "dismiss")
         assert (
             not status()["picker_visible"]
-            and status()["video_users"] == 1
+            and status()["video_users"] == banner_lease
             and status()["notification_visible"]
         )
     assert roles("resident", "wallpaper") == before_wall
+    if native_ui:
+        assert status()["native_ui_users"] == 1
+        assert log("resident").count("native UI connection opened") == 1
+        assert log("resident").count("native UI connection retired") == 0
+        assert_no_gpu(resident)
     close(hold)
-    wait(lambda: status()["video_users"] == 0, "banner retired")
+    wait(
+        lambda: not status()["notification_visible"] and status()["video_users"] == 0,
+        "banner retired",
+    )
     cold_summon = []
     for i in range(5):
         offset = len(log("resident"))
@@ -861,14 +1190,18 @@ try:
         lambda: not status()["notification_visible"] and status()["picker_visible"],
         "expiry kept picker",
     )
-    if native_picker:
+    if native_picker and not native_ui:
         wait(
             lambda: (
                 "native picker resumed after SDL shutdown" in log("resident")[offset:]
             ),
             "native picker submitted a fresh canvas after SDL shutdown",
         )
-    wait(lambda: picker_pixels(names), "picker pixels after SDL video shutdown")
+    wait(lambda: picker_pixels(names), "picker pixels after banner retirement")
+    if native_ui:
+        assert status()["native_ui_users"] == 1
+        assert "native UI connection retired" not in log("resident")[offset:]
+        assert_no_gpu(resident)
     run(candidate, "picker", "dismiss")
     for i in range(4):
         run(candidate, "wallpaper", "rotate")
@@ -881,6 +1214,12 @@ try:
     stop(mock)
     wait(lambda: status()["tray_items"] == 0, "tray unregister")
     warm = sample([resident])
+    if native_ui:
+        assert status()["native_ui_users"] == 0
+        assert log("resident").count("native UI connection opened") == log(
+            "resident"
+        ).count("native UI connection retired")
+        assert_no_gpu(resident)
     assert warm["voluntary_switch_delta"] <= 2 and warm["cpu_ticks_delta"] <= 1, warm
     assert (
         resident.poll() is None
@@ -928,6 +1267,8 @@ try:
     )
     assert stop(disabled) == 0
     picker_ab = None
+    full_ab = None
+    notification_acceptance = None
     if native_picker and baseline != candidate:
         picker_ab = picker_only_ab(names)
         standalone = start([candidate], "standalone-shm", True)
@@ -938,6 +1279,10 @@ try:
             Path(f"/proc/{standalone.pid}/maps").read_text(),
         )
         assert stop(standalone) == 0
+    if native_ui and baseline != candidate:
+        full_ab = full_resident_ab(names)
+    if native_ui and actor:
+        notification_acceptance = native_notification_acceptance(names)
     marker = root / "launch.json"
     helper = subprocess.run(
         [
@@ -976,8 +1321,13 @@ try:
         "picker_cycles": 25,
         "picker_backend": "shm" if native_picker else "sdl",
         "product_picker_pixels": True,
-        "canvas_resumed_after_sdl_shutdown": native_picker,
+        "canvas_resumed_after_sdl_shutdown": native_picker and not native_ui,
+        "notification_backend": "shm" if native_ui else "sdl",
+        "shared_native_ui_connection": native_ui,
+        "gpu_free_ui": native_ui,
         "picker_only_ab": picker_ab,
+        "full_resident_ab": full_ab,
+        "notification_acceptance": notification_acceptance,
         "wallpaper_rotations": 4,
         "disabled_pass": True,
         "tray_fetch_pass": True,

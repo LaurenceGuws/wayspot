@@ -44,13 +44,11 @@ pub const Native = struct {
 
     pub const native_picker = use_shm;
     video: *Video,
-    env: ?*const std.process.Environ.Map = null,
     native_display: if (use_shm) ?*shm.Display else void = if (use_shm) null else {},
     native_surface: if (use_shm) ?*shm.Surface else void = if (use_shm) null else {},
     canvas: ?*sdl.SDL_Surface = null,
     canvas_scale: f32 = 1,
     first_attach: bool = false,
-    resume_canvas: bool = false,
     owned_wake: bool = false,
     stop_fd: std.posix.fd_t = -1,
     applications: []const apps.App,
@@ -88,10 +86,9 @@ pub const Native = struct {
     pub fn init(native: *Native) !void {
         std.debug.assert(!native.initialized);
         if (use_shm) {
-            const env = native.env orelse return error.NativePickerEnvironment;
-            native.native_display = try shm.Display.open(native.allocator, native.io, env);
+            native.native_display = try native.video.acquireNative(native.allocator, native.io);
             errdefer {
-                native.native_display.?.destroy();
+                native.video.releaseNative();
                 native.native_display = null;
             }
             if (native.tray_enabled and native.tray_wake_fd < 0) {
@@ -101,8 +98,6 @@ pub const Native = struct {
                 native.owned_wake = true;
             }
             native.initialized = true;
-            std.debug.assert(native.video.software_owner == null);
-            native.video.software_owner = .{ .context = native, .retire = retireCanvas };
             return;
         }
         try native.video.acquire();
@@ -319,10 +314,6 @@ pub const Native = struct {
                 if (!native.first_attach) {
                     native.first_attach = true;
                     std.log.info("native picker first attach", .{});
-                }
-                if (native.resume_canvas) {
-                    native.resume_canvas = false;
-                    std.log.info("native picker resumed after SDL shutdown", .{});
                 }
                 try native.afterDraw(frame);
             }
@@ -555,14 +546,12 @@ pub const Native = struct {
         // a later picker lifetime when another window keeps SDL alive.
         if (use_shm) {
             std.debug.assert(native.native_surface == null);
-            native.video.software_owner = null;
-            if (native.native_display) |display| display.destroy();
+            native.video.releaseNative();
             native.native_display = null;
             if (native.owned_wake) {
                 _ = std.os.linux.close(native.tray_wake_fd);
                 native.tray_wake_fd = -1;
             }
-            if (native.video.users == 0) sdl.SDL_Quit();
             native.initialized = false;
             return;
         }
@@ -577,11 +566,7 @@ pub const Native = struct {
     }
 
     fn readUntil(native: *Native, start: std.Io.Timestamp) !void {
-        const elapsed = start.durationTo(std.Io.Clock.awake.now(native.io)).toMilliseconds();
-        if (elapsed >= 2000) return error.NativePickerDeadline;
-        var fds = [_]std.posix.pollfd{.{ .fd = native.native_display.?.fd(), .events = std.posix.POLL.IN, .revents = 0 }};
-        if (try std.posix.poll(&fds, @intCast(2000 - elapsed)) == 0) return error.NativePickerDeadline;
-        try native.native_display.?.readReady();
+        try Video.readBefore(native.native_display.?, native.io, start);
     }
 
     pub fn fd(native: *const Native) std.posix.fd_t {
@@ -622,10 +607,6 @@ pub const Native = struct {
     pub fn nativeEvents(native: *Native, batch: *picker.Events) !void {
         if (!use_shm) return;
         const display = native.native_display.?;
-        var fds = [_]std.posix.pollfd{.{ .fd = display.fd(), .events = std.posix.POLL.IN, .revents = 0 }};
-        // Real readiness wins over a repeat deadline. Read at most one
-        // transport batch, then drain bounded typed events.
-        if (try std.posix.poll(&fds, 0) != 0) try display.readReady();
         if (native.closed()) {
             if (batch.count < batch.items.len) {
                 batch.items[batch.count] = .quit;
@@ -635,12 +616,11 @@ pub const Native = struct {
         }
         if (display.input.count == 0) _ = try display.input.advanceRepeat(std.Io.Clock.awake.now(native.io));
         while (batch.count < batch.items.len) {
-            const event = display.input.pop() orelse break;
-            if (event.surface != native.native_surface.?.surface.?.id) continue;
+            const event = display.input.popFor(native.native_surface.?.surface.?.id) orelse break;
             batch.items[batch.count] = try native.translateShm(event);
             batch.count += 1;
         }
-        batch.more = batch.more or display.input.count != 0;
+        batch.more = batch.more or display.input.hasFor(native.native_surface.?.surface.?.id);
         if (batch.count < batch.items.len and native.native_surface.?.dirty and native.canDraw()) {
             batch.items[batch.count] = .redraw;
             batch.count += 1;
@@ -650,6 +630,7 @@ pub const Native = struct {
     fn readShm(native: *Native) !picker.Events {
         while (true) {
             var batch: picker.Events = .{};
+            try native.video.pumpNative();
             try native.nativeEvents(&batch);
             if (try native.drainTrayWake()) {
                 if (batch.count < batch.items.len) {
@@ -745,15 +726,6 @@ pub const Native = struct {
             },
             .scroll => |rows| native.scrollAction(rows),
         };
-    }
-
-    fn retireCanvas(context: *anyopaque) void {
-        const native: *Native = @ptrCast(@alignCast(context));
-        native.dropCanvas();
-        if (native.native_surface) |surface| {
-            native.resume_canvas = true;
-            surface.invalidate();
-        }
     }
 
     fn dropCanvas(native: *Native) void {

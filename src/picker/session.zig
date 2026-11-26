@@ -47,7 +47,6 @@ pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
     errdefer self.state.deinit();
     self.view = .{
         .video = video,
-        .env = init.environ_map,
         .applications = self.applications.slice(),
         .allocator = init.gpa,
         .io = init.io,

@@ -121,23 +121,27 @@ exercise real Wayland keymap, key and matched pointer events on a 1.75x layer,
 including the rendered fallback cursor. The source-test graph links
 libxkbcommon for native keyboard decoding and compose. Socketpair tests also
 exercise repeat deadlines, compose, cursor-shape and text-input-v3 done
-transactions. Real IME and the picker edit adapter remain separate gates.
-These are not a renderer cutover; the current product still uses SDL video.
+transactions. The actual picker edit adapter is covered by source tests;
+real IME remains outstanding. The installed default remains the SDL build
+until native UI physical acceptance.
 
 ### Application picker
 
-Build the opt-in native SHM picker with:
+Build the opt-in native SHM graphical UI with:
 
 ```sh
-zig build -Dnative_picker=true
+zig build -Dnative_ui=true
 ```
 
-The standalone picker and resident picker command both use this backend in
-that build. Notifications still use SDL video, so the optional EGL manifest
-continues to apply to them. The portable default build remains the accepted
-SDL picker until physical acceptance. The resident-live fixture recognizes
-this build and checks actual picker pixels and mixed-lifetime recovery; with
-an explicit installed accelerated baseline it also runs a picker-only A/B.
+Both standalone and resident picker/notification roles use this backend.
+`-Dnative_picker=true` remains an alias for the new option, enabling both
+roles; the transitional mixed SDL/SHM build is retired. The native build
+never initializes SDL video and ignores EGL manifest specialization. SDL's
+CPU drawing primitives remain. The portable default build remains the
+accepted SDL UI until physical acceptance. The resident-live fixture checks
+actual role pixels, independent retirement, original application launch
+environment and window focus. With an explicit installed accelerated
+baseline it also compares the picker-only and full combined resident scopes.
 
 Run the default graphical picker:
 

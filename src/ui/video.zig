@@ -5,18 +5,77 @@ const wl = @import("wayland_c");
 const Self = @This();
 const egl_vendor_manifest = @import("build_options").egl_vendor_manifest;
 
+pub const native_ui = @import("build_options").native_picker;
+const shm = if (native_ui) @import("native_surface.zig") else struct {};
+
 users: u8 = 0,
 tray_event: ?u32 = null,
-/// SDL_QuitRender also destroys windowless software renderers. A visible
-/// SHM picker registers one synchronous retirement hook before taking a
-/// canvas; the last video release must retire it before global SDL_Quit.
-software_owner: ?struct { context: *anyopaque, retire: *const fn (*anyopaque) void } = null,
+
+// One visible-session owner. Standalone and resident roles borrow the same
+// API; the resident retains no native connection while both roles are cold.
+env: ?*const std.process.Environ.Map = null,
+native: if (native_ui) ?*shm.Display else void = if (native_ui) null else {},
+native_users: u8 = 0,
+
+pub fn acquireNative(self: *Self, allocator: std.mem.Allocator, io: std.Io) !*shm.Display {
+    if (self.native) |display| {
+        if (display.failed) return error.NativeConnectionFailed;
+        std.debug.assert(self.native_users < 2);
+        self.native_users += 1;
+        return display;
+    }
+    std.debug.assert(self.native_users == 0 and self.users == 0);
+    const env = self.env orelse return error.NativeDisplayEnvironment;
+    const display = try shm.Display.open(allocator, io, env);
+    errdefer display.destroy();
+    const start = std.Io.Clock.awake.now(io);
+    while (display.status() == .discovering) try readBefore(display, io, start);
+    if (display.status() != .ready) return error.NativeDisplayNotReady;
+    self.native = display;
+    self.native_users = 1;
+    std.log.info("native UI connection opened", .{});
+    return display;
+}
+
+pub fn releaseNative(self: *Self) void {
+    std.debug.assert(self.native_users > 0 and self.users == 0);
+    self.native_users -= 1;
+    if (self.native_users != 0) return;
+    self.native.?.destroy();
+    self.native = null;
+    // All software renderers are now gone. Never run global SDL cleanup
+    // while a sibling role still owns CPU drawing resources.
+    sdl.SDL_Quit();
+    std.log.info("native UI connection retired", .{});
+}
+
+pub fn readBefore(display: *shm.Display, io: std.Io, start: std.Io.Timestamp) !void {
+    const elapsed = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    if (elapsed >= 2000) return error.NativeUiDeadline;
+    var fds = [_]std.posix.pollfd{.{ .fd = display.fd(), .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try std.posix.poll(&fds, @intCast(2000 - elapsed)) == 0) return error.NativeUiDeadline;
+    try display.readReady();
+}
+
+pub fn nativeFd(self: *const Self) std.posix.fd_t {
+    if (native_ui) return if (self.native) |display| display.fd() else -1;
+    return -1;
+}
+
+pub fn pumpNative(self: *Self) !void {
+    if (!native_ui) return;
+    const display = self.native orelse return;
+    if (display.failed) return error.NativeConnectionFailed;
+    var fds = [_]std.posix.pollfd{.{ .fd = display.fd(), .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try std.posix.poll(&fds, 0) != 0) try display.readReady();
+}
 
 /// Called once at the graphical process entrypoint, before SDL or service
 /// workers start. GLVND reads libc's environment, not SDL's private hint map.
 /// The original std.process.Init.environ_map remains the sole environment
 /// passed to external commands and application launches.
 pub fn prepareProcess(io: std.Io) !void {
+    if (native_ui) return;
     if (egl_vendor_manifest) |manifest| {
         const stat = std.Io.Dir.cwd().statFile(io, manifest, .{}) catch return error.EglVendorManifestUnavailable;
         if (stat.kind != .file) return error.EglVendorManifestUnavailable;
@@ -27,6 +86,7 @@ pub fn prepareProcess(io: std.Io) !void {
 }
 
 pub fn acquire(self: *Self) !void {
+    if (native_ui) return error.NativeUiHasNoVideoLease;
     if (self.users == 0) {
         // Every Wayspot window owns a custom layer-shell role. SDL's
         // Wayland startup can otherwise initialize libdecor (and its GTK
@@ -43,10 +103,7 @@ pub fn acquire(self: *Self) !void {
 pub fn release(self: *Self) void {
     std.debug.assert(self.users > 0);
     self.users -= 1;
-    if (self.users == 0) {
-        if (self.software_owner) |owner| owner.retire(owner.context);
-        sdl.SDL_Quit();
-    }
+    if (self.users == 0) sdl.SDL_Quit();
 }
 
 /// SDL's user-event counter survives SDL_Quit. Allocate once per process,

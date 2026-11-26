@@ -5,8 +5,14 @@ pub fn build(b: *std.Build) void {
     const optimize = optimizeOption(b);
     const egl_manifest = b.option([]const u8, "egl_vendor_manifest", "Restrict this build's GUI to one absolute GLVND EGL vendor manifest (default: unrestricted)");
     const settings = b.addOptions();
-    const native_picker = b.option(bool, "native_picker", "Use native Wayland SHM for the picker (notifications remain SDL)") orelse false;
-    settings.addOption(bool, "native_picker", native_picker);
+    const native_ui_option = b.option(bool, "native_ui", "Use native Wayland SHM for picker and notifications");
+    const legacy_picker_option = b.option(bool, "native_picker", "Compatibility alias for native_ui; both graphical roles migrate together");
+    if (native_ui_option != null and legacy_picker_option != null and native_ui_option.? != legacy_picker_option.?) {
+        std.log.err("native_ui and native_picker must agree", .{});
+        std.process.exit(1);
+    }
+    const native_ui = native_ui_option orelse legacy_picker_option orelse false;
+    settings.addOption(bool, "native_picker", native_ui);
     const egl_manifest_z: ?[:0]const u8 = if (egl_manifest) |path| blk: {
         if (!std.fs.path.isAbsolute(path) or std.mem.indexOfAny(u8, path, ":\x00\r\n") != null) {
             std.log.err("-Degl_vendor_manifest requires one absolute manifest path", .{});
@@ -161,7 +167,7 @@ pub fn build(b: *std.Build) void {
     xkb_translate.linkSystemLibrary("xkbcommon", .{});
     source_tests.root_module.addImport("xkb_c", xkb_translate.createModule());
     source_tests.root_module.linkSystemLibrary("xkbcommon", .{});
-    if (native_picker) {
+    if (native_ui) {
         wayspot.addImport("wayland-client", native_wayland.module("client"));
         wayspot.addImport("wayland-protocols", native_protocols);
         wayspot.addImport("wayland-present", native_present);
@@ -210,8 +216,11 @@ pub fn build(b: *std.Build) void {
     live_resident.addFileArg(executable.getEmittedBin());
     live_resident.setCwd(b.path("."));
     live_resident.has_side_effects = true;
-    if (native_picker) live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_PICKER", "1");
-    if (egl_manifest) |path| live_resident.setEnvironmentVariable("WAYSPOT_EXPECT_EGL_MANIFEST", path);
+    if (native_ui) {
+        live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_PICKER", "1");
+        live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_UI", "1");
+    }
+    if (!native_ui) if (egl_manifest) |path| live_resident.setEnvironmentVariable("WAYSPOT_EXPECT_EGL_MANIFEST", path);
     b.step("resident-live", "Prove all capabilities in an explicit isolated session")
         .dependOn(&live_resident.step);
 

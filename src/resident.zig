@@ -46,7 +46,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
     defer stop.close();
     var control = try Control.open(&(try signature(init)));
     defer control.deinit();
-    var video: Video = .{};
+    var video: Video = .{ .env = init.environ_map };
     // libdbus can also be used by the existing bounded picker tray worker.
     if ((config.notifications or config.tray) and @import("dbus_c").dbus_threads_init_default() == 0) return error.DbusThreadsUnavailable;
     var notifications: ?Notification = if (config.notifications) try Notification.init(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"), &video) else null;
@@ -73,7 +73,16 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
     while (true) {
         const tick = now(init.io);
         var more = false;
+        video.pumpNative() catch |err| {
+            std.log.warn("native UI display failed: {s}", .{@errorName(err)});
+            closePicker(&current, .dismiss);
+            if (notifications) |*service| service.displayLost();
+        };
         if (notifications) |*service| {
+            if (Video.native_ui) {
+                try service.expire(tick);
+                try service.nativeTurn();
+            }
             if (notification_ready or due(service.wake(), tick)) notification_ready = try service.tick(tick);
             more = more or notification_ready;
         } else notification_ready = false;
@@ -135,8 +144,8 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
                 },
                 .status => {
                     var buffer: [512]u8 = undefined;
-                    const reply = try std.fmt.bufPrint(&buffer, "{{\"schema\":\"wayspot-resident/v1\",\"pid\":{d},\"picker\":{s},\"picker_visible\":{s},\"notifications\":{s},\"notification_visible\":{s},\"wallpaper\":{s},\"wallpaper_outputs\":{d},\"tray\":{s},\"tray_items\":{d},\"video_users\":{d}}}\n", .{
-                        std.os.linux.getpid(), boolText(config.picker), boolText(current != null), boolText(config.notifications), boolText(if (notifications) |*service| service.visible() else false), boolText(wallpaper != null), if (wallpaper) |*service| service.count() else 0, boolText(config.tray), if (tray) |*service| service.count() else 0, video.users,
+                    const reply = try std.fmt.bufPrint(&buffer, "{{\"schema\":\"wayspot-resident/v1\",\"pid\":{d},\"picker\":{s},\"picker_visible\":{s},\"notifications\":{s},\"notification_visible\":{s},\"wallpaper\":{s},\"wallpaper_outputs\":{d},\"tray\":{s},\"tray_items\":{d},\"video_users\":{d},\"native_ui_users\":{d}}}\n", .{
+                        std.os.linux.getpid(), boolText(config.picker), boolText(current != null), boolText(config.notifications), boolText(if (notifications) |*service| service.visible() else false), boolText(wallpaper != null), if (wallpaper) |*service| service.count() else 0, boolText(config.tray), if (tray) |*service| service.count() else 0, video.users, video.native_users,
                     });
                     control.reply(reply);
                 },
@@ -164,7 +173,10 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
         } else wallpaper_ready = false;
         const ui_more = try pump(&current, &notifications, &video, init.io);
         more = more or ui_more;
-        if (notifications) |*service| try service.expire(now(init.io));
+        if (notifications) |*service| {
+            try service.expire(now(init.io));
+            try service.nativeTurn();
+        }
         const time = now(init.io);
         var timeout: ?u64 = if (more) 0 else null;
         if (notifications) |*service| if (service.wake()) |end| shorten(&timeout, end -| time);
@@ -185,7 +197,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
             if (wallpaper) |*service| service.pollFd() else pollFd(-1),
             pollFd(try video.fd()),
             pollFd(if (current) |session| session.view.tray_wake_fd else -1),
-            pollFd(if (current) |session| session.view.fd() else -1),
+            pollFd(video.nativeFd()),
         };
         _ = try posix.poll(&fds, if (timeout) |delay| @intCast(@min(delay, std.math.maxInt(i32))) else -1);
         if (fds[0].revents != 0) {

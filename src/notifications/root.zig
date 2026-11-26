@@ -8,6 +8,8 @@ const text_draw = @import("../ui/text.zig");
 const dbus = @import("dbus_c");
 const Video = @import("../ui/video.zig");
 const Stop = @import("../stop.zig");
+const native_ui = Video.native_ui;
+const shm = if (native_ui) @import("../ui/native_surface.zig") else struct {};
 
 pub const app_name_capacity = 256;
 pub const app_icon_capacity = 1024;
@@ -163,14 +165,22 @@ const UiResources = struct {
 };
 
 const Banner = struct {
+    native_display: if (native_ui) ?*shm.Display else void = if (native_ui) null else {},
+    native_surface: if (native_ui) ?*shm.Surface else void = if (native_ui) null else {},
+    presented: ?Key = null,
     window: ?*sdl.SDL_Window = null,
     layer: sdl_layer = .{},
     renderer: ?*sdl.SDL_Renderer = null,
     text: ?text_draw.Painter = null,
     resources: UiResources = .{},
 
-    fn init(banner: *Banner, video: *Video, allocator: std.mem.Allocator) !void {
+    fn init(banner: *Banner, video: *Video, allocator: std.mem.Allocator, io: std.Io) !void {
         errdefer banner.deinit(video);
+        if (native_ui) {
+            banner.native_display = try video.acquireNative(allocator, io);
+            banner.native_surface = try shm.Surface.create(banner.native_display.?, .notification, .{ .width = banner_width, .height = banner_height }, null);
+            return;
+        }
         try video.acquire();
         banner.resources.acquired(.sdl);
         banner.window = try sdl_layer.createWindow("wayspot notification", banner_width, banner_height);
@@ -190,6 +200,15 @@ const Banner = struct {
     }
 
     fn deinit(banner: *Banner, video: *Video) void {
+        if (native_ui) {
+            if (banner.native_surface) |surface| {
+                surface.destroy() catch |err| std.log.warn("native notification retirement failed: {s}", .{@errorName(err)});
+                std.log.info("native notification retired", .{});
+            }
+            if (banner.native_display != null) video.releaseNative();
+            banner.* = .{};
+            return;
+        }
         while (banner.resources.release()) |resource| switch (resource) {
             .text => {
                 if (banner.text) |*painter| painter.deinit();
@@ -204,10 +223,61 @@ const Banner = struct {
         banner.* = .{};
     }
 
-    fn draw(banner: *Banner, item: *const Presentation) !void {
+    fn exists(banner: *const Banner) bool {
+        if (native_ui) return banner.native_surface != null;
+        return banner.window != null;
+    }
+
+    fn visibleNow(banner: *const Banner) bool {
+        if (native_ui) return banner.presented != null and banner.native_surface != null;
+        return banner.window != null;
+    }
+
+    fn closed(banner: *const Banner) bool {
+        if (native_ui) return if (banner.native_surface) |surface| surface.closed or surface.display.failed else false;
+        return banner.layer.closed;
+    }
+
+    fn draw(banner: *Banner, allocator: std.mem.Allocator, item: *const Presentation) !void {
+        if (native_ui) {
+            banner.native_surface.?.invalidate();
+            try banner.drawNative(allocator, item);
+            return;
+        }
         try banner.layer.update(banner.window.?);
         const renderer = banner.renderer orelse unreachable;
         const painter = if (banner.text) |*value| value else return error.TextNotInitialized;
+        try drawContents(renderer, painter, item);
+        if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
+        if (!sdl.SDL_ShowWindow(banner.window)) return error.SdlShowFailed;
+    }
+
+    fn drawNative(banner: *Banner, allocator: std.mem.Allocator, item: *const Presentation) !void {
+        const surface = banner.native_surface orelse return;
+        const result = try surface.draw(.{ .allocator = allocator, .item = item }, paintNative);
+        if (result == .presented) {
+            if (banner.presented == null) std.log.info("native notification first attach", .{});
+            banner.presented = .{ .id = item.id, .generation = item.generation };
+        }
+    }
+
+    fn paintNative(context: anytype, frame: shm.Frame) !void {
+        // Banner redraws are infrequent. Render into the admitted buffer
+        // directly, retiring the renderer before returning its pixel borrow.
+        if (sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO) != 0) return error.NativeBannerUnexpectedVideo;
+        const canvas = sdl.SDL_CreateSurfaceFrom(@intCast(frame.extent.width), @intCast(frame.extent.height), sdl.SDL_PIXELFORMAT_XRGB8888, frame.pixels.ptr, @intCast(frame.stride)) orelse return error.NativeBannerCanvas;
+        defer sdl.SDL_DestroySurface(canvas);
+        const renderer = sdl.SDL_CreateSoftwareRenderer(canvas) orelse return error.NativeBannerRenderer;
+        defer sdl.SDL_DestroyRenderer(renderer);
+        if (!sdl.SDL_SetRenderLogicalPresentation(renderer, banner_width, banner_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX)) return error.SdlLogicalPresentationFailed;
+        const scale = @min(@as(f32, @floatFromInt(frame.extent.width)) / banner_width, @as(f32, @floatFromInt(frame.extent.height)) / banner_height);
+        var painter = try text_draw.Painter.initScaled(context.allocator, renderer, banner_font_size, scale);
+        defer painter.deinit();
+        try drawContents(renderer, &painter, context.item);
+        if (!sdl.SDL_FlushRenderer(renderer)) return error.NativeBannerFlush;
+    }
+
+    fn drawContents(renderer: *sdl.SDL_Renderer, painter: *text_draw.Painter, item: *const Presentation) !void {
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
         const summary_clip = sdl.SDL_Rect{ .x = 16, .y = 12, .w = banner_width - 32, .h = 24 };
@@ -227,8 +297,6 @@ const Banner = struct {
         );
         if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlClipFailed;
         try body_result;
-        if (!sdl.SDL_RenderPresent(renderer)) return error.SdlDrawFailed;
-        if (!sdl.SDL_ShowWindow(banner.window)) return error.SdlShowFailed;
     }
 };
 
@@ -323,14 +391,14 @@ const Ui = struct {
                 self.visible = value;
                 // Establish an expiry even if video initialization or drawing fails.
                 _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
-                if (self.banner.window == null) try self.banner.init(video, allocator);
-                try self.banner.draw(&self.visible.?);
-                _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
+                if (!self.banner.exists()) try self.banner.init(video, allocator, io);
+                try self.banner.draw(allocator, &self.visible.?);
+                if (!native_ui) _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
             },
         }
     }
 
-    fn event(self: *Ui, input: *const sdl.SDL_Event) !?Closed {
+    fn event(self: *Ui, allocator: std.mem.Allocator, input: *const sdl.SDL_Event) !?Closed {
         const window = self.banner.window orelse return null;
         if (sdl.SDL_GetWindowFromEvent(input) != window) return null;
         switch (input.type) {
@@ -341,14 +409,33 @@ const Ui = struct {
             sdl.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
             sdl.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
             sdl.SDL_EVENT_RENDER_TARGETS_RESET,
-            => try self.banner.draw(&self.visible.?),
+            => try self.banner.draw(allocator, &self.visible.?),
             sdl.SDL_EVENT_RENDER_DEVICE_RESET => {
                 self.banner.text.?.reset();
-                try self.banner.draw(&self.visible.?);
+                try self.banner.draw(allocator, &self.visible.?);
             },
             sdl.SDL_EVENT_RENDER_DEVICE_LOST => return error.SdlDeviceLost,
             else => {},
         }
+        return null;
+    }
+
+    fn nativeTurn(self: *Ui, allocator: std.mem.Allocator) !?Closed {
+        if (!native_ui) return null;
+        const surface = self.banner.native_surface orelse return null;
+        if (self.banner.closed()) return error.NativeBannerClosed;
+        const input = &surface.display.input;
+        while (input.popFor(surface.surface.?.id)) |native_event| {
+            switch (native_event.value) {
+                .button => |button| {
+                    // Preserve click-down dismissal. Never apply input to a
+                    // newer generation that has not yet been presented.
+                    if (button.code == 272 and button.pressed and std.meta.eql(self.banner.presented, self.state.key)) return self.state.close(.dismissed);
+                },
+                else => {},
+            }
+        }
+        try self.banner.drawNative(allocator, &self.visible.?);
         return null;
     }
 
@@ -2380,7 +2467,7 @@ pub const Service = struct {
     }
 
     pub fn visible(self: *const Service) bool {
-        return self.ui.banner.window != null;
+        return self.ui.banner.visibleNow();
     }
 
     pub fn deadline(self: *const Service) ?u64 {
@@ -2397,7 +2484,16 @@ pub const Service = struct {
     }
 
     pub fn handleEvent(self: *Service, input: *const sdl.SDL_Event) !void {
-        const closed = self.ui.event(input) catch |err| {
+        const closed = self.ui.event(self.owner.allocator, input) catch |err| {
+            self.bannerFailed(err);
+            return;
+        };
+        if (closed) |value| self.complete(value) catch |err| try self.recoverTurn(err);
+    }
+
+    pub fn nativeTurn(self: *Service) !void {
+        if (!native_ui) return;
+        const closed = self.ui.nativeTurn(self.owner.allocator) catch |err| {
             self.bannerFailed(err);
             return;
         };
@@ -2405,7 +2501,7 @@ pub const Service = struct {
     }
 
     pub fn expire(self: *Service, now: u64) !void {
-        if (self.ui.banner.layer.closed) self.bannerFailed(error.LayerClosed);
+        if (self.ui.banner.closed()) self.bannerFailed(error.LayerClosed);
         if (self.ui.expired(now)) |closed| self.complete(closed) catch |err| try self.recoverTurn(err);
     }
 
@@ -2416,7 +2512,7 @@ pub const Service = struct {
     }
 
     pub fn displayLost(self: *Service) void {
-        self.bannerFailed(error.SdlDisplayLost);
+        self.bannerFailed(if (native_ui) error.NativeDisplayLost else error.SdlDisplayLost);
     }
 
     fn bannerFailed(self: *Service, err: anyerror) void {
@@ -2541,10 +2637,10 @@ fn reconnectWait(err: anyerror) ?i64 {
 
 /// Standalone compatibility entrypoint, driven by the same sequential service
 /// that the unified resident will own. When hidden, SDL is not initialized.
-pub fn run(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, env: *const std.process.Environ.Map) !void {
     const stop = try Stop.open();
     defer stop.close();
-    var video: Video = .{};
+    var video: Video = .{ .env = env };
     var service = try Service.init(allocator, io, state_home, home, &video);
     defer service.deinit();
     const result = serve(&service, stop.fd);
@@ -2566,6 +2662,12 @@ fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
             try Stop.consume(service.owner.io, stop_fd);
             return;
         }
+        service.video.pumpNative() catch |err| {
+            std.log.warn("native notification display failed: {s}", .{@errorName(err)});
+            service.displayLost();
+        };
+        try service.expire(nowMilliseconds(service.owner.io));
+        try service.nativeTurn();
         const more_bus = try service.tick(nowMilliseconds(service.owner.io));
         var count: usize = 0;
         while (service.video.users != 0 and count < intake_batch_max) : (count += 1) {
@@ -2580,7 +2682,7 @@ fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
         var fds = [_]std.posix.pollfd{
             .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = try service.fd(), .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = try service.video.fd(), .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = if (native_ui) service.video.nativeFd() else try service.video.fd(), .events = std.posix.POLL.IN, .revents = 0 },
         };
         _ = try std.posix.poll(&fds, if (deadline) |end| @intCast(@min(end -| current, std.math.maxInt(i32))) else -1);
         if (fds[0].revents != 0) {
