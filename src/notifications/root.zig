@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sdl = @import("sdl_c");
 const text_draw = @import("../ui/text.zig");
+const Canvas = @import("../ui/canvas.zig").Canvas;
 const dbus = @import("dbus_c");
 const UiOwner = @import("../ui/owner.zig");
 const Stop = @import("../stop.zig");
@@ -209,25 +210,65 @@ const Banner = struct {
     fn drawContents(renderer: *sdl.SDL_Renderer, painter: *text_draw.Painter, item: *const Presentation) !void {
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
-        const summary_clip = sdl.SDL_Rect{ .x = 16, .y = 12, .w = banner_width - 32, .h = 24 };
-        if (!sdl.SDL_SetRenderClipRect(renderer, &summary_clip)) return error.SdlClipFailed;
-        const summary_result = painter.draw(item.summary, .{ 235, 235, 240 }, 16, 14);
-        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlClipFailed;
-        try summary_result;
-        const body_clip = sdl.SDL_Rect{ .x = 16, .y = 42, .w = banner_width - 32, .h = 60 };
-        if (!sdl.SDL_SetRenderClipRect(renderer, &body_clip)) return error.SdlClipFailed;
-        const body_result = painter.drawWrapped(
-            item.body,
-            .{ 190, 192, 202 },
-            16,
-            44,
-            banner_width - 32,
-            body_clip.h,
-        );
-        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlClipFailed;
-        try body_result;
+        const root = try Canvas.root(renderer, banner_width, banner_height);
+        const content = try root.child(.{ .x = 16, .y = 12, .w = banner_width - 32, .h = 90 });
+        const summary = try content.child(.{ .w = content.bounds.w, .h = 24 });
+        try summary.text(painter, item.summary, .{ 235, 235, 240 }, 0, 2);
+        const body = try content.child(.{ .y = 30, .w = content.bounds.w, .h = 60 });
+        try body.wrappedText(painter, item.body, .{ 190, 192, 202 }, 0, 2, @intCast(body.bounds.w), @intCast(body.bounds.h));
     }
 };
+
+test "borrowed banner canvas preserves direct drawing pixels at mixed densities" {
+    // Independent absolute-coordinate oracle. Only the test retains the
+    // previous draw expression, not another production backend or runtime path.
+    const Reference = struct {
+        fn paint(frame: shm.Frame, item: *const Presentation) !void {
+            const pixels = sdl.SDL_CreateSurfaceFrom(@intCast(frame.extent.width), @intCast(frame.extent.height), sdl.SDL_PIXELFORMAT_XRGB8888, frame.pixels.ptr, @intCast(frame.stride)) orelse return error.SdlTestSurface;
+            defer sdl.SDL_DestroySurface(pixels);
+            const renderer = sdl.SDL_CreateSoftwareRenderer(pixels) orelse return error.SdlTestRenderer;
+            defer sdl.SDL_DestroyRenderer(renderer);
+            try std.testing.expect(sdl.SDL_SetRenderLogicalPresentation(renderer, banner_width, banner_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX));
+            const scale = @min(@as(f32, @floatFromInt(frame.extent.width)) / banner_width, @as(f32, @floatFromInt(frame.extent.height)) / banner_height);
+            var painter = try text_draw.Painter.initScaled(std.testing.allocator, renderer, banner_font_size, scale);
+            defer painter.deinit();
+            try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
+            try std.testing.expect(sdl.SDL_RenderClear(renderer));
+            const summary: sdl.SDL_Rect = .{ .x = 16, .y = 12, .w = 388, .h = 24 };
+            try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &summary));
+            try painter.draw(item.summary, .{ 235, 235, 240 }, 16, 14);
+            try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, null));
+            const body: sdl.SDL_Rect = .{ .x = 16, .y = 42, .w = 388, .h = 60 };
+            try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &body));
+            try painter.drawWrapped(item.body, .{ 190, 192, 202 }, 16, 44, 388, 60);
+            try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, null));
+            try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+        }
+    };
+    var summary = ("Wide notification λ " ++ "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW").*;
+    var body = ("First line with several words and café λ; wrap across the region.\r\n" ++ "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界" ++ " last row\nclipped content").*;
+    const item: Presentation = .{ .id = 1, .generation = 1, .storage = &.{}, .summary = &summary, .body = &body, .timeout_ms = 1000 };
+    const logical: shm.Extent = .{ .width = banner_width, .height = banner_height };
+    const scales = [_]u32{ 120, 150, 180, 192, 210, 240 };
+    for (scales, 0..) |scale, index| {
+        // Also exercise the same letterbox transform with a nonmatching
+        // physical aspect ratio. The product does not change this policy.
+        const scaled = try logical.scaled(scale);
+        const extent: shm.Extent = .{ .width = scaled.width, .height = scaled.height + @as(u32, if (index == 3) 11 else 0) };
+        const stride = extent.width * 4;
+        const expected = try std.testing.allocator.alloc(u8, stride * extent.height);
+        defer std.testing.allocator.free(expected);
+        const actual = try std.testing.allocator.alloc(u8, expected.len);
+        defer std.testing.allocator.free(actual);
+        @memset(expected, 0x5a);
+        @memset(actual, 0x5a);
+        var frame: shm.Frame = .{ .logical_extent = logical, .scale_120 = scale, .extent = extent, .stride = stride, .pixels = expected };
+        try Reference.paint(frame, &item);
+        frame.pixels = actual;
+        try Banner.paintNative(.{ .allocator = std.testing.allocator, .item = &item }, frame);
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
+}
 
 const UiPhase = enum { cold, initializing, visible };
 const UiAction = enum { none, initialize, draw, hide };

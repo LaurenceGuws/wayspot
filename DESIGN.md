@@ -268,8 +268,18 @@ The picker retains a fixed `720x520` logical layout, with density-specific
 CPU rasterization at the admitted physical extent. The staging canvas adds
 one bounded copy so ordinary redraws retain glyph and icon textures. The
 banner instead paints directly into the borrowed buffer. Native Wayland
-input remains logical even at fractional scale. Measure before adding a
-more general widget or renderer framework.
+input remains logical even at fractional scale.
+
+The banner now composes `ui/canvas.zig` views by value. A child retains its
+requested parent-local origin and intersects its clip with every ancestor;
+it neither allocates nor owns another pixel buffer, renderer, surface or
+command list. A draw borrows the existing text painter, temporarily installs
+its inherited clip and restores the caller's clip even on drawing failure.
+The presenter still owns the logical transform and the admitted SHM frame.
+The same banner pixels are checked against independent absolute drawing at
+fractional densities. This is spatial composition, not a retained widget
+hierarchy or a commitment to any particular redraw/cache strategy. Introduce
+more primitives only when the picker or banner actually needs them.
 
 ## 8. Shared resident ownership
 

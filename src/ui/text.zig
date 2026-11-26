@@ -20,7 +20,7 @@ const CachedGlyph = struct {
     texture: ?*sdl.SDL_Texture,
 };
 
-/// Borrows one SDL renderer; owns the Howl Text font, shape buffer, and GPU glyphs.
+/// Borrows one SDL renderer; owns the Howl Text font, shape buffer, and CPU renderer glyph textures.
 pub const Painter = struct {
     allocator: std.mem.Allocator,
     renderer: *sdl.SDL_Renderer,
