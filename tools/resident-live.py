@@ -16,6 +16,8 @@ baseline = Path(os.environ.get("WAYSPOT_BASELINE", str(candidate))).resolve()
 egl_variable = "__EGL_VENDOR_LIBRARY_FILENAMES"
 expected_egl = os.environ.get("WAYSPOT_EXPECT_EGL_MANIFEST")
 inherited_egl = os.environ.get("WAYSPOT_TEST_INHERITED_EGL")
+native_picker = os.environ.get("WAYSPOT_TEST_NATIVE_PICKER") == "1"
+picker_lease = 0 if native_picker else 1
 if expected_egl:
     assert Path(expected_egl).is_absolute() and Path(expected_egl).is_file()
     expected_library = (
@@ -332,12 +334,141 @@ def pixel(name):
     return tuple(raw[off : off + 3])
 
 
+def picker_pixels(names):
+    # Verify the actual product's fixed background, toolbar, query, rows
+    # and query glyphs. Not just a log saying that a buffer was attached.
+    for name in names:
+        data = subprocess.check_output(
+            ["grim", "-o", name, "-t", "ppm", "-"], env=env, timeout=5
+        )
+        magic, dims, maximum, raw = data.split(b"\n", 3)
+        assert magic == b"P6" and maximum == b"255"
+        w, h = map(int, dims.split())
+        assert w == 1280 and h == 720
+        x0, y0 = (w - 720) // 2, (h - 520) // 2
+
+        def at(x, y):
+            offset = ((y0 + y) * w + x0 + x) * 3
+            return tuple(raw[offset : offset + 3])
+
+        if (
+            at(2, 2) != (18, 18, 24)
+            or at(12, 12) != (29, 33, 43)
+            or at(12, 50) != (30, 31, 39)
+        ):
+            continue
+        rows = [at(690, 95 + i * 30) for i in range(14)]
+        if (48, 55, 72) not in rows or (24, 24, 30) not in rows:
+            continue
+        if any(min(at(x, y)) > 200 for y in range(52, 76) for x in range(20, 420)):
+            return True
+    return False
+
+
+def picker_only_ab(names):
+    # Same private compositor and real fresh catalog for each run. The old
+    # installed NVIDIA-specialized SDL build is the explicit baseline. No
+    # notification, tray, or wallpaper can initialize GPU state in the SHM
+    # process. First attach and observed pixels are distinct measurements.
+    cfg = root / "picker-only.json"
+    cfg.write_text(
+        json.dumps(
+            {"picker": True, "notifications": False, "tray": False, "wallpaper": None}
+        )
+    )
+    rows = []
+    for rep, order in enumerate((("sdl", "shm"), ("shm", "sdl"))):
+        for mode in order:
+            binary = candidate if mode == "shm" else baseline
+            label = f"picker-{mode}-{rep}"
+            q = start([binary, "resident", cfg], label, True)
+            wait(lambda: status()["pid"] == q.pid, label + " ready")
+            cold = mem(q)
+            cycles = []
+            for cycle in range(3):
+                offset = len(log(label))
+                begin = time.monotonic_ns()
+                run(candidate, "picker")
+                wait(
+                    lambda: new_attach(label, "picker", offset), label + " first attach"
+                )
+                attach = (time.monotonic_ns() - begin) / 1e6
+                wait(lambda: picker_pixels(names), label + " actual picker pixels")
+                observed = (time.monotonic_ns() - begin) / 1e6
+                assert status()["video_users"] == (0 if mode == "shm" else 1)
+                # Allow the bounded deferred icon work to settle. No tray worker.
+                time.sleep(0.35)
+                visible = mem(q)
+                maps = Path(f"/proc/{q.pid}/maps").read_text()
+                if mode == "shm":
+                    assert not re.search(r"/lib(EGL|GLX|nvidia|LLVM)", maps), (
+                        "GPU mapped in fresh SHM picker"
+                    )
+                    assert visible["threads"] == 1
+                else:
+                    assert "/libEGL_nvidia" in maps, (
+                        "baseline not the specialized accelerated build"
+                    )
+                run(candidate, "picker", "dismiss")
+                wait(lambda: not status()["picker_visible"], label + " retired")
+                time.sleep(0.1)
+                hidden = mem(q)
+                cycles.append(
+                    {
+                        "attach_ms": attach,
+                        "pixels_ms": observed,
+                        "visible": visible,
+                        "hidden": hidden,
+                    }
+                )
+            idle = sample([q])
+            assert (
+                idle["threads"] == 1
+                and idle["cpu_ticks_delta"] <= 1
+                and idle["voluntary_switch_delta"] <= 2
+            )
+            assert stop(q) == 0
+            rows.append(
+                {"mode": mode, "rep": rep, "cold": cold, "cycles": cycles, "idle": idle}
+            )
+            print("PICKER_ONLY_PASS", label, flush=True)
+    summary = {}
+    for mode in ("sdl", "shm"):
+        r = [x for x in rows if x["mode"] == mode]
+        c = [x for y in r for x in y["cycles"]]
+        summary[mode] = {
+            "processes": len(r),
+            "cycles": len(c),
+            "cold_pss_kib": statistics.median(x["cold"]["Pss"] for x in r),
+            "visible_pss_kib": statistics.median(x["visible"]["Pss"] for x in c),
+            "hidden_pss_kib": statistics.median(x["hidden"]["Pss"] for x in c),
+            "first_attach_median_ms": statistics.median(x["attach_ms"] for x in c),
+            "observed_pixels_median_ms": statistics.median(x["pixels_ms"] for x in c),
+            "max_idle_ticks_3s": max(x["idle"]["cpu_ticks_delta"] for x in r),
+            "max_idle_threads": max(x["idle"]["threads"] for x in r),
+        }
+    result = {
+        "summary": summary,
+        "samples": rows,
+        "no_gpu_in_shm": True,
+        "scope": "same actual picker product, 2 fresh processes/backend, 3 cycles/process, headless scale-1, tray/notification/wallpaper disabled; observed pixels includes grim and CLI overhead",
+    }
+    (out / "picker-only-ab.json").write_text(json.dumps(result, indent=2) + "\n")
+    return summary
+
+
 def roles(name, role):
+    if role == "picker":
+        return log(name).count("native picker first attach") + log(name).count(
+            '"wayspot-picker")'
+        )
     return log(name).count(f'"wayspot-{role}")')
 
 
 def new_attach(name, role, offset=0):
     text = log(name)[offset:]
+    if role == "picker" and "native picker first attach" in text:
+        return True
     m = re.search(
         r'get_layer_surface\(new id zwlr_layer_surface_v1[#@](\d+), wl_surface[#@](\d+),[^\n]+"wayspot-'
         + role
@@ -434,19 +565,26 @@ def verify_window_finder(resident):
         assert not status()["picker_visible"]
         assert seat()["focused_window"] == ids[target]
         wire = log("resident")[offset:]
-        assert "wayspot-picker" in wire and re.search(
-            r"zwlr_layer_surface_v1[#@]\d+\.destroy\(", wire
-        )
-        assert "wl_display#1.sync(" in wire or re.search(
-            r"wl_display[#@]\d+\.sync\(", wire
-        )
+        if native_picker:
+            assert (
+                wire.index("native picker retired")
+                < wire.index("native picker dismissal sync")
+                < wire.index("window focus applied")
+            )
+        else:
+            assert "wayspot-picker" in wire and re.search(
+                r"zwlr_layer_surface_v1[#@]\d+\.destroy\(", wire
+            )
+            assert "wl_display#1.sync(" in wire or re.search(
+                r"wl_display[#@]\d+\.sync\(", wire
+            )
         assert "exclusive_layer" not in wire and "window selection failed" not in wire
 
     # Shared SDL display remains alive through the picker dismissal barrier.
     hold = notify("Selection with a live banner", ms=60000)
     wait(lambda: status()["notification_visible"], "banner before selection")
     offset = open_windows("red")
-    assert status()["video_users"] == 2
+    assert status()["video_users"] == 1 + picker_lease
     expect_applied("red", offset)
     assert presentations() == {1: 2, 2: 1}
     assert windows()["red"]["scene"]["status"] == "scene_enabled"
@@ -529,7 +667,10 @@ def verify_window_finder(resident):
     offset = len(log("resident"))
     run(candidate, "picker")
     wait(lambda: new_attach("resident", "picker", offset), "application picker mapped")
-    wait(lambda: status()["video_users"] == 2, "shared SDL for launch")
+    wait(
+        lambda: status()["video_users"] == 1 + picker_lease,
+        "independent picker and banner ownership",
+    )
     key("enter")
     launched = wait(
         lambda: json.loads(marker.read_text()),
@@ -677,12 +818,13 @@ try:
         first_attach.append((time.monotonic_ns() - t) / 1e6)
         assert (
             status()["picker_visible"]
-            and status()["video_users"] == 2
+            and status()["video_users"] == 1 + picker_lease
             and status()["notification_visible"]
         )
         assert_no_libdecor(resident)
         assert_egl_vendor(resident)
         if i == 0:
+            wait(lambda: picker_pixels(names), "actual product picker pixels")
             wait(lambda: (root / "action.fetch").exists(), "actual SNI property fetch")
         run(candidate, "picker")
         assert roles("resident", "picker") == i + 1, (
@@ -711,6 +853,7 @@ try:
         assert status()["video_users"] == 0
         assert_no_libdecor(resident)
     print("PASS: 20 shared picker lifetimes, notification and tray survive", flush=True)
+    offset = len(log("resident"))
     run(candidate, "picker")
     nid = notify("expiry alongside picker", ms=250)
     wait(lambda: status()["notification_visible"], "expiry banner")
@@ -718,6 +861,14 @@ try:
         lambda: not status()["notification_visible"] and status()["picker_visible"],
         "expiry kept picker",
     )
+    if native_picker:
+        wait(
+            lambda: (
+                "native picker resumed after SDL shutdown" in log("resident")[offset:]
+            ),
+            "native picker submitted a fresh canvas after SDL shutdown",
+        )
+    wait(lambda: picker_pixels(names), "picker pixels after SDL video shutdown")
     run(candidate, "picker", "dismiss")
     for i in range(4):
         run(candidate, "wallpaper", "rotate")
@@ -776,6 +927,17 @@ try:
         == 0
     )
     assert stop(disabled) == 0
+    picker_ab = None
+    if native_picker and baseline != candidate:
+        picker_ab = picker_only_ab(names)
+        standalone = start([candidate], "standalone-shm", True)
+        wait(lambda: new_attach("standalone-shm", "picker"), "standalone native attach")
+        wait(lambda: picker_pixels(names), "standalone native pixels")
+        assert not re.search(
+            r"/lib(EGL|GLX|nvidia|LLVM)",
+            Path(f"/proc/{standalone.pid}/maps").read_text(),
+        )
+        assert stop(standalone) == 0
     marker = root / "launch.json"
     helper = subprocess.run(
         [
@@ -812,6 +974,10 @@ try:
         "resident_picker_without_banner_ms": cold_summon,
         "resident_pid": resident.pid,
         "picker_cycles": 25,
+        "picker_backend": "shm" if native_picker else "sdl",
+        "product_picker_pixels": True,
+        "canvas_resumed_after_sdl_shutdown": native_picker,
+        "picker_only_ab": picker_ab,
         "wallpaper_rotations": 4,
         "disabled_pass": True,
         "tray_fetch_pass": True,

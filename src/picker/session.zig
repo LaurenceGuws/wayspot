@@ -47,6 +47,7 @@ pub fn open(init: std.process.Init, video: *Video, tray_enabled: bool) !*Self {
     errdefer self.state.deinit();
     self.view = .{
         .video = video,
+        .env = init.environ_map,
         .applications = self.applications.slice(),
         .allocator = init.gpa,
         .io = init.io,
@@ -128,6 +129,7 @@ pub fn trayReady(self: *Self) !bool {
 /// SDL's Wayland backend owns key-repeat generation. When a key is held,
 /// keep pumping it with at most an 8ms gap; no repeat timer while idle.
 pub fn repeatWake(self: *const Self) ?u64 {
+    if (View.native_picker) return self.view.repeatWake();
     if (sdl.SDL_GetKeyboardFocus() != self.view.window) return null;
     var count: c_int = 0;
     const keys = sdl.SDL_GetKeyboardState(&count);

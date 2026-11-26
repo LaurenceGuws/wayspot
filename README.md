@@ -126,6 +126,19 @@ These are not a renderer cutover; the current product still uses SDL video.
 
 ### Application picker
 
+Build the opt-in native SHM picker with:
+
+```sh
+zig build -Dnative_picker=true
+```
+
+The standalone picker and resident picker command both use this backend in
+that build. Notifications still use SDL video, so the optional EGL manifest
+continues to apply to them. The portable default build remains the accepted
+SDL picker until physical acceptance. The resident-live fixture recognizes
+this build and checks actual picker pixels and mixed-lifetime recovery; with
+an explicit installed accelerated baseline it also runs a picker-only A/B.
+
 Run the default graphical picker:
 
 ```bash

@@ -134,8 +134,12 @@ real compositor-specific boundary, such as window discovery and focus, over
 runtime probing or a permanent compositor plugin abstraction. Shared protocol
 behavior has no reason to specialize.
 
-The native SHM surface owner is an opt-in, source-qualified replacement
-boundary, not yet the installed renderer. Its one visible-session connection
+The `-Dnative_picker=true` candidate routes the actual picker through the
+native SHM surface owner, for both standalone and resident invocation. The
+existing application catalog, query, navigator, tray/menu actions, draw
+geometry and lazy icon work remain shared with the SDL picker. Notifications
+still use SDL video. No runtime backend fallback or compositor plugin is
+introduced. The native build is not the installed default yet. Its one visible-session connection
 owns at most one picker and one notification, with at most three buffers per
 surface across all extents. A frame callback permits presentation pacing;
 only wl_buffer.release permits writing into an already-submitted buffer.
@@ -199,11 +203,28 @@ update until a matching serial. Leave and retirement discard pending edits.
 Ordinary compositor-forwarded keys remain authoritative: do not suppress
 all keyboard text just because a text-input manager exists, and do not
 synthesize a key from an IME commit. IME edits cancel repeat and local
-compose. The actual picker must still consume these batches atomically,
-render preedit, and supply surrounding text and cursor geometry. Snowman
-currently lacks the text-input manager, so this protocol boundary has wire
-proof, not end-to-end IME acceptance. Product input integration remains a
-separate gate.
+compose. The picker consumes the edit batch atomically in its append-only query,
+keeps preedit outside application matching, draws its cursor/underline, and
+publishes surrounding text and logical cursor geometry after matching serials.
+Snowman currently lacks the text-input manager, so this path has wire/editor
+proof, not end-to-end IME acceptance.
+
+The transitional picker owns one CPU canvas at the current physical extent.
+SDL's software renderer and Howl Text glyph/icon caches remain stable across
+redraws, and the canvas is copied into an admitted SHM buffer after flushing
+CPU draws. No buffer is written while the compositor owns it. DPI changes
+replace renderer-owned textures and font density, preserving logical geometry.
+SDL's global last-video shutdown destroys even software renderers, so its
+single synchronous retirement hook drops the canvas before shutdown and
+invalidates the picker; the next admitted frame reconstructs it. This hook
+retires with the last SDL video consumer. The native connection and repeat
+wake join the resident's existing sequential poll loop; frame/release
+backpressure, tray completion and deadlines drive drawing. No extra renderer
+worker or polling timer. Wayland does not expose global layer coordinates;
+native SNI activation uses the existing local coordinates when no global
+position is available. The fixture checks actual picker pixels, SDL shutdown
+recovery, application launch and exact window focus; physical and Hyprland
+acceptance remain distinct.
 
 The pinned native Wayland snapshot carries a six-site raw Linux errno fix
 for libc-linked executables, with its retirement criterion in UPSTREAM.md.

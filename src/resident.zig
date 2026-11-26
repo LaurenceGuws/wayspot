@@ -41,7 +41,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
     defer parsed.deinit();
     const config = parsed.value;
     if (config.wallpaper) |root| if (!std.fs.path.isAbsolute(root)) return error.WallpaperRootInvalid;
-    if (config.picker or config.notifications) try Video.prepareProcess(init.io);
+    if ((config.picker and !@import("picker/view.zig").Native.native_picker) or config.notifications) try Video.prepareProcess(init.io);
     const stop = try Stop.open();
     defer stop.close();
     var control = try Control.open(&(try signature(init)));
@@ -173,6 +173,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
         if (control.deadline) |end| shorten(&timeout, end -| time);
         if (current) |session| {
             shorten(&timeout, session.deadline -| time);
+            if (session.view.hasPendingDraw()) shorten(&timeout, 0);
             if (session.repeatWake()) |delay| shorten(&timeout, delay);
         }
         var fds = [_]posix.pollfd{
@@ -184,6 +185,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
             if (wallpaper) |*service| service.pollFd() else pollFd(-1),
             pollFd(try video.fd()),
             pollFd(if (current) |session| session.view.tray_wake_fd else -1),
+            pollFd(if (current) |session| session.view.fd() else -1),
         };
         _ = try posix.poll(&fds, if (timeout) |delay| @intCast(@min(delay, std.math.maxInt(i32))) else -1);
         if (fds[0].revents != 0) {
@@ -196,7 +198,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
         tray_ready = tray_ready or fds[4].revents != 0;
         wallpaper_ready = fds[5].revents != 0;
         if (fds[6].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-            closePicker(&current, .dismiss);
+            if (!@import("picker/view.zig").Native.native_picker) closePicker(&current, .dismiss);
             if (notifications) |*service| service.displayLost();
         }
     }
@@ -210,6 +212,7 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
         if (!sdl.SDL_PollEvent(&input)) break;
         if (notifications.*) |*service| try service.handleEvent(&input);
         if (current.*) |session| {
+            if (@import("picker/view.zig").Native.native_picker) continue;
             batch.items[batch.count] = session.view.handleEvent(input) catch |err| {
                 std.log.warn("picker input failed: {s}", .{@errorName(err)});
                 closePicker(current, .dismiss);
@@ -218,9 +221,15 @@ fn pump(current: *?*Picker, notifications: *?Notification, video: *Video, io: st
             batch.count += 1;
         }
     }
-    const more = received == picker.event_capacity or (video.users != 0 and sdl.SDL_PollEvent(null));
+    var more = received == picker.event_capacity or (video.users != 0 and sdl.SDL_PollEvent(null));
     if (current.*) |session| {
-        if (session.view.layer.closed) {
+        session.view.nativeEvents(&batch) catch |err| {
+            std.log.warn("native picker input failed: {s}", .{@errorName(err)});
+            closePicker(current, .dismiss);
+            return more;
+        };
+        more = more or batch.more;
+        if (session.view.closed()) {
             closePicker(current, .dismiss);
             return more;
         }

@@ -33,6 +33,7 @@ pub const Painter = struct {
     textures: [texture_capacity]CachedGlyph = undefined,
     texture_count: usize = 0,
     next_victim: usize = 0,
+    logical_scale: f32 = 1,
 
     /// Opens one embedded font set, once per visible picker/banner lifetime.
     pub fn init(allocator: std.mem.Allocator, renderer: *sdl.SDL_Renderer, font_size: u16) !Painter {
@@ -49,6 +50,13 @@ pub const Painter = struct {
             .shape_buffer = shape_buffer,
             .metrics = font.metrics(),
         };
+    }
+
+    pub fn initScaled(allocator: std.mem.Allocator, renderer: *sdl.SDL_Renderer, font_size: u16, scale: f32) !Painter {
+        if (!std.math.isFinite(scale) or scale <= 0 or scale > 8) return error.InvalidTextScale;
+        var self = try init(allocator, renderer, @intFromFloat(@max(1, @round(@as(f32, @floatFromInt(font_size)) * scale))));
+        self.logical_scale = scale;
+        return self;
     }
 
     /// Drops renderer resources before the SDL renderer, then closes font state.
@@ -81,11 +89,11 @@ pub const Painter = struct {
                     return error.SdlTextColorFailed;
                 }
                 const destination = sdl.SDL_FRect{
-                    .x = x + unit(pen_x + glyph.x_offset) + @as(f32, @floatFromInt(cached.left)),
-                    .y = y + @as(f32, @floatFromInt(self.metrics.baseline)) -
-                        @as(f32, @floatFromInt(cached.top)) - unit(pen_y + glyph.y_offset),
-                    .w = @floatFromInt(cached.width),
-                    .h = @floatFromInt(cached.height),
+                    .x = x + (unit(pen_x + glyph.x_offset) + @as(f32, @floatFromInt(cached.left))) / self.logical_scale,
+                    .y = y + (@as(f32, @floatFromInt(self.metrics.baseline)) -
+                        @as(f32, @floatFromInt(cached.top)) - unit(pen_y + glyph.y_offset)) / self.logical_scale,
+                    .w = @as(f32, @floatFromInt(cached.width)) / self.logical_scale,
+                    .h = @as(f32, @floatFromInt(cached.height)) / self.logical_scale,
                 };
                 if (!sdl.SDL_RenderTexture(self.renderer, texture, null, &destination)) {
                     return error.SdlTextDrawFailed;
@@ -102,7 +110,7 @@ pub const Painter = struct {
         const run = try self.shape(bytes);
         var advance: i64 = 0;
         for (run.glyphs) |glyph| advance += glyph.x_advance;
-        return @max(0, unit(advance));
+        return @max(0, unit(advance) / self.logical_scale);
     }
 
     /// Wraps a short banner to caller-owned width and height. SDL owns clipping.

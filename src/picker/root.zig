@@ -200,6 +200,8 @@ pub const Event = union(enum) {
     down,
     enter,
     text: Text,
+    edit: struct { commit: Text, preedit: Text, delete_before: u32, delete_after: u32, cursor_begin: i32 = -1, cursor_end: i32 = -1 },
+    cancel_preedit,
     hover: usize,
     click: usize,
     scroll: i8,
@@ -234,6 +236,9 @@ pub const WindowStatus = enum {
 pub const Frame = struct {
     table: Table = .apps,
     query: [:0]const u8,
+    preedit: []const u8 = "",
+    preedit_cursor: [2]i32 = .{ -1, -1 },
+    query_from_ime: bool = false,
     rows: [visible_row_capacity]Row = undefined,
     row_count: usize = 0,
     selected_row: usize = 0,
@@ -345,6 +350,9 @@ pub const State = struct {
     window_backend: ?navigator.Backend = null,
     applications: []const apps.App,
     query: Query = .{},
+    preedit: Text = .{ .len = 0 },
+    preedit_cursor: [2]i32 = .{ -1, -1 },
+    query_from_ime: bool = false,
     rows: Rows = .{ .apps = .{ .applications = &.{}, .matches = .{} } },
     selected: usize = 0,
     first: usize = 0,
@@ -376,6 +384,7 @@ pub const State = struct {
             switch (event) {
                 .quit, .escape => return .dismiss,
                 .tab => {
+                    state.preedit.len = 0;
                     if (state.finder == .windows) {
                         try state.enterApplications(history_reader);
                     } else {
@@ -383,6 +392,7 @@ pub const State = struct {
                     }
                 },
                 .backspace => {
+                    state.preedit.len = 0;
                     var query = state.query;
                     query.delete();
                     try state.setQuery(history_reader, query);
@@ -399,10 +409,34 @@ pub const State = struct {
                     if (try state.acceptSelection(history_reader, navigator_operations)) |action| return action;
                 },
                 .text => |text| {
+                    state.preedit.len = 0;
                     var query = state.query;
                     try query.append(text.slice());
                     try state.setQuery(history_reader, query);
                 },
+                .edit => |edit| {
+                    // Query is append-only, with the cursor at the end.
+                    // Reject invalid deletion/overflow as one edit.
+                    if (edit.delete_after != 0 or edit.delete_before > state.query.len) continue;
+                    var query = state.query;
+                    const end = query.len - edit.delete_before;
+                    if (end < query.len and textContinuation(query.bytes[end])) continue;
+                    if (edit.commit.len > query_capacity - end or !std.unicode.utf8ValidateSlice(edit.commit.slice()) or !std.unicode.utf8ValidateSlice(edit.preedit.slice())) continue;
+                    if (!(edit.cursor_begin == -1 and edit.cursor_end == -1)) {
+                        const valid = for ([_]i32{ edit.cursor_begin, edit.cursor_end }) |offset| {
+                            if (offset < 0 or offset > edit.preedit.len or (offset < edit.preedit.len and textContinuation(edit.preedit.bytes[@intCast(offset)]))) break false;
+                        } else true;
+                        if (!valid) continue;
+                    }
+                    query.len = end;
+                    query.bytes[end] = 0;
+                    try query.append(edit.commit.slice());
+                    if (!std.mem.eql(u8, query.text(), state.query.text())) try state.setQuery(history_reader, query);
+                    state.preedit = edit.preedit;
+                    state.preedit_cursor = .{ edit.cursor_begin, edit.cursor_end };
+                    state.query_from_ime = true;
+                },
+                .cancel_preedit => state.preedit.len = 0,
                 .hover => |row| {
                     if (visibleSelection(state, row, state.rows.count())) |selected| {
                         state.selected = selected;
@@ -456,6 +490,7 @@ pub const State = struct {
             Rows.initRoot(text[1..]);
         state.rows.deinit(state.allocator);
         state.query = query;
+        state.query_from_ime = false;
         state.rows = rows;
         state.selected = 0;
         state.first = 0;
@@ -513,6 +548,7 @@ pub const State = struct {
         const rows = try Rows.initWindows(state.applications, &state.window_snapshot, query.text());
         state.rows.deinit(state.allocator);
         state.query = query;
+        state.query_from_ime = false;
         state.rows = rows;
         state.selected = 0;
         state.first = 0;
@@ -561,6 +597,9 @@ fn makeFrame(state: *const State) Frame {
     var frame = Frame{
         .table = std.meta.activeTag(state.rows),
         .query = state.query.text(),
+        .preedit = state.preedit.slice(),
+        .preedit_cursor = state.preedit_cursor,
+        .query_from_ime = state.query_from_ime,
         .first = @min(state.first, total),
         .total_count = total,
         .window_status = state.window_status,
@@ -940,4 +979,36 @@ fn testAppId(id: []const u8, name: []const u8) apps.App {
         .terminal = false,
         .issues = .empty,
     };
+}
+
+test "IME edits update the append-only query atomically and keep preedit out of matching" {
+    const History = struct {
+        pub fn readHistory(_: @This()) !notification.History {
+            return .{};
+        }
+    };
+    var state: State = .{ .allocator = std.testing.allocator, .applications = &.{} };
+    defer state.deinit();
+    try state.begin();
+    const nav = navigator.Native{ .io = std.testing.io, .environ_map = null };
+    var events: Events = .{};
+    events.count = 1;
+    events.items[0] = .{ .text = try Text.init("aé") };
+    _ = try state.advance(History{}, nav, &events);
+    events.items[0] = .{ .edit = .{ .commit = try Text.init("漢"), .preedit = try Text.init("字"), .delete_before = 1, .delete_after = 0 } };
+    try std.testing.expectEqual(Action.wait, try state.advance(History{}, nav, &events));
+    try std.testing.expectEqualStrings("aé", state.frame().query);
+    events.items[0].edit.delete_before = 2;
+    events.items[0].edit.cursor_begin = 3;
+    events.items[0].edit.cursor_end = 3;
+    try std.testing.expectEqual(Action.draw, try state.advance(History{}, nav, &events));
+    const frame = state.frame();
+    try std.testing.expectEqualStrings("a漢", frame.query);
+    try std.testing.expectEqualStrings("字", frame.preedit);
+    try std.testing.expectEqual([2]i32{ 3, 3 }, frame.preedit_cursor);
+    try std.testing.expect(frame.query_from_ime);
+    events.items[0] = .cancel_preedit;
+    _ = try state.advance(History{}, nav, &events);
+    try std.testing.expectEqualStrings("a漢", state.frame().query);
+    try std.testing.expectEqualStrings("", state.frame().preedit);
 }

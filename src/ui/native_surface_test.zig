@@ -1331,3 +1331,35 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
     try testing.expectEqual(@as(u32, 0), sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO));
     std.debug.print("NATIVE_INPUT_LIVE_PASS local seat only, real XKB text and navigation, matched pointer press/release at 1.75x, retired focus\n", .{});
 }
+
+test "IME surrounding context is committed once and waits for a matching done" {
+    var f = try Fixture.open();
+    defer f.close();
+    try f.global(21, "zwp_text_input_manager_v3", 1);
+    try localInput(&f);
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch {};
+    _ = try f.take();
+    const object = f.display.input.ime_object.?.id;
+    const rect: [4]i32 = .{ 20, 52, 1, 20 };
+    try f.display.input.setImeContext(&f.display.conn, "a", rect, false);
+    try testing.expectEqual(@as(usize, 0), (try f.take()).len);
+    try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.surface.?.id }});
+    const initial = try f.take();
+    try testing.expectEqual(@as(usize, 1), initial.count(object, 3));
+    try testing.expectEqual(@as(usize, 1), initial.count(object, 6));
+    try testing.expectEqual(@as(usize, 1), initial.count(object, 7));
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 0 }});
+    _ = try nextInput(&f, picker, .ime);
+    try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
+    try testing.expectEqual(@as(usize, 0), (try f.take()).len);
+    try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 1 }});
+    _ = try nextInput(&f, picker, .ime);
+    try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
+    const update = try f.take();
+    try testing.expectEqual(@as(usize, 1), update.count(object, 3));
+    try testing.expectEqual(@as(usize, 1), update.count(object, 7));
+    try testing.expectEqual(@as(u32, 0), try update.firstWord(object, 4));
+    try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
+    try testing.expectEqual(@as(usize, 0), (try f.take()).len);
+}

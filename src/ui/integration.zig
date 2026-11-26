@@ -48,6 +48,7 @@ const HistoryReader = struct {
 };
 
 test "private shared video routes two real layers and releases only the closing owner" {
+    if (View.native_picker) return; // The native mixed-lifetime path has its own resident gate.
     const requested = getenv("WAYSPOT_GUI_PRIVATE_TEST") orelse return;
     const runtime = std.mem.span(getenv("XDG_RUNTIME_DIR") orelse return error.PrivateRuntimeMissing);
     // Require the explicit private runtime identity, not a flag that could

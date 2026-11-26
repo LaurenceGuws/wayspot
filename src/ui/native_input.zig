@@ -65,6 +65,12 @@ pub const ImeBatch = struct {
     serial_matches: bool = false,
 };
 
+pub const ImeContext = struct {
+    text: [256:0]u8 = @splat(0),
+    len: u16 = 0,
+    rect: [4]i32 = .{ 20, 52, 1, 20 },
+};
+
 pub const Event = struct {
     surface: wire.ObjectId,
     value: union(enum) {
@@ -112,6 +118,9 @@ ime_focus: ?wire.ObjectId = null,
 ime_serial: u32 = 0,
 ime_pending: ImeBatch = .{},
 ime_preedit: bool = false,
+ime_context: ?ImeContext = null,
+ime_sent: ?ImeContext = null,
+ime_can_update: bool = true,
 axis_units: i64 = 0,
 axis_distance: f64 = 0,
 axis_steps: ?i64 = null,
@@ -137,6 +146,7 @@ pub fn register(self: *Self, slot: usize, surface: wl.Surface, keyboard: bool) v
 pub fn forget(self: *Self, conn: *Connection, slot: usize) !void {
     const retired = self.targets[slot] orelse return;
     self.targets[slot] = null;
+    if (retired.keyboard) self.ime_context = null;
     const disable_ime = self.ime_focus == retired.id;
     if (disable_ime) self.resetIme();
     if (self.keyboard_focus == retired.id) self.resetKeyboard();
@@ -259,8 +269,35 @@ fn commitIme(self: *Self, conn: *Connection) !void {
     self.ime_serial +%= 1;
 }
 
+/// The editor owns committed query text. Publish an append-only cursor and
+/// its rectangle in surface-local coordinates, never a preedit string.
+/// Cache desired context even when a stale done serial prevents sending it.
+pub fn setImeContext(self: *Self, conn: *Connection, text: []const u8, rect: [4]i32, from_ime: bool) !void {
+    if (self.ime_manager == null) return;
+    if (text.len > 256 or !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.NativeImeText;
+    var context: ImeContext = .{ .len = @intCast(text.len), .rect = rect };
+    @memcpy(context.text[0..text.len], text);
+    self.ime_context = context;
+    if (self.ime_focus == null or !self.ime_can_update) return;
+    if (self.ime_sent) |sent| if (std.meta.eql(sent, context)) return;
+    try self.sendImeContext(conn, from_ime);
+    try self.commitIme(conn);
+    try conn.flush();
+}
+
+fn sendImeContext(self: *Self, conn: *Connection, from_ime: bool) !void {
+    const context = self.ime_context orelse return;
+    const object = self.ime_object.?;
+    try object.setSurroundingText(&conn.session, context.text[0..context.len :0], context.len, context.len);
+    try object.setTextChangeCause(&conn.session, if (from_ime) .input_method else .other);
+    try object.setCursorRectangle(&conn.session, context.rect[0], context.rect[1], context.rect[2], context.rect[3]);
+    self.ime_sent = context;
+}
+
 fn resetIme(self: *Self) void {
     self.ime_focus = null;
+    self.ime_sent = null;
+    self.ime_can_update = true;
     self.ime_pending = .{};
     self.ime_preedit = false;
     self.repeat = null;
@@ -275,9 +312,8 @@ fn onIme(self: *Self, conn: *Connection, object: zwp.TextInputV3, event: zwp.Tex
             if (!self.target(entered.surface.id, true)) return;
             self.ime_focus = entered.surface.id;
             try object.enable(&conn.session);
-            // Surrounding text and cursor geometry belong to the actual
-            // editable widget, not this transport. Advertise neither until
-            // the picker adapter supplies them.
+            try object.setContentType(&conn.session, .{}, .normal);
+            try self.sendImeContext(conn, false);
             try self.commitIme(conn);
         },
         .leave => |left| if (self.ime_focus == left.surface.id) {
@@ -304,9 +340,13 @@ fn onIme(self: *Self, conn: *Connection, object: zwp.TextInputV3, event: zwp.Tex
                     // The v3 specification applies edits even for a stale
                     // serial, but forbids updating client state until matched.
                     self.ime_pending.serial_matches = value.serial == self.ime_serial;
+                    self.ime_can_update = self.ime_pending.serial_matches;
+                    const has_edit = self.ime_preedit or self.ime_pending.preedit.len != 0 or self.ime_pending.commit.len != 0 or self.ime_pending.delete_before != 0 or self.ime_pending.delete_after != 0;
                     self.ime_preedit = self.ime_pending.preedit.len != 0;
-                    self.repeat = null;
-                    self.resetCompose();
+                    if (has_edit) {
+                        self.repeat = null;
+                        self.resetCompose();
+                    }
                     try self.push(.{ .surface = focus, .value = .{ .ime = self.ime_pending } });
                     self.ime_pending = .{};
                 },

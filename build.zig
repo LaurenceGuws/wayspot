@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = optimizeOption(b);
     const egl_manifest = b.option([]const u8, "egl_vendor_manifest", "Restrict this build's GUI to one absolute GLVND EGL vendor manifest (default: unrestricted)");
     const settings = b.addOptions();
+    const native_picker = b.option(bool, "native_picker", "Use native Wayland SHM for the picker (notifications remain SDL)") orelse false;
+    settings.addOption(bool, "native_picker", native_picker);
     const egl_manifest_z: ?[:0]const u8 = if (egl_manifest) |path| blk: {
         if (!std.fs.path.isAbsolute(path) or std.mem.indexOfAny(u8, path, ":\x00\r\n") != null) {
             std.log.err("-Degl_vendor_manifest requires one absolute manifest path", .{});
@@ -159,6 +161,14 @@ pub fn build(b: *std.Build) void {
     xkb_translate.linkSystemLibrary("xkbcommon", .{});
     source_tests.root_module.addImport("xkb_c", xkb_translate.createModule());
     source_tests.root_module.linkSystemLibrary("xkbcommon", .{});
+    if (native_picker) {
+        wayspot.addImport("wayland-client", native_wayland.module("client"));
+        wayspot.addImport("wayland-protocols", native_protocols);
+        wayspot.addImport("wayland-present", native_present);
+        wayspot.addImport("wayland-wire", native_wayland.module("protocol"));
+        wayspot.addImport("xkb_c", xkb_translate.createModule());
+        wayspot.linkSystemLibrary("xkbcommon", .{});
+    }
     source_tests.use_llvm = false;
     source_tests.use_lld = false;
     const live_native = b.addSystemCommand(&.{"python3"});
@@ -200,6 +210,7 @@ pub fn build(b: *std.Build) void {
     live_resident.addFileArg(executable.getEmittedBin());
     live_resident.setCwd(b.path("."));
     live_resident.has_side_effects = true;
+    if (native_picker) live_resident.setEnvironmentVariable("WAYSPOT_TEST_NATIVE_PICKER", "1");
     if (egl_manifest) |path| live_resident.setEnvironmentVariable("WAYSPOT_EXPECT_EGL_MANIFEST", path);
     b.step("resident-live", "Prove all capabilities in an explicit isolated session")
         .dependOn(&live_resident.step);

@@ -7,6 +7,10 @@ const egl_vendor_manifest = @import("build_options").egl_vendor_manifest;
 
 users: u8 = 0,
 tray_event: ?u32 = null,
+/// SDL_QuitRender also destroys windowless software renderers. A visible
+/// SHM picker registers one synchronous retirement hook before taking a
+/// canvas; the last video release must retire it before global SDL_Quit.
+software_owner: ?struct { context: *anyopaque, retire: *const fn (*anyopaque) void } = null,
 
 /// Called once at the graphical process entrypoint, before SDL or service
 /// workers start. GLVND reads libc's environment, not SDL's private hint map.
@@ -39,7 +43,10 @@ pub fn acquire(self: *Self) !void {
 pub fn release(self: *Self) void {
     std.debug.assert(self.users > 0);
     self.users -= 1;
-    if (self.users == 0) sdl.SDL_Quit();
+    if (self.users == 0) {
+        if (self.software_owner) |owner| owner.retire(owner.context);
+        sdl.SDL_Quit();
+    }
 }
 
 /// SDL's user-event counter survives SDL_Quit. Allocate once per process,

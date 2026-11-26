@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !u8 {
         return perform(init, meaning, applications.slice(), terminal, home);
     }
 
-    try Video.prepareProcess(init.io);
+    if (!sdl.Native.native_picker) try Video.prepareProcess(init.io);
     runPicker(init, &files, &applications, terminal, home) catch |failure| {
         if (navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP")) != .snowman) return failure;
         navigator.reportFailure(init, failure);
@@ -126,8 +126,12 @@ fn runPicker(
 ) !void {
     logApplications(files, applications);
     var video: Video = .{};
+    var stop: ?@import("stop.zig") = if (sdl.Native.native_picker) try @import("stop.zig").open() else null;
+    defer if (stop) |owner| owner.close();
     var native: sdl.Native = .{
         .video = &video,
+        .env = init.environ_map,
+        .stop_fd = if (stop) |owner| owner.fd else -1,
         .applications = applications.slice(),
         .allocator = init.gpa,
         .io = init.io,
@@ -144,6 +148,10 @@ fn runPicker(
         @intCast(std.os.linux.getpid()),
         applications.slice(),
     )) |index| {
+        if (stop) |owner| {
+            owner.close();
+            stop = null;
+        }
         var process = launch.Native{ .io = init.io, .environ_map = init.environ_map };
         try launch.spawn(&process, &applications.slice()[index], terminal, home);
     }
