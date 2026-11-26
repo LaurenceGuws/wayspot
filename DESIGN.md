@@ -270,7 +270,7 @@ one bounded copy so ordinary redraws retain glyph and icon textures. The
 banner instead paints directly into the borrowed buffer. Native Wayland
 input remains logical even at fractional scale.
 
-The banner now composes `ui/canvas.zig` views by value. A child retains its
+The banner now composes Wattle `Canvas` views by value. A child retains its
 requested parent-local origin and intersects its clip with every ancestor;
 it neither allocates nor owns another pixel buffer, renderer, surface or
 command list. A draw borrows the existing text painter, temporarily installs
@@ -287,11 +287,11 @@ same toolbar-local half-open slot rectangles; icons, menus, clock facts and
 activation still belong to the picker. Six-density byte comparisons cover an
 empty and fully populated tray, including transparent textures and missing-icon
 fallbacks. No retained widget tree or generic input dispatcher is introduced.
-The menu and result list share `ui/row_layout.zig`: a logical rectangle,
+The menu and result list share Wattle `RowLayout`: a logical rectangle,
 row pitch and trailing paint gap. Pointer hit testing uses the same slots
 as row composition. The result list preserves its two-pixel clickable gap;
 menus have no gap. This primitive owns no data, selection or scroll state.
-The concrete `ui/menu.zig` widget adds its own hover/keyboard position.
+The concrete Wattle `Menu` widget adds its own hover/keyboard position.
 The picker owns fetched rows, enabled-action checks, the originating tray
 item and all D-Bus effects in one optional `OpenMenu`. Replacement and
 retirement discard navigation with the corresponding protocol snapshot.
@@ -301,7 +301,7 @@ The result painter borrows a Canvas child for each visible row and its
 icon/text columns; even a long application name cannot escape its row and
 paint over the scrollbar. Six-density absolute-reference pixel tests cover
 every result form, selected and unselected, including label containment.
-The concrete `ui/text_field.zig` value owns field and committed-caret
+The concrete Wattle `TextField` value owns field and committed-caret
 geometry. It borrows display text, committed text and preedit for drawing;
 the picker still owns the editor, matching, focus and IME protocol state.
 The same field geometry anchors the IME cursor rectangle before conversion
@@ -313,6 +313,12 @@ paths at six densities. Only the presenter clears the destination, owns
 SDL resources and commits the admitted SHM frame. `tray-live` exercises
 actual UI/Wayland/D-Bus behavior. No retained label copies, general event
 dispatcher or separate widget surfaces.
+
+The drawing primitives, text painter and concrete menu/search field now
+live in the independent Wattle source module. Wayspot pins its exact Git
+revision and package hash, uses its single CPU-only SDL ABI and runs its
+standalone tests in the product check graph. Presentation, native input,
+tray protocol, wallpaper, discovery and application actions stay here.
 
 Retention is an independent presenter policy, not a requirement of the
 spatial composition API. A measured experiment against the actual picker

@@ -1,10 +1,10 @@
 //! Owns the fixed picker's pixel rectangles and pointer hit testing.
 
 const std = @import("std");
-const canvas = @import("../ui/canvas.zig");
-const CanvasRect = canvas.Rect;
-const TextField = @import("../ui/text_field.zig").TextField;
-const RowLayout = @import("../ui/row_layout.zig").RowLayout;
+const wattle = @import("wattle");
+const CanvasRect = wattle.Rect;
+const TextField = wattle.TextField;
+const RowLayout = wattle.RowLayout;
 
 pub const window_width = 720;
 pub const window_height = 520;
@@ -53,7 +53,7 @@ pub const scrollbar_track = CanvasRect{
 };
 
 /// Fractional thumb relative to its track; the track owns clipping.
-pub fn scrollbar(first: usize, shown: usize, total: usize) ?canvas.FloatRect {
+pub fn scrollbar(first: usize, shown: usize, total: usize) ?wattle.FloatRect {
     if (total <= shown) return null;
     std.debug.assert(shown > 0);
     std.debug.assert(first <= total - shown);

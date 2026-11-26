@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const wallpaper = @import("root.zig");
-const sdl = @import("sdl_c");
+const sdl = @import("wattle").sdl;
 const wl = @import("wayland_c");
 const outputs = @import("outputs.zig");
 const Stop = @import("../stop.zig");

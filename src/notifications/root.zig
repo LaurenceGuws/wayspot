@@ -2,9 +2,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const sdl = @import("sdl_c");
-const text_draw = @import("../ui/text.zig");
-const Canvas = @import("../ui/canvas.zig").Canvas;
+const wattle = @import("wattle");
+const sdl = wattle.sdl;
+const Canvas = wattle.Canvas;
 const dbus = @import("dbus_c");
 const UiOwner = @import("../ui/owner.zig");
 const Stop = @import("../stop.zig");
@@ -201,13 +201,13 @@ const Banner = struct {
         defer sdl.SDL_DestroyRenderer(renderer);
         if (!sdl.SDL_SetRenderLogicalPresentation(renderer, banner_width, banner_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX)) return error.SdlLogicalPresentationFailed;
         const scale = @min(@as(f32, @floatFromInt(frame.extent.width)) / banner_width, @as(f32, @floatFromInt(frame.extent.height)) / banner_height);
-        var painter = try text_draw.Painter.initScaled(context.allocator, renderer, banner_font_size, scale);
+        var painter = try wattle.Painter.initScaled(context.allocator, renderer, banner_font_size, scale);
         defer painter.deinit();
         try drawContents(renderer, &painter, context.item);
         if (!sdl.SDL_FlushRenderer(renderer)) return error.NativeBannerFlush;
     }
 
-    fn drawContents(renderer: *sdl.SDL_Renderer, painter: *text_draw.Painter, item: *const Presentation) !void {
+    fn drawContents(renderer: *sdl.SDL_Renderer, painter: *wattle.Painter, item: *const Presentation) !void {
         if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255)) return error.SdlDrawFailed;
         if (!sdl.SDL_RenderClear(renderer)) return error.SdlDrawFailed;
         const root = try Canvas.root(renderer, banner_width, banner_height);
@@ -230,7 +230,7 @@ test "borrowed banner canvas preserves direct drawing pixels at mixed densities"
             defer sdl.SDL_DestroyRenderer(renderer);
             try std.testing.expect(sdl.SDL_SetRenderLogicalPresentation(renderer, banner_width, banner_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX));
             const scale = @min(@as(f32, @floatFromInt(frame.extent.width)) / banner_width, @as(f32, @floatFromInt(frame.extent.height)) / banner_height);
-            var painter = try text_draw.Painter.initScaled(std.testing.allocator, renderer, banner_font_size, scale);
+            var painter = try wattle.Painter.initScaled(std.testing.allocator, renderer, banner_font_size, scale);
             defer painter.deinit();
             try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
             try std.testing.expect(sdl.SDL_RenderClear(renderer));

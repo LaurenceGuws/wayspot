@@ -8,14 +8,13 @@ const image = @import("image.zig");
 const navigator = @import("navigator.zig");
 const picker = @import("root.zig");
 const pixels = @import("geometry.zig");
-const text_draw = @import("../ui/text.zig");
-const canvas_draw = @import("../ui/canvas.zig");
-const Canvas = canvas_draw.Canvas;
-const Menu = @import("../ui/menu.zig").Menu;
+const wattle = @import("wattle");
+const Canvas = wattle.Canvas;
+const Menu = wattle.Menu;
 const UiOwner = @import("../ui/owner.zig");
 const tray = @import("../tray/host.zig");
 const tray_menu = @import("../tray/menu.zig");
-const sdl = @import("sdl_c");
+const sdl = wattle.sdl;
 const time = @import("time_c");
 const shm = @import("../ui/native_surface.zig");
 const Input = shm.Input;
@@ -56,7 +55,7 @@ pub const Native = struct {
     io: std.Io,
     home: []const u8,
     renderer: ?*sdl.SDL_Renderer = null,
-    text: ?text_draw.Painter = null,
+    text: ?wattle.Painter = null,
     icons: [picker.visible_row_capacity]Icon = undefined,
     icon_count: usize = 0,
     pending_icons: bool = false,
@@ -517,7 +516,7 @@ pub const Native = struct {
             errdefer native.dropCanvas();
             native.renderer = sdl.SDL_CreateSoftwareRenderer(native.canvas.?) orelse return error.NativeCanvasRenderer;
             if (!sdl.SDL_SetRenderLogicalPresentation(native.renderer.?, pixels.window_width, pixels.window_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX)) return error.SdlLogicalPresentationFailed;
-            native.text = try text_draw.Painter.initScaled(native.allocator, native.renderer.?, font_size, scale);
+            native.text = try wattle.Painter.initScaled(native.allocator, native.renderer.?, font_size, scale);
             native.canvas_scale = scale;
             native.createTrayTextures();
         }
@@ -918,7 +917,7 @@ fn destroyIcon(icon: Native.Icon) void {
 
 /// Map UI geometry into the configured surface's logical coordinate space.
 /// Buffer density is deliberately absent from this protocol conversion.
-fn imeCursorRect(extent: shm.Extent, caret: canvas_draw.FloatRect) [4]i32 {
+fn imeCursorRect(extent: shm.Extent, caret: wattle.FloatRect) [4]i32 {
     const width: f64 = @floatFromInt(extent.width);
     const height: f64 = @floatFromInt(extent.height);
     const scale = @min(width / pixels.window_width, height / pixels.window_height);
@@ -1122,7 +1121,7 @@ test "tray menu overlays only its bounded picker rectangle and remains navigable
     defer sdl.SDL_DestroyRenderer(renderer);
     var ui_owner: UiOwner = .{};
     var native = Native{ .ui_owner = &ui_owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "/home/test", .renderer = renderer };
-    native.text = try text_draw.Painter.init(std.testing.allocator, renderer, 16);
+    native.text = try wattle.Painter.init(std.testing.allocator, renderer, 16);
     defer native.clearText();
     var menu: tray_menu.Menu = .{};
     menu.rows[0] = .{ .id = 7, .length = 13 };
@@ -1229,7 +1228,7 @@ test "borrowed toolbar preserves exact direct pixels for zero and full tray at m
             const scale: f32 = @min(@as(f32, @floatFromInt(frame.extent.width)) / pixels.window_width, @as(f32, @floatFromInt(frame.extent.height)) / pixels.window_height);
             var owner: UiOwner = .{};
             var native = Native{ .ui_owner = &owner, .applications = &.{}, .allocator = allocator, .io = undefined, .home = "", .renderer = renderer, .canvas_scale = scale };
-            native.text = try text_draw.Painter.initScaled(allocator, renderer, Native.font_size, scale);
+            native.text = try wattle.Painter.initScaled(allocator, renderer, Native.font_size, scale);
             defer native.clearText();
             var icon_pixels = [_]u32{ 0xffff0000, 0x8000ff00, 0xff1f42e0, 0xffd0dae0, 0xff23d273, 0x00000000 };
             const icon = sdl.SDL_CreateSurfaceFrom(3, 2, sdl.SDL_PIXELFORMAT_ARGB8888, &icon_pixels, 12) orelse return error.SdlTestSurface;
@@ -1307,7 +1306,7 @@ test "canvas menu matches direct drawing for root, disabled and nested rows at m
             const scale: f32 = @min(@as(f32, @floatFromInt(frame.extent.width)) / pixels.window_width, @as(f32, @floatFromInt(frame.extent.height)) / pixels.window_height);
             var owner: UiOwner = .{};
             var native = Native{ .ui_owner = &owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "", .renderer = renderer, .canvas_scale = scale };
-            native.text = try text_draw.Painter.initScaled(std.testing.allocator, renderer, Native.font_size, scale);
+            native.text = try wattle.Painter.initScaled(std.testing.allocator, renderer, Native.font_size, scale);
             defer native.clearText();
             try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
             try std.testing.expect(sdl.SDL_RenderClear(renderer));
@@ -1395,7 +1394,7 @@ test "open menu owns its exact tray identity and clears navigation on replacemen
 
 test "result canvas preserves all four row forms and contains overflowing app labels" {
     const Reference = struct {
-        fn text(renderer: *sdl.SDL_Renderer, painter: *text_draw.Painter, label: []const u8, color: [3]u8, x: i32, top: i32, width: ?i32) !void {
+        fn text(renderer: *sdl.SDL_Renderer, painter: *wattle.Painter, label: []const u8, color: [3]u8, x: i32, top: i32, width: ?i32) !void {
             if (width) |w| {
                 const clip: sdl.SDL_Rect = .{ .x = x, .y = top, .w = w, .h = 28 };
                 try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &clip));
@@ -1453,7 +1452,7 @@ test "result canvas preserves all four row forms and contains overflowing app la
             const scale: f32 = @min(@as(f32, @floatFromInt(frame.extent.width)) / pixels.window_width, @as(f32, @floatFromInt(frame.extent.height)) / pixels.window_height);
             var owner: UiOwner = .{};
             var native = Native{ .ui_owner = &owner, .applications = applications, .allocator = allocator, .io = undefined, .home = "", .renderer = renderer, .canvas_scale = scale };
-            native.text = try text_draw.Painter.initScaled(allocator, renderer, Native.font_size, scale);
+            native.text = try wattle.Painter.initScaled(allocator, renderer, Native.font_size, scale);
             defer native.clearText();
             var icon_pixels = [_]u32{ 0xffff0000, 0x8000ff00, 0xff1f42e0, 0x00000000 };
             const icon = sdl.SDL_CreateSurfaceFrom(2, 2, sdl.SDL_PIXELFORMAT_ARGB8888, &icon_pixels, 8) orelse return error.SdlTestSurface;
@@ -1581,7 +1580,7 @@ test "fractional scrollbar canvas preserves independent absolute thumb geometry"
 }
 
 test "IME cursor conversion uses logical surface letterboxing and not buffer density" {
-    const caret: canvas_draw.FloatRect = .{ .x = 700, .y = 52, .w = 1, .h = 20 };
+    const caret: wattle.FloatRect = .{ .x = 700, .y = 52, .w = 1, .h = 20 };
     try std.testing.expectEqual([4]i32{ 700, 52, 1, 20 }, imeCursorRect(.{ .width = 720, .height = 520 }, caret));
     try std.testing.expectEqual([4]i32{ 1400, 104, 2, 40 }, imeCursorRect(.{ .width = 1440, .height = 1040 }, caret));
     try std.testing.expectEqual([4]i32{ 800, 52, 1, 20 }, imeCursorRect(.{ .width = 920, .height = 520 }, caret));

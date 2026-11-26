@@ -50,13 +50,14 @@ vendored sources where present, otherwise use an available upstream checkout or
 the upstream project itself. Do not encode one developer machine's filesystem
 layout into Wayspot's product or contributor contract.
 
-SDL3 used only for CPU drawing and image decoding is vendored under
-`vendor/sdl/`. Native Wayland owns UI presentation and input.
-The Howl Text font/shaping/rasterization source is a pinned upstream snapshot
-under `vendor/howl-text/`; Wayspot owns only presentation, clipping and SDL
-glyph textures, not font shaping or a terminal renderer. The original upstream
-commit and subtree are recorded in `vendor/howl-text/UPSTREAM.md`. Protocol XML
-used by the Wayland resident lives under `protocols/`.
+The pinned Wattle dependency owns the CPU-only SDL build, translated SDL
+binding, text presentation, Canvas and concrete UI widgets. Wattle preserves
+SDL, Howl Text and font provenance and license notices. Do not duplicate
+those sources or add a second SDL build in Wayspot. Native Wayland owns UI
+presentation and input; application editing, tray, notifications and window
+focus remain product-owned. Protocol XML used by the resident lives under
+`protocols/`. Changes to Wattle must qualify the actual consumer before
+updating its exact commit and content hash.
 
 ## Working loop
 

@@ -9,46 +9,9 @@ pub fn build(b: *std.Build) void {
     const audit_command = b.addSystemCommand(&.{ "zig-audit", "check" });
     audit_command.setCwd(b.path("."));
     audit.dependOn(&audit_command.step);
-    const sdl = b.dependency("sdl", .{
-        .target = target,
-        .optimize = optimize,
-        .preferred_linkage = .static,
-        // Wayspot only needs SDL surfaces, image decoding and the software
-        // rasterizer. No video subsystem or accelerated renderer is available.
-        .build_config_h_overrides = @as([]const []const u8, &.{
-            "-DSDL_VIDEO_DISABLED=1",
-            "-DSDL_GPU_DISABLED=1",
-            "-USDL_VIDEO_DRIVER_DUMMY",
-            "-USDL_VIDEO_DRIVER_OFFSCREEN",
-            "-USDL_VIDEO_DRIVER_WAYLAND",
-            "-USDL_VIDEO_DRIVER_X11",
-            "-USDL_VIDEO_DRIVER_KMSDRM",
-            "-USDL_VIDEO_RENDER_GPU",
-            "-USDL_VIDEO_RENDER_VULKAN",
-            "-USDL_VIDEO_RENDER_OGL",
-            "-USDL_VIDEO_RENDER_OGL_ES2",
-            "-USDL_VIDEO_OPENGL",
-            "-USDL_VIDEO_OPENGL_ES",
-            "-USDL_VIDEO_OPENGL_ES2",
-            "-USDL_VIDEO_OPENGL_GLX",
-            "-USDL_VIDEO_OPENGL_EGL",
-            "-USDL_VIDEO_VULKAN",
-        }),
-    });
-    const howl_text = b.dependency("howl_text", .{ .target = target, .optimize = optimize });
+    const wattle = b.dependency("wattle", .{ .target = target, .optimize = optimize });
+    const ui = wattle.module("wattle");
     const headers = b.addWriteFiles();
-    const sdl_header = headers.add(
-        "wayspot-sdl.h",
-        "#include <SDL3/SDL.h>\n",
-    );
-    const sdl_translate = b.addTranslateC(.{
-        .root_source_file = sdl_header,
-        .target = target,
-        .optimize = optimize,
-    });
-    sdl_translate.addIncludePath(sdl.path("include"));
-    const sdl_c = sdl_translate.createModule();
-
     const dbus_header = headers.add("wayspot-dbus.h", "#include <dbus/dbus.h>\n");
     const dbus_translate = b.addTranslateC(.{
         .root_source_file = dbus_header,
@@ -72,13 +35,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    wayspot.addIncludePath(sdl.path("include"));
     wayspot.addIncludePath(b.path("vendor/stb"));
     wayspot.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
-    wayspot.addAnonymousImport("NotoSans-Regular.ttf", .{
-        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
-    });
-    wayspot.linkLibrary(sdl.artifact("SDL3"));
     wayspot.linkSystemLibrary("dbus-1", .{});
     const layer_xml = b.path("protocols/wlr-layer-shell-unstable-v1.xml");
     const layer_header = waylandHeader(
@@ -112,8 +70,7 @@ pub fn build(b: *std.Build) void {
     });
     wayland_translate.linkSystemLibrary("wayland-client", .{});
     const wayland_c = wayland_translate.createModule();
-    wayspot.addImport("sdl_c", sdl_c);
-    wayspot.addImport("howl_text", howl_text.module("howl_text"));
+    wayspot.addImport("wattle", ui);
     wayspot.addImport("dbus_c", dbus_c);
     wayspot.addImport("wayland_c", wayland_c);
     wayspot.addImport("time_c", time_c);
@@ -137,7 +94,11 @@ pub fn build(b: *std.Build) void {
     source_tests.root_module.addIncludePath(b.path("vendor/stb"));
     source_tests.root_module.addCSourceFile(.{ .file = b.path("src/wallpaper/jpeg.c") });
     source_tests.root_module.addImport("time_c", time_c);
-    addNotificationLibraries(b, source_tests.root_module, sdl, howl_text.module("howl_text"), sdl_c, dbus_c, wayland_c, wayland_protocol);
+    source_tests.root_module.addImport("wattle", ui);
+    source_tests.root_module.linkSystemLibrary("dbus-1", .{});
+    source_tests.root_module.addImport("dbus_c", dbus_c);
+    source_tests.root_module.addImport("wayland_c", wayland_c);
+    source_tests.root_module.linkLibrary(wayland_protocol);
     // Both graphical roles use the native surface owner.
     // Use the exact pinned native Wayland package already used by Snowman's
     // simulator. No second compositor-specific protocol implementation.
@@ -254,6 +215,10 @@ pub fn build(b: *std.Build) void {
     const run_wallpaper_catalog_tests = b.addRunArtifact(wallpaper_catalog_tests);
     const test_step = b.step("test", "Run Wayspot tests");
     test_step.dependOn(&b.addRunArtifact(source_tests).step);
+    // A dependency is a separate Zig test root. Keep all extracted UI
+    // tests in the consumer regression graph as well as Wattle's own gate.
+    const ui_tests = b.addTest(.{ .name = "wattle-tests", .root_module = ui, .use_llvm = false, .use_lld = false });
+    test_step.dependOn(&b.addRunArtifact(ui_tests).step);
     test_step.dependOn(&canary.step);
     test_step.dependOn(&run_wallpaper_catalog_tests.step);
     const run_bash_completion_test = b.addSystemCommand(&.{ "bash", "tools/bash_completion_test.bash" });
@@ -309,27 +274,4 @@ fn optimizeOption(b: *std.Build) std.builtin.OptimizeMode {
         .fast => .fast,
         .small => .small,
     };
-}
-
-fn addNotificationLibraries(
-    b: *std.Build,
-    module: *std.Build.Module,
-    sdl: *std.Build.Dependency,
-    howl_text: *std.Build.Module,
-    sdl_c: *std.Build.Module,
-    dbus_c: *std.Build.Module,
-    wayland_c: *std.Build.Module,
-    wayland_protocol: *std.Build.Step.Compile,
-) void {
-    module.addAnonymousImport("NotoSans-Regular.ttf", .{
-        .root_source_file = b.path("assets/fonts/NotoSans-Regular.ttf"),
-    });
-    module.addIncludePath(sdl.path("include"));
-    module.linkLibrary(sdl.artifact("SDL3"));
-    module.linkSystemLibrary("dbus-1", .{});
-    module.addImport("howl_text", howl_text);
-    module.addImport("sdl_c", sdl_c);
-    module.addImport("dbus_c", dbus_c);
-    module.addImport("wayland_c", wayland_c);
-    module.linkLibrary(wayland_protocol);
 }

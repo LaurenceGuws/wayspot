@@ -326,9 +326,13 @@ release tag are stable.
 ## Building
 
 Wayspot is developed and tested with official Zig `0.17.0` on Arch Linux, also
-recorded in `.zigversion` and the Zig package manifest. SDL3 is vendored for CPU drawing and image decoding. Text shaping and glyph rasterization come from an exact,
-provenance-recorded snapshot of Howl Text in
-`vendor/howl-text`, using system FreeType and HarfBuzz. Wayland, libxkbcommon and D-Bus are also system dependencies.
+recorded in `.zigversion` and the Zig package manifest. The pinned
+[Wattle](https://github.com/LaurenceGuws/wattle) Zig module owns CPU drawing,
+SDL3 image decoding and software rendering, and the exact Howl Text and font
+snapshots. It builds SDL statically, using system FreeType and HarfBuzz for
+text. Wayspot keeps native Wayland surface/input ownership, libxkbcommon and
+D-Bus dependencies. `zig build test` runs both product and Wattle tests.
+No sibling checkout is required.
 
 Normal desktop build (`ReleaseSafe`):
 

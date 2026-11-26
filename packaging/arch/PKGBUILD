@@ -12,15 +12,18 @@ makedepends=('git')
 provides=('wayspot')
 conflicts=('wayspot')
 
+_wattle_commit='c638c96dcff8497f2a4c79c606db802299ea43b2'
 _sdl_linux_deps_commit='fd349940b9dbaa0f221703b05df826d745d7ce2a'
 _zig_version='0.17.0'
 
 source=(
   'wayspot::git+https://github.com/LaurenceGuws/wayspot.git'
+  "wattle::git+https://github.com/LaurenceGuws/wattle.git#commit=${_wattle_commit}"
   "sdl_linux_deps::git+https://github.com/castholm/SDL_linux_deps.git#commit=${_sdl_linux_deps_commit}"
   "zig-x86_64-linux-${_zig_version}.tar.xz::https://ziglang.org/download/${_zig_version}/zig-x86_64-linux-${_zig_version}.tar.xz"
 )
 sha256sums=(
+  'SKIP'
   'SKIP'
   'SKIP'
   '1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026'
@@ -34,15 +37,19 @@ pkgver() {
 prepare() {
   cd wayspot
 
-  # Use the exact SDL Linux dependency already downloaded by makepkg.
-  # SDL's dependency table moves across upstream revisions. Match its named
-  # entry, never the current vendor manifest's physical line numbers.
-  grep -q '^        \.sdl_linux_deps = \.{' vendor/sdl/build.zig.zon || return 1
+  # Use the exact dependency sources acquired by makepkg. The product's
+  # committed manifest remains a remote, content-hashed Zig dependency.
+  test "$(git -C "$srcdir/wattle" rev-parse HEAD)" = "$_wattle_commit" || return 1
+  grep -Fq "git+https://github.com/LaurenceGuws/wattle.git#${_wattle_commit}" build.zig.zon || return 1
+  sed -i '/^        \.wattle = \.{/,/^        },/c\        .wattle = .{ .path = "../wattle" },' build.zig.zon
+  grep -Fq '        .wattle = .{ .path = "../wattle" },' build.zig.zon || return 1
+
+  local sdl_manifest="$srcdir/wattle/vendor/sdl/build.zig.zon"
+  grep -q '^        \.sdl_linux_deps = \.{' "$sdl_manifest" || return 1
   sed -i \
     '/^        \.sdl_linux_deps = \.{/,/^        },/c\        .sdl_linux_deps = .{ .path = "../../../sdl_linux_deps", .lazy = true },' \
-    vendor/sdl/build.zig.zon
-  grep -q '^        \.sdl_linux_deps = \.{ \.path = "../../../sdl_linux_deps", \.lazy = true },$' \
-    vendor/sdl/build.zig.zon || return 1
+    "$sdl_manifest"
+  grep -Fq '        .sdl_linux_deps = .{ .path = "../../../sdl_linux_deps", .lazy = true },' "$sdl_manifest" || return 1
 }
 
 build() {
@@ -66,5 +73,10 @@ package() {
   install -Dm644 "$srcdir/wayspot.bash" \
     "$pkgdir/usr/share/bash-completion/completions/wayspot"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/wayspot/LICENSE"
-  install -Dm644 assets/fonts/LICENSE "$pkgdir/usr/share/licenses/wayspot/NotoSans-LICENSE"
+  install -Dm644 "$srcdir/wattle/LICENSE" "$pkgdir/usr/share/licenses/wayspot/Wattle-LICENSE"
+  install -Dm644 "$srcdir/wattle/assets/fonts/LICENSE" "$pkgdir/usr/share/licenses/wayspot/NotoSans-LICENSE"
+  install -Dm644 "$srcdir/wattle/vendor/sdl/LICENSE.txt" "$pkgdir/usr/share/licenses/wayspot/SDL-LICENSE"
+  for notice in "$srcdir/wattle/vendor/howl-text/LICENSES/"*.txt; do
+    install -Dm644 "$notice" "$pkgdir/usr/share/licenses/wayspot/howl-text/$(basename "$notice")"
+  done
 }

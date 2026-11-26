@@ -1,6 +1,6 @@
 //! Main-thread native display lifetime shared by the two graphical roles.
 const std = @import("std");
-const sdl = @import("sdl_c");
+const sdl = @import("wattle").sdl;
 const Self = @This();
 const shm = @import("native_surface.zig");
 

@@ -4,10 +4,10 @@
     .fingerprint = 0x1bbfcaf57fa6a14e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .howl_text = .{ .path = "vendor/howl-text" },
         .wayland = .{ .path = "vendor/zig-wayland-native" },
-        .sdl = .{
-            .path = "vendor/sdl",
+        .wattle = .{
+            .url = "git+https://github.com/LaurenceGuws/wattle.git#c638c96dcff8497f2a4c79c606db802299ea43b2",
+            .hash = "wattle-0.1.0-LJ0dhC8T3wODONVcrdIPGap-bt9_OSs2A8Wi5PfQKOjf",
         },
     },
     .paths = .{
@@ -20,9 +20,7 @@
         "protocols",
         "src",
         "tools",
-        "vendor/howl-text",
         "vendor/zig-wayland-native",
-        "vendor/sdl",
         "vendor/stb",
     },
 }
