@@ -10,6 +10,7 @@ const picker = @import("root.zig");
 const pixels = @import("geometry.zig");
 const text_draw = @import("../ui/text.zig");
 const Canvas = @import("../ui/canvas.zig").Canvas;
+const Menu = @import("../ui/menu.zig").Menu;
 const UiOwner = @import("../ui/owner.zig");
 const tray = @import("../tray/host.zig");
 const tray_menu = @import("../tray/menu.zig");
@@ -71,9 +72,7 @@ pub const Native = struct {
     tray_worker_snapshot: tray.Snapshot = .{},
     tray_snapshot: tray.Snapshot = .{},
     tray_textures: [tray.capacity]?*sdl.SDL_Texture = @splat(null),
-    menu: ?tray_menu.Menu = null,
-    menu_item: usize = 0,
-    menu_hover: ?usize = null,
+    menu: ?OpenMenu = null,
     pressed_row: ?usize = null,
 
     /// Acquires the shared display and a tray completion eventfd.
@@ -138,9 +137,9 @@ pub const Native = struct {
                 native.menu = null;
                 break :blk .tab;
             },
-            xkb.XKB_KEY_Up => if (native.menu != null) native.moveMenu(-1) else .up,
-            xkb.XKB_KEY_Down => if (native.menu != null) native.moveMenu(1) else .down,
-            xkb.XKB_KEY_Return, xkb.XKB_KEY_KP_Enter => if (native.menu != null) native.selectMenu() else .enter,
+            xkb.XKB_KEY_Up => if (native.menu) |*menu| (if (menu.widget.move(.up)) .redraw else .ignored) else .up,
+            xkb.XKB_KEY_Down => if (native.menu) |*menu| (if (menu.widget.move(.down)) .redraw else .ignored) else .down,
+            xkb.XKB_KEY_Return, xkb.XKB_KEY_KP_Enter => if (native.menu) |*menu| (if (menu.widget.selected()) |index| native.clickMenu(index) else .ignored) else .enter,
             else => .ignored,
         };
     }
@@ -150,13 +149,14 @@ pub const Native = struct {
         return .{ .text = try picker.Text.init(bytes) };
     }
     fn motionAction(native: *Native, x: f32, y: f32) picker.Event {
-        return if (native.menu != null) native.hoverMenu(x, y) else hoverAt(x, y) orelse .ignored;
+        if (native.menu) |*menu| return if (menu.widget.hover(x, y)) .redraw else .ignored;
+        return hoverAt(x, y) orelse .ignored;
     }
     fn buttonDown(native: *Native, button: u8, x: f32, y: f32) picker.Event {
         return blk: {
             native.pressed_row = null;
-            if (native.menu != null) {
-                if (native.menuAt(x, y)) |index| {
+            if (native.menu) |*menu| {
+                if (menu.widget.at(x, y)) |index| {
                     if (button == sdl.SDL_BUTTON_LEFT)
                         break :blk native.clickMenu(index);
                 }
@@ -783,10 +783,22 @@ pub const Native = struct {
         };
     }
 
-    const menu_left: f32 = 398;
-    const menu_top: f32 = 42;
-    const menu_width: f32 = 306;
-    const menu_height: f32 = 27;
+    // The picker owns the exact SNI item and parsed protocol rows. A
+    // replacement of either closes the menu and its navigation together.
+    const OpenMenu = struct {
+        item: usize,
+        data: tray_menu.Menu,
+        widget: Menu,
+
+        fn init(item: usize, data: tray_menu.Menu) OpenMenu {
+            std.debug.assert(data.count <= tray_menu.capacity);
+            return .{
+                .item = item,
+                .data = data,
+                .widget = Menu.init(.{ .x = 398, .y = 42, .w = 306, .h = 27 * @as(i32, @intCast(data.count)) }, 27),
+            };
+        }
+    };
 
     /// Prefer a real DBusMenu on right click or menu-only items; otherwise
     /// call the SNI item's own ContextMenu/Activate method.
@@ -794,9 +806,7 @@ pub const Native = struct {
         const item = &native.tray_snapshot.entries[index];
         if ((button == sdl.SDL_BUTTON_RIGHT or item.item_is_menu) and item.menu_len > 0) {
             if (tray_menu.fetch(item.serviceName(), item.menuPath(), 0) catch null) |menu| {
-                native.menu = menu;
-                native.menu_item = index;
-                native.menu_hover = null;
+                native.menu = OpenMenu.init(index, menu);
                 return .redraw;
             }
         }
@@ -804,45 +814,16 @@ pub const Native = struct {
         return .ignored;
     }
 
-    fn menuAt(native: *const Native, x: f32, y: f32) ?usize {
-        const menu = native.menu orelse return null;
-        if (x < menu_left or x >= menu_left + menu_width or y < menu_top) return null;
-        const index: usize = @intFromFloat((y - menu_top) / menu_height);
-        return if (index < menu.count) index else null;
-    }
-
-    fn hoverMenu(native: *Native, x: f32, y: f32) picker.Event {
-        const next = native.menuAt(x, y);
-        if (next == native.menu_hover) return .ignored;
-        native.menu_hover = next;
-        return .redraw;
-    }
-
-    fn moveMenu(native: *Native, direction: i8) picker.Event {
-        const count = if (native.menu) |menu| menu.count else return .ignored;
-        if (count == 0) return .ignored;
-        native.menu_hover = if (native.menu_hover) |current|
-            if (direction < 0) current -| 1 else @min(count - 1, current +| 1)
-        else if (direction < 0)
-            count - 1
-        else
-            0;
-        return .redraw;
-    }
-
-    fn selectMenu(native: *Native) picker.Event {
-        return native.clickMenu(native.menu_hover orelse 0);
-    }
-
     fn clickMenu(native: *Native, index: usize) picker.Event {
-        const menu = native.menu orelse return .ignored;
-        if (index >= menu.count or !menu.rows[index].enabled) return .ignored;
-        const row = &menu.rows[index];
-        const item = &native.tray_snapshot.entries[native.menu_item];
+        const menu = if (native.menu) |*value| value else return .ignored;
+        // The widget chooses a row; only the protocol owner authorizes an
+        // enabled action and knows its stable external menu ID.
+        if (index >= menu.data.count or !menu.data.rows[index].enabled) return .ignored;
+        const row = &menu.data.rows[index];
+        const item = &native.tray_snapshot.entries[menu.item];
         if (row.submenu) {
             if (tray_menu.fetch(item.serviceName(), item.menuPath(), row.id) catch null) |submenu| {
-                native.menu = submenu;
-                native.menu_hover = null;
+                native.menu = OpenMenu.init(menu.item, submenu);
                 return .redraw;
             }
         }
@@ -850,27 +831,16 @@ pub const Native = struct {
             std.log.warn("tray menu action failed: {s}", .{@errorName(err)});
         };
         native.menu = null;
-        native.menu_hover = null;
         return .redraw;
     }
 
     fn drawMenu(native: *Native) !void {
         const menu = if (native.menu) |*value| value else return;
-        const renderer = native.renderer orelse unreachable;
-        for (menu.rows[0..menu.count], 0..) |*row, index| {
-            const top = menu_top + menu_height * @as(f32, @floatFromInt(index));
-            const bounds: sdl.SDL_FRect = .{ .x = menu_left, .y = top, .w = menu_width, .h = menu_height };
-            const active = native.menu_hover != null and native.menu_hover.? == index;
-            const shade: [3]u8 = if (active and row.enabled) .{ 56, 66, 83 } else .{ 30, 34, 44 };
-            if (!sdl.SDL_SetRenderDrawColor(renderer, shade[0], shade[1], shade[2], 255))
-                return error.TrayMenuDrawFailed;
-            if (!sdl.SDL_RenderFillRect(renderer, &bounds)) return error.TrayMenuDrawFailed;
-            const clip = sdl.SDL_Rect{ .x = @intFromFloat(menu_left + 8), .y = @intFromFloat(top), .w = @intFromFloat(menu_width - 28), .h = @intFromFloat(menu_height) };
-            if (!sdl.SDL_SetRenderClipRect(renderer, &clip)) return error.TrayMenuDrawFailed;
-            const result = native.drawText(row.text(), if (row.enabled) .{ 226, 231, 241 } else .{ 122, 129, 145 }, menu_left + 10, top + 4);
-            if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.TrayMenuDrawFailed;
-            try result;
-            if (row.submenu) try native.drawText(">", .{ 185, 195, 215 }, menu_left + menu_width - 20, top + 4);
+        const root = try Canvas.root(native.renderer.?, pixels.window_width, pixels.window_height);
+        const panel = try root.child(menu.widget.bounds);
+        const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
+        for (menu.data.rows[0..menu.data.count], 0..) |*row, index| {
+            try menu.widget.drawRow(panel, painter, index, .{ .label = row.text(), .enabled = row.enabled, .submenu = row.submenu });
         }
     }
 
@@ -1240,16 +1210,20 @@ test "tray menu overlays only its bounded picker rectangle and remains navigable
     menu.rows[1] = .{ .id = 8, .length = 8, .enabled = false };
     @memcpy(menu.rows[1].label[0..8], "Disabled");
     menu.count = 2;
-    native.menu = menu;
-    try std.testing.expectEqual(@as(?usize, 0), native.menuAt(420, 45));
-    try std.testing.expectEqual(@as(?usize, 1), native.menuAt(420, 74));
-    try std.testing.expectEqual(@as(?usize, null), native.menuAt(300, 45));
-    try std.testing.expectEqual(@as(?usize, null), native.menuAt(420, 120));
-    try std.testing.expectEqual(picker.Event.redraw, native.hoverMenu(420, 45));
-    try std.testing.expectEqual(@as(?usize, 0), native.menu_hover);
-    try std.testing.expectEqual(picker.Event.ignored, native.hoverMenu(420, 45));
-    try std.testing.expectEqual(picker.Event.redraw, native.moveMenu(1));
-    try std.testing.expectEqual(@as(?usize, 1), native.menu_hover);
+    native.menu = Native.OpenMenu.init(0, menu);
+    try std.testing.expectEqual(@as(?usize, 0), native.menu.?.widget.at(420, 45));
+    try std.testing.expectEqual(@as(?usize, 1), native.menu.?.widget.at(420, 74));
+    try std.testing.expectEqual(@as(?usize, null), native.menu.?.widget.at(300, 45));
+    try std.testing.expectEqual(@as(?usize, null), native.menu.?.widget.at(420, 120));
+    try std.testing.expectEqual(picker.Event.redraw, native.motionAction(420, 45));
+    try std.testing.expectEqual(@as(?usize, 0), native.menu.?.widget.hovered);
+    try std.testing.expectEqual(picker.Event.ignored, native.motionAction(420, 45));
+    try std.testing.expectEqual(picker.Event.redraw, native.keyAction(xkb.XKB_KEY_Down));
+    try std.testing.expectEqual(@as(?usize, 1), native.menu.?.widget.hovered);
+    // Disabled selections never reach external I/O, by either route.
+    try std.testing.expectEqual(picker.Event.ignored, native.keyAction(xkb.XKB_KEY_Return));
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonDown(sdl.SDL_BUTTON_LEFT, 420, 74));
+    try std.testing.expect(native.menu != null);
     if (!sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255) or
         !sdl.SDL_RenderClear(renderer)) return error.SdlTestRenderFailed;
     try native.drawMenu();
@@ -1262,14 +1236,14 @@ test "tray menu overlays only its bounded picker rectangle and remains navigable
 test "Tab, Backspace, and Escape dismiss tray menus without stealing picker controls" {
     var ui_owner: UiOwner = .{};
     var native = Native{ .ui_owner = &ui_owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
-    native.menu = .{};
+    native.menu = Native.OpenMenu.init(0, .{});
     try std.testing.expectEqual(picker.Event.tab, native.keyAction(xkb.XKB_KEY_Tab));
     try std.testing.expect(native.menu == null);
-    native.menu = .{};
+    native.menu = Native.OpenMenu.init(0, .{});
     try std.testing.expectEqual(picker.Event.redraw, native.keyAction(xkb.XKB_KEY_BackSpace));
     try std.testing.expect(native.menu == null);
     try std.testing.expectEqual(picker.Event.backspace, native.keyAction(xkb.XKB_KEY_BackSpace));
-    native.menu = .{};
+    native.menu = Native.OpenMenu.init(0, .{});
     try std.testing.expectEqual(picker.Event.redraw, native.keyAction(xkb.XKB_KEY_Escape));
     try std.testing.expect(native.menu == null);
     try std.testing.expectEqual(picker.Event.escape, native.keyAction(xkb.XKB_KEY_Escape));
@@ -1297,7 +1271,7 @@ test "private-bus picker pointer events open the real tray menu and send its act
 
     try std.testing.expectEqual(picker.Event.redraw, native.buttonDown(sdl.SDL_BUTTON_RIGHT, 495, 23));
     try std.testing.expect(native.menu != null);
-    try std.testing.expectEqualStrings("Open Mock Settings", native.menu.?.rows[0].text());
+    try std.testing.expectEqualStrings("Open Mock Settings", native.menu.?.data.rows[0].text());
     // The actual action adapter is exercised against the private mock menu.
     try std.testing.expectEqual(picker.Event.redraw, native.buttonDown(sdl.SDL_BUTTON_LEFT, 420, 50));
     try std.testing.expect(native.menu == null);
@@ -1390,4 +1364,101 @@ test "borrowed toolbar preserves exact direct pixels for zero and full tray at m
             try std.testing.expectEqualSlices(u8, expected, actual);
         }
     }
+}
+
+test "canvas menu matches direct drawing for root, disabled and nested rows at mixed densities" {
+    const Reference = struct {
+        fn paint(frame: shm.Frame, data: tray_menu.Menu, hovered: ?usize, direct: bool) !void {
+            const target = sdl.SDL_CreateSurfaceFrom(@intCast(frame.extent.width), @intCast(frame.extent.height), sdl.SDL_PIXELFORMAT_XRGB8888, frame.pixels.ptr, @intCast(frame.stride)) orelse return error.SdlTestSurface;
+            defer sdl.SDL_DestroySurface(target);
+            const renderer = sdl.SDL_CreateSoftwareRenderer(target) orelse return error.SdlTestRenderer;
+            defer sdl.SDL_DestroyRenderer(renderer);
+            try std.testing.expect(sdl.SDL_SetRenderLogicalPresentation(renderer, pixels.window_width, pixels.window_height, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX));
+            const scale: f32 = @min(@as(f32, @floatFromInt(frame.extent.width)) / pixels.window_width, @as(f32, @floatFromInt(frame.extent.height)) / pixels.window_height);
+            var owner: UiOwner = .{};
+            var native = Native{ .ui_owner = &owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "", .renderer = renderer, .canvas_scale = scale };
+            native.text = try text_draw.Painter.initScaled(std.testing.allocator, renderer, Native.font_size, scale);
+            defer native.clearText();
+            try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
+            try std.testing.expect(sdl.SDL_RenderClear(renderer));
+            if (direct) {
+                // Independent absolute geometry from the former menu painter.
+                for (data.rows[0..data.count], 0..) |*row, index| {
+                    const top: f32 = 42 + 27 * @as(f32, @floatFromInt(index));
+                    const bounds: sdl.SDL_FRect = .{ .x = 398, .y = top, .w = 306, .h = 27 };
+                    const shade: [3]u8 = if (hovered == index and row.enabled) .{ 56, 66, 83 } else .{ 30, 34, 44 };
+                    try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, shade[0], shade[1], shade[2], 255));
+                    try std.testing.expect(sdl.SDL_RenderFillRect(renderer, &bounds));
+                    const clip: sdl.SDL_Rect = .{ .x = 406, .y = @intFromFloat(top), .w = 278, .h = 27 };
+                    try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, &clip));
+                    try native.text.?.draw(row.text(), if (row.enabled) .{ 226, 231, 241 } else .{ 122, 129, 145 }, 408, top + 4);
+                    try std.testing.expect(sdl.SDL_SetRenderClipRect(renderer, null));
+                    if (row.submenu) try native.text.?.draw(">", .{ 185, 195, 215 }, 684, top + 4);
+                }
+            } else {
+                native.menu = Native.OpenMenu.init(0, data);
+                native.menu.?.widget.hovered = hovered;
+                try native.drawMenu();
+            }
+            try std.testing.expect(!sdl.SDL_RenderClipEnabled(renderer));
+            try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+        }
+    };
+    var data: tray_menu.Menu = .{};
+    const labels = [_][]const u8{ "Open Canary", "Disabled λ", "A long submenu label WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "Nested action" };
+    for (0..tray_menu.capacity) |index| {
+        const label = labels[index % labels.len];
+        data.rows[index] = .{ .id = @intCast(index + 1), .length = label.len, .enabled = index % 4 != 1, .submenu = index % 4 == 2 };
+        @memcpy(data.rows[index].label[0..label.len], label);
+    }
+    const cases = [_]struct { count: usize, hovered: ?usize }{
+        .{ .count = 0, .hovered = null },
+        .{ .count = 1, .hovered = 0 },
+        .{ .count = 3, .hovered = 1 },
+        .{ .count = tray_menu.capacity, .hovered = 10 },
+    };
+    const logical: shm.Extent = .{ .width = pixels.window_width, .height = pixels.window_height };
+    for ([_]u32{ 120, 150, 180, 192, 210, 240 }) |scale| {
+        const scaled = try logical.scaled(scale);
+        const extent: shm.Extent = .{ .width = scaled.width, .height = scaled.height + @as(u32, if (scale == 192) 7 else 0) };
+        const stride = extent.width * 4;
+        const expected = try std.testing.allocator.alloc(u8, stride * extent.height);
+        defer std.testing.allocator.free(expected);
+        const actual = try std.testing.allocator.alloc(u8, expected.len);
+        defer std.testing.allocator.free(actual);
+        for (cases) |case| {
+            data.count = case.count;
+            @memset(expected, 0x5a);
+            @memset(actual, 0x5a);
+            var frame: shm.Frame = .{ .logical_extent = logical, .scale_120 = scale, .extent = extent, .stride = stride, .pixels = expected };
+            try Reference.paint(frame, data, case.hovered, true);
+            frame.pixels = actual;
+            try Reference.paint(frame, data, case.hovered, false);
+            try std.testing.expectEqualSlices(u8, expected, actual);
+        }
+    }
+}
+
+test "open menu owns its exact tray identity and clears navigation on replacement" {
+    var owner: UiOwner = .{};
+    var native = Native{ .ui_owner = &owner, .applications = &.{}, .allocator = std.testing.allocator, .io = undefined, .home = "" };
+    var rows: tray_menu.Menu = .{ .count = 2 };
+    rows.rows[0] = .{ .id = 7 };
+    rows.rows[1] = .{ .id = 8, .enabled = false };
+    native.menu = Native.OpenMenu.init(1, rows);
+    try std.testing.expectEqual(picker.Event.redraw, native.motionAction(420, 77));
+    try std.testing.expectEqual(@as(?usize, 1), native.menu.?.widget.hovered);
+    try std.testing.expectEqual(picker.Event.ignored, native.scrollAction(1));
+    try std.testing.expectEqual(picker.Event.redraw, native.buttonDown(sdl.SDL_BUTTON_LEFT, 300, 100));
+    try std.testing.expect(native.menu == null);
+    try std.testing.expectEqual(picker.Event.ignored, native.buttonUp(sdl.SDL_BUTTON_LEFT, 300, 100));
+    rows.count = 1;
+    rows.rows[0].id = 10;
+    native.menu = Native.OpenMenu.init(2, rows);
+    try std.testing.expectEqual(@as(usize, 2), native.menu.?.item);
+    try std.testing.expectEqual(@as(?usize, null), native.menu.?.widget.hovered);
+    try std.testing.expectEqual(@as(?usize, 0), native.menu.?.widget.selected());
+    try std.testing.expectEqual(@as(?usize, null), native.menu.?.widget.at(420, 77));
+    native.clearTray();
+    try std.testing.expect(native.menu == null);
 }

@@ -287,6 +287,16 @@ same toolbar-local half-open slot rectangles; icons, menus, clock facts and
 activation still belong to the picker. Six-density byte comparisons cover an
 empty and fully populated tray, including transparent textures and missing-icon
 fallbacks. No retained widget tree or generic input dispatcher is introduced.
+The concrete `ui/menu.zig` widget holds a logical rectangle, row height
+and hover/keyboard position. Rows are drawn through local Canvas children;
+input uses the same half-open geometry. The current fixed menu is entirely
+inside the picker. Its row count is derived from its extent. The picker
+owns the fetched rows, enabled-action checks, originating tray item and
+all D-Bus effects in one optional `OpenMenu`. Replacing or retiring that
+value discards navigation with its corresponding protocol snapshot. Disabled
+rows remain navigable but cannot invoke an action. `tray-live` exercises
+this actual UI/Wayland/D-Bus contract; no general event dispatcher, retained
+label copy or separate menu surface is introduced.
 
 ## 8. Shared resident ownership
 

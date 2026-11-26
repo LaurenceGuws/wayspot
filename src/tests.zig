@@ -19,6 +19,7 @@ test {
     _ = @import("picker/simulator.zig");
     _ = @import("ui/text.zig");
     _ = @import("ui/canvas.zig");
+    _ = @import("ui/menu.zig");
     _ = @import("ui/owner.zig");
     _ = @import("ui/native_surface.zig");
     _ = @import("ui/native_surface_test.zig");
