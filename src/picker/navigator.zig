@@ -303,7 +303,13 @@ pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: [
     var active = std.json.parseFromSlice(struct { address: []const u8 }, allocator, observed.stdout, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch return error.CompositorReplyMalformed;
     defer active.deinit();
     try validAddress(active.value.address);
-    if (!std.ascii.eqlIgnoreCase(active.value.address, id)) return error.CompositorFocusMismatch;
+    if (!std.ascii.eqlIgnoreCase(active.value.address, id)) {
+        // Both values have passed validAddress. Keep the exact observation
+        // for diagnosing physical focus races, without redispatching or
+        // treating a different window as success.
+        if (!@import("builtin").is_test) std.log.warn("Hyprland focus mismatch: requested={s} observed={s}", .{ id, active.value.address });
+        return error.CompositorFocusMismatch;
+    }
 }
 
 const snowman_schema = "snowman-command/v1";
