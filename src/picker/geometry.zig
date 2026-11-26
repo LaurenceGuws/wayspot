@@ -1,7 +1,9 @@
 //! Owns the fixed picker's pixel rectangles and pointer hit testing.
 
 const std = @import("std");
-const CanvasRect = @import("../ui/canvas.zig").Rect;
+const canvas = @import("../ui/canvas.zig");
+const CanvasRect = canvas.Rect;
+const TextField = @import("../ui/text_field.zig").TextField;
 const RowLayout = @import("../ui/row_layout.zig").RowLayout;
 
 pub const window_width = 720;
@@ -9,19 +11,12 @@ pub const window_height = 520;
 pub const visible_rows = 14;
 pub const icon_size = 22;
 
-pub const Rect = struct {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-};
-
 /// Slots preserve the original 30-pixel hit target and 28-pixel painted row.
 pub const results = RowLayout.init(.{ .x = 8, .y = 90, .w = 696, .h = 30 * visible_rows }, 30, 2);
 
 /// The toolbar is part of the existing picker window, not a desktop layer.
 pub const toolbar = CanvasRect{ .x = 8, .y = 8, .w = 704, .h = 30 };
-pub const query = Rect{ .x = 8, .y = 46, .w = 704, .h = 36 };
+pub const query = TextField{ .bounds = .{ .x = 8, .y = 46, .w = 704, .h = 36 } };
 /// Children are toolbar-local, never independent absolute hitboxes.
 pub const clock_clip = CanvasRect{ .x = 507, .y = 1, .w = 189, .h = 28 };
 
@@ -50,25 +45,27 @@ pub fn trayAt(x: f32, y: f32, count: usize) ?usize {
     }
     return null;
 }
-pub const scrollbar_track = Rect{
-    .x = @floatFromInt(results.bounds.x + results.bounds.w + 4),
-    .y = @floatFromInt(results.bounds.y),
+pub const scrollbar_track = CanvasRect{
+    .x = results.bounds.x + results.bounds.w + 4,
+    .y = results.bounds.y,
     .w = 4,
-    .h = @floatFromInt(results.bounds.h),
+    .h = results.bounds.h,
 };
 
-pub fn scrollbar(first: usize, shown: usize, total: usize) ?Rect {
+/// Fractional thumb relative to its track; the track owns clipping.
+pub fn scrollbar(first: usize, shown: usize, total: usize) ?canvas.FloatRect {
     if (total <= shown) return null;
     std.debug.assert(shown > 0);
     std.debug.assert(first <= total - shown);
     const shown_float: f32 = @floatFromInt(shown);
     const total_float: f32 = @floatFromInt(total);
-    const height = @max(16, scrollbar_track.h * shown_float / total_float);
+    const track_height: f32 = @floatFromInt(scrollbar_track.h);
+    const height = @max(16, track_height * shown_float / total_float);
     const offset = @as(f32, @floatFromInt(first)) / @as(f32, @floatFromInt(total - shown));
     return .{
-        .x = scrollbar_track.x,
-        .y = scrollbar_track.y + (scrollbar_track.h - height) * offset,
-        .w = scrollbar_track.w,
+        .x = 0,
+        .y = (track_height - height) * offset,
+        .w = @floatFromInt(scrollbar_track.w),
         .h = height,
     };
 }
@@ -76,18 +73,18 @@ pub fn scrollbar(first: usize, shown: usize, total: usize) ?Rect {
 test "scrollbar maps first and last pages to track ends" {
     const first = scrollbar(0, visible_rows, 90).?;
     const last = scrollbar(90 - visible_rows, visible_rows, 90).?;
-    try std.testing.expectEqual(scrollbar_track.y, first.y);
-    try std.testing.expectEqual(scrollbar_track.y + scrollbar_track.h, last.y + last.h);
+    try std.testing.expectEqual(@as(f32, 0), first.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(scrollbar_track.h)), last.y + last.h);
     try std.testing.expectEqual(null, scrollbar(0, visible_rows, visible_rows));
 }
 
 test "toolbar, search and all fourteen rows stay separate within the window" {
-    try std.testing.expect(@as(f32, @floatFromInt(toolbar.y + toolbar.h)) < query.y);
-    try std.testing.expect(query.y + query.h < @as(f32, @floatFromInt(results.bounds.y)));
+    try std.testing.expect(toolbar.y + toolbar.h < query.bounds.y);
+    try std.testing.expect(query.bounds.y + query.bounds.h < results.bounds.y);
     try std.testing.expect(results.bounds.y + results.bounds.h <= window_height);
     try std.testing.expectEqual(@as(usize, visible_rows), results.count());
     try std.testing.expectEqual(@as(?usize, null), results.at(20, @floatFromInt(toolbar.y + 5)));
-    try std.testing.expectEqual(@as(?usize, null), results.at(20, query.y + 5));
+    try std.testing.expectEqual(@as(?usize, null), results.at(20, @floatFromInt(query.bounds.y + 5)));
     try std.testing.expectEqual(@as(?usize, 0), results.at(20, 95));
     try std.testing.expectEqual(@as(?usize, visible_rows - 1), results.at(20, 485));
 }
@@ -96,7 +93,7 @@ test "tray hitboxes stay within toolbar and never overlap the clock" {
     try std.testing.expectEqual(@as(?usize, null), trayAt(500, 20, 0));
     try std.testing.expectEqual(@as(?usize, 0), trayAt(495, 20, 1));
     try std.testing.expectEqual(@as(?usize, 1), trayAt(468, 20, 2));
-    try std.testing.expectEqual(@as(?usize, null), trayAt(495, query.y, 2));
+    try std.testing.expectEqual(@as(?usize, null), trayAt(495, @floatFromInt(query.bounds.y), 2));
     try std.testing.expectEqual(@as(?usize, null), trayAt(std.math.nan(f32), 20, 1));
     try std.testing.expectEqual(@as(?usize, null), trayAt(495, 20, tray_capacity + 1));
     for (0..tray_capacity) |index| {

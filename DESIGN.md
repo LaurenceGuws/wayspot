@@ -299,11 +299,21 @@ Disabled menu rows remain navigable but cannot invoke an action. Result
 selection, search, scrolling and matched button release remain picker policy.
 The result painter borrows a Canvas child for each visible row and its
 icon/text columns; even a long application name cannot escape its row and
-paint over the scrollbar. The fractional scrollbar and query rendering
-remain separate pending their own migration. Six-density absolute-reference
-pixel tests cover every result form, selected and unselected, including
-label containment. `tray-live` exercises actual UI/Wayland/D-Bus behavior.
-No retained label copies, general event dispatcher or separate menu surface.
+paint over the scrollbar. Six-density absolute-reference pixel tests cover
+every result form, selected and unselected, including label containment.
+The concrete `ui/text_field.zig` value owns field and committed-caret
+geometry. It borrows display text, committed text and preedit for drawing;
+the picker still owns the editor, matching, focus and IME protocol state.
+The same field geometry anchors the IME cursor rectangle before conversion
+to configured logical surface coordinates. Canvas preserves fractional
+text positions, preedit markers and scrollbar thumbs inside inherited
+integer child clips; malformed fractional coordinates are rejected before
+rasterization. Independent absolute-coordinate pixel tests cover these
+paths at six densities. Only the presenter clears the destination, owns
+SDL resources and commits the admitted SHM frame. `tray-live` exercises
+actual UI/Wayland/D-Bus behavior. No retained label copies, general event
+dispatcher or separate widget surfaces. Retention remains an open measured
+experiment, not a requirement of the spatial composition API.
 
 ## 8. Shared resident ownership
 

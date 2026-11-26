@@ -64,7 +64,7 @@ pub const Menu = struct {
         try row.fill(if (self.hovered == index and item.enabled) .{ 56, 66, 83 } else .{ 30, 34, 44 });
         const label = try row.child(.{ .x = 8, .w = bounds.w - 28, .h = bounds.h });
         try label.text(painter, item.label, if (item.enabled) .{ 226, 231, 241 } else .{ 122, 129, 145 }, 2, 4);
-        if (item.submenu) try row.text(painter, ">", .{ 185, 195, 215 }, bounds.w - 20, 4);
+        if (item.submenu) try row.text(painter, ">", .{ 185, 195, 215 }, @floatFromInt(bounds.w - 20), 4);
     }
 };
 

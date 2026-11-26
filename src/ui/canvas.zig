@@ -43,8 +43,26 @@ pub const Rect = struct {
     }
 };
 
+/// Fractional drawing geometry, not a child layout or hit-test rectangle.
+/// Text advances and scrollbar thumbs retain their subpixel positions.
+pub const FloatRect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+};
+
 fn coordinate(origin: i32, offset: i32) !i32 {
     return std.math.add(i32, origin, offset) catch error.InvalidCanvasGeometry;
+}
+
+// Bound raster coordinates well within SDL's signed pixel geometry even
+// at the admitted maximum scale. Structural child geometry stays integral.
+fn floatCoordinate(origin: i32, offset: f32) !f32 {
+    const value = @as(f32, @floatFromInt(origin)) + offset;
+    const limit: f32 = 1 << 24;
+    if (!std.math.isFinite(value) or @abs(value) > limit) return error.InvalidCanvasGeometry;
+    return value;
 }
 
 pub const Canvas = struct {
@@ -120,6 +138,26 @@ pub const Canvas = struct {
         if (!ok) return error.SdlDrawFailed;
     }
 
+    /// A fractional shape in local coordinates. Unlike fill, its requested
+    /// rectangle need not fit the view, so inherit clipping on every draw.
+    pub fn fillRect(self: Canvas, local: FloatRect, color: [3]u8) !void {
+        if (!std.math.isFinite(local.w) or !std.math.isFinite(local.h) or local.w < 0 or local.h < 0) return error.InvalidCanvasGeometry;
+        const rect: sdl.SDL_FRect = .{
+            .x = try floatCoordinate(self.bounds.x, local.x),
+            .y = try floatCoordinate(self.bounds.y, local.y),
+            .w = local.w,
+            .h = local.h,
+        };
+        _ = try floatCoordinate(self.bounds.x, local.x + local.w);
+        _ = try floatCoordinate(self.bounds.y, local.y + local.h);
+        if (local.w == 0 or local.h == 0) return;
+        const scope = (try self.beginClip()) orelse return;
+        const ok = sdl.SDL_SetRenderDrawColor(self.renderer, color[0], color[1], color[2], 255) and
+            sdl.SDL_RenderFillRect(self.renderer, &rect);
+        try scope.restore();
+        if (!ok) return error.SdlDrawFailed;
+    }
+
     /// Draw one existing texture into the requested view, preserving the
     /// original sampling geometry if an ancestor clips it. The caller
     /// retains texture ownership and supplies a texture of this renderer.
@@ -133,13 +171,13 @@ pub const Canvas = struct {
     }
 
     /// Coordinates are relative to this view, not its clipped intersection.
-    pub fn text(self: Canvas, painter: *Painter, bytes: []const u8, color: [3]u8, x: i32, y: i32) !void {
+    pub fn text(self: Canvas, painter: *Painter, bytes: []const u8, color: [3]u8, x: f32, y: f32) !void {
         std.debug.assert(painter.renderer == self.renderer);
         if (self.clip == null or bytes.len == 0) return;
-        const left = try coordinate(self.bounds.x, x);
-        const top = try coordinate(self.bounds.y, y);
+        const left = try floatCoordinate(self.bounds.x, x);
+        const top = try floatCoordinate(self.bounds.y, y);
         const scope = (try self.beginClip()) orelse return;
-        const result = painter.draw(bytes, color, @floatFromInt(left), @floatFromInt(top));
+        const result = painter.draw(bytes, color, left, top);
         try scope.restore();
         try result;
     }
@@ -257,6 +295,19 @@ test "clipped canvas shapes and textures retain original placement and caller cl
             // The image starts at x=4, not the ancestor's clip at x=8.
             const expected: u32 = if (inside) (if (x < 12) 0xff0000 else 0x00ff00) else 0;
             try std.testing.expectEqual(expected, pixels[y * stride + x] & 0x00ffffff);
+        }
+    }
+    // Fractional local drawing must honor both ancestor and ambient clips.
+    try child.fillRect(.{ .x = 3.5, .y = 1.5, .w = 10.25, .h = 5.5 }, .{ 11, 12, 13 });
+    try std.testing.expectError(error.InvalidCanvasGeometry, child.fillRect(.{ .x = std.math.nan(f32), .y = 0, .w = 1, .h = 1 }, .{ 255, 0, 0 }));
+    try std.testing.expectError(error.InvalidCanvasGeometry, child.fillRect(.{ .x = 0, .y = 0, .w = -1, .h = 1 }, .{ 255, 0, 0 }));
+    try std.testing.expectError(error.InvalidCanvasGeometry, child.fillRect(.{ .x = 0, .y = 0, .w = std.math.inf(f32), .h = 1 }, .{ 255, 0, 0 }));
+    try std.testing.expectError(error.InvalidCanvasGeometry, child.fillRect(.{ .x = 0, .y = 0, .w = 1 << 25, .h = 1 }, .{ 255, 0, 0 }));
+    try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+    for (0..20) |y| {
+        for (0..40) |x| {
+            const inside = x >= 9 and x < 16 and y >= 8 and y < 12;
+            try std.testing.expectEqual(@as(u32, if (inside) 0x0b0c0d else 0), pixels[y * stride + x] & 0x00ffffff);
         }
     }
     var actual: sdl.SDL_Rect = undefined;

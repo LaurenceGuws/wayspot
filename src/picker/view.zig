@@ -9,7 +9,8 @@ const navigator = @import("navigator.zig");
 const picker = @import("root.zig");
 const pixels = @import("geometry.zig");
 const text_draw = @import("../ui/text.zig");
-const Canvas = @import("../ui/canvas.zig").Canvas;
+const canvas_draw = @import("../ui/canvas.zig");
+const Canvas = canvas_draw.Canvas;
 const Menu = @import("../ui/menu.zig").Menu;
 const UiOwner = @import("../ui/owner.zig");
 const tray = @import("../tray/host.zig");
@@ -213,10 +214,6 @@ pub const Native = struct {
         var clock_bytes: [32]u8 = undefined;
         try native.drawToolbar(localClock(&clock_bytes) catch "--:--");
 
-        const query_pane = nativeRect(pixels.query);
-        if (!sdl.SDL_SetRenderDrawColor(renderer, 30, 31, 39, 255)) return error.SdlDrawFailed;
-        if (!sdl.SDL_RenderFillRect(renderer, &query_pane)) return error.SdlDrawFailed;
-        if (!sdl.SDL_SetRenderDrawColor(renderer, 235, 235, 240, 255)) return error.SdlDrawFailed;
         var failure_text: [160]u8 = undefined;
         const query: []const u8 = if (frame.table == .windows and frame.window_error != null and
             frame.window_status == .unavailable)
@@ -234,20 +231,15 @@ pub const Native = struct {
             },
             .notifications => "Notification history",
         } else frame.query;
-        // The query has its own full-width row, so a long search never
-        // overwrites the toolbar's clock or eventual tray icons.
-        const query_clip = sdl.SDL_Rect{ .x = 17, .y = 47, .w = 684, .h = 34 };
-        if (!sdl.SDL_SetRenderClipRect(renderer, &query_clip)) return error.SdlDrawFailed;
-        const query_draw = native.drawQuery(frame, query);
-        if (!sdl.SDL_SetRenderClipRect(renderer, null)) return error.SdlDrawFailed;
-        try query_draw;
         const root = try Canvas.root(renderer, pixels.window_width, pixels.window_height);
+        const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
+        try pixels.query.draw(root, painter, .{ .committed = frame.query, .display = query, .preedit = frame.preedit, .cursor = frame.preedit_cursor });
         const results = try root.child(pixels.results.bounds);
         for (frame.rowSlice(), 0..) |row, index| {
             const cell = try results.child(pixels.results.row(index) orelse return error.PickerRowOutOfBounds);
             try native.drawRow(cell, row, index == frame.selected_row);
         }
-        try drawScrollbar(renderer, frame);
+        try drawScrollbar(root, frame);
         try native.drawMenu();
     }
 
@@ -264,26 +256,6 @@ pub const Native = struct {
         if (native.tray_enabled and !native.tray_fetched and native.tray_worker == null) {
             native.tray_fetched = true;
             native.startTrayFetch();
-        }
-    }
-
-    fn drawQuery(native: *Native, frame: *const picker.Frame, query: []const u8) !void {
-        try native.drawText(if (frame.preedit.len != 0) frame.query else query, .{ 235, 235, 240 }, 20, 52);
-        if (frame.preedit.len != 0) {
-            const painter = &native.text.?;
-            const x = 20 + try painter.width(frame.query);
-            try native.drawText(frame.preedit, .{ 130, 190, 255 }, x, 52);
-            const renderer = native.renderer.?;
-            const width = try painter.width(frame.preedit);
-            const underline = sdl.SDL_FRect{ .x = x, .y = 74, .w = width, .h = 1 };
-            if (!sdl.SDL_SetRenderDrawColor(renderer, 130, 190, 255, 255) or !sdl.SDL_RenderFillRect(renderer, &underline)) return error.SdlDrawFailed;
-            const cursor = frame.preedit_cursor;
-            if (cursor[0] >= 0 and cursor[1] >= 0 and cursor[0] <= frame.preedit.len and cursor[1] <= frame.preedit.len) {
-                const left = x + try painter.width(frame.preedit[0..@intCast(@min(cursor[0], cursor[1]))]);
-                const right = x + try painter.width(frame.preedit[0..@intCast(@max(cursor[0], cursor[1]))]);
-                const marker = sdl.SDL_FRect{ .x = left, .y = if (left == right) 52 else 75, .w = @max(1, right - left), .h = if (left == right) 20 else 2 };
-                if (!sdl.SDL_RenderFillRect(renderer, &marker)) return error.SdlDrawFailed;
-            }
         }
     }
 
@@ -553,16 +525,8 @@ pub const Native = struct {
         try native.drawContents(context.frame);
         const display = native.native_display.?;
         if (display.input.ime_manager != null) {
-            const width: f64 = @floatFromInt(frame.logical_extent.width);
-            const height: f64 = @floatFromInt(frame.logical_extent.height);
-            const logical_scale = @min(width / pixels.window_width, height / pixels.window_height);
-            const caret: f64 = @floatCast(@min(700, 20 + try native.text.?.width(context.frame.query)));
-            try display.input.setImeContext(&display.conn, context.frame.query, .{
-                @intFromFloat((width - pixels.window_width * logical_scale) / 2 + caret * logical_scale),
-                @intFromFloat((height - pixels.window_height * logical_scale) / 2 + 52 * logical_scale),
-                @intFromFloat(@max(1, logical_scale)),
-                @intFromFloat(@max(1, 20 * logical_scale)),
-            }, context.frame.query_from_ime);
+            const caret = try pixels.query.caret(&native.text.?, context.frame.query);
+            try display.input.setImeContext(&display.conn, context.frame.query, imeCursorRect(frame.logical_extent, caret), context.frame.query_from_ime);
         }
         if (!sdl.SDL_FlushRenderer(native.renderer.?)) return error.NativeCanvasFlush;
         const canvas = native.canvas.?;
@@ -814,11 +778,6 @@ pub const Native = struct {
         }
     }
 
-    fn drawText(native: *Native, value: []const u8, color: [3]u8, x: f32, y: f32) !void {
-        const painter = if (native.text) |*owned| owned else return error.TextNotInitialized;
-        try painter.draw(value, color, x, y);
-    }
-
     fn firstMissing(native: *const Native, frame: *const picker.Frame) !?u16 {
         for (frame.rowSlice()) |row| {
             const app_index = rowApp(row) orelse continue;
@@ -957,18 +916,25 @@ fn destroyIcon(icon: Native.Icon) void {
     }
 }
 
-fn drawScrollbar(renderer: *sdl.SDL_Renderer, frame: *const picker.Frame) !void {
-    const thumb = pixels.scrollbar(frame.first, frame.row_count, frame.total_count) orelse return;
-    const track = nativeRect(pixels.scrollbar_track);
-    const native_thumb = nativeRect(thumb);
-    if (!sdl.SDL_SetRenderDrawColor(renderer, 38, 44, 52, 255)) return error.SdlDrawFailed;
-    if (!sdl.SDL_RenderFillRect(renderer, &track)) return error.SdlDrawFailed;
-    if (!sdl.SDL_SetRenderDrawColor(renderer, 104, 118, 136, 255)) return error.SdlDrawFailed;
-    if (!sdl.SDL_RenderFillRect(renderer, &native_thumb)) return error.SdlDrawFailed;
+/// Map UI geometry into the configured surface's logical coordinate space.
+/// Buffer density is deliberately absent from this protocol conversion.
+fn imeCursorRect(extent: shm.Extent, caret: canvas_draw.FloatRect) [4]i32 {
+    const width: f64 = @floatFromInt(extent.width);
+    const height: f64 = @floatFromInt(extent.height);
+    const scale = @min(width / pixels.window_width, height / pixels.window_height);
+    return .{
+        @intFromFloat((width - pixels.window_width * scale) / 2 + @as(f64, caret.x) * scale),
+        @intFromFloat((height - pixels.window_height * scale) / 2 + @as(f64, caret.y) * scale),
+        @intFromFloat(@max(1, @as(f64, caret.w) * scale)),
+        @intFromFloat(@max(1, @as(f64, caret.h) * scale)),
+    };
 }
 
-fn nativeRect(rect: pixels.Rect) sdl.SDL_FRect {
-    return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+fn drawScrollbar(root: Canvas, frame: *const picker.Frame) !void {
+    const thumb = pixels.scrollbar(frame.first, frame.row_count, frame.total_count) orelse return;
+    const track = try root.child(pixels.scrollbar_track);
+    try track.fill(.{ 38, 44, 52 });
+    try track.fillRect(thumb, .{ 104, 118, 136 });
 }
 
 fn formatWindowMetadata(row: picker.WindowRow, output: []u8) ![]const u8 {
@@ -1565,4 +1531,59 @@ test "result canvas preserves all four row forms and contains overflowing app la
             }
         }
     }
+}
+
+test "fractional scrollbar canvas preserves independent absolute thumb geometry" {
+    const Reference = struct {
+        fn paint(frame: shm.Frame, first: usize, total: usize, direct: bool) !void {
+            const surface = sdl.SDL_CreateSurfaceFrom(@intCast(frame.extent.width), @intCast(frame.extent.height), sdl.SDL_PIXELFORMAT_XRGB8888, frame.pixels.ptr, @intCast(frame.stride)) orelse return error.SdlTestSurface;
+            defer sdl.SDL_DestroySurface(surface);
+            const renderer = sdl.SDL_CreateSoftwareRenderer(surface) orelse return error.SdlTestRenderer;
+            defer sdl.SDL_DestroyRenderer(renderer);
+            try std.testing.expect(sdl.SDL_SetRenderLogicalPresentation(renderer, 720, 520, sdl.SDL_LOGICAL_PRESENTATION_LETTERBOX));
+            try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 18, 18, 24, 255));
+            try std.testing.expect(sdl.SDL_RenderClear(renderer));
+            const shown = @min(total, 14);
+            if (direct) {
+                if (total > shown) {
+                    const height = @max(16, 420 * @as(f32, @floatFromInt(shown)) / @as(f32, @floatFromInt(total)));
+                    const offset = @as(f32, @floatFromInt(first)) / @as(f32, @floatFromInt(total - shown));
+                    const track: sdl.SDL_FRect = .{ .x = 708, .y = 90, .w = 4, .h = 420 };
+                    const thumb: sdl.SDL_FRect = .{ .x = 708, .y = 90 + (420 - height) * offset, .w = 4, .h = height };
+                    try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 38, 44, 52, 255));
+                    try std.testing.expect(sdl.SDL_RenderFillRect(renderer, &track));
+                    try std.testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 104, 118, 136, 255));
+                    try std.testing.expect(sdl.SDL_RenderFillRect(renderer, &thumb));
+                }
+            } else try drawScrollbar(try Canvas.root(renderer, 720, 520), &.{ .query = "", .first = first, .row_count = shown, .total_count = total });
+            try std.testing.expect(!sdl.SDL_RenderClipEnabled(renderer));
+            try std.testing.expect(sdl.SDL_FlushRenderer(renderer));
+        }
+    };
+    const logical: shm.Extent = .{ .width = 720, .height = 520 };
+    for ([_]u32{ 120, 150, 180, 192, 210, 240 }) |scale| {
+        const extent = try logical.scaled(scale);
+        const stride = extent.width * 4;
+        const expected = try std.testing.allocator.alloc(u8, stride * extent.height);
+        defer std.testing.allocator.free(expected);
+        const actual = try std.testing.allocator.alloc(u8, expected.len);
+        defer std.testing.allocator.free(actual);
+        for ([_][2]usize{ .{ 0, 0 }, .{ 0, 14 }, .{ 0, 90 }, .{ 23, 90 }, .{ 76, 90 }, .{ 411, 500 } }) |position| {
+            @memset(expected, 0x5a);
+            @memset(actual, 0x5a);
+            var frame: shm.Frame = .{ .logical_extent = logical, .scale_120 = scale, .extent = extent, .stride = stride, .pixels = expected };
+            try Reference.paint(frame, position[0], position[1], true);
+            frame.pixels = actual;
+            try Reference.paint(frame, position[0], position[1], false);
+            try std.testing.expectEqualSlices(u8, expected, actual);
+        }
+    }
+}
+
+test "IME cursor conversion uses logical surface letterboxing and not buffer density" {
+    const caret: canvas_draw.FloatRect = .{ .x = 700, .y = 52, .w = 1, .h = 20 };
+    try std.testing.expectEqual([4]i32{ 700, 52, 1, 20 }, imeCursorRect(.{ .width = 720, .height = 520 }, caret));
+    try std.testing.expectEqual([4]i32{ 1400, 104, 2, 40 }, imeCursorRect(.{ .width = 1440, .height = 1040 }, caret));
+    try std.testing.expectEqual([4]i32{ 800, 52, 1, 20 }, imeCursorRect(.{ .width = 920, .height = 520 }, caret));
+    try std.testing.expectEqual([4]i32{ 350, 76, 1, 10 }, imeCursorRect(.{ .width = 360, .height = 360 }, caret));
 }
