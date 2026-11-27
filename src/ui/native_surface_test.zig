@@ -1226,29 +1226,26 @@ test "private real native layers draw CPU pixels and retire independently" {
     try expectPixels(&env, black, black, false);
     for (0..3) |_| {
         const display = try native.Display.open(testing.allocator, testing.io, &env);
-        defer display.destroy();
+        defer {
+            retireRemainingSurfaces(display);
+            display.destroy();
+        }
         const start = std.Io.Clock.awake.now(testing.io);
         while (display.status() == .discovering) try readBefore(display, start);
         try testing.expectEqual(native.Display.Status.ready, display.status());
-        var picker: ?*native.Surface = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, null);
-        defer if (picker) |surface| surface.destroy() catch {};
-        var banner: ?*native.Surface = try native.Surface.create(display, .notification, .{ .width = 420, .height = 120 }, null);
-        defer if (banner) |surface| surface.destroy() catch {};
-        try drawBefore(display, picker.?, green);
-        try drawBefore(display, banner.?, red);
+        const picker = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, null);
+        const banner = try native.Surface.create(display, .notification, .{ .width = 420, .height = 120 }, null);
+        try drawBefore(display, picker, green);
+        try drawBefore(display, banner, red);
         try expectPixels(&env, green, red, true);
-        picker.?.invalidate();
-        try drawBefore(display, picker.?, blue);
+        picker.invalidate();
+        try drawBefore(display, picker, blue);
         try expectPixels(&env, blue, red, true);
-        const old_picker = picker.?;
-        picker = null;
-        try old_picker.destroy();
+        try picker.destroy();
         try barrier(display);
         try expectPixels(&env, black, red, false);
         try testing.expectEqual(@as(u8, 1), display.surfaces);
-        const old_banner = banner.?;
-        banner = null;
-        try old_banner.destroy();
+        try banner.destroy();
         try barrier(display);
         try expectPixels(&env, black, black, false);
         try testing.expectEqual(@as(u8, 0), display.surfaces);
@@ -1328,11 +1325,20 @@ fn changeScale(env: *const std.process.Environ.Map, numerator: u32) !void {
     defer testing.allocator.free(payload);
     const path = try std.fs.path.join(testing.allocator, &.{ env.get("XDG_RUNTIME_DIR").?, "native-scale.json" });
     defer testing.allocator.free(path);
-    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = path, .data = payload });
-    defer std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
+    const dir = std.Io.Dir.cwd();
+    const file = try dir.createFile(testing.io, path, .{ .exclusive = true });
+    errdefer dir.deleteFile(testing.io, path) catch |err| {
+        if (err != error.FileNotFound)
+            std.log.err("native scale fixture cleanup: {s}", .{@errorName(err)});
+    };
+    {
+        defer file.close(testing.io);
+        try file.writeStreamingAll(testing.io, payload);
+    }
     const applied = try cliJson(env, &.{ "display", "apply", path });
     defer applied.deinit();
     try testing.expectEqualStrings("applied", applied.value.object.get("data").?.object.get("status").?.string);
+    try dir.deleteFile(testing.io, path);
 }
 
 fn settleScale(display: *native.Display, surface: *native.Surface, rgb: [3]u8, expected: u32) !void {
@@ -1360,7 +1366,10 @@ test "private mixed density layers keep their roles through real output scale ch
     const green = [3]u8{ 20, 110, 60 };
     const red = [3]u8{ 130, 30, 60 };
     const display = try native.Display.open(testing.allocator, testing.io, &env);
-    defer display.destroy();
+    defer {
+        retireRemainingSurfaces(display);
+        display.destroy();
+    }
     const start = std.Io.Clock.awake.now(testing.io);
     while (display.status() == .discovering) try readBefore(display, start);
     try testing.expectEqual(native.Display.Status.ready, display.status());
@@ -1372,39 +1381,33 @@ test "private mixed density layers keep their roles through real output scale ch
         const output = slot orelse continue;
         if (output.scale == 120 and left == null) left = output.object else if (output.scale == 240 and right == null) right = output.object else return error.NativeFixtureOutputs;
     }
-    var picker: ?*native.Surface = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, right orelse return error.NativeFixtureOutputs);
-    defer if (picker) |surface| surface.destroy() catch {};
-    var banner: ?*native.Surface = try native.Surface.create(display, .notification, .{ .width = 420, .height = 120 }, left orelse return error.NativeFixtureOutputs);
-    defer if (banner) |surface| surface.destroy() catch {};
-    try drawBefore(display, picker.?, green);
-    try drawBefore(display, banner.?, red);
-    try settleScale(display, picker.?, green, 180);
-    try settleScale(display, banner.?, red, 120);
-    const role_id = picker.?.layer.?.id;
-    const surface_id = picker.?.surface.?.id;
+    const picker = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, right orelse return error.NativeFixtureOutputs);
+    const banner = try native.Surface.create(display, .notification, .{ .width = 420, .height = 120 }, left orelse return error.NativeFixtureOutputs);
+    try drawBefore(display, picker, green);
+    try drawBefore(display, banner, red);
+    try settleScale(display, picker, green, 180);
+    try settleScale(display, banner, red, 120);
+    const role_id = picker.layer.?.id;
+    const surface_id = picker.surface.?.id;
     try expectOutputPixels(&env, "HEADLESS-1", 180, green, black, true);
     try expectOutputPixels(&env, "HEADLESS-2", 120, black, red, false);
     // The right output retains its logical size and placement. Only its
     // physical mode and scale change; the live roles must never remap.
     for ([_]u32{ 210, 240, 120, 180 }) |scale| {
         try changeScale(&env, scale);
-        try settleScale(display, picker.?, green, scale);
-        try testing.expectEqual(role_id, picker.?.layer.?.id);
-        try testing.expectEqual(surface_id, picker.?.surface.?.id);
-        try testing.expectEqual(@as(u32, 120), banner.?.scale_120);
-        try testing.expect(!banner.?.dirty);
+        try settleScale(display, picker, green, scale);
+        try testing.expectEqual(role_id, picker.layer.?.id);
+        try testing.expectEqual(surface_id, picker.surface.?.id);
+        try testing.expectEqual(@as(u32, 120), banner.scale_120);
+        try testing.expect(!banner.dirty);
         try expectOutputPixels(&env, "HEADLESS-1", scale, green, black, true);
         try expectOutputPixels(&env, "HEADLESS-2", 120, black, red, false);
     }
-    const old_picker = picker.?;
-    picker = null;
-    try old_picker.destroy();
+    try picker.destroy();
     try barrier(display);
     try expectOutputPixels(&env, "HEADLESS-1", 180, black, black, false);
     try expectOutputPixels(&env, "HEADLESS-2", 120, black, red, false);
-    const old_banner = banner.?;
-    banner = null;
-    try old_banner.destroy();
+    try banner.destroy();
     try barrier(display);
     try expectOutputPixels(&env, "HEADLESS-2", 120, black, black, false);
     try testing.expectEqual(@as(u8, 0), display.surfaces);
@@ -1472,7 +1475,10 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
     defer actor.kill(testing.io);
     try actor.stdin.?.writeStreamingAll(testing.io, "input\n");
     const display = try native.Display.open(testing.allocator, testing.io, &env);
-    defer display.destroy();
+    defer {
+        retireRemainingSurfaces(display);
+        display.destroy();
+    }
     const start = std.Io.Clock.awake.now(testing.io);
     while (display.status() == .discovering or display.input.pointer == null or display.input.state == null) try readBefore(display, start);
     try testing.expectEqual(native.Display.Status.ready, display.status());
@@ -1481,18 +1487,40 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
         seat_count += 1;
     };
     try testing.expectEqual(@as(usize, 2), seat_count);
-    var picker: ?*native.Surface = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, null);
-    defer if (picker) |s| s.destroy() catch {};
-    const id = picker.?.surface.?.id;
-    try drawBefore(display, picker.?, .{ 20, 110, 60 });
-    try settleScale(display, picker.?, .{ 20, 110, 60 }, 210);
-    _ = try awaitInput(display, id, .keyboard_enter);
+    const picker = try native.Surface.create(display, .picker, .{ .width = 720, .height = 520 }, null);
+    const id = picker.surface.?.id;
+    try drawBefore(display, picker, .{ 20, 110, 60 });
+    try settleScale(display, picker, .{ 20, 110, 60 }, 210);
+    const entered = try awaitInput(display, id, .keyboard_enter);
+    try testing.expectEqual(id, entered.surface);
+    try testing.expectEqual(@as(?wire.ObjectId, id), display.input.keyboard_focus);
     try actor.stdin.?.writeStreamingAll(testing.io, "move-left\n");
     const motion_start = std.Io.Clock.awake.now(testing.io);
     while (display.input.pointer_focus != id or @abs(display.input.point.x - 40) > 2 or @abs(display.input.point.y - 260) > 2) try readBefore(display, motion_start);
     try testing.expectApproxEqAbs(@as(f64, 40), display.input.point.x, 2);
     try testing.expectApproxEqAbs(@as(f64, 260), display.input.point.y, 2);
-    try testing.expect(display.input.cursor.surface != null);
+    const cursor = &display.input.cursor;
+    // Newer compositors advertise cursor-shape. Exercise that normal entry
+    // first, then explicitly retire the shape device on this disposable
+    // connection to retain the live SHM fallback pixel witness as well.
+    if (cursor.device != null) {
+        try testing.expect(cursor.manager != null and cursor.surface == null and cursor.pool == null);
+        try barrier(display);
+        std.debug.print("NATIVE_CURSOR_SHAPE_PATH negotiated shape device; no fallback allocated\n", .{});
+        try cursor.releasePointer(&display.conn);
+        try display.flush();
+        try actor.stdin.?.writeStreamingAll(testing.io, "point 1100 360 1280 720\n");
+        const leave_start = std.Io.Clock.awake.now(testing.io);
+        while (display.input.pointer_focus != null) try readBefore(display, leave_start);
+        try actor.stdin.?.writeStreamingAll(testing.io, "move-left\n");
+        const enter_start = std.Io.Clock.awake.now(testing.io);
+        while (display.input.pointer_focus != id or @abs(display.input.point.x - 40) > 2 or @abs(display.input.point.y - 260) > 2)
+            try readBefore(display, enter_start);
+    }
+    try testing.expect(cursor.device == null and cursor.surface != null);
+    const pool = cursor.pool orelse return error.MissingCursorBuffer;
+    try testing.expectEqual(@as(usize, 1), pool.count());
+    try testing.expectEqual(present.Format.argb8888, pool.buffers.items[0].format);
     try barrier(display);
     try expectCursorPixels(&env, false);
     try expectCursorPixels(&env, true);
@@ -1515,11 +1543,10 @@ test "private actual Wayland keyboard and pointer reach the native fractional pi
         const key_up = (try awaitInput(display, id, .key)).value.key;
         try testing.expect(key_down.pressed and !key_up.pressed and key_down.symbol == symbol and key_up.symbol == symbol and key_down.text_len == 0);
     }
-    const old = picker.?;
-    picker = null;
-    try old.destroy();
+    try picker.destroy();
     try barrier(display);
     try testing.expect(display.input.keyboard_focus == null and display.input.pointer_focus == null and display.input.count == 0 and display.input.repeatDeadline() == null);
+    try testing.expectEqual(@as(u8, 0), display.surfaces);
     try actor.stdin.?.writeStreamingAll(testing.io, "exit\n");
     const term = try actor.wait(testing.io);
     try testing.expect(term == .exited and term.exited == 0);

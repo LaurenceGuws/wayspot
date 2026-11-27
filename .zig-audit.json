@@ -19,6 +19,7 @@
     "src/ui/native_cursor.zig",
     "src/ui/native_input.zig",
     "src/ui/native_surface.zig",
+    "src/ui/native_surface_test.zig",
     "src/ui/owner.zig",
     "src/wallpaper/outputs.zig",
     "src/wallpaper/root.zig",
