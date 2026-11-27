@@ -1,0 +1,37 @@
+--- a/lib/std/Io/Threaded.zig
++++ b/lib/std/Io/Threaded.zig
+@@ -15529,0 +15530,3 @@
++        // No Child handle is returned on this branch. The failed child and
++        // its parent-side pipes are still owned by spawn.
++        reapFailedSpawnPosix(spawned);
+@@ -15550,0 +15554,30 @@
++}
++
++// The child reported a pre-exec error and is exiting via forkBail.
++// Retire only its PID, without cancellation or sending another signal.
++fn reapFailedSpawnPosix(spawned: Spawned) void {
++    if (spawned.stdin) |file| closeFd(file.handle);
++    if (spawned.stdout) |file| closeFd(file.handle);
++    if (spawned.stderr) |file| closeFd(file.handle);
++
++    while (true) {
++        const err = if (have_wait4) blk: {
++            var status: if (builtin.link_libc) c_int else i32 = undefined;
++            break :blk posix.errno(posix.system.wait4(spawned.pid, &status, 0, null));
++        } else if (have_waitid) blk: {
++            const linux = std.os.linux;
++            var info: linux.siginfo_t = undefined;
++            break :blk linux.errno(linux.waitid(.PID, spawned.pid, &info, linux.W.EXITED, null));
++        } else blk: {
++            var status: if (builtin.link_libc) c_int else i32 = undefined;
++            break :blk posix.errno(posix.system.waitpid(spawned.pid, &status, 0));
++        };
++        switch (err) {
++            .SUCCESS, .CHILD => return, // SIGCHLD may request automatic reaping.
++            .INTR => continue,
++            else => {
++                std.debug.print("failed to reap failed spawn {d}: {t}\n", .{ spawned.pid, err });
++                return; // Preserve the original child error.
++            },
++        }
++    }

@@ -231,6 +231,8 @@ pub fn build(b: *std.Build) void {
             b.path("src"),
             b.path("tools/wallpaper_catalog.zig"),
             b.path("tools/tray_canary.zig"),
+            b.path("tools/zig_spawn_regression.zig"),
+            b.path("tools/zig_spawn_detached_regression.zig"),
         },
         .check = true,
     });

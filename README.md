@@ -334,6 +334,11 @@ text. Wayspot keeps native Wayland surface/input ownership, libxkbcommon and
 D-Bus dependencies. `zig build test` runs both product and Wattle tests.
 No sibling checkout is required.
 
+An opt-in [Zig 0.17.0 failed-spawn ownership patch](patches/zig-0.17.0/README.md)
+addresses a confirmed child/pipe leak in the pinned standard library.
+The patch has dedicated regression tests and an isolated-library build recipe;
+the normal build and package do not automatically select the patched library.
+
 Normal desktop build (`ReleaseSafe`):
 
 ```bash

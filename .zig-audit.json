@@ -13,6 +13,8 @@
     "src/main.zig",
     "src/stop.zig",
     "tools/wallpaper_catalog.zig",
-    "tools/tray_canary.zig"
+    "tools/tray_canary.zig",
+    "tools/zig_spawn_regression.zig",
+    "tools/zig_spawn_detached_regression.zig"
   ]
 }
