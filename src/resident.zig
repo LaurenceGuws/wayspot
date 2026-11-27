@@ -10,6 +10,9 @@ const Notification = @import("notifications/root.zig").Service;
 const Wallpaper = @import("wallpaper/wayland.zig").Service;
 const Watcher = @import("tray/watcher.zig").Watcher;
 
+const config_capacity = 16 * 1024;
+
+/// Independently enabled capabilities for one session-owned resident.
 pub const Config = struct {
     picker: bool = true,
     notifications: bool = true,
@@ -17,10 +20,12 @@ pub const Config = struct {
     wallpaper: ?[]const u8 = null,
 };
 
+/// Derives the session identity from its exact runtime and display names.
 pub fn signature(init: std.process.Init) ![32]u8 {
     return @import("wallpaper/wayland.zig").sessionIdentifier(init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing, init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing);
 }
 
+/// Sends one control command and exposes its accepted receipt or refusal.
 pub fn request(init: std.process.Init, command: Control.Command) !void {
     var buffer: [1024]u8 = undefined;
     const reply = try Control.call(init.io, &(try signature(init)), command, &buffer);
@@ -33,9 +38,34 @@ pub fn request(init: std.process.Init, command: Control.Command) !void {
     } else if (!std.mem.eql(u8, reply, "ok\n")) return error.ControlReceiptInvalid;
 }
 
+fn readConfig(io: std.Io, path: []const u8, storage: *[config_capacity]u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.ResidentConfigPathInvalid;
+    const cwd = std.Io.Dir.cwd();
+    const known = try cwd.statFile(io, path, .{ .follow_symlinks = true });
+    if (known.kind != .file) return error.ResidentConfigNotRegularFile;
+    // Keep regular-file symlinks valid, but do not wait for a FIFO writer
+    // if the path changes between the preliminary check and open.
+    const fd = try posix.openat(cwd.handle, path, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NONBLOCK = true,
+        .NOCTTY = true,
+    }, 0);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.ResidentConfigNotRegularFile;
+    if (stat.size >= storage.len) return error.StreamTooLong;
+    const len = try file.readPositionalAll(io, storage, 0);
+    if (len >= storage.len) return error.StreamTooLong;
+    if (len != stat.size) return error.ResidentConfigChanged;
+    return storage[0..len];
+}
+
+/// Owns the configured capability lifetimes and their sequential readiness loop.
 pub fn run(init: std.process.Init, path: []const u8) !void {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(16 * 1024));
-    defer init.gpa.free(bytes);
+    var storage: [config_capacity]u8 = undefined;
+    const bytes = try readConfig(init.io, path, &storage);
     const parsed = try std.json.parseFromSlice(Config, init.gpa, bytes, .{});
     defer parsed.deinit();
     const config = parsed.value;
@@ -89,7 +119,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
                         tray_retry = null;
                         tray_ready = true;
                     } else |err| switch (err) {
-                        error.TrayBusUnavailable => tray_retry = tick + 1000,
+                        error.TrayBusUnavailable => tray_retry = tick +| 1000,
                         else => return err,
                     }
                 }
@@ -98,7 +128,7 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
                 const pending = service.advance() catch |err| switch (err) {
                     error.TrayBusDisconnected => blk: {
                         service.close();
-                        tray_retry = tick + 1000;
+                        tray_retry = tick +| 1000;
                         break :blk false;
                     },
                     else => return err,
@@ -194,7 +224,8 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
             pollFd(ui_owner.nativeFd()),
             pollFd(if (current) |session| session.view.tray_wake_fd else -1),
         };
-        _ = try posix.poll(&fds, if (timeout) |delay| @intCast(@min(delay, std.math.maxInt(i32))) else -1);
+        const ready = (try pollTurn(init.io, &fds, timeout)) orelse continue;
+        if (ready == 0) continue;
         if (fds[0].revents != 0) {
             try Stop.consume(init.io, stop.fd);
             if (notifications) |*service| try service.flush();
@@ -208,6 +239,23 @@ pub fn run(init: std.process.Init, path: []const u8) !void {
             closePicker(&current, .dismiss);
             if (notifications) |*service| service.displayLost();
         }
+    }
+}
+
+// An interrupted wait belongs to the deadline owner, not a relative-timeout
+// retry loop. Discard the interrupted revents and recompute all readiness.
+fn pollTurn(io: std.Io, fds: []posix.pollfd, timeout: ?u64) !?usize {
+    const linux = std.os.linux;
+    const delay: i32 = if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1;
+    const result = linux.poll(fds.ptr, fds.len, delay);
+    switch (linux.errno(result)) {
+        .SUCCESS => return result,
+        .INTR => {
+            try io.checkCancel();
+            return null;
+        },
+        .NOMEM => return error.SystemResources,
+        else => return error.ResidentPollFailed,
     }
 }
 
@@ -288,4 +336,59 @@ test "capability configuration is strict and individually optional" {
     defer value.deinit();
     try std.testing.expect(!value.value.picker and !value.value.notifications and !value.value.tray and value.value.wallpaper == null);
     try std.testing.expectError(error.UnknownField, std.json.parseFromSlice(Config, std.testing.allocator, "{\"unknown\":true}", .{}));
+}
+
+test "resident config admits only bounded regular file bytes" {
+    const io = std.testing.io;
+    const linux = std.os.linux;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fixture.dir.realPath(io, &root_buf)];
+    const good = "{\"picker\":false,\"notifications\":false,\"tray\":false,\"wallpaper\":null}";
+    try fixture.dir.writeFile(io, .{ .sub_path = "config", .data = good });
+    try fixture.dir.symLink(io, "config", "linked", .{});
+    try fixture.dir.createDir(io, "directory", .default_dir);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.mknodat(
+        fixture.dir.handle,
+        "fifo",
+        linux.S.IFIFO | 0o600,
+        0,
+    )));
+    try fixture.dir.symLink(io, "fifo", "linked-fifo", .{});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var bytes: [config_capacity]u8 = undefined;
+    for ([_][]const u8{ "config", "linked" }) |name| {
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
+        try std.testing.expectEqualStrings(good, try readConfig(io, path, &bytes));
+    }
+    for ([_][]const u8{ "directory", "fifo", "linked-fifo" }) |name| {
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
+        try std.testing.expectError(error.ResidentConfigNotRegularFile, readConfig(io, path, &bytes));
+    }
+    var padded: [config_capacity]u8 = @splat(' ');
+    @memcpy(padded[0..good.len], good);
+    try fixture.dir.writeFile(io, .{ .sub_path = "below", .data = padded[0 .. padded.len - 1] });
+    try fixture.dir.writeFile(io, .{ .sub_path = "limit", .data = &padded });
+    const below = try std.fmt.bufPrint(&path_buf, "{s}/below", .{root});
+    try std.testing.expectEqualSlices(u8, padded[0 .. padded.len - 1], try readConfig(io, below, &bytes));
+    const limit = try std.fmt.bufPrint(&path_buf, "{s}/limit", .{root});
+    try std.testing.expectError(error.StreamTooLong, readConfig(io, limit, &bytes));
+}
+
+test "resident poll distinguishes timeout from actual descriptor readiness" {
+    const io = std.testing.io;
+    const linux = std.os.linux;
+    const fd_result = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(fd_result));
+    const fd: posix.fd_t = @intCast(fd_result);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    var fds = [_]posix.pollfd{pollFd(fd)};
+    try std.testing.expectEqual(@as(?usize, 0), try pollTurn(io, &fds, 0));
+    try std.testing.expectEqual(@as(i16, 0), fds[0].revents);
+    const value: u64 = 1;
+    try file.writeStreamingAll(io, std.mem.asBytes(&value));
+    try std.testing.expectEqual(@as(?usize, 1), try pollTurn(io, &fds, 0));
+    try std.testing.expect(fds[0].revents & posix.POLL.IN != 0);
 }

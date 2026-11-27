@@ -64,9 +64,9 @@ updating its exact commit and content hash.
 Implement the smallest complete useful change, exercise the real path, run the
 relevant deterministic tests, and stop when the requested problem is solved.
 Use `zig build check` for repository formatting and the full regression graph.
-The shared `zig build audit` enforces the reviewed scope in `.zig-audit.json`.
-Expand it by completed ownership boundary during the source migration. Review
-each finding individually; do not silently baseline or blanket-acknowledge
-findings. Keep the gate green and do not claim full coverage until all owned
-Zig source is admitted.
+The shared `zig build audit` enforces all owned Zig source, including new
+unignored files, through the Git-backed scope in `.zig-audit.json`.
+Only the pinned third-party vendor subtree is excluded. Review each finding
+individually; do not silently baseline, shrink the owned scope or
+blanket-acknowledge findings. Keep the gate green.
 Keep reviewer checkpoints small. Do not commit without operator authority.

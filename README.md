@@ -372,10 +372,11 @@ zig build check
 
 It checks Zig formatting and runs the full tests (including the standalone
 wallpaper-catalog tool and Bash completion). `zig build audit` is a separate
-ruleset-3 gate enforced by `check`. During the application-source migration,
-`.zig-audit.json` defines the exact reviewed scope. Remaining owned source
-must be reviewed individually before admission; a passing gate does not yet
-claim full product coverage.
+ruleset-3 gate enforced by `check`. The Git-backed scope in `.zig-audit.json`
+includes all tracked and unignored untracked Zig source, excluding the pinned
+third-party `vendor/` subtree. New owned Zig files are checked automatically.
+Intentional sharp constructs require exact source-local acknowledgements;
+vendored dependencies retain their own qualification boundaries.
 
 ## Scope
 

@@ -3,8 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = optimizeOption(b);
-    // Expand the configured source scope as each ownership boundary is reviewed.
-    const audit = b.step("audit", "Audit reviewed Wayspot Zig source");
+    // Enforce the complete Git-discovered owned Zig source scope.
+    const audit = b.step("audit", "Audit all owned Wayspot Zig source");
     const audit_command = b.addSystemCommand(&.{ "zig-audit", "check" });
     audit_command.setCwd(b.path("."));
     audit.dependOn(&audit_command.step);
@@ -236,7 +236,7 @@ pub fn build(b: *std.Build) void {
         },
         .check = true,
     });
-    const check = b.step("check", "Check formatting, audit reviewed source, and run regression tests");
+    const check = b.step("check", "Check formatting, audit owned source, and run regression tests");
     check.dependOn(&formatting.step);
     check.dependOn(audit);
     check.dependOn(test_step);
