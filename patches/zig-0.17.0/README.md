@@ -20,7 +20,7 @@ reaping. An unexpected wait error is diagnosed without replacing the original
 spawn error. Successful spawning and the existing ambiguous error-pipe
 handling are unchanged. Progress IPC remains owned by the progress node.
 
-The source is Zig, distributed under its MIT license (LICENSE.zig).
+The source is Zig, distributed under its MIT license (LICENSE.txt).
 The patch is qualified on Linux x86_64 with and without libc. Other OS and
 architecture branches, progress IPC and unexpected wait errors have not been
 independently exercised. This does not repair unrelated cancellation or
