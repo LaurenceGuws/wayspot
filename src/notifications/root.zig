@@ -150,10 +150,22 @@ const Banner = struct {
     native_display: ?*shm.Display = null,
     native_surface: ?*shm.Surface = null,
     presented: ?Key = null,
+
+    const PaintContext = struct {
+        allocator: std.mem.Allocator,
+        item: *const Presentation,
+    };
+
     fn init(banner: *Banner, ui_owner: *UiOwner, allocator: std.mem.Allocator, io: std.Io) !void {
+        std.debug.assert(banner.native_display == null and banner.native_surface == null);
         errdefer banner.deinit(ui_owner);
         banner.native_display = try ui_owner.acquireNative(allocator, io);
-        banner.native_surface = try shm.Surface.create(banner.native_display.?, .notification, .{ .width = banner_width, .height = banner_height }, null);
+        banner.native_surface = try shm.Surface.create(
+            banner.native_display.?,
+            .notification,
+            .{ .width = banner_width, .height = banner_height },
+            null,
+        );
     }
 
     fn deinit(banner: *Banner, ui_owner: *UiOwner) void {
@@ -170,7 +182,7 @@ const Banner = struct {
     }
 
     fn visibleNow(banner: *const Banner) bool {
-        return banner.presented != null and banner.native_surface != null;
+        return banner.presented != null and banner.native_surface != null and !banner.closed();
     }
 
     fn closed(banner: *const Banner) bool {
@@ -184,14 +196,18 @@ const Banner = struct {
 
     fn drawNative(banner: *Banner, allocator: std.mem.Allocator, item: *const Presentation) !void {
         const surface = banner.native_surface orelse return;
-        const result = try surface.draw(.{ .allocator = allocator, .item = item }, paintNative);
+        const result = try surface.draw(
+            PaintContext{ .allocator = allocator, .item = item },
+            paintNative,
+        );
+        if (result == .closed) return error.NativeBannerClosed;
         if (result == .presented) {
             if (banner.presented == null) std.log.info("native notification first attach", .{});
             banner.presented = .{ .id = item.id, .generation = item.generation };
         }
     }
 
-    fn paintNative(context: anytype, frame: shm.Frame) !void {
+    fn paintNative(context: PaintContext, frame: shm.Frame) !void {
         // Banner redraws are infrequent. Render into the admitted buffer
         // directly, retiring the renderer before returning its pixel borrow.
         if (sdl.SDL_WasInit(sdl.SDL_INIT_VIDEO) != 0) return error.NativeBannerUnexpectedVideo;
@@ -270,45 +286,28 @@ test "borrowed banner canvas preserves direct drawing pixels at mixed densities"
     }
 }
 
-const UiPhase = enum { cold, initializing, visible };
-const UiAction = enum { none, initialize, draw, hide };
-const UiSignal = union(enum) { shown: Key, hidden: Key };
-const UiDecision = enum { none, initialize, draw, hide };
-
+// The logical lifetime does not depend on surface configuration or a draw.
 const UiState = struct {
-    phase: UiPhase = .cold,
     key: ?Key = null,
     deadline: u64 = 0,
     reported: bool = false,
 
-    fn show(state: *UiState, key: Key) UiAction {
-        state.key = key;
-        return switch (state.phase) {
-            .cold => blk: {
-                state.phase = .initializing;
-                break :blk .initialize;
-            },
-            .initializing => .none,
-            .visible => .draw,
-        };
+    fn show(state: *UiState, key: Key, now: u64, timeout_ms: u32) void {
+        std.debug.assert(key.id != 0 and key.generation != 0);
+        std.debug.assert(timeout_ms > 0 and timeout_ms <= timeout_max_ms);
+        state.* = .{ .key = key, .deadline = now +| timeout_ms };
     }
 
-    fn hide(state: *UiState, _: Key) UiAction {
-        const action: UiAction = if (state.phase == .cold) .none else .hide;
+    fn hide(state: *UiState, key: Key) bool {
+        const current = state.key orelse return false;
+        if (key.generation < current.generation) return false;
+        if (key.generation == current.generation and key.id != current.id) return false;
         state.* = .{};
-        return action;
-    }
-
-    fn drawn(state: *UiState, now: u64, timeout_ms: u32) UiAction {
-        std.debug.assert(state.phase == .initializing or state.phase == .visible);
-        std.debug.assert(state.key != null);
-        state.phase = .visible;
-        state.deadline = now +| timeout_ms;
-        return .draw;
+        return true;
     }
 
     fn remaining(state: *const UiState, now: u64) i32 {
-        std.debug.assert(state.phase == .visible);
+        std.debug.assert(state.key != null);
         return @intCast(@min(state.deadline -| now, timeout_max_ms));
     }
 
@@ -319,22 +318,6 @@ const UiState = struct {
         return .{ .key = key, .reason = reason };
     }
 };
-
-fn decideUi(state: *UiState, signal: UiSignal) UiDecision {
-    return switch (signal) {
-        .shown => |key| switch (state.show(key)) {
-            .none => .none,
-            .initialize => .initialize,
-            .draw => .draw,
-            .hide => unreachable,
-        },
-        .hidden => |key| switch (state.hide(key)) {
-            .none => .none,
-            .hide => .hide,
-            .initialize, .draw => unreachable,
-        },
-    };
-}
 
 /// A banner can be absent while its accepted notification is still alive.
 /// Rendering failure must not stop D-Bus service or extend the expiry deadline.
@@ -352,15 +335,17 @@ const Ui = struct {
     fn apply(self: *Ui, ui_owner: *UiOwner, allocator: std.mem.Allocator, io: std.Io, desired: Desired) !void {
         switch (desired) {
             .hidden => |key| {
-                _ = decideUi(&self.state, .{ .hidden = key });
-                self.clear(ui_owner, allocator);
+                if (self.state.hide(key)) self.clear(ui_owner, allocator);
             },
             .shown => |value| {
-                _ = decideUi(&self.state, .{ .shown = .{ .id = value.id, .generation = value.generation } });
                 if (self.visible) |*prior| prior.deinit(allocator);
                 self.visible = value;
-                // Establish an expiry even if display initialization or drawing fails.
-                _ = self.state.drawn(nowMilliseconds(io), value.timeout_ms);
+                // Establish an expiry before attempting display initialization.
+                self.state.show(
+                    .{ .id = value.id, .generation = value.generation },
+                    nowMilliseconds(io),
+                    value.timeout_ms,
+                );
                 if (!self.banner.exists()) try self.banner.init(ui_owner, allocator, io);
                 try self.banner.draw(allocator, &self.visible.?);
             },
@@ -453,6 +438,8 @@ pub const Error = error{
     GenerationExhausted,
     PathMissing,
     HistoryOpenFailed,
+    HistoryAlreadyOwned,
+    HistoryLockFailed,
     HistoryReadFailed,
     HistoryCorrupt,
     HistoryTooLarge,
@@ -882,13 +869,26 @@ const Native = struct {
         native.* = undefined;
     }
 
-    fn read(native: *Native) Error![]u8 {
-        const file = (try openHistoryFile(native.directory, native.io)) orelse
-            return native.allocator.alloc(u8, 0) catch error.OutOfMemory;
-        defer file.close(native.io);
+    const RetainedFile = struct {
+        file: std.Io.File,
+        stat: std.Io.File.Stat,
+    };
+
+    fn openRetained(native: *Native) Error!?RetainedFile {
+        const file = (try openHistoryFile(native.directory, native.io)) orelse return null;
+        errdefer file.close(native.io);
         const stat = file.stat(native.io) catch return error.HistoryReadFailed;
         if (stat.kind != .file) return error.HistoryOpenFailed;
         if (stat.size > file_capacity) return error.HistoryTooLarge;
+        return .{ .file = file, .stat = stat };
+    }
+
+    fn read(native: *Native) Error![]u8 {
+        const retained = (try native.openRetained()) orelse
+            return native.allocator.alloc(u8, 0) catch error.OutOfMemory;
+        const file = retained.file;
+        const stat = retained.stat;
+        defer file.close(native.io);
         if (stat.permissions.toMode() & 0o7777 != 0o600) {
             file.setPermissions(native.io, .fromMode(0o600)) catch
                 return error.HistoryOpenFailed;
@@ -956,12 +956,13 @@ const Native = struct {
         native.temporary_name_length = 0;
     }
 
+    // Borrows the existing directory descriptor; never close this File view.
+    fn directoryFile(native: *const Native) std.Io.File {
+        return .{ .handle = native.directory.handle, .flags = .{ .nonblocking = false } };
+    }
+
     fn syncParent(native: *Native) Error!void {
-        const parent_file = std.Io.File{
-            .handle = native.directory.handle,
-            .flags = .{ .nonblocking = false },
-        };
-        parent_file.sync(native.io) catch return error.HistorySyncFailed;
+        native.directoryFile().sync(native.io) catch return error.HistorySyncFailed;
     }
 
     fn abort(native: *Native) Error!void {
@@ -1182,27 +1183,37 @@ const Owner = struct {
         state_home: ?[]const u8,
         home: ?[]const u8,
     ) Error!Owner {
-        return initAt(allocator, io, state_home, home, try unixSeconds(io));
-    }
-
-    fn initAt(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        state_home: ?[]const u8,
-        home: ?[]const u8,
-        now: i64,
-    ) Error!Owner {
         var native = try Native.init(allocator, io, state_home, home);
         errdefer native.deinit();
-        var history = try load(&native, now);
-        errdefer history.deinit(allocator);
+        // Preserve immediate wrong-kind/oversize rejection without adopting
+        // a snapshot before the notification bus name is owned.
+        if (try native.openRetained()) |retained| retained.file.close(io);
         return .{
             .allocator = allocator,
             .io = io,
-            .history = history,
+            .history = .{},
             .native = native,
-            .durability = .{ .dirty = true },
         };
+    }
+
+    fn acquireHistory(owner: *Owner) Error!void {
+        std.debug.assert(owner.history.active == null);
+        std.debug.assert(owner.durability.failure == null);
+        const directory = owner.native.directoryFile();
+        const locked = directory.tryLock(owner.io, .exclusive) catch return error.HistoryLockFailed;
+        if (!locked) return error.HistoryAlreadyOwned;
+        errdefer directory.unlock(owner.io);
+
+        var history = try load(&owner.native, try unixSeconds(owner.io));
+        // Keep process-local allocated identities monotonic across reconnects.
+        history.next_history_id = @max(history.next_history_id, owner.history.next_history_id);
+        owner.history.deinit(owner.allocator);
+        owner.history = history;
+        owner.durability.mark();
+    }
+
+    fn releaseHistory(owner: *Owner) void {
+        owner.native.directoryFile().unlock(owner.io);
     }
 
     fn deinit(owner: *Owner) void {
@@ -1347,8 +1358,8 @@ test "generation never wraps and exhaustion changes no state" {
 }
 
 const UiOperation = union(enum) {
-    decision: UiDecision,
-    draw: Key,
+    shown: Key,
+    hidden: bool,
     wait: i32,
     closed: Closed,
 };
@@ -1368,61 +1379,56 @@ const UiTranscript = struct {
     }
 };
 
-test "strict UI transcript follows newest draw deadline and close policy" {
+test "strict UI transcript follows newest generation deadline and close policy" {
     const one = Key{ .id = 1, .generation = 1 };
     const two = Key{ .id = 1, .generation = 2 };
     const three = Key{ .id = 2, .generation = 3 };
     var transcript = UiTranscript{ .expected = &.{
-        .{ .decision = .none },
-        .{ .decision = .initialize },
-        .{ .decision = .none },
-        .{ .draw = two },
+        .{ .hidden = false },
+        .{ .shown = one },
+        .{ .shown = two },
         .{ .wait = 100 },
-        .{ .decision = .draw },
-        .{ .draw = three },
+        .{ .hidden = false },
+        .{ .shown = three },
         .{ .wait = 200 },
         .{ .closed = .{ .key = three, .reason = .expired } },
-        .{ .decision = .initialize },
-        .{ .draw = one },
+        .{ .shown = one },
         .{ .closed = .{ .key = one, .reason = .dismissed } },
-        .{ .decision = .initialize },
-        .{ .draw = one },
-        .{ .decision = .hide },
+        .{ .shown = two },
+        .{ .hidden = true },
     } };
     var state: UiState = .{};
-    try transcript.observe(.{ .decision = decideUi(&state, .{ .hidden = one }) });
-    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = one }) });
-    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = two }) });
-    try std.testing.expectEqual(UiAction.draw, state.drawn(10, 100));
-    try transcript.observe(.{ .draw = state.key.? });
+    try transcript.observe(.{ .hidden = state.hide(one) });
+    state.show(one, 0, 100);
+    try transcript.observe(.{ .shown = state.key.? });
+    state.show(two, 10, 100);
+    try transcript.observe(.{ .shown = state.key.? });
     try transcript.observe(.{ .wait = state.remaining(10) });
-    try transcript.observe(.{ .decision = decideUi(&state, .{ .shown = three }) });
-    try std.testing.expectEqual(UiAction.draw, state.drawn(20, 200));
-    try transcript.observe(.{ .draw = state.key.? });
+    try transcript.observe(.{ .hidden = state.hide(one) });
+    state.show(three, 20, 200);
+    try transcript.observe(.{ .shown = state.key.? });
     try transcript.observe(.{ .wait = state.remaining(20) });
     try transcript.observe(.{ .closed = state.close(.expired).? });
     try std.testing.expect(state.close(.dismissed) == null);
     var dismissed: UiState = .{};
-    try transcript.observe(.{ .decision = decideUi(&dismissed, .{ .shown = one }) });
-    try std.testing.expectEqual(UiAction.draw, dismissed.drawn(0, 100));
-    try transcript.observe(.{ .draw = dismissed.key.? });
+    dismissed.show(one, 0, 100);
+    try transcript.observe(.{ .shown = dismissed.key.? });
     try transcript.observe(.{ .closed = dismissed.close(.dismissed).? });
     try std.testing.expect(dismissed.close(.dismissed) == null);
-    var hidden: UiState = .{};
-    try transcript.observe(.{ .decision = decideUi(&hidden, .{ .shown = one }) });
-    try std.testing.expectEqual(UiAction.draw, hidden.drawn(0, 100));
-    try transcript.observe(.{ .draw = hidden.key.? });
-    try transcript.observe(.{ .decision = decideUi(&hidden, .{ .hidden = one }) });
+    dismissed.show(two, 0, 100);
+    try transcript.observe(.{ .shown = dismissed.key.? });
+    try transcript.observe(.{ .hidden = dismissed.hide(three) });
+    try std.testing.expect(dismissed.key == null);
     try transcript.done();
 }
 
 test "strict UI transcript rejects unexpected missing and extra operations" {
-    var unexpected = UiTranscript{ .expected = &.{.{ .decision = .draw }} };
-    try std.testing.expectError(error.UnexpectedOperation, unexpected.observe(.{ .decision = .hide }));
-    var missing = UiTranscript{ .expected = &.{.{ .decision = .draw }} };
+    var unexpected = UiTranscript{ .expected = &.{.{ .hidden = true }} };
+    try std.testing.expectError(error.UnexpectedOperation, unexpected.observe(.{ .hidden = false }));
+    var missing = UiTranscript{ .expected = &.{.{ .hidden = true }} };
     try std.testing.expectError(error.MissingOperation, missing.done());
     var extra = UiTranscript{ .expected = &.{} };
-    try std.testing.expectError(error.ExtraOperation, extra.observe(.{ .decision = .draw }));
+    try std.testing.expectError(error.ExtraOperation, extra.observe(.{ .hidden = false }));
 }
 
 test "accept allocation failures publish no partial identity or history" {
@@ -1539,7 +1545,7 @@ fn fuzzIntake(_: void, smith: *std.testing.Smith) !void {
                 var owned = value;
                 owned.deinit(std.testing.allocator);
             },
-            else => unreachable,
+            else => return error.InvalidFuzzChoice,
         }
         owner.history.assertValid();
         try std.testing.expect(@intFromBool(owner.history.active != null) <= 1);
@@ -2327,7 +2333,9 @@ test "notification publication order and displaced identity are exact" {
 }
 
 test "only external connection failures retry; persistence failures remain sticky" {
-    for ([_]anyerror{ error.BusLost, error.NameLost, error.SessionBusUnavailable }) |err| {
+    for ([_]error{ BusLost, NameLost, SessionBusUnavailable }{
+        error.BusLost, error.NameLost, error.SessionBusUnavailable,
+    }) |err| {
         try std.testing.expectEqual(@as(?i64, reconnect_wait_milliseconds), reconnectWait(err));
     }
     try std.testing.expect(reconnectWait(error.NameOwned) == null);
@@ -2350,7 +2358,14 @@ pub const Service = struct {
     pending: Pending,
     ui: Ui = .{},
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, state_home: ?[]const u8, home: ?[]const u8, ui_owner: *UiOwner) !Service {
+    /// Creates the history directory owner, without claiming the bus or writer lease.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        state_home: ?[]const u8,
+        home: ?[]const u8,
+        ui_owner: *UiOwner,
+    ) !Service {
         return .{
             .owner = try Owner.init(allocator, io, state_home, home),
             .ui_owner = ui_owner,
@@ -2358,6 +2373,7 @@ pub const Service = struct {
         };
     }
 
+    /// Retires graphical, pending, bus and history resources; caller flushes first.
     pub fn deinit(self: *Service) void {
         self.ui.clear(self.ui_owner, self.owner.allocator);
         self.pending.clear();
@@ -2365,23 +2381,36 @@ pub const Service = struct {
         self.owner.deinit();
     }
 
-    pub fn connect(self: *Service) !void {
+    fn connect(self: *Service) !void {
+        std.debug.assert(!self.owns_history);
         try self.dbus_owner.open();
         errdefer self.dbus_owner.close();
         try self.dbus_owner.own();
+        try self.owner.acquireHistory();
         self.owns_history = true;
     }
 
-    pub fn disconnect(self: *Service) !void {
+    fn disconnect(self: *Service) !void {
         self.dbus_owner.close();
+        // Keep the writer lease through final durability even if the bus name
+        // has disappeared. A successor cannot overwrite this transaction.
+        defer if (self.owns_history) {
+            self.owner.releaseHistory();
+            self.owns_history = false;
+        };
         if (self.owner.history.active) |active| {
-            std.debug.assert(self.owner.close(.{ .id = active.notification_id, .generation = active.generation }));
+            const retired = self.owner.close(.{
+                .id = active.notification_id,
+                .generation = active.generation,
+            });
+            std.debug.assert(retired);
         }
         self.pending.clear();
         self.ui.clear(self.ui_owner, self.owner.allocator);
         try self.flush();
     }
 
+    /// Borrows the bus poll descriptor, or -1 while disconnected.
     pub fn fd(self: *const Service) !std.posix.fd_t {
         const connection = self.dbus_owner.connection orelse return -1;
         var value: c_int = -1;
@@ -2389,8 +2418,9 @@ pub const Service = struct {
         return value;
     }
 
+    /// Flushes only while the history writer lease is held.
     pub fn flush(self: *Service) !void {
-        // A duplicate-name refusal must not overwrite the real owner's history.
+        // A duplicate owner or disconnected service may not publish history.
         if (self.owns_history) try self.owner.flush();
     }
 
@@ -2400,71 +2430,77 @@ pub const Service = struct {
             if (now < self.retry_at) return false;
             self.connect() catch |err| {
                 const delay = reconnectWait(err) orelse return err;
-                self.retry_at = now + @as(u64, @intCast(delay));
+                self.retry_at = now +| @as(u64, @intCast(delay));
                 return false;
             };
         }
         return self.advance() catch |err| {
             const delay = reconnectWait(err) orelse return err;
             try self.disconnect();
-            self.retry_at = now + @as(u64, @intCast(delay));
+            self.retry_at = now +| @as(u64, @intCast(delay));
             return false;
         };
     }
 
+    /// Next monotonic connection retry or active notification expiry deadline.
     pub fn wake(self: *const Service) ?u64 {
         if (self.dbus_owner.connection == null) return self.retry_at;
         return self.deadline();
     }
 
+    /// Reports a presented banner on a live native surface.
     pub fn visible(self: *const Service) bool {
         return self.ui.banner.visibleNow();
     }
 
-    pub fn deadline(self: *const Service) ?u64 {
+    fn deadline(self: *const Service) ?u64 {
         return if (self.ui.visible != null) self.ui.state.deadline else null;
     }
 
-    pub fn advance(self: *Service) !bool {
+    fn advance(self: *Service) !bool {
         const more = try intake(&self.dbus_owner, self);
         try self.flush();
         if (self.pending.take()) |desired| {
-            self.ui.apply(self.ui_owner, self.owner.allocator, self.owner.io, desired) catch |err| self.bannerFailed(err);
+            self.ui.apply(self.ui_owner, self.owner.allocator, self.owner.io, desired) catch |err| self.bannerFailed(@errorName(err));
         }
         return more;
     }
 
+    /// Processes native banner input and presentation, then closes exact generations.
     pub fn nativeTurn(self: *Service) !void {
         const closed = self.ui.nativeTurn(self.owner.allocator) catch |err| {
-            self.bannerFailed(err);
+            self.bannerFailed(@errorName(err));
             return;
         };
         if (closed) |value| self.complete(value) catch |err| try self.recoverTurn(err);
     }
 
+    /// Retires closed surfaces and expires the logical notification at its deadline.
     pub fn expire(self: *Service, now: u64) !void {
-        if (self.ui.banner.closed()) self.bannerFailed(error.LayerClosed);
+        if (self.ui.banner.closed()) self.bannerFailed("LayerClosed");
         if (self.ui.expired(now)) |closed| self.complete(closed) catch |err| try self.recoverTurn(err);
     }
 
+    // zig-audit: acknowledge anyerror
+    // reason: Preserve errors from the bus, native display and history without reclassification.
     fn recoverTurn(self: *Service, err: anyerror) !void {
         const delay = reconnectWait(err) orelse return err;
         try self.disconnect();
-        self.retry_at = nowMilliseconds(self.owner.io) + @as(u64, @intCast(delay));
+        self.retry_at = nowMilliseconds(self.owner.io) +| @as(u64, @intCast(delay));
     }
 
+    /// Retires only graphical resources; the logical expiry remains in force.
     pub fn displayLost(self: *Service) void {
-        self.bannerFailed(error.NativeDisplayLost);
+        self.bannerFailed("NativeDisplayLost");
     }
 
-    fn bannerFailed(self: *Service, err: anyerror) void {
-        std.log.err("notification banner failed: {s}", .{@errorName(err)});
+    fn bannerFailed(self: *Service, reason: []const u8) void {
+        std.log.err("notification banner failed: {s}", .{reason});
         self.ui.banner.deinit(self.ui_owner);
     }
 
     fn complete(self: *Service, closed: Closed) !void {
-        if (!currentClose(self.owner.history.active, closed)) return;
-        std.debug.assert(self.owner.close(closed.key));
+        if (!self.owner.close(closed.key)) return;
         self.ui.clear(self.ui_owner, self.owner.allocator);
         try self.dbus_owner.signalClosed(closed.key.id, closed.reason);
         try self.flush();
@@ -2484,25 +2520,31 @@ pub const Service = struct {
         const id = accepted.presentation.id;
         const displaced = accepted.displaced;
         var order = NotifyOrder{ .displaced = displaced != null };
-        std.debug.assert(order.marked(self.owner.durability.dirty) == .dirty);
+        const dirty_step = order.marked(self.owner.durability.dirty);
+        std.debug.assert(dirty_step == .dirty);
         var owns_presentation = true;
         defer if (owns_presentation) accepted.presentation.deinit(self.owner.allocator);
         try self.dbus_owner.replyNotify(id);
-        std.debug.assert(order.replied() == .reply);
+        const reply_step = order.replied();
+        std.debug.assert(reply_step == .reply);
         owns_presentation = false;
         self.pending.publish(accepted.presentation);
-        std.debug.assert(order.published() == .publish);
+        const publish_step = order.published();
+        std.debug.assert(publish_step == .publish);
         accepted = undefined;
         if (displaced) |closed| {
             try self.dbus_owner.signalClosed(closed.id, .expired);
-            std.debug.assert(order.signaled() == .displaced);
+            const displaced_step = order.signaled();
+            std.debug.assert(displaced_step == .displaced);
         }
-        std.debug.assert(order.finished() == .done);
+        const done_step = order.finished();
+        std.debug.assert(done_step == .done);
     }
 
     fn close(self: *Service, id: u32) !void {
         if (activeKey(self.owner.history.active, id)) |key| {
-            std.debug.assert(self.owner.close(key));
+            const retired = self.owner.close(key);
+            std.debug.assert(retired);
             self.pending.hide(key);
             try self.dbus_owner.signalClosed(id, .requested);
         }
@@ -2570,6 +2612,8 @@ test "bounded real intake yields after 64 messages, then drains the remainder" {
     try std.testing.expectEqual(@as(usize, 0), bus.remaining);
 }
 
+// zig-audit: acknowledge anyerror
+// reason: Only the three explicit connection-loss errors authorize a retry.
 fn reconnectWait(err: anyerror) ?i64 {
     return switch (err) {
         error.BusLost, error.NameLost, error.SessionBusUnavailable => reconnect_wait_milliseconds,
@@ -2620,7 +2664,11 @@ fn serve(service: *Service, stop_fd: std.posix.fd_t) !void {
             .{ .fd = try service.fd(), .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = service.ui_owner.nativeFd(), .events = std.posix.POLL.IN, .revents = 0 },
         };
-        _ = try std.posix.poll(&fds, if (deadline) |end| @intCast(@min(end -| current, std.math.maxInt(i32))) else -1);
+        const timeout: i32 = if (deadline) |end|
+            @intCast(@min(end -| current, std.math.maxInt(i32)))
+        else
+            -1;
+        if (try std.posix.poll(&fds, timeout) == 0) continue;
         if (fds[0].revents != 0) {
             try Stop.consume(service.owner.io, stop_fd);
             return;
@@ -3219,4 +3267,116 @@ test "history close transcript reports missing cleanup in all optimization modes
     );
     try std.testing.expect(transcript.close_mismatch);
     try std.testing.expect(!transcript.file_open and !transcript.directory_open);
+}
+
+test "a stale hidden generation cannot retire a newer presentation" {
+    const allocator = std.testing.allocator;
+    var owner: UiOwner = .{};
+    var source = try sampleNotification(allocator, 7, "newer");
+    defer source.deinit(allocator);
+    source.generation = 2;
+    var ui: Ui = .{
+        .state = .{ .key = .{ .id = 7, .generation = 2 }, .deadline = 100 },
+        .visible = try Presentation.init(allocator, &source),
+    };
+    defer ui.clear(&owner, allocator);
+    try ui.apply(&owner, allocator, std.testing.io, .{
+        .hidden = .{ .id = 7, .generation = 1 },
+    });
+    try std.testing.expect(ui.visible != null);
+    try std.testing.expectEqual(@as(Generation, 2), ui.visible.?.generation);
+    // Coalescing a new notification and its closure before presentation
+    // must still retire the older surface and its presentation.
+    try ui.apply(&owner, allocator, std.testing.io, .{
+        .hidden = .{ .id = 8, .generation = 3 },
+    });
+    try std.testing.expect(ui.visible == null);
+}
+
+test "a new generation retains its expiry when banner initialization fails" {
+    const allocator = std.testing.allocator;
+    var owner: UiOwner = .{}; // No display environment, by construction.
+    var source = try sampleNotification(allocator, 7, "replacement");
+    defer source.deinit(allocator);
+    source.generation = 2;
+    var ui: Ui = .{
+        .state = .{
+            .key = .{ .id = 7, .generation = 1 },
+            .deadline = 100,
+            .reported = true,
+        },
+    };
+    defer ui.clear(&owner, allocator);
+    const value = try Presentation.init(allocator, &source);
+    try std.testing.expectError(
+        error.NativeDisplayEnvironment,
+        ui.apply(&owner, allocator, std.testing.io, .{ .shown = value }),
+    );
+    try std.testing.expect(!ui.banner.exists());
+    try std.testing.expectEqual(@as(u8, 0), owner.native_users);
+    try std.testing.expect(ui.expired(ui.state.deadline - 1) == null);
+    const closed = ui.expired(ui.state.deadline) orelse return error.MissingExpiry;
+    try std.testing.expectEqual(Key{ .id = 7, .generation = 2 }, closed.key);
+    try std.testing.expectEqual(CloseReason.expired, closed.reason);
+    try std.testing.expect(ui.expired(ui.state.deadline) == null);
+}
+
+test "history writer lease reloads the canonical snapshot and rejects competing owners" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path[0..try fixture.dir.realPath(io, &path)];
+    var first = try Owner.init(allocator, io, root, null);
+    defer first.deinit();
+    var second = try Owner.init(allocator, io, root, null);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 0), second.history.count);
+    try first.acquireHistory();
+    var first_held = true;
+    defer if (first_held) first.releaseHistory();
+    try std.testing.expectError(error.HistoryAlreadyOwned, second.acquireHistory());
+
+    const now = try unixSeconds(io);
+    var accepted = try first.acceptAt(sampleRequestValue(0, "first owner"), now);
+    defer accepted.presentation.deinit(allocator);
+    try std.testing.expect(first.close(.{
+        .id = accepted.presentation.id,
+        .generation = accepted.presentation.generation,
+    }));
+    try first.flush();
+    first.releaseHistory();
+    first_held = false;
+
+    try second.acquireHistory();
+    defer second.releaseHistory();
+    try std.testing.expectEqual(@as(usize, 1), second.history.count);
+    try std.testing.expectEqualStrings("first owner", second.history.records[0].?.summary);
+    try std.testing.expectError(error.HistoryAlreadyOwned, first.acquireHistory());
+}
+
+test "failed history acquisition does not retain the directory lease" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path[0..try fixture.dir.realPath(io, &path)];
+    var first = try Owner.init(allocator, io, root, null);
+    defer first.deinit();
+    var second = try Owner.init(allocator, io, root, null);
+    defer second.deinit();
+
+    try first.native.directory.writeFile(io, .{
+        .sub_path = "notifications.jsonl",
+        .data = "not valid JSONL\n",
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
+    try std.testing.expectError(error.HistoryCorrupt, first.acquireHistory());
+    const directory = second.native.directoryFile();
+    try std.testing.expect(try directory.tryLock(io, .exclusive));
+    defer directory.unlock(io);
+    try std.testing.expect(!first.durability.dirty);
+    try std.testing.expectEqual(@as(usize, 0), first.history.count);
 }
