@@ -5,18 +5,24 @@
 const std = @import("std");
 const linux = std.os.linux;
 const Connection = @import("wayland-client").Connection;
+const ObjectId = @import("wayland-wire").ObjectId;
 const present = @import("wayland-present");
 const wl = @import("wayland-protocols").wl;
 const zwlr = @import("wayland-protocols").zwlr;
 const wp = @import("wayland-protocols").wp;
 const Allocator = std.mem.Allocator;
+/// Input owner shared by native graphical roles.
 pub const Input = @import("native_input.zig");
 
+/// The two independently owned native layer roles.
 pub const Role = enum { picker, notification };
+/// Maximum total buffers per role, including busy stale shapes.
 pub const max_buffers: usize = 3;
+/// Maximum simultaneous graphical roles on one display.
 pub const max_surfaces: usize = 2;
-pub const max_buffer_bytes: usize = 16 * 1024 * 1024;
+const max_buffer_bytes: usize = 16 * 1024 * 1024;
 const max_outputs = 32;
+/// Wayland fractional scale denominator.
 pub const scale_unit: u32 = 120;
 const max_scale: u32 = 8 * scale_unit;
 
@@ -37,14 +43,17 @@ pub fn scaledPixels(logical: u32, scale: u32) !u32 {
     return std.math.cast(u32, value) orelse error.InvalidSurfaceExtent;
 }
 
+/// Positive logical or physical extent, bounded by the surface byte budget.
 pub const Extent = struct {
     width: u32,
     height: u32,
 
+    /// Validates positive dimensions and the exact XRGB8888 byte bound.
     pub fn validate(size: Extent) !void {
         if (size.width == 0 or size.height == 0 or size.width > 4096 or size.height > 4096) return error.InvalidSurfaceExtent;
         if (@as(u64, size.width) * size.height * 4 > max_buffer_bytes) return error.InvalidSurfaceExtent;
     }
+    /// Converts a validated logical extent to bounded physical pixels.
     pub fn scaled(size: Extent, scale: u32) !Extent {
         try size.validate();
         const pixels: Extent = .{
@@ -84,8 +93,10 @@ pub const Display = struct {
     surfaces: u8 = 0,
     occupied: [max_surfaces]?*Surface = @splat(null),
 
+    /// Registry discovery and connection usability, independent of surface configure.
     pub const Status = enum { discovering, ready, unavailable, failed };
 
+    /// Connects to the selected environment and starts asynchronous registry discovery.
     pub fn open(allocator: Allocator, io: std.Io, env: *const std.process.Environ.Map) !*Display {
         const display = try adopt(allocator, try Connection.connect(allocator, io, env));
         errdefer display.destroy();
@@ -112,6 +123,7 @@ pub const Display = struct {
         return self;
     }
 
+    /// Retires the input, SHM and connection owners after all surfaces are destroyed.
     pub fn destroy(self: *Display) void {
         std.debug.assert(self.surfaces == 0);
         self.input.deinit(&self.conn);
@@ -120,6 +132,7 @@ pub const Display = struct {
         self.allocator.destroy(self);
     }
 
+    /// Reports discovery completion and the required bound globals.
     pub fn status(self: *const Display) Status {
         if (self.failed) return .failed;
         if (!self.discovery_done) return .discovering;
@@ -127,6 +140,7 @@ pub const Display = struct {
         return .ready;
     }
 
+    /// Borrows the native connection descriptor for the caller's event loop.
     pub fn fd(self: *const Display) std.posix.fd_t {
         return self.conn.fd;
     }
@@ -136,10 +150,13 @@ pub const Display = struct {
         if (self.failed) return error.NativeConnectionFailed;
         errdefer self.failed = true;
         try self.conn.read();
+        // zig-audit: acknowledge discard
+        // reason: Listeners own event effects; the count does not control the required flush.
         _ = try self.conn.dispatchPending();
         try self.flush();
     }
 
+    /// Flushes queued protocol requests; failure makes the connection unusable.
     pub fn flush(self: *Display) !void {
         if (self.failed) return error.NativeConnectionFailed;
         errdefer self.failed = true;
@@ -214,6 +231,11 @@ pub const Display = struct {
         } else if (std.mem.eql(u8, global.interface, "wl_seat")) {
             try self.input.bindSeat(conn, registry, global.name, global.version);
         } else if (std.mem.eql(u8, global.interface, "wl_output") and global.version >= 3) {
+            for (self.outputs) |slot| {
+                if (slot) |output| {
+                    if (output.global == global.name) return error.NativeOutputDuplicate;
+                }
+            }
             // Version 3 provides release on hot-unplug. Older outputs are
             // not needed by the supported compositors; absent hints mean 1x.
             for (&self.outputs) |*slot| {
@@ -262,8 +284,10 @@ pub const Frame = struct {
     stride: u32,
     pixels: []u8,
 };
+/// Result of one admitted drawing attempt, including independent readiness fences.
 pub const Draw = enum { not_configured, clean, frame_pending, buffers_busy, presented, closed };
 
+/// Stable owner of one layer role, its protocol listeners and release-fenced SHM pool.
 pub const Surface = struct {
     display: *Display,
     role: Role,
@@ -299,7 +323,9 @@ pub const Surface = struct {
         display.occupied[@backingInt(role)] = self;
         errdefer {
             display.failed = true;
-            self.destroy() catch {};
+            self.destroy() catch |err| {
+                std.log.debug("native surface construction cleanup: {s}", .{@errorName(err)});
+            };
         }
         const conn = &display.conn;
         const session = &conn.session;
@@ -337,6 +363,8 @@ pub const Surface = struct {
                     .width = if (config.width == 0) self.requested.width else config.width,
                     .height = if (config.height == 0) self.requested.height else config.height,
                 };
+                // zig-audit: acknowledge discard
+                // reason: Check the same physical extent used by draw before acknowledging configure.
                 _ = try extent.scaled(self.scale_120);
                 try layer.ackConfigure(&conn.session, config.serial);
                 if (self.extent == null or !std.meta.eql(self.extent.?, extent)) {
@@ -360,7 +388,11 @@ pub const Surface = struct {
         }
         const wanted = self.fractional_preferred orelse self.integer_preferred orelse fallback;
         if (wanted == self.scale_120 or self.closed) return;
-        if (self.extent) |extent| _ = try extent.scaled(wanted);
+        if (self.extent) |extent| {
+            // zig-audit: acknowledge discard
+            // reason: Admit the physical extent before publishing its new scale.
+            _ = try extent.scaled(wanted);
+        }
         self.scale_120 = wanted;
         self.dirty = true;
     }
@@ -389,6 +421,7 @@ pub const Surface = struct {
         }
     }
 
+    /// Marks content dirty without painting or borrowing a buffer.
     pub fn invalidate(self: *Surface) void {
         self.dirty = true;
     }
@@ -397,13 +430,21 @@ pub const Surface = struct {
     /// distinct fences; neither substitutes for the other. The upstream
     /// pool bounds *current-shape* buffers only, so count all held shapes
     /// here before acquire. Rapid resizes cannot grow a stale-buffer tail.
-    pub fn draw(self: *Surface, context: anytype, comptime paint: anytype) !Draw {
+    pub fn draw(
+        self: *Surface,
+        // zig-audit: acknowledge anytype
+        // reason: Picker, notification and deterministic paint contexts remain statically typed.
+        context: anytype,
+        // zig-audit: acknowledge anytype
+        // reason: The synchronous painter consumes the matching concrete context and Frame.
+        comptime paint: anytype,
+    ) !Draw {
+        if (self.painting) return error.NativePaintInProgress;
         if (self.display.failed) return error.NativeConnectionFailed;
         if (self.closed) return .closed;
         const extent = self.extent orelse return .not_configured;
         if (!self.dirty) return .clean;
         if (!self.presenter.?.ready()) return .frame_pending;
-        std.debug.assert(!self.painting);
         const pool = self.pool.?;
         var held: usize = 0;
         for (pool.buffers.items) |buffer| {
@@ -419,7 +460,13 @@ pub const Surface = struct {
         std.debug.assert(pool.count() <= max_buffers and buffer.state == .acquired);
         self.painting = true;
         defer self.painting = false;
-        paint(context, Frame{ .logical_extent = extent, .scale_120 = self.scale_120, .extent = pixels, .stride = buffer.stride, .pixels = buffer.pixels() }) catch |err| {
+        paint(context, Frame{
+            .logical_extent = extent,
+            .scale_120 = self.scale_120,
+            .extent = pixels,
+            .stride = buffer.stride,
+            .pixels = buffer.pixels(),
+        }) catch |err| {
             pool.cancel(buffer);
             return err;
         };
@@ -443,12 +490,14 @@ pub const Surface = struct {
         return .presented;
     }
 
-    /// Consume the surface even on failure. Never wait for release: all
+    /// Consumes the surface even on retirement failure, except a recursive
+    /// call during its active paint borrow, which is refused without consuming.
+    /// Never wait for release: all
     /// retired SHM mappings are abandoned, not reused or modified. Remove
     /// callback contexts before freeing the pool and keep sibling surfaces
     /// alive on a healthy connection. A caller may request a sync fence.
     pub fn destroy(self: *Surface) !void {
-        std.debug.assert(!self.painting);
+        if (self.painting) return error.NativePaintInProgress;
         const display = self.display;
         const conn = &display.conn;
         defer {
@@ -461,13 +510,13 @@ pub const Surface = struct {
         };
         if (self.presenter) |presenter| presenter.destroy();
         if (self.layer) |layer| {
-            conn.clearListener(layer) catch {};
+            retireListener(conn, layer.id);
             layer.destroy(&conn.session) catch {
                 display.failed = true;
             };
         }
         if (self.fractional) |fractional| {
-            conn.clearListener(fractional) catch {};
+            retireListener(conn, fractional.id);
             fractional.destroy(&conn.session) catch {
                 display.failed = true;
             };
@@ -476,15 +525,23 @@ pub const Surface = struct {
             display.failed = true;
         };
         if (self.surface) |surface| {
-            conn.clearListener(surface) catch {};
+            retireListener(conn, surface.id);
             surface.destroy(&conn.session) catch {
                 display.failed = true;
             };
         }
         if (self.pool) |pool| {
-            for (pool.buffers.items) |buffer| conn.clearListener(buffer.wl_buffer) catch {};
+            for (pool.buffers.items) |buffer| retireListener(conn, buffer.wl_buffer.id);
             pool.destroy();
         }
         try display.flush();
     }
 };
+
+// A dead object cannot retain a live listener. setUserData can fail only
+// when the object is no longer live; that is already the desired state.
+fn retireListener(conn: *Connection, id: ObjectId) void {
+    conn.session.setUserData(id, null, null) catch |err| switch (err) {
+        error.InvalidObject => return,
+    };
+}

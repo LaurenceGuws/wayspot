@@ -1534,3 +1534,40 @@ test "native UI discovery wait has one deadline across interrupted poll" {
     try testing.expectError(error.NativeUiDeadline, Owner.readBefore(display, testing.io, started));
     try testing.expect(!display.failed);
 }
+
+test "duplicate output global cannot reserve a second native output slot" {
+    var f = try Fixture.openWith(.{ .outputs = 1 });
+    defer f.close();
+    const first = f.display.outputs[0].?.object;
+    try testing.expectError(error.NativeOutputDuplicate, f.global(6, "wl_output", 4));
+    try testing.expectEqual(native.Display.Status.failed, f.display.status());
+    try testing.expectEqual(first, f.display.outputs[0].?.object);
+    try testing.expect(f.display.outputs[1] == null);
+}
+
+test "recursive native paint refuses before borrowing another buffer" {
+    const Reentrant = struct {
+        surface: *native.Surface,
+        fn draw(self: *@This(), _: native.Frame) !void {
+            var nested: Paint = .{};
+            try testing.expectError(error.NativePaintInProgress, self.surface.draw(&nested, Paint.draw));
+            try testing.expectEqual(@as(usize, 0), nested.calls);
+            try testing.expectError(error.NativePaintInProgress, self.surface.destroy());
+            try testing.expect(self.surface.painting);
+            try testing.expectEqual(@as(u8, 1), self.surface.display.surfaces);
+        }
+    };
+    var f = try Fixture.open();
+    defer f.close();
+    const surface = try native.Surface.create(f.display, .picker, size, null);
+    defer surface.destroy() catch |err| {
+        std.log.warn("recursive paint fixture retirement: {s}", .{@errorName(err)});
+    };
+    const initial = try f.take();
+    try testing.expect(initial.len > 0);
+    try f.configure(surface, 1, size);
+    var nested: Reentrant = .{ .surface = surface };
+    try testing.expectEqual(native.Draw.presented, try surface.draw(&nested, Reentrant.draw));
+    try testing.expectEqual(@as(usize, 1), surface.pool.?.count());
+    try testing.expect(!surface.painting);
+}
