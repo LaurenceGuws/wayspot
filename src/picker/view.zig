@@ -48,7 +48,6 @@ pub const Native = struct {
     canvas: ?*sdl.SDL_Surface = null,
     canvas_scale: f32 = 1,
     first_attach: bool = false,
-    owned_wake: bool = false,
     stop_fd: std.posix.fd_t = -1,
     applications: []const apps.App,
     allocator: std.mem.Allocator,
@@ -78,16 +77,16 @@ pub const Native = struct {
     /// Acquires the shared display and a tray completion eventfd.
     pub fn init(native: *Native) !void {
         std.debug.assert(!native.initialized);
+        std.debug.assert(native.tray_wake_fd < 0);
         native.native_display = try native.ui_owner.acquireNative(native.allocator, native.io);
         errdefer {
             native.ui_owner.releaseNative();
             native.native_display = null;
         }
-        if (native.tray_enabled and native.tray_wake_fd < 0) {
+        if (native.tray_enabled) {
             const wake_fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
             if (std.os.linux.errno(wake_fd) != .SUCCESS) return error.TrayWakeOpenFailed;
             native.tray_wake_fd = @intCast(wake_fd);
-            native.owned_wake = true;
         }
         native.initialized = true;
     }
@@ -340,9 +339,15 @@ pub const Native = struct {
         std.debug.assert(native.native_surface == null);
         native.ui_owner.releaseNative();
         native.native_display = null;
-        if (native.owned_wake) {
-            _ = std.os.linux.close(native.tray_wake_fd);
+        if (native.tray_wake_fd >= 0) {
+            const wake_fd = native.tray_wake_fd;
             native.tray_wake_fd = -1;
+            const linux = std.os.linux;
+            // Linux retires the descriptor even on EINTR.
+            switch (linux.errno(linux.close(wake_fd))) {
+                .SUCCESS, .INTR => {},
+                else => |err| std.log.err("picker tray wake close failed: {s}", .{@tagName(err)}),
+            }
         }
         native.initialized = false;
     }
@@ -410,7 +415,7 @@ pub const Native = struct {
             var batch: picker.Events = .{};
             try native.ui_owner.pumpNative();
             try native.nativeEvents(&batch);
-            if (try native.drainTrayWake()) {
+            if (try native.trayReady()) {
                 if (batch.count < batch.items.len) {
                     batch.items[batch.count] = .redraw;
                     batch.count += 1;
@@ -435,7 +440,8 @@ pub const Native = struct {
         }
     }
 
-    fn drainTrayWake(native: *Native) !bool {
+    /// Drains the owned wake descriptor and adopts a completed worker result.
+    pub fn trayReady(native: *Native) !bool {
         if (native.tray_wake_fd < 0) return false;
         var value: u64 = undefined;
         const bytes = std.mem.asBytes(&value);
@@ -445,7 +451,9 @@ pub const Native = struct {
             .AGAIN, .INTR => {},
             else => return error.TrayWakeReadFailed,
         }
-        return native.trayReady();
+        if (!native.tray_worker_ready.load(.acquire) or native.tray_worker == null) return false;
+        try native.receiveTray();
+        return true;
     }
 
     fn coordinates(native: *const Native, point: Input.Point) struct { x: f32, y: f32 } {
@@ -577,12 +585,6 @@ pub const Native = struct {
     fn clearText(native: *Native) void {
         if (native.text) |*painter| painter.deinit();
         native.text = null;
-    }
-
-    pub fn trayReady(native: *Native) !bool {
-        if (!native.tray_worker_ready.load(.acquire) or native.tray_worker == null) return false;
-        try native.receiveTray();
-        return true;
     }
 
     fn receiveTray(native: *Native) !void {

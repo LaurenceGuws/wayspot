@@ -226,7 +226,7 @@ fn pump(current: *?*Picker, io: std.Io) !bool {
             return more;
         }
         batch.more = more;
-        const ready = if (batch.count < batch.items.len) session.trayReady() catch |err| {
+        const ready = if (batch.count < batch.items.len) session.view.trayReady() catch |err| {
             std.log.warn("picker tray wake failed: {s}", .{@errorName(err)});
             closePicker(current, .dismiss);
             return more;
@@ -243,7 +243,7 @@ fn pump(current: *?*Picker, io: std.Io) !bool {
         };
         switch (action) {
             .wait => if (timer_due) {
-                session.deadline = now(io) + @as(u64, @intCast(session.view.waitTimeout()));
+                session.refreshDeadline();
             },
             .draw => {},
             .dismiss => closePicker(current, .dismiss),

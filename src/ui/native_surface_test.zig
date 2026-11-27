@@ -1907,3 +1907,48 @@ test "full native input queue refuses a release without replacing queued transit
     try testing.expectError(error.NativeConnectionFailed, picker.destroy());
     try testing.expectEqual(@as(u8, 0), f.display.surfaces);
 }
+
+test "picker session invalid terminal action retires its lease and wake descriptor" {
+    const Session = @import("../picker/session.zig");
+    const Owner = @import("owner.zig");
+    const allocator = testing.allocator;
+    var f = try Fixture.open();
+    defer f.closeServer();
+    var owner: Owner = .{ .native = f.display, .native_users = 1 };
+    defer owner.releaseNative();
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    const Action = @import("../picker/root.zig").Action;
+    for ([_]Action{ .wait, .draw, .{ .launch = 0 } }) |action| {
+        const session = try allocator.create(Session);
+        session.* = .{
+            .process = undefined,
+            .applications = .{ .allocator = allocator },
+            .terminal = null,
+            .home = "",
+            .state = .{ .allocator = allocator, .applications = &.{} },
+            .view = .{
+                .ui_owner = &owner,
+                .applications = &.{},
+                .allocator = allocator,
+                .io = testing.io,
+                .home = "",
+            },
+        };
+        session.process.gpa = allocator;
+        session.process.io = testing.io;
+        session.process.environ_map = &env;
+        session.view.init() catch |err| {
+            allocator.destroy(session);
+            return err;
+        };
+        try session.view.startText();
+        const fd = session.view.tray_wake_fd;
+        try testing.expect(fd >= 0);
+        const expected = if (action == .launch) error.ApplicationIndexInvalid else error.PickerActionNotTerminal;
+        try testing.expectError(expected, session.finish(action));
+        try testing.expectEqual(@as(u8, 1), owner.native_users);
+        try testing.expectEqual(f.display, owner.native.?);
+        try testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)));
+    }
+}

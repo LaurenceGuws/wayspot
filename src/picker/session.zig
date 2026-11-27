@@ -19,6 +19,7 @@ state: picker.State,
 view: View,
 deadline: u64 = 0,
 
+/// Acquires one fresh catalogue, state and visible native role, rolling back partial startup.
 pub fn open(init: std.process.Init, ui_owner: *UiOwner, tray_enabled: bool) !*Self {
     const self = try init.gpa.create(Self);
     errdefer init.gpa.destroy(self);
@@ -52,25 +53,20 @@ pub fn open(init: std.process.Init, ui_owner: *UiOwner, tray_enabled: bool) !*Se
         .home = home,
         .tray_enabled = tray_enabled,
     };
-    if (tray_enabled) {
-        const fd = std.os.linux.eventfd(0, std.os.linux.EFD.CLOEXEC | std.os.linux.EFD.NONBLOCK);
-        if (std.os.linux.errno(fd) != .SUCCESS) return error.TrayWakeOpenFailed;
-        self.view.tray_wake_fd = @intCast(fd);
-    }
-    errdefer if (self.view.tray_wake_fd >= 0) {
-        _ = std.os.linux.close(self.view.tray_wake_fd);
-    };
     try self.view.init();
     errdefer self.view.quit();
     try self.view.create();
     errdefer self.view.destroy();
     try self.view.startText();
-    errdefer self.view.stopText() catch {};
+    errdefer self.view.stopText() catch |err| {
+        std.log.debug("picker startup text retirement: {s}", .{@errorName(err)});
+    };
     try self.state.begin();
     try self.draw();
     return self;
 }
 
+/// Consumes the session on every exit, retiring the role before any admitted action.
 pub fn finish(self: *Self, selected: picker.Action) !void {
     const allocator = self.process.gpa;
     defer allocator.destroy(self);
@@ -82,46 +78,42 @@ pub fn finish(self: *Self, selected: picker.Action) !void {
         break :blk {};
     };
     self.view.quit();
-    if (self.view.tray_wake_fd >= 0) _ = std.os.linux.close(self.view.tray_wake_fd);
     try stop_result;
     try destroy_result;
     switch (selected) {
         .dismiss => {},
         .launch => |index| {
+            const applications = self.applications.slice();
+            if (index >= applications.len) return error.ApplicationIndexInvalid;
             var process: launch.Detached = .{ .io = self.process.io, .environ_map = self.process.environ_map };
-            try launch.spawn(&process, &self.applications.slice()[index], self.terminal, self.home);
+            try launch.spawn(&process, &applications[index], self.terminal, self.home);
         },
         .focus => |id| try navigator.focus(navigator.Native{ .io = self.process.io, .environ_map = self.process.environ_map }, allocator, self.state.window_backend, id.slice()),
-        else => unreachable,
+        .wait, .draw => return error.PickerActionNotTerminal,
     }
 }
 
+/// Reads the retained notification history only on explicit picker demand.
 pub fn readHistory(self: *Self) !notification.History {
     return notification.inspect(self.process.gpa, self.process.io, self.process.environ_map.get("XDG_STATE_HOME"), self.home);
 }
 
+/// Publishes the current borrowed frame and refreshes the visible wake deadline.
 pub fn draw(self: *Self) !void {
     try self.view.draw(&self.state.frame());
-    self.deadline = now(self.process.io) + @as(u64, @intCast(self.view.waitTimeout()));
+    self.refreshDeadline();
 }
 
+/// Consumes one input batch and draws only when the picker requests it.
 pub fn advance(self: *Self, events: *const picker.Events) !picker.Action {
     const action = try self.state.advance(self, navigator.Native{ .io = self.process.io, .environ_map = self.process.environ_map }, events);
     if (action == .draw) try self.draw();
     return action;
 }
 
-pub fn trayReady(self: *Self) !bool {
-    if (self.view.tray_wake_fd < 0) return false;
-    var value: u64 = undefined;
-    const bytes = std.mem.asBytes(&value);
-    const result = std.os.linux.read(self.view.tray_wake_fd, bytes.ptr, bytes.len);
-    switch (std.os.linux.errno(result)) {
-        .SUCCESS => if (result != bytes.len) return error.TrayWakeReadFailed,
-        .AGAIN, .INTR => {},
-        else => return error.TrayWakeReadFailed,
-    }
-    return self.view.trayReady();
+/// Establishes the next visible wake from the current view readiness policy.
+pub fn refreshDeadline(self: *Self) void {
+    self.deadline = now(self.process.io) +| @as(u64, @intCast(self.view.waitTimeout()));
 }
 
 /// A held native key supplies its exact repeat deadline; none while idle.
