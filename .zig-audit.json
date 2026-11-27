@@ -12,6 +12,7 @@
     "src/control.zig",
     "src/main.zig",
     "src/stop.zig",
+    "src/tray/host.zig",
     "tools/wallpaper_catalog.zig",
     "tools/tray_canary.zig",
     "tools/zig_spawn_regression.zig",
