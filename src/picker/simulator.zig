@@ -30,6 +30,11 @@ const Draw = struct {
     query: []const u8,
     rows: ExpectedRows = .none,
     selected_row: usize = 0,
+    first: usize = 0,
+    total_count: ?usize = null,
+    preedit: []const u8 = "",
+    preedit_cursor: [2]i32 = .{ -1, -1 },
+    query_from_ime: bool = false,
     window_status: picker.WindowStatus = .dormant,
     window_error: ?[]const u8 = null,
     result: Result = .ok,
@@ -41,6 +46,13 @@ const ExpectedRows = union(enum) {
     apps: []const u16,
     windows: []const ExpectedWindowRow,
     notifications: []const NotificationRow,
+
+    fn count(rows: ExpectedRows) usize {
+        return switch (rows) {
+            .none => 0,
+            inline else => |items| items.len,
+        };
+    }
 };
 
 const NotificationRow = struct {
@@ -98,32 +110,36 @@ const Transcript = struct {
     index: usize = 0,
     mismatch: bool = false,
 
+    /// Consumes exactly one display acquisition result.
     pub fn init(transcript: *Transcript) !void {
-        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const result = switch (transcript.next() orelse return transcript.reject()) {
             .init => |result| result,
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         if (result == .fail) return error.SdlInitFailed;
     }
 
+    /// Consumes exactly one surface acquisition result.
     pub fn create(transcript: *Transcript) !void {
-        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const result = switch (transcript.next() orelse return transcript.reject()) {
             .create => |result| result,
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         if (result == .fail) return error.SdlCreateFailed;
     }
 
+    /// Consumes exactly one text-input activation result.
     pub fn startText(transcript: *Transcript) !void {
-        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const result = switch (transcript.next() orelse return transcript.reject()) {
             .start_text => |result| result,
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         if (result == .fail) return error.SdlStartTextFailed;
     }
 
+    /// Consumes the next bounded event batch or expected read error.
     pub fn read(transcript: *Transcript) !picker.Events {
-        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const result = switch (transcript.next() orelse return transcript.reject()) {
             .wait => |wait_result| switch (wait_result) {
                 .event => |event| {
                     var events: picker.Events = .{};
@@ -134,10 +150,10 @@ const Transcript = struct {
                 .events => |events| events,
                 .fail => return error.SdlWaitFailed,
             },
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         if (result.items.len == 0 or result.items.len > picker.event_capacity) {
-            return error.TranscriptMismatch;
+            return transcript.reject();
         }
         var events: picker.Events = .{};
         @memcpy(events.items[0..result.items.len], result.items);
@@ -146,47 +162,56 @@ const Transcript = struct {
         return events;
     }
 
+    /// Checks the full declared frame projection before returning its expected result.
     pub fn draw(transcript: *Transcript, frame: *const picker.Frame) !void {
-        const expected = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const expected = switch (transcript.next() orelse return transcript.reject()) {
             .draw => |expected_draw| expected_draw,
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
-        if (expected.table != frame.table) return error.TranscriptMismatch;
-        if (!std.mem.eql(u8, expected.query, frame.query)) return error.TranscriptMismatch;
+        if (expected.table != frame.table) return transcript.reject();
+        if (!std.mem.eql(u8, expected.query, frame.query)) return transcript.reject();
+        if (!std.mem.eql(u8, expected.preedit, frame.preedit) or
+            !std.mem.eql(i32, &expected.preedit_cursor, &frame.preedit_cursor) or
+            expected.query_from_ime != frame.query_from_ime) return transcript.reject();
+        if (frame.row_count > frame.rows.len or
+            frame.first != expected.first or
+            frame.total_count != (expected.total_count orelse expected.rows.count()) or
+            frame.first > frame.total_count or frame.row_count > frame.total_count - frame.first)
+            return transcript.reject();
         switch (expected.rows) {
-            .none => if (frame.row_count != 0) return error.TranscriptMismatch,
+            .none => if (frame.row_count != 0) return transcript.reject(),
             .root => |tables| try transcript.expectTables(frame, tables),
             .apps => |indexes| try transcript.expectApps(frame, indexes),
             .windows => |windows| try transcript.expectWindows(frame, windows),
-            .notifications => |records| try expectNotifications(frame, records),
+            .notifications => |records| expectNotifications(frame, records) catch return transcript.reject(),
         }
-        if (frame.row_count > 0 and expected.selected_row != frame.selected_row) {
-            return error.TranscriptMismatch;
+        if (expected.selected_row != frame.selected_row) {
+            return transcript.reject();
         }
         if (frame.window_status != expected.window_status or
-            (frame.window_error == null) != (expected.window_error == null)) return error.TranscriptMismatch;
+            (frame.window_error == null) != (expected.window_error == null)) return transcript.reject();
         if (frame.window_error) |reason| {
-            if (!std.mem.eql(u8, reason, expected.window_error.?)) return error.TranscriptMismatch;
+            if (!std.mem.eql(u8, reason, expected.window_error.?)) return transcript.reject();
         }
         if (expected.result == .fail) return error.SdlDrawFailed;
     }
 
-    fn expectTables(_: *Transcript, frame: *const picker.Frame, tables: []const picker.Table) !void {
-        if (tables.len != frame.row_count) return error.TranscriptMismatch;
+    fn expectTables(transcript: *Transcript, frame: *const picker.Frame, tables: []const picker.Table) !void {
+        if (tables.len != frame.row_count) return transcript.reject();
         for (frame.rowSlice(), tables) |row, table| switch (row) {
-            .table => |actual| if (actual != table) return error.TranscriptMismatch,
-            else => return error.TranscriptMismatch,
+            .table => |actual| if (actual != table) return transcript.reject(),
+            else => return transcript.reject(),
         };
     }
 
     fn expectApps(transcript: *Transcript, frame: *const picker.Frame, indexes: []const u16) !void {
-        if (indexes.len != frame.row_count) return error.TranscriptMismatch;
+        if (indexes.len != frame.row_count) return transcript.reject();
         for (frame.rowSlice(), indexes) |row, expected| switch (row) {
             .app => |actual| {
-                if (actual != expected) return error.TranscriptMismatch;
-                if (actual >= transcript.applications.len) return error.TranscriptMismatch;
+                if (actual != expected) return transcript.reject();
+                if (actual >= transcript.applications.len) return transcript.reject();
             },
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
     }
 
@@ -195,56 +220,57 @@ const Transcript = struct {
         frame: *const picker.Frame,
         windows: []const ExpectedWindowRow,
     ) !void {
-        if (windows.len != frame.row_count) return error.TranscriptMismatch;
+        if (windows.len != frame.row_count) return transcript.reject();
         for (frame.rowSlice(), windows) |row, expected| switch (row) {
             .window => |actual| {
                 if (!std.mem.eql(u8, actual.window.stable_id.slice(), expected.stable_id)) {
-                    return error.TranscriptMismatch;
+                    return transcript.reject();
                 }
-                if (actual.app_index != expected.app_index) return error.TranscriptMismatch;
+                if (actual.app_index != expected.app_index) return transcript.reject();
                 if (actual.app_index) |index| {
-                    if (index >= transcript.applications.len) return error.TranscriptMismatch;
+                    if (index >= transcript.applications.len) return transcript.reject();
                 }
             },
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
     }
 
+    /// Checks exact compositor command arguments and returns the declared subprocess result.
     pub fn run(
         transcript: *Transcript,
         allocator: std.mem.Allocator,
         argv: []const []const u8,
         max_stdout: usize,
     ) !navigator.ProcessResult {
-        if (argv.len < 3) return error.TranscriptMismatch;
+        if (argv.len < 3) return transcript.reject();
         if (transcript.backend == .snowman) return transcript.snowmanRun(allocator, argv, max_stdout);
-        if (!std.mem.eql(u8, argv[0], "hyprctl") or transcript.backend != .hyprland) return error.TranscriptMismatch;
-        const step = transcript.next() orelse return error.TranscriptMismatch;
+        if (!std.mem.eql(u8, argv[0], "hyprctl") or transcript.backend != .hyprland) return transcript.reject();
+        const step = transcript.next() orelse return transcript.reject();
         const Selected = struct { bytes: []const u8, result: Result };
         const selected: Selected = if (argv.len == 3 and std.mem.eql(u8, argv[1], "-j") and
             std.mem.eql(u8, argv[2], "clients") and max_stdout == 256 * 1024)
             switch (step) {
                 .navigator_discovery => |discovery| .{ .bytes = discovery.bytes, .result = discovery.result },
-                else => return error.TranscriptMismatch,
+                else => return transcript.reject(),
             }
         else if (argv.len == 3 and std.mem.eql(u8, argv[1], "dispatch") and max_stdout == 64 * 1024)
             switch (step) {
                 .navigator_focus => |focus| blk: {
                     var expected_buffer: [136]u8 = undefined;
                     const expected = try std.fmt.bufPrint(&expected_buffer, "hl.dsp.focus({{ window = \"address:{s}\" }})", .{focus.stable_id});
-                    if (!std.mem.eql(u8, argv[2], expected)) return error.TranscriptMismatch;
+                    if (!std.mem.eql(u8, argv[2], expected)) return transcript.reject();
                     break :blk .{ .bytes = focus.bytes, .result = focus.result };
                 },
-                else => return error.TranscriptMismatch,
+                else => return transcript.reject(),
             }
         else if (argv.len == 3 and std.mem.eql(u8, argv[1], "-j") and
             std.mem.eql(u8, argv[2], "activewindow") and max_stdout == 64 * 1024)
             switch (step) {
                 .navigator_focus_observation => |observation| .{ .bytes = observation.bytes, .result = observation.result },
-                else => return error.TranscriptMismatch,
+                else => return transcript.reject(),
             }
         else
-            return error.TranscriptMismatch;
+            return transcript.reject();
         const stdout = try allocator.dupe(u8, selected.bytes);
         errdefer allocator.free(stdout);
         return .{
@@ -255,35 +281,36 @@ const Transcript = struct {
     }
 
     fn snowmanRun(transcript: *Transcript, allocator: std.mem.Allocator, argv: []const []const u8, max_stdout: usize) !navigator.ProcessResult {
-        if (argv.len != 4 or !std.mem.eql(u8, argv[0], "snowman") or max_stdout != 64 * 1024) return error.TranscriptMismatch;
-        const step = transcript.next() orelse return error.TranscriptMismatch;
+        if (argv.len != 4 or !std.mem.eql(u8, argv[0], "snowman") or max_stdout != 64 * 1024) return transcript.reject();
+        const step = transcript.next() orelse return transcript.reject();
         const reply = switch (step) {
             .navigator_discovery => |value| blk: {
-                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "list") or !std.mem.eql(u8, argv[3], "--mapped")) return error.TranscriptMismatch;
+                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "list") or !std.mem.eql(u8, argv[3], "--mapped")) return transcript.reject();
                 break :blk value;
             },
             .navigator_focus_observation => |value| blk: {
-                if (!std.mem.eql(u8, argv[1], "seat") or !std.mem.eql(u8, argv[2], "get") or !std.mem.eql(u8, argv[3], "1")) return error.TranscriptMismatch;
+                if (!std.mem.eql(u8, argv[1], "seat") or !std.mem.eql(u8, argv[2], "get") or !std.mem.eql(u8, argv[3], "1")) return transcript.reject();
                 break :blk NavigatorDiscovery{ .bytes = value.bytes, .result = value.result };
             },
             .navigator_focus => |value| blk: {
-                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "focus") or !std.mem.eql(u8, argv[3], value.stable_id)) return error.TranscriptMismatch;
+                if (!std.mem.eql(u8, argv[1], "window") or !std.mem.eql(u8, argv[2], "focus") or !std.mem.eql(u8, argv[3], value.stable_id)) return transcript.reject();
                 break :blk NavigatorDiscovery{ .bytes = value.bytes, .result = value.result };
             },
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         const stdout = try allocator.dupe(u8, if (reply.result == .ok) reply.bytes else "");
         errdefer allocator.free(stdout);
         return .{ .stdout = stdout, .stderr = try allocator.dupe(u8, if (reply.result == .ok) "" else reply.bytes), .succeeded = reply.result == .ok };
     }
 
+    /// Transfers retained history once, or returns the declared read result.
     pub fn readHistory(transcript: *Transcript) !notification.History {
         transcript.history_reads += 1;
-        return switch (transcript.next() orelse return error.TranscriptMismatch) {
+        return switch (transcript.next() orelse return transcript.reject()) {
             .read_history => |result| switch (result) {
                 .empty => .{},
                 .stored => blk: {
-                    const retained = transcript.retained orelse return error.TranscriptMismatch;
+                    const retained = transcript.retained orelse return transcript.reject();
                     transcript.retained = null;
                     break :blk retained;
                 },
@@ -291,31 +318,40 @@ const Transcript = struct {
                 .permission => error.HistoryOpenFailed,
                 .allocation => error.OutOfMemory,
             },
-            else => error.TranscriptMismatch,
+            else => transcript.reject(),
         };
     }
 
+    /// Consumes the exact text-input retirement result.
     pub fn stopText(transcript: *Transcript) !void {
-        const result = switch (transcript.next() orelse return error.TranscriptMismatch) {
+        const result = switch (transcript.next() orelse return transcript.reject()) {
             .stop_text => |result| result,
-            else => return error.TranscriptMismatch,
+            else => return transcript.reject(),
         };
         if (result == .fail) return error.SdlStopTextFailed;
     }
 
+    /// Records surface retirement even if an earlier operation failed.
     pub fn destroy(transcript: *Transcript) void {
         transcript.consume(.destroy);
     }
 
+    /// Consumes retirement and the subsequent synchronization result.
     pub fn destroyForFocus(transcript: *Transcript) !void {
         transcript.destroy();
-        const step = transcript.next() orelse return error.TranscriptMismatch;
-        if (step != .sync) return error.TranscriptMismatch;
+        const step = transcript.next() orelse return transcript.reject();
+        if (step != .sync) return transcript.reject();
         if (step.sync == .fail) return error.PickerDismissalSyncFailed;
     }
 
+    /// Records final display release.
     pub fn quit(transcript: *Transcript) void {
         transcript.consume(.quit);
+    }
+
+    fn reject(transcript: *Transcript) error{TranscriptMismatch} {
+        transcript.mismatch = true;
+        return error.TranscriptMismatch;
     }
 
     fn next(transcript: *Transcript) ?Step {
@@ -379,7 +415,6 @@ fn simulateHistoryBackend(
     retained: ?notification.History,
     backend: navigator.Backend,
 ) !?usize {
-    if (steps.len > step_capacity) return error.TranscriptTooLong;
     var transcript = Transcript{
         .steps = steps,
         .applications = applications,
@@ -387,6 +422,7 @@ fn simulateHistoryBackend(
         .retained = retained,
     };
     defer if (transcript.retained) |*history| history.deinit(std.testing.allocator);
+    if (steps.len > step_capacity) return error.TranscriptTooLong;
     const result = picker.run(
         &transcript,
         &transcript,
@@ -497,7 +533,7 @@ test "typing in window finder filters windows instead of returning to applicatio
 
 test "Tab toggles window finder back to a fresh application finder" {
     const applications = [_]apps.App{testApp("Alpha")};
-    _ = try simulateApps(&.{
+    try std.testing.expectEqual(@as(?usize, null), try simulateApps(&.{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -524,12 +560,12 @@ test "Tab toggles window finder back to a fresh application finder" {
         .{ .stop_text = .ok },
         .destroy,
         .quit,
-    }, &applications);
+    }, &applications));
 }
 
 test "Hyprland discovery failure leaves a bounded window mode and Tab recovers apps" {
     const applications = [_]apps.App{testApp("Alpha")};
-    _ = try simulateApps(&.{
+    try std.testing.expectEqual(@as(?usize, null), try simulateApps(&.{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -552,12 +588,12 @@ test "Hyprland discovery failure leaves a bounded window mode and Tab recovers a
         .{ .stop_text = .ok },
         .destroy,
         .quit,
-    }, &applications);
+    }, &applications));
 }
 
 test "malformed Hyprland client response is visible and recoverable" {
     const applications = [_]apps.App{testApp("Alpha")};
-    _ = try simulateApps(&.{
+    try std.testing.expectEqual(@as(?usize, null), try simulateApps(&.{
         .{ .init = .ok },
         .{ .create = .ok },
         .{ .start_text = .ok },
@@ -576,7 +612,7 @@ test "malformed Hyprland client response is visible and recoverable" {
         .{ .stop_text = .ok },
         .destroy,
         .quit,
-    }, &applications);
+    }, &applications));
 }
 
 test "stale exact window focus never activates another target" {
@@ -804,16 +840,21 @@ test "scroll hover and click preserve exact row and application identity" {
         .{ .draw = .{
             .query = "",
             .rows = .{ .apps = &initial_indexes },
+            .total_count = 16,
         } },
         .{ .wait = .{ .event = .{ .scroll = 2 } } },
         .{ .draw = .{
             .query = "",
             .rows = .{ .apps = &scrolled_indexes },
+            .first = 2,
+            .total_count = 16,
         } },
         .{ .wait = .{ .event = .{ .hover = 5 } } },
         .{ .draw = .{
             .query = "",
             .rows = .{ .apps = &scrolled_indexes },
+            .first = 2,
+            .total_count = 16,
             .selected_row = 5,
         } },
         .{ .wait = .{ .event = .{ .click = 5 } } },
@@ -937,7 +978,7 @@ test "missing history is empty and read failures clean display exactly" {
         .quit,
     });
 
-    const failures = [_]struct { HistoryRead, anyerror }{
+    const failures = [_]struct { HistoryRead, error{ HistoryCorrupt, HistoryOpenFailed, OutOfMemory } }{
         .{ .corrupt, error.HistoryCorrupt },
         .{ .permission, error.HistoryOpenFailed },
         .{ .allocation, error.OutOfMemory },
@@ -970,7 +1011,7 @@ fn retainedHistory() !notification.History {
 
 fn testApp(name: []const u8) apps.App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = "test.desktop",
         .name = name,
         .generic_name = null,
@@ -1086,6 +1127,103 @@ fn appendCleanup(steps: []Step, count: *usize) void {
     append(steps, count, .quit);
 }
 
-fn expectFailure(expected: anyerror, steps: []const Step) !void {
+const GeneratedFailure = error{
+    SdlInitFailed,
+    SdlCreateFailed,
+    SdlStartTextFailed,
+    SdlDrawFailed,
+    SdlWaitFailed,
+    InvalidText,
+    SdlStopTextFailed,
+};
+
+fn expectFailure(expected: GeneratedFailure, steps: []const Step) !void {
     try std.testing.expectError(expected, simulate(steps));
+}
+
+test "transcript mismatch cannot masquerade as compositor discovery failure" {
+    // The model intentionally recovers from native discovery errors. A
+    // malformed test script must not be accepted as one of those errors.
+    for ([_]navigator.Backend{ .hyprland, .snowman }) |backend| {
+        try std.testing.expectError(error.TranscriptMismatch, simulateHistoryBackend(&.{
+            .{ .init = .ok },
+            .{ .create = .ok },
+            .{ .start_text = .ok },
+            .{ .draw = .{ .query = "" } },
+            .{ .wait = .{ .event = .tab } },
+            .{ .navigator_focus_observation = .{} },
+            .{ .draw = .{
+                .table = .windows,
+                .query = "",
+                .window_status = .unavailable,
+                .window_error = "TranscriptMismatch",
+            } },
+            .{ .wait = .{ .event = .quit } },
+            .{ .stop_text = .ok },
+            .destroy,
+            .quit,
+        }, &.{}, null, backend));
+    }
+}
+
+test "draw mismatch survives a later expected text stop failure" {
+    try std.testing.expectError(error.TranscriptMismatch, simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "wrong expected query" } },
+        .{ .stop_text = .fail },
+        .destroy,
+        .quit,
+    }));
+}
+
+test "over-bound transcript retires its transferred history" {
+    const steps: [step_capacity + 1]Step = @splat(.{ .init = .fail });
+    try std.testing.expectError(error.TranscriptTooLong, simulateHistory(&steps, &.{}, try retainedHistory()));
+}
+
+test "transcript verifies IME composition separately from committed query" {
+    try simulate(&.{
+        .{ .init = .ok },
+        .{ .create = .ok },
+        .{ .start_text = .ok },
+        .{ .draw = .{ .query = "" } },
+        .{ .wait = .{ .event = .{ .text = try picker.Text.init("a") } } },
+        .{ .draw = .{ .query = "a" } },
+        .{ .wait = .{ .event = .{ .edit = .{
+            .commit = try picker.Text.init("λ"),
+            .preedit = try picker.Text.init("漢"),
+            .delete_before = 1,
+            .delete_after = 0,
+            .cursor_begin = 3,
+            .cursor_end = 3,
+        } } } },
+        .{ .draw = .{ .query = "λ", .preedit = "漢", .preedit_cursor = .{ 3, 3 }, .query_from_ime = true } },
+        .{ .wait = .{ .event = .cancel_preedit } },
+        .{ .draw = .{ .query = "λ", .query_from_ime = true } },
+        .{ .wait = .{ .event = .escape } },
+        .{ .stop_text = .ok },
+        .destroy,
+        .quit,
+    });
+}
+
+test "transcript refuses each incorrect viewport and editor witness" {
+    const expected = [_]Step{.{ .draw = .{ .query = "" } }};
+    const frames = [_]picker.Frame{
+        .{ .query = "", .first = 1 },
+        .{ .query = "", .total_count = 1 },
+        .{ .query = "", .selected_row = 1 },
+        .{ .query = "", .preedit = "λ" },
+        .{ .query = "", .preedit_cursor = .{ 0, 0 } },
+        .{ .query = "", .query_from_ime = true },
+        .{ .query = "", .row_count = picker.visible_row_capacity + 1 },
+    };
+    for (&frames) |*frame| {
+        var transcript: Transcript = .{ .steps = &expected, .applications = &.{} };
+        try std.testing.expectError(error.TranscriptMismatch, transcript.draw(frame));
+        try std.testing.expectEqual(expected.len, transcript.index);
+        try std.testing.expectError(error.TranscriptMismatch, transcript.done());
+    }
 }
