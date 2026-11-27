@@ -25,28 +25,46 @@ const Requests = struct {
     bytes: [16384]u8 = undefined,
     len: usize = 0,
 
-    fn count(self: *const Requests, object: wire.ObjectId, opcode: u16) usize {
+    const Message = struct {
+        header: wire.wire.Header,
+        payload: []const u8,
+    };
+
+    fn next(self: *const Requests, at: *usize) !?Message {
+        if (self.len > self.bytes.len or at.* > self.len) return error.FixtureRequestLimit;
+        if (at.* == self.len) return null;
+        const remaining = self.bytes[at.*..self.len];
+        if (remaining.len < 8) return error.FixtureRequestTruncated;
+        const header = wire.wire.Header.decode(remaining[0..8]);
+        if (header.size < 8 or header.size % 4 != 0) return error.FixtureRequestSize;
+        if (header.size > remaining.len) return error.FixtureRequestTruncated;
+        at.* += header.size;
+        return .{ .header = header, .payload = remaining[8..header.size] };
+    }
+
+    fn validate(self: *const Requests) !void {
+        var at: usize = 0;
+        while (try self.next(&at)) |message| {
+            try testing.expect(message.header.object != @as(wire.ObjectId, @fromBackingInt(0)));
+        }
+    }
+
+    fn count(self: *const Requests, object: wire.ObjectId, opcode: u16) !usize {
         var found: usize = 0;
         var at: usize = 0;
-        while (at < self.len) {
-            const h = wire.wire.Header.decode(self.bytes[at..][0..8]);
-            std.debug.assert(h.size >= 8 and at + h.size <= self.len);
-            if (h.object == object and h.opcode == opcode) found += 1;
-            at += h.size;
+        while (try self.next(&at)) |message| {
+            if (message.header.object == object and message.header.opcode == opcode) found += 1;
         }
         return found;
     }
 
     fn word(self: *const Requests, object: wire.ObjectId, opcode: u16, index: usize) !u32 {
         var at: usize = 0;
-        while (at < self.len) {
-            const h = wire.wire.Header.decode(self.bytes[at..][0..8]);
-            std.debug.assert(h.size >= 8 and at + h.size <= self.len);
-            if (h.object == object and h.opcode == opcode) {
-                if (h.size < 12 + index * 4) return error.MissingWord;
-                return std.mem.readInt(u32, self.bytes[at + 8 + index * 4 ..][0..4], endian);
+        while (try self.next(&at)) |message| {
+            if (message.header.object == object and message.header.opcode == opcode) {
+                if (index >= message.payload.len / 4) return error.MissingWord;
+                return std.mem.readInt(u32, message.payload[index * 4 ..][0..4], endian);
             }
-            at += h.size;
         }
         return error.MissingRequest;
     }
@@ -55,6 +73,14 @@ const Requests = struct {
         return self.word(object, opcode, 0);
     }
 };
+
+fn closeFixtureFd(fd: i32) void {
+    switch (linux.errno(linux.close(fd))) {
+        // Linux retires the descriptor even if close reports EINTR.
+        .SUCCESS, .INTR => {},
+        else => |err| std.log.err("native fixture descriptor close: {s}", .{@tagName(err)}),
+    }
+}
 
 const Fixture = struct {
     display: *native.Display,
@@ -75,15 +101,17 @@ const Fixture = struct {
     fn openWith(options: Options) !Fixture {
         var fds: [2]i32 = undefined;
         try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &fds));
-        errdefer _ = linux.close(fds[1]);
+        errdefer closeFixtureFd(fds[1]);
         const conn = Connection.fromFd(testing.allocator, testing.io, fds[0]) catch |err| {
-            _ = linux.close(fds[0]);
+            closeFixtureFd(fds[0]);
             return err;
         };
         var self: Fixture = .{ .display = try native.Display.adopt(testing.allocator, conn), .server = fds[1], .registry = undefined };
         errdefer self.display.destroy();
         try testing.expectEqual(native.Display.Status.discovering, self.display.status());
         const initial = try self.take();
+        try testing.expectEqual(@as(usize, 1), try initial.count(.display, 1));
+        try testing.expectEqual(@as(usize, 1), try initial.count(.display, 0));
         self.registry = @fromBackingInt(try initial.firstWord(.display, 1));
         const callback: wire.ObjectId = @fromBackingInt(try initial.firstWord(.display, 0));
         for ([_][:0]const u8{ "wl_compositor", "wl_shm", "zwlr_layer_shell_v1" }, [_]u32{ options.compositor_version, 1, 1 }, 1..) |name, version, id| {
@@ -94,7 +122,10 @@ const Fixture = struct {
         for (0..options.outputs) |i| try self.global(@intCast(6 + i), "wl_output", 4);
         try self.done(callback);
         try testing.expectEqual(native.Display.Status.ready, self.display.status());
-        _ = try self.take();
+        const bindings = try self.take();
+        const expected = 3 + @as(usize, @intFromBool(options.viewport)) +
+            @as(usize, @intFromBool(options.fractional)) + options.outputs;
+        try testing.expectEqual(expected, try bindings.count(self.registry, 0));
         return self;
     }
 
@@ -118,9 +149,29 @@ const Fixture = struct {
         try self.event(surface.surface.?.id, &wl.Surface.interface, 0, &.{.{ .object = output.id }});
     }
 
+    fn closeServer(self: *Fixture) void {
+        if (self.server < 0) return;
+        const fd = self.server;
+        self.server = -1;
+        closeFixtureFd(fd);
+    }
+
     fn close(self: *Fixture) void {
+        // Last-resort cleanup if a test failed before its explicit retirement.
+        // Never leave a surface alive when the display allocation is freed.
+        for (self.display.occupied) |entry| {
+            if (entry) |surface| {
+                const failed = self.display.failed;
+                surface.destroy() catch |err| {
+                    if (failed and err == error.NativeConnectionFailed)
+                        std.log.debug("fixture retires failed display surface", .{})
+                    else
+                        std.log.err("fixture surface retirement: {s}", .{@errorName(err)});
+                };
+            }
+        }
         self.display.destroy();
-        if (self.server >= 0) _ = linux.close(self.server);
+        self.closeServer();
     }
 
     fn event(self: *Fixture, object: wire.ObjectId, interface: *const wire.Interface, opcode: u16, args: []const wire.Arg) !void {
@@ -128,11 +179,17 @@ const Fixture = struct {
     }
 
     fn eventFd(self: *Fixture, object: wire.ObjectId, interface: *const wire.Interface, opcode: u16, args: []const wire.Arg, fd: ?i32) !void {
+        if (opcode >= interface.events.len) return error.FixtureEventOpcode;
+        const signature = interface.events[opcode];
+        if (signature.fdCount() != @as(usize, @intFromBool(fd != null)))
+            return error.FixtureEventDescriptors;
         var bytes: [wire.wire.max_message_size]u8 = undefined;
-        const len = try wire.wire.encodedSize(interface.events[opcode].args, args);
+        const len = try wire.wire.encodedSize(signature.args, args);
         wire.wire.encode(bytes[0..len], object, opcode, args);
         if (fd) |file| {
             var control: [32]u8 align(@alignOf(linux.cmsghdr)) = @splat(0);
+            // zig-audit: acknowledge ptr_cast
+            // reason: This aligned control array owns one Linux SCM_RIGHTS header and descriptor.
             const header: *linux.cmsghdr = @ptrCast(&control);
             header.* = .{ .len = @sizeOf(linux.cmsghdr) + @sizeOf(i32), .level = linux.SOL.SOCKET, .type = linux.SCM.RIGHTS };
             @memcpy(control[@sizeOf(linux.cmsghdr)..][0..@sizeOf(i32)], std.mem.asBytes(&file));
@@ -176,7 +233,10 @@ const Fixture = struct {
                     if (n == 0) return error.FixtureDisconnected;
                     requests.len += n;
                 },
-                .AGAIN => return requests,
+                .AGAIN => {
+                    try requests.validate();
+                    return requests;
+                },
                 .INTR => continue,
                 else => return error.FixtureRead,
             }
@@ -208,7 +268,8 @@ fn submitted(f: *Fixture, surface: *native.Surface, paint: *Paint) !*present.Buf
     try testing.expectEqual(native.Draw.presented, try surface.draw(paint, Paint.draw));
     const requests = try f.take();
     const id = try requests.firstWord(surface.surface.?.id, 1);
-    try testing.expectEqual(@as(usize, 1), requests.count(surface.surface.?.id, 6));
+    try testing.expectEqual(@as(usize, 1), try requests.count(surface.surface.?.id, 1));
+    try testing.expectEqual(@as(usize, 1), try requests.count(surface.surface.?.id, 6));
     try testing.expectEqual(surface.extent.?, paint.last_logical);
     try testing.expectEqual(surface.scale_120, paint.last_scale);
     try testing.expectEqual(try surface.extent.?.scaled(surface.scale_120), paint.last_pixels);
@@ -216,7 +277,7 @@ fn submitted(f: *Fixture, surface: *native.Surface, paint: *Paint) !*present.Buf
         try testing.expectEqual(surface.extent.?.width, try requests.word(viewport.id, 2, 0));
         try testing.expectEqual(surface.extent.?.height, try requests.word(viewport.id, 2, 1));
         try testing.expectEqual(@as(i32, 1), surface.presenter.?.scale);
-        try testing.expectEqual(@as(usize, 0), requests.count(surface.surface.?.id, 8));
+        try testing.expectEqual(@as(usize, 0), try requests.count(surface.surface.?.id, 8));
     } else {
         try testing.expectEqual(@as(i32, @intCast(surface.scale_120 / native.scale_unit)), surface.presenter.?.scale);
     }
@@ -231,14 +292,19 @@ fn submitted(f: *Fixture, surface: *native.Surface, paint: *Paint) !*present.Buf
     return error.MissingBuffer;
 }
 
+fn expectInitialCommit(requests: *const Requests, surface: *const native.Surface) !void {
+    const id = surface.surface.?.id;
+    try testing.expectEqual(@as(usize, 1), try requests.count(id, 6));
+    try testing.expectEqual(@as(usize, 0), try requests.count(id, 1));
+}
+
 test "configure before pixels; frame and release are separate fences across resize" {
     var f = try Fixture.open();
     defer f.close();
     const s = try native.Surface.create(f.display, .picker, size, null);
-    defer s.destroy() catch {};
     const open = try f.take();
-    try testing.expectEqual(@as(usize, 1), open.count(s.surface.?.id, 6));
-    try testing.expectEqual(@as(usize, 0), open.count(s.surface.?.id, 1));
+    try testing.expectEqual(@as(usize, 1), try open.count(s.surface.?.id, 6));
+    try testing.expectEqual(@as(usize, 0), try open.count(s.surface.?.id, 1));
     var paint: Paint = .{};
     try testing.expectEqual(native.Draw.not_configured, try s.draw(&paint, Paint.draw));
     try testing.expectEqual(@as(usize, 0), paint.calls);
@@ -272,7 +338,8 @@ test "configure before pixels; frame and release are separate fences across resi
     try testing.expectEqual(@as(usize, 3), s.pool.?.count());
     try testing.expectEqual(@as(usize, 0), (try f.take()).len);
     try f.release(a_id);
-    _ = try f.take();
+    const released = try f.take();
+    try testing.expectEqual(@as(usize, 1), try released.count(a_id, 0));
     try testing.expectEqual(@as(usize, 2), s.pool.?.count());
     paint.byte = 0x78;
     const d = try submitted(&f, s, &paint);
@@ -283,50 +350,52 @@ test "configure before pixels; frame and release are separate fences across resi
     try testing.expectEqual(native.Draw.clean, try s.draw(&paint, Paint.draw));
     try f.configure(s, 4, .{ .width = 96, .height = 48 });
     try testing.expectEqual(native.Draw.clean, try s.draw(&paint, Paint.draw));
+    try s.destroy();
 }
 
 test "aborted painting cancels the borrow without a partial attach" {
     var f = try Fixture.open();
     defer f.close();
     const s = try native.Surface.create(f.display, .picker, size, null);
-    defer s.destroy() catch {};
-    _ = try f.take();
+    try expectInitialCommit(&(try f.take()), s);
     try f.configure(s, 1, size);
     var paint: Paint = .{ .fail = true };
     try testing.expectError(error.PaintRefused, s.draw(&paint, Paint.draw));
     const first = s.pool.?.buffers.items[0];
     try testing.expectEqual(present.Buffer.State.free, first.state);
     const partial = try f.take();
-    try testing.expectEqual(@as(usize, 0), partial.count(s.surface.?.id, 1));
+    try testing.expectEqual(@as(usize, 0), try partial.count(s.surface.?.id, 1));
     paint.fail = false;
     try testing.expectEqual(first, try submitted(&f, s, &paint));
     try testing.expectEqual(@as(usize, 1), s.pool.?.count());
+    try s.destroy();
 }
 
 test "independent roles retire with late events and explicit sync on a shared display" {
     var f = try Fixture.open();
     defer f.close();
     var picker: ?*native.Surface = try native.Surface.create(f.display, .picker, size, null);
-    defer if (picker) |s| s.destroy() catch {};
     try testing.expectError(error.NativeRoleAlreadyOwned, native.Surface.create(f.display, .picker, size, null));
     const banner = try native.Surface.create(f.display, .notification, size, null);
-    defer banner.destroy() catch {};
     try testing.expectError(error.NativeSurfaceLimit, native.Surface.create(f.display, .picker, size, null));
-    _ = try f.take();
+    const opened = try f.take();
+    try expectInitialCommit(&opened, picker.?);
+    try expectInitialCommit(&opened, banner);
     try f.configure(picker.?, 1, size);
     try f.configure(banner, 2, size);
     var paint: Paint = .{};
     const old_buffer = (try submitted(&f, picker.?, &paint)).wl_buffer.id;
     const old_frame = picker.?.presenter.?.frame.?.id;
     const old_layer = picker.?.layer.?.id;
-    _ = try submitted(&f, banner, &paint);
+    const first_banner = try submitted(&f, banner, &paint);
+    try testing.expectEqual(banner.extent.?.width, first_banner.width);
     const old = picker.?;
     picker = null;
     try old.destroy();
     try testing.expectEqual(@as(u8, 1), f.display.surfaces);
     try f.display.requestSync();
     const retire = try f.take();
-    try testing.expectEqual(@as(usize, 1), retire.count(old_layer, 7));
+    try testing.expectEqual(@as(usize, 1), try retire.count(old_layer, 7));
     const fence_id: wire.ObjectId = @fromBackingInt(try retire.firstWord(.display, 0));
     try testing.expect(f.display.sync_pending);
     try testing.expectError(error.NativeSyncPending, f.display.requestSync());
@@ -338,29 +407,31 @@ test "independent roles retire with late events and explicit sync on a shared di
     try testing.expect(!f.display.sync_pending);
     try f.frame(banner);
     banner.invalidate();
-    _ = try submitted(&f, banner, &paint);
+    const next_banner = try submitted(&f, banner, &paint);
+    try testing.expectEqual(banner.extent.?.width, next_banner.width);
     try f.event(banner.layer.?.id, &zwlr.LayerSurfaceV1.interface, 1, &.{});
     try testing.expectEqual(native.Draw.closed, try banner.draw(&paint, Paint.draw));
+    try banner.destroy();
 }
 
 test "oversized configure poisons the connection before allocation" {
     var f = try Fixture.open();
     defer f.close();
     const s = try native.Surface.create(f.display, .picker, size, null);
-    defer s.destroy() catch {};
-    _ = try f.take();
+    try expectInitialCommit(&(try f.take()), s);
     try testing.expectError(error.InvalidSurfaceExtent, f.event(s.layer.?.id, &zwlr.LayerSurfaceV1.interface, 0, &.{ .{ .uint = 1 }, .{ .uint = 4096 }, .{ .uint = 4096 } }));
     try testing.expectEqual(native.Display.Status.failed, f.display.status());
     try testing.expectEqual(@as(usize, 0), s.pool.?.count());
     var paint: Paint = .{};
     try testing.expectError(error.NativeConnectionFailed, s.draw(&paint, Paint.draw));
+    try testing.expectError(error.NativeConnectionFailed, s.destroy());
+    try testing.expectEqual(@as(u8, 0), f.display.surfaces);
 }
 
 test "raw send failure poisons a libc-linked connection" {
     var f = try Fixture.open();
     defer f.close();
-    _ = linux.close(f.server);
-    f.server = -1;
+    f.closeServer();
     try testing.expectError(error.ConnectionClosed, f.display.requestSync());
     try testing.expectEqual(native.Display.Status.failed, f.display.status());
     try testing.expectError(error.NativeConnectionFailed, f.display.flush());
@@ -369,8 +440,7 @@ test "raw send failure poisons a libc-linked connection" {
 test "raw receive EOF is a connection failure, not an idle frame" {
     var f = try Fixture.open();
     defer f.close();
-    _ = linux.close(f.server);
-    f.server = -1;
+    f.closeServer();
     try testing.expectError(error.ConnectionClosed, f.display.readReady());
     try testing.expectEqual(native.Display.Status.failed, f.display.status());
 }
@@ -380,10 +450,10 @@ test "fractional scale uses exact rounded pixels and preserves independent logic
     defer f.close();
     const logical: native.Extent = .{ .width = 63, .height = 31 };
     const picker = try native.Surface.create(f.display, .picker, logical, null);
-    defer picker.destroy() catch {};
     const banner = try native.Surface.create(f.display, .notification, size, null);
-    defer banner.destroy() catch {};
-    _ = try f.take();
+    const opened = try f.take();
+    try expectInitialCommit(&opened, picker);
+    try expectInitialCommit(&opened, banner);
     var paint: Paint = .{};
     try f.scale(picker, 150);
     try f.scale(banner, 210);
@@ -419,7 +489,8 @@ test "fractional scale uses exact rounded pixels and preserves independent logic
     try testing.expectEqual(@as(usize, 3), picker.pool.?.count());
     try f.scale(picker, 120); // coalesce another scale while all slots are held
     try f.release(a_id);
-    _ = try f.take();
+    const released = try f.take();
+    try testing.expectEqual(@as(usize, 1), try released.count(a_id, 0));
     const d = try submitted(&f, picker, &paint);
     try testing.expectEqual(logical.width, d.width);
     try testing.expectEqual(logical.height, d.height);
@@ -428,16 +499,17 @@ test "fractional scale uses exact rounded pixels and preserves independent logic
     try testing.expectEqual(native.Draw.clean, try picker.draw(&paint, Paint.draw));
     try testing.expectEqual(@as(u32, 210), banner.scale_120);
     try testing.expectEqual(@as(u32, 112), separate.width);
+    try picker.destroy();
+    try banner.destroy();
 }
 
 test "integer fallback follows entered outputs atomically and core preferred scale wins" {
     var f = try Fixture.openWith(.{ .compositor_version = 6, .fractional = true, .outputs = 2 });
     defer f.close();
     const s = try native.Surface.create(f.display, .picker, size, null);
-    defer s.destroy() catch {};
     // The fractional manager alone is insufficient without a viewport.
     try testing.expect(s.fractional == null and s.viewport == null);
-    _ = try f.take();
+    try expectInitialCommit(&(try f.take()), s);
     try f.configure(s, 1, size);
     const left = f.display.outputs[0].?.object;
     const right = f.display.outputs[1].?.object;
@@ -458,14 +530,16 @@ test "integer fallback follows entered outputs atomically and core preferred sca
     try testing.expectEqual(@as(u32, 240), s.scale_120);
     try f.frame(s);
     try f.release(first.wl_buffer.id);
-    _ = try submitted(&f, s, &paint);
+    const second = try submitted(&f, s, &paint);
+    try testing.expectEqual(@as(u32, 128), second.width);
     // Retiring an output removes its membership and releases its object.
     try f.event(f.registry, &wl.Registry.interface, 1, &.{.{ .uint = 6 }});
     const retired = try f.take();
-    try testing.expectEqual(@as(usize, 1), retired.count(left.id, 0));
+    try testing.expectEqual(@as(usize, 1), try retired.count(left.id, 0));
     try testing.expectEqual(@as(u32, 120), s.scale_120);
     try f.global(8, "wl_output", 4);
-    _ = try f.take();
+    const added = try f.take();
+    try testing.expectEqual(@as(usize, 1), try added.count(f.registry, 0));
     const replacement = f.display.outputs[0].?.object;
     try f.outputScale(replacement, 3);
     try f.outputDone(replacement);
@@ -477,6 +551,7 @@ test "integer fallback follows entered outputs atomically and core preferred sca
     try f.outputScale(replacement, 4);
     try f.outputDone(replacement);
     try testing.expectEqual(@as(u32, 240), s.scale_120);
+    try s.destroy();
 }
 
 test "invalid fractional hints and physical extent bounds fail before allocating" {
@@ -488,12 +563,13 @@ test "invalid fractional hints and physical extent bounds fail before allocating
     var f = try Fixture.openWith(.{ .viewport = true, .fractional = true });
     defer f.close();
     const s = try native.Surface.create(f.display, .picker, size, null);
-    defer s.destroy() catch {};
-    _ = try f.take();
+    try expectInitialCommit(&(try f.take()), s);
     try f.configure(s, 1, size);
     try testing.expectError(error.InvalidSurfaceScale, f.scale(s, 0));
     try testing.expectEqual(native.Display.Status.failed, f.display.status());
     try testing.expectEqual(@as(usize, 0), s.pool.?.count());
+    try testing.expectError(error.NativeConnectionFailed, s.destroy());
+    try testing.expectEqual(@as(u8, 0), f.display.surfaces);
 }
 
 // Self-contained XKB map, including modifiers. No host layout or locale
@@ -515,7 +591,7 @@ fn keymapEvent(f: *Fixture, bytes: []const u8, declared_size: u32) !void {
     const rc = linux.memfd_create("wayspot-keymap-fixture", linux.MFD.CLOEXEC);
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
     const fd: i32 = @intCast(rc);
-    defer _ = linux.close(fd);
+    defer closeFixtureFd(fd);
     try testing.expectEqual(bytes.len, linux.write(fd, bytes.ptr, bytes.len));
     try f.eventFd(f.display.input.keyboard.?.id, &wl.Keyboard.interface, 0, &.{ .{ .uint = 1 }, .{ .fd = fd }, .{ .uint = declared_size } }, fd);
 }
@@ -835,8 +911,8 @@ test "cursor shape uses enter serial; immutable SHM fallback retains one buffer"
     try pointerEnter(&f, picker, 8, 9);
     _ = try nextInput(&f, picker, .pointer_enter);
     const again = try f.take();
-    try testing.expectEqual(@as(usize, 1), again.count(pointer, 0));
-    try testing.expectEqual(@as(usize, 0), again.count(cursor.surface.?.id, 6));
+    try testing.expectEqual(@as(usize, 1), try again.count(pointer, 0));
+    try testing.expectEqual(@as(usize, 0), try again.count(cursor.surface.?.id, 6));
     try testing.expectEqualSlices(u8, original, buffer.pixels());
     try f.global(21, "wp_cursor_shape_manager_v1", 1);
     _ = try f.take();
@@ -847,7 +923,7 @@ test "cursor shape uses enter serial; immutable SHM fallback retains one buffer"
     const shape = try f.take();
     try testing.expectEqual(@as(u32, 42), try shape.word(cursor.device.?.id, 1, 0));
     try testing.expectEqual(@as(u32, 1), try shape.word(cursor.device.?.id, 1, 1));
-    try testing.expectEqual(@as(usize, 0), shape.count(pointer, 0));
+    try testing.expectEqual(@as(usize, 0), try shape.count(pointer, 0));
 }
 
 test "IME batches apply only on done and do not suppress forwarded keys" {
@@ -866,8 +942,8 @@ test "IME batches apply only on done and do not suppress forwarded keys" {
     _ = try nextInput(&f, picker.?, .keyboard_enter);
     try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.?.surface.?.id }});
     const enabled = try f.take();
-    try testing.expectEqual(@as(usize, 1), enabled.count(object, 1));
-    try testing.expectEqual(@as(usize, 1), enabled.count(object, 7));
+    try testing.expectEqual(@as(usize, 1), try enabled.count(object, 1));
+    try testing.expectEqual(@as(usize, 1), try enabled.count(object, 7));
     try keyEvent(&f, 30, true);
     try testing.expectEqualStrings("a", (try nextInput(&f, picker.?, .key)).value.key.utf8());
     try keyEvent(&f, 30, false);
@@ -889,7 +965,7 @@ test "IME batches apply only on done and do not suppress forwarded keys" {
     try f.event(object, &zwp.TextInputV3.interface, 1, &.{.{ .object = picker.?.surface.?.id }});
     _ = try nextInput(&f, picker.?, .ime_cancel);
     try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = banner.surface.?.id }});
-    try testing.expectEqual(@as(usize, 0), (try f.take()).count(object, 1));
+    try testing.expectEqual(@as(usize, 0), try (try f.take()).count(object, 1));
     try f.event(object, &zwp.TextInputV3.interface, 3, &.{.{ .string = "ignored" }});
     try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 1 }});
     try testing.expect(f.display.input.pop() == null);
@@ -900,7 +976,7 @@ test "IME batches apply only on done and do not suppress forwarded keys" {
     picker = null;
     try old.destroy();
     const retired = try f.take();
-    try testing.expectEqual(@as(usize, 1), retired.count(object, 2));
+    try testing.expectEqual(@as(usize, 1), try retired.count(object, 2));
     try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 2 }});
     try testing.expect(f.display.input.pop() == null);
 }
@@ -1356,9 +1432,9 @@ test "IME surrounding context is committed once and waits for a matching done" {
     try testing.expectEqual(@as(usize, 0), (try f.take()).len);
     try f.event(object, &zwp.TextInputV3.interface, 0, &.{.{ .object = picker.surface.?.id }});
     const initial = try f.take();
-    try testing.expectEqual(@as(usize, 1), initial.count(object, 3));
-    try testing.expectEqual(@as(usize, 1), initial.count(object, 6));
-    try testing.expectEqual(@as(usize, 1), initial.count(object, 7));
+    try testing.expectEqual(@as(usize, 1), try initial.count(object, 3));
+    try testing.expectEqual(@as(usize, 1), try initial.count(object, 6));
+    try testing.expectEqual(@as(usize, 1), try initial.count(object, 7));
     try f.event(object, &zwp.TextInputV3.interface, 5, &.{.{ .uint = 0 }});
     _ = try nextInput(&f, picker, .ime);
     try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
@@ -1367,8 +1443,8 @@ test "IME surrounding context is committed once and waits for a matching done" {
     _ = try nextInput(&f, picker, .ime);
     try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
     const update = try f.take();
-    try testing.expectEqual(@as(usize, 1), update.count(object, 3));
-    try testing.expectEqual(@as(usize, 1), update.count(object, 7));
+    try testing.expectEqual(@as(usize, 1), try update.count(object, 3));
+    try testing.expectEqual(@as(usize, 1), try update.count(object, 7));
     try testing.expectEqual(@as(u32, 0), try update.firstWord(object, 4));
     try f.display.input.setImeContext(&f.display.conn, "aé", rect, true);
     try testing.expectEqual(@as(usize, 0), (try f.take()).len);
@@ -1450,7 +1526,7 @@ test "native picker and banner roles reserve no tile space on the wire" {
     try testing.expectEqual(@as(u32, 0), try p.firstWord(pl, 1)); // center
     try testing.expectEqual(std.math.maxInt(u32), try p.firstWord(pl, 2)); // zone -1
     try testing.expectEqual(@as(u32, 1), try p.firstWord(pl, 4)); // exclusive keyboard
-    try testing.expectEqual(@as(usize, 0), p.count(pl, 3));
+    try testing.expectEqual(@as(usize, 0), try p.count(pl, 3));
     const banner = try native.Surface.create(f.display, .notification, size, null);
     defer banner.destroy() catch {};
     const b = try f.take();
@@ -1470,7 +1546,7 @@ test "actual shared display lease survives sibling retirement and rejects failed
     try testing.expect(cold.native == null and cold.native_users == 0 and cold.nativeFd() == -1);
     var f = try Fixture.open();
     // Transfer the ready fixture display to the real lease owner.
-    defer _ = linux.close(f.server);
+    defer f.closeServer();
     var owner: Owner = .{ .native = f.display, .native_users = 1 };
     defer while (owner.native_users > 0) owner.releaseNative();
     var picker: ?*native.Surface = try native.Surface.create(f.display, .picker, size, null);
@@ -1637,6 +1713,33 @@ test "cursor preparation refusal does not publish a partial fallback" {
     try testing.expect(cursor.surface != null and cursor.pool != null);
     try testing.expectEqual(@as(usize, 1), cursor.pool.?.count());
     const requests = try f.take();
-    try testing.expectEqual(@as(usize, 1), requests.count(pointer.id, 0));
-    try testing.expectEqual(@as(usize, 1), requests.count(cursor.surface.?.id, 6));
+    try testing.expectEqual(@as(usize, 1), try requests.count(pointer.id, 0));
+    try testing.expectEqual(@as(usize, 1), try requests.count(cursor.surface.?.id, 6));
+}
+
+test "request oracle rejects payload beyond the received batch" {
+    var requests: Requests = .{ .len = 8 };
+    const header: wire.wire.Header = .{ .object = .display, .opcode = 1, .size = 12 };
+    header.encode(requests.bytes[0..8]);
+    // Initialize bytes outside the received extent to demonstrate that the
+    // oracle must not read them as evidence, even in an optimized build.
+    std.mem.writeInt(u32, requests.bytes[8..12], 0x12345678, endian);
+    try testing.expectError(error.FixtureRequestTruncated, requests.firstWord(.display, 1));
+}
+
+test "request capture refuses incomplete socket transcript" {
+    var f = try Fixture.open();
+    defer f.close();
+    var bytes: [8]u8 = undefined;
+    const header: wire.wire.Header = .{ .object = .display, .opcode = 1, .size = 12 };
+    header.encode(&bytes);
+    try testing.expectEqual(bytes.len, linux.sendto(
+        f.display.fd(),
+        &bytes,
+        bytes.len,
+        linux.MSG.NOSIGNAL,
+        null,
+        0,
+    ));
+    try testing.expectError(error.FixtureRequestTruncated, f.take());
 }
