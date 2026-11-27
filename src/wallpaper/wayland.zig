@@ -15,8 +15,9 @@ extern fn wayspot_jpeg_decode(
     width: *u32,
     height: *u32,
 ) callconv(.c) ?[*]u8;
-extern fn wayspot_jpeg_free(pixels: *anyopaque) callconv(.c) void;
+extern fn wayspot_jpeg_free(pixels: [*]u8) callconv(.c) void;
 
+/// Discovers one fresh bounded catalogue from the configured directory.
 pub fn discoverCatalog(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8) !wallpaper.Catalog {
     var source = Discovery{ .io = io };
     return wallpaper.collectCatalog(&source, allocator, root_path);
@@ -27,25 +28,35 @@ const Discovery = struct {
     root: ?std.Io.Dir = null,
     iterator: std.Io.Dir.Iterator = undefined,
 
+    /// Acquires a non-followed directory and its borrowed iterator.
     pub fn openRoot(source: *Discovery, path: []const u8) !void {
-        source.root = try std.Io.Dir.openDirAbsolute(source.io, path, .{ .iterate = true, .follow_symlinks = false });
-        source.iterator = source.root.?.iterate();
+        std.debug.assert(source.root == null);
+        const root = try std.Io.Dir.openDirAbsolute(source.io, path, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        source.root = root;
+        source.iterator = root.iterate();
     }
 
+    /// Retires the iterator's directory handle.
     pub fn closeRoot(source: *Discovery) void {
         source.root.?.close(source.io);
         source.root = null;
     }
 
+    /// Borrows the next directory entry until the next iterator operation.
     pub fn nextEntry(source: *Discovery) !?wallpaper.CatalogEntry {
         const entry = try source.iterator.next(source.io) orelse return null;
         return .{ .name = entry.name, .kind = entry.kind };
     }
 
+    /// Resolves an unknown entry kind without following its final symlink.
     pub fn statEntry(source: *Discovery, name: []const u8) !std.Io.File.Kind {
         return (try source.root.?.statFile(source.io, name, .{ .follow_symlinks = false })).kind;
     }
 
+    /// Obtains one independent catalogue shuffle seed.
     pub fn randomSeed(source: *Discovery) !u64 {
         var seed: u64 = undefined;
         try source.io.randomSecure(std.mem.asBytes(&seed));
@@ -61,6 +72,7 @@ const Source = struct {
     rotate_client: std.posix.fd_t = -1,
     rotate_bytes: [16]u8 = undefined,
     rotate_length: u8 = 0,
+    /// Acquires a regular image candidate without following its final symlink.
     pub fn open(source: *Source, path: []const u8) !void {
         std.debug.assert(source.file == null);
         // A catalogue path can change after discovery. Refuse known special
@@ -80,86 +92,93 @@ const Source = struct {
         source.file = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     }
 
+    /// Reports the actual acquired image descriptor kind and byte extent.
     pub fn stat(source: *Source) !struct { kind: std.Io.File.Kind, size: u64 } {
-        const value = try (source.file orelse unreachable).stat(source.io);
+        const value = try (source.file orelse return error.ImageFileNotOpen).stat(source.io);
         return .{ .kind = value.kind, .size = value.size };
     }
 
+    /// Reads at offset zero through the acquired image descriptor.
     pub fn read(source: *Source, bytes: []u8) !usize {
-        return (source.file orelse unreachable).readPositionalAll(source.io, bytes, 0);
+        return (source.file orelse return error.ImageFileNotOpen).readPositionalAll(source.io, bytes, 0);
     }
 
+    /// Retires the descriptor acquired by the image reader.
     pub fn close(source: *Source) void {
-        const file = source.file orelse unreachable;
-        file.close(source.io);
+        const file = source.file orelse {
+            std.debug.assert(false);
+            return;
+        };
         source.file = null;
+        file.close(source.io);
     }
 
-    pub fn openRotation(source: *Source, signature: []const u8) !void {
+    fn openRotation(source: *Source, signature: []const u8) !void {
         try source.bindRotation(signature, true);
     }
 
     fn bindRotation(source: *Source, signature: []const u8, listen: bool) !void {
-        std.debug.assert(source.rotate_listener < 0 and source.rotate_client < 0);
+        if (source.rotate_listener >= 0 or source.rotate_client >= 0)
+            return error.RotationAlreadyOpen;
         const address = try abstractAddress(signature);
-        const result = std.posix.system.socket(
-            std.posix.AF.UNIX,
-            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-            0,
-        );
-        const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
-            @intCast(result)
-        else
-            return error.RotationSocketOpenFailed;
-        errdefer _ = std.posix.system.close(fd);
-        switch (std.posix.errno(std.posix.system.bind(fd, @ptrCast(&address.value), address.length))) {
+        const fd = try rotationSocket();
+        errdefer closeFd(fd);
+        // zig-audit: acknowledge ptr_cast
+        // reason: Linux bind borrows an exact-length abstract AF_UNIX address.
+        switch (std.os.linux.errno(std.os.linux.bind(fd, @ptrCast(&address.value), address.length))) {
             .SUCCESS => {},
             .ADDRINUSE => return error.RotationNameInUse,
             else => return error.RotationSocketBindFailed,
         }
-        if (listen and std.posix.errno(std.posix.system.listen(fd, 4)) != .SUCCESS) {
+        if (listen and std.os.linux.errno(std.os.linux.listen(fd, 4)) != .SUCCESS)
             return error.RotationSocketListenFailed;
-        }
         source.rotate_listener = fd;
     }
 
-    pub fn closeRotation(source: *Source) void {
-        if (source.rotate_client >= 0) _ = std.posix.system.close(source.rotate_client);
-        if (source.rotate_listener >= 0) _ = std.posix.system.close(source.rotate_listener);
+    fn closeClient(source: *Source) void {
+        if (source.rotate_client >= 0) closeFd(source.rotate_client);
         source.rotate_client = -1;
-        source.rotate_listener = -1;
         source.rotate_length = 0;
     }
 
-    pub fn receiveRotation(source: *Source) !bool {
+    fn closeRotation(source: *Source) void {
+        source.closeClient();
+        if (source.rotate_listener >= 0) closeFd(source.rotate_listener);
+        source.rotate_listener = -1;
+    }
+
+    fn acceptRotation(source: *Source) !?std.posix.fd_t {
+        const linux = std.os.linux;
+        const result = linux.accept4(
+            source.rotate_listener,
+            null,
+            null,
+            std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        );
+        switch (linux.errno(result)) {
+            .SUCCESS => {},
+            .AGAIN, .INTR => return null,
+            else => return error.RotationAcceptFailed,
+        }
+        const fd: std.posix.fd_t = @intCast(result);
+        errdefer closeFd(fd);
+        try authenticatePeer(fd, linux.geteuid());
+        return fd;
+    }
+
+    fn receiveRotation(source: *Source) !bool {
         if (source.rotate_client >= 0) source.rejectBusy();
         if (source.rotate_client < 0) {
-            const accepted = std.os.linux.accept4(
-                source.rotate_listener,
-                null,
-                null,
-                std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-            );
-            source.rotate_client = if (std.os.linux.errno(accepted) == .SUCCESS)
-                @intCast(accepted)
-            else
-                return error.RotationAcceptFailed;
-            errdefer {
-                _ = std.posix.system.close(source.rotate_client);
-                source.rotate_client = -1;
-            }
-            try authenticatePeer(source.rotate_client, std.os.linux.geteuid());
+            source.rotate_client = (try source.acceptRotation()) orelse return false;
+            std.debug.assert(source.rotate_length == 0);
         }
-        const file: std.Io.File = .{ .handle = source.rotate_client, .flags = .{ .nonblocking = true } };
         const suffix = source.rotate_bytes[source.rotate_length..];
-        const count = file.readStreaming(source.io, &.{suffix}) catch |err| switch (err) {
-            error.WouldBlock => return false,
-            error.EndOfStream => return error.RotationRequestIncomplete,
-            else => return err,
-        };
+        const count = try receiveBytes(source.rotate_client, suffix) orelse return false;
+        if (count == 0) return error.RotationRequestIncomplete;
         source.rotate_length += @intCast(count);
-        const bytes = source.rotate_bytes[0..source.rotate_length];
-        return switch (wallpaper.classifyRotationRequest(bytes)) {
+        return switch (wallpaper.classifyRotationRequest(
+            source.rotate_bytes[0..source.rotate_length],
+        )) {
             .incomplete => false,
             .rotate => true,
             .invalid => error.RotationRequestInvalid,
@@ -167,27 +186,26 @@ const Source = struct {
     }
 
     fn rejectBusy(source: *Source) void {
-        const accepted = std.os.linux.accept4(
-            source.rotate_listener,
-            null,
-            null,
-            std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-        );
-        if (std.os.linux.errno(accepted) != .SUCCESS) return;
-        const fd: std.posix.fd_t = @intCast(accepted);
-        defer _ = std.posix.system.close(fd);
-        authenticatePeer(fd, std.os.linux.geteuid()) catch return;
-        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
-        file.writeStreamingAll(source.io, "error\n") catch {};
+        const fd = (source.acceptRotation() catch |err| {
+            std.log.warn("wallpaper busy peer refused: {s}", .{@errorName(err)});
+            return;
+        }) orelse return;
+        defer closeFd(fd);
+        // Best effort: retire one bounded queued prefix before closing.
+        // No request from this descriptor is admitted.
+        var ignored: [16]u8 = undefined;
+        if (receiveBytes(fd, &ignored)) |received| {
+            if (received) |count| std.debug.assert(count <= ignored.len);
+        } else |err| {
+            std.log.warn("wallpaper busy request read failed: {s}", .{@errorName(err)});
+        }
+        sendReceipt(fd, false);
     }
 
-    pub fn replyRotation(source: *Source, success: bool) void {
+    fn replyRotation(source: *Source, success: bool) void {
         if (source.rotate_client < 0) return;
-        const file: std.Io.File = .{ .handle = source.rotate_client, .flags = .{ .nonblocking = true } };
-        file.writeStreamingAll(source.io, if (success) "ok\n" else "error\n") catch {};
-        _ = std.posix.system.close(source.rotate_client);
-        source.rotate_client = -1;
-        source.rotate_length = 0;
+        defer source.closeClient();
+        sendReceipt(source.rotate_client, success);
     }
 
     /// Returns the borrowed I/O clock in monotonic milliseconds for bounded waits.
@@ -195,6 +213,7 @@ const Source = struct {
         return @intCast(std.Io.Clock.awake.now(source.io).toMilliseconds());
     }
 
+    /// Decodes admitted image bytes into an owned XRGB8888 allocation.
     pub fn decode(
         _: *Source,
         allocator: std.mem.Allocator,
@@ -229,6 +248,7 @@ const Source = struct {
         };
     }
 
+    /// Scales a validated crop into caller-owned destination pixels.
     pub fn scale(
         _: *Source,
         image: *const wallpaper.Image,
@@ -282,18 +302,44 @@ fn abstractAddress(signature: []const u8) !AbstractAddress {
     };
 }
 
-const Credentials = extern struct { pid: c_int, uid: c_uint, gid: c_uint };
+const Credentials = extern struct {
+    pid: std.os.linux.pid_t,
+    uid: std.os.linux.uid_t,
+    gid: std.os.linux.gid_t,
+};
+
+fn closeFd(fd: std.posix.fd_t) void {
+    // Linux retires the descriptor even when close reports EINTR.
+    switch (std.os.linux.errno(std.os.linux.close(fd))) {
+        .SUCCESS, .INTR => {},
+        else => |err| std.log.err("wallpaper descriptor close failed: {s}", .{@tagName(err)}),
+    }
+}
+
+fn rotationSocket() !std.posix.fd_t {
+    const linux = std.os.linux;
+    const result = linux.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        0,
+    );
+    if (linux.errno(result) != .SUCCESS) return error.RotationSocketOpenFailed;
+    return @intCast(result);
+}
 
 fn authenticatePeer(fd: std.posix.fd_t, expected_uid: c_uint) !void {
+    const linux = std.os.linux;
     var credentials: Credentials = undefined;
     var length: std.posix.socklen_t = @sizeOf(Credentials);
-    if (std.posix.errno(std.posix.system.getsockopt(
+    const result = linux.getsockopt(
         fd,
         std.posix.SOL.SOCKET,
-        std.os.linux.SO.PEERCRED,
-        @ptrCast(&credentials),
+        linux.SO.PEERCRED,
+        std.mem.asBytes(&credentials),
         &length,
-    )) != .SUCCESS or length != @sizeOf(Credentials)) return error.RotationPeerCredentialsFailed;
+    );
+    if (linux.errno(result) != .SUCCESS or length != @sizeOf(Credentials))
+        return error.RotationPeerCredentialsFailed;
     try requireUid(credentials.uid, expected_uid);
 }
 
@@ -301,90 +347,147 @@ fn requireUid(actual: c_uint, expected: c_uint) !void {
     if (actual != expected) return error.RotationPeerInvalid;
 }
 
-pub fn requestRotation(io: std.Io, signature: []const u8) !void {
-    const started = std.Io.Clock.awake.now(io);
-    const address = try abstractAddress(signature);
-    const result = std.posix.system.socket(
-        std.posix.AF.UNIX,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+// A null result means no progress; zero bytes means the peer ended its stream.
+fn receiveBytes(fd: std.posix.fd_t, bytes: []u8) !?usize {
+    std.debug.assert(bytes.len > 0);
+    const linux = std.os.linux;
+    const result = linux.recvfrom(fd, bytes.ptr, bytes.len, linux.MSG.DONTWAIT, null, null);
+    return switch (linux.errno(result)) {
+        .SUCCESS => result,
+        .AGAIN, .INTR => null,
+        else => error.RotationSocketReadFailed,
+    };
+}
+
+fn sendBytes(fd: std.posix.fd_t, bytes: []const u8) !?usize {
+    std.debug.assert(bytes.len > 0);
+    const linux = std.os.linux;
+    const result = linux.sendto(
+        fd,
+        bytes.ptr,
+        bytes.len,
+        linux.MSG.DONTWAIT | linux.MSG.NOSIGNAL,
+        null,
         0,
     );
-    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
-        @intCast(result)
-    else
-        return error.RotationSocketOpenFailed;
-    defer _ = std.posix.system.close(fd);
-    switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
+    return switch (linux.errno(result)) {
+        .SUCCESS => result,
+        .AGAIN, .INTR => null,
+        else => error.RotationSocketWriteFailed,
+    };
+}
+
+fn sendReceipt(fd: std.posix.fd_t, success: bool) void {
+    const bytes = if (success) "ok\n" else "error\n";
+    const count = sendBytes(fd, bytes) catch |err| {
+        std.log.warn("wallpaper receipt failed: {s}", .{@errorName(err)});
+        return;
+    };
+    if (count == null or count.? != bytes.len)
+        std.log.warn("wallpaper receipt incomplete", .{});
+}
+
+fn connectRotation(
+    io: std.Io,
+    fd: std.posix.fd_t,
+    address: AbstractAddress,
+    started: std.Io.Timestamp,
+) !void {
+    const linux = std.os.linux;
+    switch (linux.errno(linux.connect(fd, &address.value, address.length))) {
         .SUCCESS => {},
         .INPROGRESS => {
             try pollDirect(io, fd, std.posix.POLL.OUT, started);
             var socket_error: c_int = 0;
             var length: std.posix.socklen_t = @sizeOf(c_int);
-            if (std.posix.errno(std.posix.system.getsockopt(
+            const result = linux.getsockopt(
                 fd,
                 std.posix.SOL.SOCKET,
-                std.posix.SO.ERROR,
-                @ptrCast(&socket_error),
+                linux.SO.ERROR,
+                std.mem.asBytes(&socket_error),
                 &length,
-            )) != .SUCCESS or length != @sizeOf(c_int)) return error.RotationSocketConnectFailed;
-            if (socket_error != 0) return switch (@as(std.posix.E, @fromBackingInt(@intCast(socket_error)))) {
-                .CONNREFUSED => error.WallpaperResidentUnavailable,
-                .TIMEDOUT => error.RotationTimedOut,
+            );
+            if (linux.errno(result) != .SUCCESS or length != @sizeOf(c_int))
+                return error.RotationSocketConnectFailed;
+            if (socket_error != 0) return switch (socket_error) {
+                @backingInt(linux.E.CONNREFUSED) => error.WallpaperResidentUnavailable,
+                @backingInt(linux.E.TIMEDOUT) => error.RotationTimedOut,
                 else => error.RotationSocketConnectFailed,
             };
         },
         .CONNREFUSED => return error.WallpaperResidentUnavailable,
         else => return error.RotationSocketConnectFailed,
     }
-    try authenticatePeer(fd, std.os.linux.geteuid());
-    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    try authenticatePeer(fd, linux.geteuid());
+}
+
+/// Sends the legacy newline command and requires an exact close-delimited receipt.
+pub fn requestRotation(io: std.Io, signature: []const u8) !void {
+    const started = std.Io.Clock.awake.now(io);
+    const address = try abstractAddress(signature);
+    const fd = try rotationSocket();
+    defer closeFd(fd);
+    try connectRotation(io, fd, address, started);
     var written: usize = 0;
+    const command = "rotate\n";
     for (0..16) |_| {
-        written += file.writeStreaming(io, &.{}, &.{"rotate\n"[written..]}, 1) catch |err| switch (err) {
-            error.WouldBlock => {
-                try pollDirect(io, fd, std.posix.POLL.OUT, started);
-                continue;
-            },
-            else => return err,
-        };
-        if (written == "rotate\n".len) break;
+        try pollDirect(io, fd, std.posix.POLL.OUT, started);
+        const count = try sendBytes(fd, command[written..]) orelse continue;
+        written += count;
+        if (written == command.len) break;
     }
-    if (written != "rotate\n".len) return error.RotationRequestIncomplete;
+    if (written != command.len) return error.RotationRequestIncomplete;
+    try readReceipt(io, fd, started);
+}
+
+fn readReceipt(io: std.Io, fd: std.posix.fd_t, started: std.Io.Timestamp) !void {
+    // The legacy server closes after replying. A matching prefix alone
+    // does not prove the receipt ended; a later fragment could invalidate it.
     var reply: [16]u8 = undefined;
     var used: usize = 0;
     for (0..16) |_| {
-        used += file.readStreaming(io, &.{reply[used..]}) catch |err| switch (err) {
-            error.WouldBlock => {
-                try pollDirect(io, fd, std.posix.POLL.IN, started);
-                continue;
-            },
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (std.mem.indexOfScalar(u8, reply[0..used], '\n') != null) break;
+        try pollDirect(io, fd, std.posix.POLL.IN, started);
+        const count = try receiveBytes(fd, reply[used..]) orelse continue;
+        if (count == 0) {
+            if (std.mem.eql(u8, reply[0..used], "ok\n")) return;
+            return error.RotationRejected;
+        }
+        used += count;
+        if (used > "ok\n".len or !std.mem.eql(u8, reply[0..used], "ok\n"[0..used]))
+            return error.RotationRejected;
     }
-    if (!std.mem.eql(u8, reply[0..used], "ok\n")) return error.RotationRejected;
+    return error.RotationRejected;
 }
 
 const rotation_request_timeout_milliseconds = 30_000;
 
 fn requestMillisecondsRemaining(elapsed: i64) !i32 {
     if (elapsed >= rotation_request_timeout_milliseconds) return error.RotationTimedOut;
+    if (elapsed < 0) return error.RotationClockInvalid;
     return @intCast(rotation_request_timeout_milliseconds - elapsed);
 }
 
 fn pollDirect(io: std.Io, fd: std.posix.fd_t, events: i16, started: std.Io.Timestamp) !void {
+    const linux = std.os.linux;
     var descriptors = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    if (try std.posix.poll(&descriptors, try requestMillisecondsRemaining(elapsed)) == 0) {
-        return error.RotationTimedOut;
+    while (true) {
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+        const remaining = try requestMillisecondsRemaining(elapsed);
+        const result = linux.poll(&descriptors, descriptors.len, remaining);
+        switch (linux.errno(result)) {
+            .SUCCESS => break,
+            .INTR => {
+                try io.checkCancel();
+                continue;
+            },
+            else => return error.RotationSocketFailed,
+        }
     }
-    if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0) {
+    if (descriptors[0].revents == 0) return error.RotationTimedOut;
+    if (descriptors[0].revents & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0)
         return error.RotationSocketFailed;
-    }
-    if (events == std.posix.POLL.OUT and descriptors[0].revents & std.posix.POLL.HUP != 0) {
+    if (events == std.posix.POLL.OUT and descriptors[0].revents & std.posix.POLL.HUP != 0)
         return error.RotationSocketFailed;
-    }
 }
 
 /// Stable per-display identity for Wayspot rotation control, independent of
@@ -544,7 +647,7 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
     try resident.openRotation(signature);
     defer resident.closeRotation();
     const client = try connectRotationTest(signature);
-    defer _ = std.posix.system.close(client);
+    defer closeFd(client);
     const file: std.Io.File = .{ .handle = client, .flags = .{ .nonblocking = true } };
     try file.writeStreamingAll(std.testing.io, "rot");
     while (!(try wait(&resident, null, -1, 100)).rotate) {}
@@ -562,7 +665,7 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
     resident.replyRotation(true);
 
     const disconnected = try connectRotationTest(signature);
-    _ = std.posix.system.close(disconnected);
+    closeFd(disconnected);
     while (!(try wait(&resident, null, -1, 100)).rotate) {}
     try std.testing.expectError(error.RotationRequestIncomplete, resident.receiveRotation());
     resident.replyRotation(false);
@@ -572,26 +675,14 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
 
 fn connectRotationTest(signature: []const u8) !std.posix.fd_t {
     const address = try abstractAddress(signature);
-    const result = std.posix.system.socket(
-        std.posix.AF.UNIX,
-        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
-        0,
-    );
-    const fd: std.posix.fd_t = if (std.posix.errno(result) == .SUCCESS)
-        @intCast(result)
-    else
-        return error.TestSocketFailed;
-    errdefer _ = std.posix.system.close(fd);
-    switch (std.posix.errno(std.posix.system.connect(fd, @ptrCast(&address.value), address.length))) {
-        .SUCCESS => {},
-        .INPROGRESS => try pollDirect(std.testing.io, fd, std.posix.POLL.OUT, std.Io.Clock.awake.now(std.testing.io)),
-        else => return error.TestSocketFailed,
-    }
-    try authenticatePeer(fd, std.os.linux.geteuid());
+    const fd = try rotationSocket();
+    errdefer closeFd(fd);
+    try connectRotation(std.testing.io, fd, address, std.Io.Clock.awake.now(std.testing.io));
     return fd;
 }
 
 test "rotation request has one exact total wait bound" {
+    try std.testing.expectError(error.RotationClockInvalid, requestMillisecondsRemaining(-1));
     try std.testing.expectEqual(@as(i32, 30_000), try requestMillisecondsRemaining(0));
     try std.testing.expectEqual(@as(i32, 1), try requestMillisecondsRemaining(29_999));
     try std.testing.expectError(error.RotationTimedOut, requestMillisecondsRemaining(30_000));
@@ -1358,15 +1449,15 @@ test "stop readiness takes priority over rotation" {
     var fds: [2]std.posix.fd_t = undefined;
     const result = std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0, &fds);
     try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    defer closeFd(fds[0]);
+    defer closeFd(fds[1]);
     const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
     try writer.writeStreamingAll(std.testing.io, &(@as([128]u8, @splat(0))));
     var source: Source = .{ .io = std.testing.io };
     try source.openRotation("wallpaper-stop-priority-test");
     defer source.closeRotation();
     const client = try connectRotationTest("wallpaper-stop-priority-test");
-    defer _ = std.posix.system.close(client);
+    defer closeFd(client);
     const ready = try wait(&source, null, fds[0], 100);
     try std.testing.expect(ready.stop and !ready.rotate);
 }
@@ -1461,4 +1552,61 @@ test "native image open rejects paths replaced after catalogue discovery" {
         return error.ExpectedOpenFailure;
     } else |_| {}
     try std.testing.expect(failing.file == null);
+}
+
+test "rotation accepts no pending connection without losing listener ownership" {
+    var source: Source = .{ .io = std.testing.io };
+    try source.openRotation("rotation-empty-accept-test");
+    defer source.closeRotation();
+    const listener = source.rotate_listener;
+    try std.testing.expect(!try source.receiveRotation());
+    try std.testing.expectEqual(listener, source.rotate_listener);
+    try std.testing.expectEqual(@as(std.posix.fd_t, -1), source.rotate_client);
+    try std.testing.expectError(error.RotationAlreadyOpen, source.openRotation("other"));
+    try std.testing.expectEqual(listener, source.rotate_listener);
+}
+
+test "rotation receipt requires end of stream after an exact success" {
+    const linux = std.os.linux;
+    const cases = [_]struct { bytes: []const u8, success: bool }{
+        .{ .bytes = "ok\n", .success = true },
+        .{ .bytes = "ok\nextra", .success = false },
+        .{ .bytes = "ok", .success = false },
+        .{ .bytes = "error\n", .success = false },
+        .{ .bytes = "", .success = false },
+    };
+    for (cases) |case| {
+        var fds: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(
+            std.posix.AF.UNIX,
+            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+            0,
+            &fds,
+        )));
+        defer closeFd(fds[0]);
+        defer closeFd(fds[1]);
+        if (case.bytes.len != 0)
+            try std.testing.expectEqual(case.bytes.len, (try sendBytes(fds[1], case.bytes)).?);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.shutdown(fds[1], 1)));
+        const now = std.Io.Clock.awake.now(std.testing.io);
+        if (case.success) {
+            try readReceipt(std.testing.io, fds[0], now);
+        } else {
+            try std.testing.expectError(error.RotationRejected, readReceipt(std.testing.io, fds[0], now));
+        }
+    }
+}
+
+test "rotation send to retired peer reports failure without signal delivery" {
+    const linux = std.os.linux;
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
+        0,
+        &fds,
+    )));
+    defer closeFd(fds[0]);
+    closeFd(fds[1]);
+    try std.testing.expectError(error.RotationSocketWriteFailed, sendBytes(fds[0], "ok\n"));
 }
