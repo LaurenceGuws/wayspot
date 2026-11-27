@@ -10,6 +10,7 @@ fn Text(comptime capacity: usize) type {
         bytes: [capacity]u8 = undefined,
         len: u16 = 0,
 
+        /// Owns nonempty valid UTF-8 without truncating identity.
         pub fn exact(input: []const u8) !@This() {
             if (input.len == 0 or input.len > capacity or !std.unicode.utf8ValidateSlice(input) or
                 std.mem.indexOfScalar(u8, input, 0) != null) return error.InvalidText;
@@ -18,6 +19,7 @@ fn Text(comptime capacity: usize) type {
             return text;
         }
 
+        /// Owns display text, truncating long values at a codepoint boundary.
         pub fn display(input: []const u8) !@This() {
             if (!std.unicode.utf8ValidateSlice(input) or std.mem.indexOfScalar(u8, input, 0) != null) return error.InvalidText;
             if (input.len == 0) return .{};
@@ -30,22 +32,33 @@ fn Text(comptime capacity: usize) type {
             return text;
         }
 
+        /// Borrows the admitted byte extent.
         pub fn slice(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
         }
     };
 }
 
+/// Exact compositor-native window identity, never a display label.
 pub const StableId = Text(128);
+/// Exact workspace identity reported by the selected compositor.
 pub const WorkspaceId = Text(128);
+/// Exact monitor identity when a window has an output.
 pub const MonitorId = Text(128);
+/// Bounded application identity text for matching and presentation.
 pub const AppId = Text(192);
+/// Bounded display title, truncated only at UTF-8 boundaries.
 pub const Title = Text(384);
+/// Compositor-reported logical window geometry.
 pub const Geometry = struct { x: f64, y: f64, width: f64, height: f64 };
+/// Observed viewport relationship, unknown without evidence.
 pub const ViewportState = enum { visible, partial, offscreen, unknown };
+/// Compositor scene participation, not proof of unobscured pixels.
 pub const Presentation = enum { presented, workspace_inactive, occluded, hidden, unmapped, unknown };
+/// Observed directions beyond the viewport.
 pub const Edges = struct { left: bool = false, right: bool = false, top: bool = false, bottom: bool = false };
 
+/// One owned window observation with exact native selection identity.
 pub const Window = struct {
     stable_id: StableId,
     app_id: AppId,
@@ -62,15 +75,19 @@ pub const Window = struct {
     fullscreen: bool,
 };
 
+/// One-based spatial ordinal among windows of the same workspace.
 pub const WorkspacePosition = struct { ordinal: u16, total: u16 };
+/// One bounded, independently owned window-list observation.
 pub const Snapshot = struct {
     windows: [max_windows]Window = undefined,
     count: usize = 0,
 
+    /// Borrows only the admitted windows.
     pub fn slice(self: *const Snapshot) []const Window {
         return self.windows[0..self.count];
     }
 
+    /// Computes spatial position without reordering the focus-sorted snapshot.
     pub fn workspacePosition(self: *const Snapshot, index: usize) ?WorkspacePosition {
         if (index >= self.count) return null;
         const target = &self.windows[index];
@@ -88,10 +105,12 @@ pub const Snapshot = struct {
     }
 };
 
+/// Indexes into the exact snapshot used for one query.
 pub const Matches = struct {
     indexes: [max_windows]u16 = undefined,
     count: usize = 0,
 
+    /// Filters current observations while retaining their original focus order.
     pub fn init(snapshot: *const Snapshot, query: []const u8) !Matches {
         if (query.len > 256 or !std.unicode.utf8ValidateSlice(query)) return error.InvalidQuery;
         var matches: Matches = .{};
@@ -109,6 +128,7 @@ pub const Matches = struct {
         return matches;
     }
 
+    /// Borrows the exact indexes into the original snapshot.
     pub fn slice(self: *const Matches) []const u16 {
         return self.indexes[0..self.count];
     }
@@ -148,6 +168,7 @@ fn windowLess(_: void, a: Window, b: Window) bool {
 
 /// The session's exact SDDM desktop identity, not a compatibility list.
 pub const Backend = enum { hyprland, snowman };
+/// Selects only an explicitly supported session identity.
 pub fn backendForSession(desktop: ?[]const u8) ?Backend {
     const name = desktop orelse return null;
     if (std.mem.eql(u8, name, "Hyprland")) return .hyprland;
@@ -155,61 +176,38 @@ pub fn backendForSession(desktop: ?[]const u8) ?Backend {
     return null;
 }
 
-/// Select a compositor's window listing operation.
-pub const WindowDiscovery = union(Backend) {
-    hyprland: void,
-    snowman: void,
+fn discoveryArgv(backend: Backend) []const []const u8 {
+    return switch (backend) {
+        .hyprland => &.{ "hyprctl", "-j", "clients" },
+        .snowman => &.{ "snowman", "window", "list", "--mapped" },
+    };
+}
 
-    pub fn argv(self: WindowDiscovery) ![]const []const u8 {
-        return switch (self) {
-            .hyprland => &.{ "hyprctl", "-j", "clients" },
-            .snowman => &.{ "snowman", "window", "list", "--mapped" },
-        };
-    }
-};
+fn observationArgv(backend: Backend) []const []const u8 {
+    return switch (backend) {
+        .hyprland => &.{ "hyprctl", "-j", "activewindow" },
+        .snowman => &.{ "snowman", "seat", "get", "1" },
+    };
+}
 
-/// Focus one exact compositor-native window identity.
-pub const WindowFocus = union(Backend) {
-    hyprland: []const u8,
-    snowman: []const u8,
+fn hyprlandFocusArgv(id: []const u8, storage: *[3][]const u8, target: *[136]u8) ![]const []const u8 {
+    try validAddress(id);
+    // Hyprland 0.56+ dispatches Lua expressions, not legacy names.
+    storage.* = .{
+        "hyprctl",
+        "dispatch",
+        try std.fmt.bufPrint(target, "hl.dsp.focus({{ window = \"address:{s}\" }})", .{id}),
+    };
+    return storage;
+}
 
-    pub fn argv(self: WindowFocus, storage: *[4][]const u8, target: *[136]u8) ![]const []const u8 {
-        return switch (self) {
-            .snowman => |id| blk: {
-                _ = try numericId(id);
-                storage.* = .{ "snowman", "window", "focus", id };
-                break :blk storage;
-            },
-            .hyprland => |id| blk: {
-                try validAddress(id);
-                // Hyprland 0.56+ dispatches Lua expressions, not legacy names.
-                storage[0] = "hyprctl";
-                storage[1] = "dispatch";
-                storage[2] = try std.fmt.bufPrint(target, "hl.dsp.focus({{ window = \"address:{s}\" }})", .{id});
-                break :blk storage[0..3];
-            },
-        };
-    }
-};
-
-/// Observe the compositor's actual focused window after dispatch.
-pub const FocusObservation = union(Backend) {
-    hyprland: void,
-    snowman: void,
-
-    pub fn argv(self: FocusObservation) ![]const []const u8 {
-        return switch (self) {
-            .hyprland => &.{ "hyprctl", "-j", "activewindow" },
-            .snowman => &.{ "snowman", "seat", "get", "1" },
-        };
-    }
-};
-
+/// Owns both bounded subprocess output allocations and its exit result.
 pub const ProcessResult = struct {
     stdout: []u8,
     stderr: []u8,
     succeeded: bool,
 
+    /// Retires both owned streams with the original allocator.
     pub fn deinit(self: *ProcessResult, allocator: Allocator) void {
         allocator.free(self.stdout);
         allocator.free(self.stderr);
@@ -223,6 +221,7 @@ pub const Native = struct {
     io: std.Io,
     environ_map: ?*const std.process.Environ.Map,
 
+    /// Runs one bounded native CLI request with the captured session environment.
     pub fn run(self: Native, allocator: Allocator, argv: []const []const u8, max_stdout: usize) !ProcessResult {
         const child = std.process.run(allocator, self.io, .{
             .argv = argv,
@@ -235,6 +234,7 @@ pub const Native = struct {
             error.StreamTooLong => error.CompositorReplyTooLong,
             error.Timeout => error.CompositorCliTimedOut,
             error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
             else => error.CompositorCliFailed,
         };
         return .{
@@ -249,19 +249,21 @@ pub const Native = struct {
 };
 
 /// Read current mapped windows only when the picker enters window mode.
+// zig-audit: acknowledge anytype
+// reason: Native subprocesses and strict command transcripts share the discovery contract.
 pub fn load(operations: anytype, allocator: Allocator, backend: ?Backend, self_pid: i64) !Snapshot {
     switch (backend orelse return error.UnsupportedCompositor) {
         .snowman => {
-            var windows = try operations.run(allocator, try (WindowDiscovery{ .snowman = {} }).argv(), max_action_reply);
+            var windows = try operations.run(allocator, discoveryArgv(.snowman), max_action_reply);
             defer windows.deinit(allocator);
             if (!windows.succeeded) return error.CompositorCliRejected;
-            var seat = try operations.run(allocator, try (FocusObservation{ .snowman = {} }).argv(), max_action_reply);
+            var seat = try operations.run(allocator, observationArgv(.snowman), max_action_reply);
             defer seat.deinit(allocator);
             if (!seat.succeeded) return error.CompositorCliRejected;
             return parseSnowman(allocator, windows.stdout, seat.stdout);
         },
         .hyprland => {
-            var result = try operations.run(allocator, try (WindowDiscovery{ .hyprland = {} }).argv(), max_reply);
+            var result = try operations.run(allocator, discoveryArgv(.hyprland), max_reply);
             defer result.deinit(allocator);
             if (!result.succeeded) return error.CompositorCliRejected;
             return parseDesktop(allocator, result.stdout, self_pid);
@@ -271,15 +273,18 @@ pub fn load(operations: anytype, allocator: Allocator, backend: ?Backend, self_p
 
 /// Focus one exact native ID. Snowman must be called only after the picker
 /// has retired its exclusive layer; its receipt includes both native foci.
+// zig-audit: acknowledge anytype
+// reason: Native subprocesses and strict command transcripts share the exact focus receipt contract.
 pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: []const u8) !void {
-    var storage: [4][]const u8 = undefined;
-    var target: [136]u8 = undefined;
     if ((backend orelse return error.UnsupportedCompositor) == .snowman) {
-        var result = try operations.run(allocator, try (WindowFocus{ .snowman = id }).argv(&storage, &target), max_action_reply);
+        const selected = try numericId(id);
+        var result = try operations.run(allocator, &.{ "snowman", "window", "focus", id }, max_action_reply);
         defer result.deinit(allocator);
-        return verifySnowmanFocus(allocator, &result, try numericId(id));
+        return verifySnowmanFocus(allocator, &result, selected);
     }
-    var result = try operations.run(allocator, try (WindowFocus{ .hyprland = id }).argv(&storage, &target), max_action_reply);
+    var storage: [3][]const u8 = undefined;
+    var target: [136]u8 = undefined;
+    var result = try operations.run(allocator, try hyprlandFocusArgv(id, &storage, &target), max_action_reply);
     defer result.deinit(allocator);
     if (!result.succeeded or !std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), "ok")) {
         if (!@import("builtin").is_test) {
@@ -296,14 +301,14 @@ pub fn focus(operations: anytype, allocator: Allocator, backend: ?Backend, id: [
         }
         return error.CompositorFocusRejected;
     }
-    var observed = try operations.run(allocator, try (FocusObservation{ .hyprland = {} }).argv(), max_action_reply);
+    var observed = try operations.run(allocator, observationArgv(.hyprland), max_action_reply);
     defer observed.deinit(allocator);
     if (!observed.succeeded) return error.CompositorFocusUnverified;
     if (observed.stdout.len > max_action_reply) return error.CompositorReplyTooLong;
-    var active = std.json.parseFromSlice(struct { address: []const u8 }, allocator, observed.stdout, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch return error.CompositorReplyMalformed;
+    var active = std.json.parseFromSlice(struct { address: []const u8 }, allocator, observed.stdout, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.CompositorReplyMalformed;
     defer active.deinit();
     try validAddress(active.value.address);
-    if (!std.ascii.eqlIgnoreCase(active.value.address, id)) {
+    if (!sameAddress(active.value.address, id)) {
         // Both values have passed validAddress. Keep the exact observation
         // for diagnosing physical focus races, without redispatching or
         // treating a different window as success.
@@ -319,6 +324,19 @@ fn numericId(value: []const u8) !u64 {
     for (value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidWindowId;
     return std.fmt.parseInt(u64, value, 10) catch return error.InvalidWindowId;
 }
+
+const SnowId = enum(u64) {
+    _,
+
+    /// Parses a canonical nonzero JSON integer from the bounded reply.
+    pub fn jsonParse(_: Allocator, source: *std.json.Scanner, _: std.json.ParseOptions) !SnowId {
+        const bytes = switch (try source.next()) {
+            .number => |value| value,
+            else => return error.UnexpectedToken,
+        };
+        return @fromBackingInt(@intCast(numericId(bytes) catch return error.InvalidNumber));
+    }
+};
 
 fn numericText(comptime Id: type, value: u64) !Id {
     if (value == 0) return error.InvalidWindowId;
@@ -342,9 +360,9 @@ fn decodeSnowman(comptime Data: type, allocator: Allocator, bytes: []const u8, o
 }
 
 const SnowWindow = struct {
-    id: u64,
-    workspace_id: u64,
-    output_id: ?u64,
+    id: SnowId,
+    workspace_id: SnowId,
+    output_id: ?SnowId,
     mapped: bool,
     app_id: []const u8,
     title: []const u8,
@@ -354,11 +372,11 @@ const SnowWindow = struct {
     scene: struct { status: enum { unmapped, workspace_unpresented, layout_hidden, scene_disabled, scene_enabled, scene_unobserved } },
 };
 const SnowSeat = struct {
-    id: u64,
+    id: SnowId,
     kind: enum { shared, private },
-    focused_window: ?u64,
+    focused_window: ?SnowId,
     recent_window_count: usize,
-    recent_window_ids: []u64,
+    recent_window_ids: []SnowId,
 };
 
 fn SnowReply(comptime Data: type) type {
@@ -373,10 +391,10 @@ pub fn parseSnowman(allocator: Allocator, windows: []const u8, seat: []const u8)
     const observed = try decodeSnowman(SnowReply(SnowSeat), allocator, seat, "seat_get");
     defer observed.deinit();
     const history = observed.value.data;
-    if (history.id != 1 or history.kind != .shared or history.recent_window_count != history.recent_window_ids.len or
-        history.recent_window_ids.len > 512 or history.focused_window == 0) return error.CompositorReplyMalformed;
+    if (@backingInt(history.id) != 1 or history.kind != .shared or history.recent_window_count != history.recent_window_ids.len or
+        history.recent_window_ids.len > 512) return error.CompositorReplyMalformed;
     for (history.recent_window_ids, 0..) |id, index| {
-        if (id == 0 or std.mem.indexOfScalar(u64, history.recent_window_ids[0..index], id) != null) return error.CompositorReplyMalformed;
+        if (std.mem.indexOfScalar(SnowId, history.recent_window_ids[0..index], id) != null) return error.CompositorReplyMalformed;
     }
     if (views.value.data.len > max_windows) return error.TooManyWindows;
     var snapshot: Snapshot = .{};
@@ -385,14 +403,14 @@ pub fn parseSnowman(allocator: Allocator, windows: []const u8, seat: []const u8)
         if (!std.math.isFinite(view.geometry.x) or !std.math.isFinite(view.geometry.y) or
             !std.math.isFinite(view.geometry.width) or !std.math.isFinite(view.geometry.height) or
             view.geometry.width < 0 or view.geometry.height < 0) return error.GeometryInvalid;
-        const id = try numericText(StableId, view.id);
+        const id = try numericText(StableId, @backingInt(view.id));
         for (snapshot.slice()) |existing| if (std.mem.eql(u8, existing.stable_id.slice(), id.slice())) return error.DuplicateStableId;
         snapshot.windows[snapshot.count] = .{
             .stable_id = id,
             .app_id = try AppId.display(view.app_id),
             .title = try Title.display(view.title),
-            .workspace_id = try numericText(WorkspaceId, view.workspace_id),
-            .monitor_id = if (view.output_id) |output| try numericText(MonitorId, output) else null,
+            .workspace_id = try numericText(WorkspaceId, @backingInt(view.workspace_id)),
+            .monitor_id = if (view.output_id) |output| try numericText(MonitorId, @backingInt(output)) else null,
             .geometry = view.geometry,
             .presentation = switch (view.scene.status) {
                 .workspace_unpresented => .workspace_inactive,
@@ -401,7 +419,7 @@ pub fn parseSnowman(allocator: Allocator, windows: []const u8, seat: []const u8)
                 .scene_unobserved => .unknown,
                 .unmapped => return error.CompositorReplyMalformed,
             },
-            .focus_rank = if (std.mem.indexOfScalar(u64, history.recent_window_ids, view.id)) |index| @intCast(index) else null,
+            .focus_rank = if (std.mem.indexOfScalar(SnowId, history.recent_window_ids, view.id)) |index| @intCast(index) else null,
             .active = history.focused_window == view.id,
             .floating = view.mode == .floating,
             .fullscreen = view.fullscreen,
@@ -414,7 +432,7 @@ pub fn parseSnowman(allocator: Allocator, windows: []const u8, seat: []const u8)
 
 const SnowFocusReceipt = struct {
     status: []const u8,
-    window_id: ?u64,
+    window_id: ?SnowId,
     policy: []const u8,
     keyboard_focused: bool,
     pointer_focused: bool,
@@ -423,7 +441,7 @@ const SnowFocusReceipt = struct {
 fn verifySnowmanFocus(allocator: Allocator, result: *const ProcessResult, id: u64) !void {
     if (!result.succeeded) {
         const Failure = struct { schema: []const u8, ok: bool, @"error": struct { code: []const u8 } };
-        const parsed = std.json.parseFromSlice(Failure, allocator, result.stderr, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch return error.CompositorFocusRejected;
+        const parsed = std.json.parseFromSlice(Failure, allocator, result.stderr, .{ .ignore_unknown_fields = true, .duplicate_field_behavior = .@"error" }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.CompositorFocusRejected;
         defer parsed.deinit();
         if (parsed.value.ok or !std.mem.eql(u8, parsed.value.schema, snowman_schema)) return error.CompositorFocusRejected;
         const code = parsed.value.@"error".code;
@@ -439,7 +457,7 @@ fn verifySnowmanFocus(allocator: Allocator, result: *const ProcessResult, id: u6
     const parsed = try decodeSnowman(SnowReply(SnowFocusReceipt), allocator, result.stdout, "window_focus");
     defer parsed.deinit();
     const receipt = parsed.value.data;
-    if (receipt.window_id != id or !receipt.keyboard_focused or !receipt.pointer_focused or
+    if (receipt.window_id != @as(SnowId, @fromBackingInt(@intCast(id))) or !receipt.keyboard_focused or !receipt.pointer_focused or
         !std.mem.eql(u8, receipt.status, "applied") or !std.mem.eql(u8, receipt.policy, "greedy")) return error.CompositorFocusMismatch;
     if (!@import("builtin").is_test) std.log.info("window focus applied id={d}", .{id});
 }
@@ -447,6 +465,8 @@ fn verifySnowmanFocus(allocator: Allocator, result: *const ProcessResult, id: u6
 /// Do not wait for notify-send's D-Bus reply on the resident's UI thread:
 /// the same resident may own the notification service. The existing detached
 /// launcher waits only for the short launch helper, not the notification.
+// zig-audit: acknowledge anyerror
+// reason: The outer picker action boundary reports exact native errors without narrowing them.
 pub fn reportFailure(init: std.process.Init, failure: anyerror) void {
     const message: []const u8 = switch (failure) {
         error.SnowmanFocusLocked => "The selected window or workspace is locked.",
@@ -497,7 +517,8 @@ pub fn parseDesktop(allocator: Allocator, bytes: []const u8, self_pid: i64) !Sna
         var raw = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
             .duplicate_field_behavior = .@"error",
             .max_value_len = max_reply,
-        }) catch {
+        }) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
             if (!@import("builtin").is_test) std.log.warn("hyprctl clients JSON syntax error: {s}", .{@errorName(failure)});
             return error.CompositorReplyMalformed;
         };
@@ -562,7 +583,7 @@ pub fn parseDesktop(allocator: Allocator, bytes: []const u8, self_pid: i64) !Sna
             .fullscreen = fullscreen,
         };
         for (snapshot.slice()) |existing| {
-            if (std.mem.eql(u8, existing.stable_id.slice(), window.stable_id.slice())) return error.DuplicateStableId;
+            if (sameAddress(existing.stable_id.slice(), window.stable_id.slice())) return error.DuplicateStableId;
         }
         snapshot.windows[snapshot.count] = window;
         snapshot.count += 1;
@@ -574,6 +595,16 @@ pub fn parseDesktop(allocator: Allocator, bytes: []const u8, self_pid: i64) !Sna
 fn validAddress(value: []const u8) !void {
     if (value.len < 3 or value.len > 18 or !std.mem.startsWith(u8, value, "0x")) return error.InvalidWindowAddress;
     for (value[2..]) |byte| if (!std.ascii.isHex(byte)) return error.InvalidWindowAddress;
+    if (std.mem.trimStart(u8, value[2..], "0").len == 0) return error.InvalidWindowAddress;
+}
+
+// Both inputs have already passed validAddress. Preserve native spelling
+// for dispatch while comparing the hexadecimal identity, not its formatting.
+fn sameAddress(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(
+        std.mem.trimStart(u8, a[2..], "0"),
+        std.mem.trimStart(u8, b[2..], "0"),
+    );
 }
 
 const fixture =
@@ -645,15 +676,41 @@ test "Hyprland mixed normal and special workspace clients include an absent nume
     try std.testing.expectEqualSlices(u16, &.{1}, (try Matches.init(&snapshot, "ws special:magic")).slice());
 }
 
+// Verify the actual focus entrypoint's full argv and exact response, not a
+// second command encoder that could diverge from production.
+const FocusProbe = struct {
+    const Step = struct {
+        argv: []const []const u8,
+        bytes: []const u8,
+    };
+    steps: []const Step,
+    cursor: usize = 0,
+
+    fn run(self: *FocusProbe, allocator: Allocator, argv: []const []const u8, max_stdout: usize) !ProcessResult {
+        if (self.cursor >= self.steps.len) return error.FocusProbeUnexpected;
+        const step = self.steps[self.cursor];
+        self.cursor += 1;
+        try std.testing.expectEqual(max_action_reply, max_stdout);
+        try std.testing.expectEqual(step.argv.len, argv.len);
+        for (step.argv, argv) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+        const stdout = try allocator.dupe(u8, step.bytes);
+        errdefer allocator.free(stdout);
+        return .{ .stdout = stdout, .stderr = try allocator.dupe(u8, ""), .succeeded = true };
+    }
+};
+
 test "Snowman native commands preserve canonical numeric identity" {
-    const list = try (WindowDiscovery{ .snowman = {} }).argv();
+    const list = discoveryArgv(.snowman);
     try std.testing.expectEqualStrings("--mapped", list[3]);
-    var storage: [4][]const u8 = undefined;
-    var target: [136]u8 = undefined;
-    const focus_args = try (WindowFocus{ .snowman = "18446744073709551615" }).argv(&storage, &target);
-    try std.testing.expectEqualStrings("snowman", focus_args[0]);
-    try std.testing.expectEqualStrings("focus", focus_args[2]);
-    try std.testing.expectEqualStrings("18446744073709551615", focus_args[3]);
+    try std.testing.expectEqual(std.math.maxInt(u64), try numericId("18446744073709551615"));
+    var probe: FocusProbe = .{ .steps = &.{.{
+        .argv = &.{ "snowman", "window", "focus", "18446744073709551615" },
+        .bytes = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{\"status\":\"applied\",\"window_id\":18446744073709551615,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true}}",
+    }} };
+    try focus(&probe, std.testing.allocator, .snowman, "18446744073709551615");
+    try std.testing.expectEqual(probe.steps.len, probe.cursor);
+    try std.testing.expectError(error.InvalidWindowId, focus(&probe, std.testing.allocator, .snowman, "01"));
+    try std.testing.expectEqual(probe.steps.len, probe.cursor);
     try std.testing.expectError(error.InvalidWindowId, numericId("0"));
     try std.testing.expectError(error.InvalidWindowId, numericId("01"));
     try std.testing.expectError(error.InvalidWindowId, numericId("--sticky"));
@@ -669,14 +726,14 @@ test "bad native data and duplicate exact targets are rejected" {
         \\]
     ;
     try std.testing.expectError(error.DuplicateStableId, parseDesktop(std.testing.allocator, duplicated, 1));
-    var storage: [4][]const u8 = undefined;
+    var storage: [3][]const u8 = undefined;
     var target: [136]u8 = undefined;
-    const focus_args = try (WindowFocus{ .hyprland = "0xAbC123" }).argv(&storage, &target);
+    const focus_args = try hyprlandFocusArgv("0xAbC123", &storage, &target);
     try std.testing.expectEqual(@as(usize, 3), focus_args.len);
     try std.testing.expectEqualStrings("hyprctl", focus_args[0]);
     try std.testing.expectEqualStrings("dispatch", focus_args[1]);
     try std.testing.expectEqualStrings("hl.dsp.focus({ window = \"address:0xAbC123\" })", focus_args[2]);
-    try std.testing.expectError(error.InvalidWindowAddress, (WindowFocus{ .hyprland = "class:any" }).argv(&storage, &target));
+    try std.testing.expectError(error.InvalidWindowAddress, hyprlandFocusArgv("class:any", &storage, &target));
 }
 
 const snowman_fixture =
@@ -704,15 +761,98 @@ test "Snowman discovery uses seat MRU and keeps hidden and unpresented windows" 
 }
 
 test "Snowman focus receipt must name the exact window and both native foci" {
-    const cases = [_]struct { bytes: []const u8, failure: ?anyerror }{
+    const cases = [_]struct { bytes: []const u8, failure: ?error{CompositorFocusMismatch} }{
         .{ .bytes = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{\"status\":\"applied\",\"window_id\":42,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true}}", .failure = null },
         .{ .bytes = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{\"status\":\"applied\",\"window_id\":43,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true}}", .failure = error.CompositorFocusMismatch },
         .{ .bytes = "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{\"status\":\"applied\",\"window_id\":42,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":false}}", .failure = error.CompositorFocusMismatch },
     };
     for (cases) |case| {
-        var result: ProcessResult = .{ .stdout = try std.testing.allocator.dupe(u8, case.bytes), .stderr = try std.testing.allocator.dupe(u8, ""), .succeeded = true };
-        defer result.deinit(std.testing.allocator);
+        const bytes = try std.testing.allocator.dupe(u8, case.bytes);
+        defer std.testing.allocator.free(bytes);
+        const result: ProcessResult = .{ .stdout = bytes, .stderr = &.{}, .succeeded = true };
         const verified = verifySnowmanFocus(std.testing.allocator, &result, 42);
         if (case.failure) |failure| try std.testing.expectError(failure, verified) else try verified;
     }
+}
+
+test "Hyprland duplicate hexadecimal identities are rejected regardless of spelling" {
+    const payload =
+        \\[
+        \\ {"address":"0xAbC","class":"one","title":"One","mapped":true,"at":[0,0],"size":[100,100],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0},
+        \\ {"address":"0x000abc","class":"two","title":"Two","mapped":true,"at":[0,0],"size":[100,100],"workspace":{"id":1},"monitor":0,"floating":false,"fullscreen":0}
+        \\]
+    ;
+    try std.testing.expectError(error.DuplicateStableId, parseDesktop(std.testing.allocator, payload, 99));
+}
+
+test "Snowman focus receipt does not coerce a quoted or floating window identity" {
+    for ([_][]const u8{ "\"42\"", "42.0", "4.2e1", "42.000000000000000000000000000000000001" }) |identity| {
+        const bytes = try std.fmt.allocPrint(std.testing.allocator, "{{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{{\"status\":\"applied\",\"window_id\":{s},\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true}}}}", .{identity});
+        defer std.testing.allocator.free(bytes);
+        var result: ProcessResult = .{ .stdout = bytes, .stderr = &.{}, .succeeded = true };
+        try std.testing.expectError(error.CompositorReplyMalformed, verifySnowmanFocus(std.testing.allocator, &result, 42));
+    }
+}
+
+test "Hyprland focus observation compares the hexadecimal identity without redispatch" {
+    const dispatch: FocusProbe.Step = .{
+        .argv = &.{ "hyprctl", "dispatch", "hl.dsp.focus({ window = \"address:0xAbC\" })" },
+        .bytes = "ok\n",
+    };
+    for ([_]struct { address: []const u8, matches: bool }{
+        .{ .address = "0x000abc", .matches = true },
+        .{ .address = "0x000abd", .matches = false },
+    }) |case| {
+        const observed = try std.fmt.allocPrint(std.testing.allocator, "{{\"address\":\"{s}\"}}", .{case.address});
+        defer std.testing.allocator.free(observed);
+        var probe: FocusProbe = .{ .steps = &.{ dispatch, .{
+            .argv = &.{ "hyprctl", "-j", "activewindow" },
+            .bytes = observed,
+        } } };
+        if (case.matches) {
+            try focus(&probe, std.testing.allocator, .hyprland, "0xAbC");
+        } else {
+            try std.testing.expectError(error.CompositorFocusMismatch, focus(&probe, std.testing.allocator, .hyprland, "0xAbC"));
+        }
+        try std.testing.expectEqual(probe.steps.len, probe.cursor);
+    }
+    var no_dispatch: FocusProbe = .{ .steps = &.{} };
+    try std.testing.expectError(error.InvalidWindowAddress, focus(&no_dispatch, std.testing.allocator, .hyprland, "0x0000"));
+    try std.testing.expectEqual(@as(usize, 0), no_dispatch.cursor);
+}
+
+test "Snowman discovery refuses coercible native identities in either reply" {
+    const a = std.testing.allocator;
+    const mutations = [_]struct { from: []const u8, to: []const u8, seat: bool = false }{
+        .{ .from = "\"id\":41", .to = "\"id\":\"41\"" },
+        .{ .from = "\"workspace_id\":1", .to = "\"workspace_id\":1.0" },
+        .{ .from = "\"output_id\":1", .to = "\"output_id\":1e0" },
+        .{ .from = "\"id\":1,", .to = "\"id\":\"1\",", .seat = true },
+        .{ .from = "\"focused_window\":41", .to = "\"focused_window\":41.0", .seat = true },
+        .{ .from = "[41,43,42]", .to = "[41,43,\"42\"]", .seat = true },
+    };
+    for (mutations) |mutation| {
+        const original = if (mutation.seat) snowman_history else snowman_fixture;
+        const changed = try std.mem.replaceOwned(u8, a, original, mutation.from, mutation.to);
+        defer a.free(changed);
+        try std.testing.expect(!std.mem.eql(u8, original, changed));
+        try std.testing.expectError(error.CompositorReplyMalformed, parseSnowman(
+            a,
+            if (mutation.seat) snowman_fixture else changed,
+            if (mutation.seat) changed else snowman_history,
+        ));
+    }
+}
+
+fn allocationWitness(allocator: Allocator) !void {
+    const snapshot = try parseSnowman(allocator, snowman_fixture, snowman_history);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.count);
+    const receipt = try allocator.dupe(u8, "{\"schema\":\"snowman-command/v1\",\"ok\":true,\"operation\":\"window_focus\",\"serial\":2,\"data\":{\"status\":\"applied\",\"window_id\":42,\"policy\":\"greedy\",\"keyboard_focused\":true,\"pointer_focused\":true}}");
+    defer allocator.free(receipt);
+    const result: ProcessResult = .{ .stdout = receipt, .stderr = &.{}, .succeeded = true };
+    try verifySnowmanFocus(allocator, &result, 42);
+}
+
+test "navigator allocation failure publishes no partial snapshot or successful receipt" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationWitness, .{});
 }
