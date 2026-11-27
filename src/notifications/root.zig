@@ -10,12 +10,12 @@ const UiOwner = @import("../ui/owner.zig");
 const Stop = @import("../stop.zig");
 const shm = @import("../ui/native_surface.zig");
 
-pub const app_name_capacity = 256;
-pub const app_icon_capacity = 1024;
-pub const summary_capacity = 1024;
-pub const body_capacity = 16 * 1024;
+const app_name_capacity = 256;
+const app_icon_capacity = 1024;
+const summary_capacity = 1024;
+const body_capacity = 16 * 1024;
 
-pub const Request = struct {
+const Request = struct {
     replaces_id: u32,
     app_name: []const u8,
     app_icon: []const u8,
@@ -24,7 +24,7 @@ pub const Request = struct {
     expire_timeout: i32,
 };
 
-pub const CloseReason = enum(u32) {
+const CloseReason = enum(u32) {
     expired = 1,
     dismissed = 2,
     requested = 3,
@@ -438,11 +438,13 @@ fn validateRequest(request: Request) Error!void {
     }
 }
 
+/// Maximum records in one retained history and its picker view.
 pub const record_capacity = 4096;
-pub const file_capacity = 32 * 1024 * 1024;
-pub const line_capacity = 18_432;
-pub const retention_seconds: i64 = 30 * 24 * 60 * 60;
+const file_capacity = 32 * 1024 * 1024;
+const line_capacity = 18_432;
+const retention_seconds: i64 = 30 * 24 * 60 * 60;
 
+/// Bounded notification admission, retained-state and persistence failures.
 pub const Error = error{
     OutOfMemory,
     InvalidUtf8,
@@ -530,14 +532,17 @@ pub const History = struct {
     next_history_id: u64 = 1,
     active: ?Active = null,
 
+    /// Releases all owned records, including a partially constructed parse.
+    /// Uses the allocator that supplied the retained record allocations.
     pub fn deinit(history: *History, allocator: std.mem.Allocator) void {
-        history.assertValid();
+        // A failed parse has not necessarily reached its final retention bounds.
+        std.debug.assert(history.count <= record_capacity);
         for (history.records[0..history.count]) |*slot| slot.*.?.deinit(allocator);
         history.* = .{};
     }
 
-    /// Adds or replaces one accepted notification, then prunes oldest records.
-    pub fn accepted(
+    // Adds or replaces one accepted notification, then prunes oldest records.
+    fn accepted(
         history: *History,
         allocator: std.mem.Allocator,
         now: i64,
@@ -545,7 +550,8 @@ pub const History = struct {
         replaces: bool,
     ) Error!void {
         history.assertValid();
-        const replacing = replaces and history.active != null and history.active.?.notification_id == source.id;
+        const replacing = replaces and history.active != null and
+            history.active.?.notification_id == source.id;
         const history_id = if (replacing)
             history.active.?.history_id
         else blk: {
@@ -576,8 +582,8 @@ pub const History = struct {
         history.assertValid();
     }
 
-    /// Forgets the runtime-only association for one closed Freedesktop id.
-    pub fn closed(history: *History, key: Key) void {
+    // Forgets the runtime-only association for one closed Freedesktop id.
+    fn closed(history: *History, key: Key) void {
         if (history.active == null or
             history.active.?.notification_id != key.id or
             history.active.?.generation != key.generation) return;
@@ -594,7 +600,9 @@ pub const History = struct {
 
     fn retain(history: *History, allocator: std.mem.Allocator, record: Record) void {
         if (history.count == history.records.len) {
-            if (record.received_unix_seconds <= history.records[0].?.received_unix_seconds) {
+            // A new record at the same timestamp follows the existing ones.
+            // Drop it only when its timestamp is strictly older than the floor.
+            if (record.received_unix_seconds < history.records[0].?.received_unix_seconds) {
                 var discarded = record;
                 discarded.deinit(allocator);
                 return;
@@ -648,7 +656,11 @@ pub const History = struct {
         if (history.active) |active| {
             std.debug.assert(active.notification_id != 0);
             std.debug.assert(active.generation != 0);
-            std.debug.assert(history.findRecord(active.history_id) != null);
+            // Retention and the live notification lifetime are independent.
+            // A clock rollback can evict the active record; replacements still
+            // use its reserved history id, and closure still uses its key.
+            std.debug.assert(active.history_id != 0);
+            std.debug.assert(active.history_id < history.next_history_id);
         }
         var bytes: usize = 0;
         for (history.records, 0..) |slot, index| {
@@ -656,6 +668,12 @@ pub const History = struct {
             const record = slot orelse continue;
             std.debug.assert(record.history_id != 0);
             std.debug.assert(record.line_bytes <= line_capacity);
+            if (index > 0) {
+                std.debug.assert(
+                    history.records[index - 1].?.received_unix_seconds <=
+                        record.received_unix_seconds,
+                );
+            }
             bytes += record.line_bytes;
             for (history.records[index + 1 .. history.count]) |other| {
                 std.debug.assert(record.history_id != other.?.history_id);
@@ -693,6 +711,10 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, now: i64) Error!Hi
             return error.HistoryCorrupt;
         }
         if (line.len + 1 > line_capacity) return error.LineTooLong;
+        // The canonical writer never emits more than this many records.
+        // Do not evict during admission: duplicate identities must remain
+        // detectable throughout the complete input snapshot.
+        if (history.count == record_capacity) return error.HistoryTooLarge;
         var parsed = std.json.parseFromSlice(Wire, allocator, line, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = false,
@@ -723,14 +745,14 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8, now: i64) Error!Hi
     return history;
 }
 
-/// Reads one complete byte snapshot, then publishes only a complete parsed history.
-pub fn load(source: anytype, allocator: std.mem.Allocator, now: i64) Error!History {
+// Reads one complete owned byte snapshot through the sole native history writer.
+fn load(source: *Native, now: i64) Error!History {
     const bytes = try source.read();
-    defer allocator.free(bytes);
-    return parse(allocator, bytes, now);
+    defer source.allocator.free(bytes);
+    return parse(source.allocator, bytes, now);
 }
 
-pub fn encode(allocator: std.mem.Allocator, history: *const History) Error![]u8 {
+fn encode(allocator: std.mem.Allocator, history: *const History) Error![]u8 {
     history.assertValid();
     const bytes = allocator.alloc(u8, history.file_bytes) catch return error.OutOfMemory;
     errdefer allocator.free(bytes);
@@ -1125,7 +1147,7 @@ pub const Owner = struct {
     ) Error!Owner {
         var native = try Native.init(allocator, io, state_home, home);
         errdefer native.deinit();
-        var history = try load(&native, allocator, now);
+        var history = try load(&native, now);
         errdefer history.deinit(allocator);
         return .{
             .allocator = allocator,
@@ -2989,4 +3011,82 @@ fn appendHint(array: *dbus.DBusMessageIter, key: []const u8) !void {
         dbus.dbus_message_iter_abandon_container_if_open(array, &entry);
         return error.OutOfMemory;
     }
+}
+
+fn filledHistoryForTest(allocator: std.mem.Allocator, now: i64) !History {
+    var history: History = .{};
+    errdefer history.deinit(allocator);
+    for (1..record_capacity + 1) |id| {
+        history.append(try Record.init(allocator, now, @intCast(id), "app", "old", "body"));
+    }
+    history.next_history_id = record_capacity + 1;
+    return history;
+}
+
+test "full history retains newest accepted record at equal timestamps" {
+    const allocator = std.testing.allocator;
+    var owner = testOwner(allocator);
+    owner.history = try filledHistoryForTest(allocator, 100);
+    defer owner.history.deinit(allocator);
+    var accepted = try owner.acceptAt(sampleRequestValue(0, "new"), 100);
+    defer accepted.presentation.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, record_capacity), owner.history.count);
+    try std.testing.expectEqual(@as(u64, 2), owner.history.records[0].?.history_id);
+    try std.testing.expectEqualStrings("new", owner.history.records[record_capacity - 1].?.summary);
+    try std.testing.expectEqual(@as(u64, record_capacity + 1), owner.history.active.?.history_id);
+}
+
+test "clock rollback can evict history without losing the live notification identity" {
+    const allocator = std.testing.allocator;
+    var owner = testOwner(allocator);
+    owner.history = try filledHistoryForTest(allocator, 100);
+    defer owner.history.deinit(allocator);
+    var accepted = try owner.acceptAt(sampleRequestValue(0, "rolled back"), 99);
+    defer accepted.presentation.deinit(allocator);
+    const identity = owner.history.active.?;
+    try std.testing.expectEqual(@as(usize, record_capacity), owner.history.count);
+    try std.testing.expect(owner.history.findRecord(identity.history_id) == null);
+    try std.testing.expectEqual(accepted.presentation.id, identity.notification_id);
+
+    var replacement = try owner.acceptAt(
+        sampleRequestValue(identity.notification_id, "restored"),
+        101,
+    );
+    defer replacement.presentation.deinit(allocator);
+    try std.testing.expect(replacement.displaced == null);
+    try std.testing.expectEqual(identity.notification_id, replacement.presentation.id);
+    try std.testing.expectEqual(identity.history_id, owner.history.active.?.history_id);
+    try std.testing.expectEqualStrings("restored", owner.history.records[record_capacity - 1].?.summary);
+    try std.testing.expect(owner.close(.{
+        .id = replacement.presentation.id,
+        .generation = replacement.presentation.generation,
+    }));
+    try std.testing.expect(owner.history.active == null);
+}
+
+test "canonical history accepts the exact record limit and rejects excess before eviction" {
+    const allocator = std.testing.allocator;
+    var history = try filledHistoryForTest(allocator, 100);
+    defer history.deinit(allocator);
+    const encoded = try encode(allocator, &history);
+    defer allocator.free(encoded);
+    var parsed = try parse(allocator, encoded, 100);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, record_capacity), parsed.count);
+    try std.testing.expectEqual(@as(u64, record_capacity + 1), parsed.next_history_id);
+
+    const extra =
+        "{\"received_unix_seconds\":101,\"history_id\":4097," ++
+        "\"app_name\":\"a\",\"summary\":\"new\",\"body\":\"b\"}\n";
+    const overflow = try std.mem.concat(allocator, u8, &.{ encoded, extra });
+    defer allocator.free(overflow);
+    try std.testing.expectError(error.HistoryTooLarge, parse(allocator, overflow, 100));
+
+    // Old parsing could evict the first id and admit its duplicate later.
+    const duplicate =
+        "{\"received_unix_seconds\":102,\"history_id\":1," ++
+        "\"app_name\":\"a\",\"summary\":\"duplicate\",\"body\":\"b\"}\n";
+    const repeated = try std.mem.concat(allocator, u8, &.{ overflow, duplicate });
+    defer allocator.free(repeated);
+    try std.testing.expectError(error.HistoryTooLarge, parse(allocator, repeated, 100));
 }
