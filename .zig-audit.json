@@ -19,6 +19,7 @@
     "src/picker/navigator.zig",
     "src/picker/root.zig",
     "src/picker/session.zig",
+    "src/picker/view.zig",
     "src/stop.zig",
     "src/tray/host.zig",
     "src/tray/menu.zig",
