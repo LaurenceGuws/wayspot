@@ -4,18 +4,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("catalog.zig");
 
+/// Maximum application argv count, including its executable and any terminal prefix.
 pub const argument_capacity = 64;
-pub const storage_capacity = 8192;
+const storage_capacity = 8192;
 
-/// Plan owns every argv byte; moving it after init invalidates its argv slices.
-pub const Plan = struct {
+/// Plan owns argv bytes and borrows cwd; moving it after init invalidates argv slices.
+const Plan = struct {
     storage: [storage_capacity]u8 = undefined,
     used: usize = 0,
     argv: [argument_capacity][]const u8 = undefined,
     count: usize = 0,
     cwd: ?[]const u8 = null,
 
-    pub fn init(
+    fn init(
         plan: *Plan,
         app: *const apps.App,
         terminal: ?[]const u8,
@@ -25,6 +26,8 @@ pub const Plan = struct {
         errdefer plan.* = .{};
         if (!std.fs.path.isAbsolute(home)) return error.HomeInvalid;
         if (home.len > apps.path_capacity) return error.HomeTooLong;
+        const cwd = app.path orelse home;
+        try validateCwd(cwd);
         if (app.terminal) {
             const name = terminal orelse return error.TerminalUnavailable;
             if (!std.mem.eql(u8, name, "kitty")) return error.TerminalUnsupported;
@@ -38,10 +41,10 @@ pub const Plan = struct {
         if (std.mem.indexOfScalar(u8, plan.argv[app_start], '=') != null) {
             return error.ExecutableInvalid;
         }
-        plan.cwd = app.path orelse home;
+        plan.cwd = cwd;
     }
 
-    pub fn arguments(plan: *const Plan) []const []const u8 {
+    fn arguments(plan: *const Plan) []const []const u8 {
         return plan.argv[0..plan.count];
     }
 
@@ -72,8 +75,9 @@ pub const Plan = struct {
                         index += 1;
                         if (index == app.exec.len) return error.InvalidQuoteEscape;
                         const escaped = app.exec[index];
-                        if (escaped != '"' and escaped != '`' and escaped != '$' and escaped != '\\') {
-                            return error.InvalidQuoteEscape;
+                        switch (escaped) {
+                            '"', '`', '$', '\\' => {},
+                            else => return error.InvalidQuoteEscape,
                         }
                         try plan.byte(escaped);
                     } else {
@@ -101,7 +105,8 @@ pub const Plan = struct {
                     },
                     'F', 'U' => {
                         if (file_code_seen) return error.RepeatedFileCode;
-                        if (plan.used != start or (index < app.exec.len and app.exec[index] != ' ')) {
+                        if (plan.used != start) return error.FieldCodeNotWholeArgument;
+                        if (index < app.exec.len and app.exec[index] != ' ') {
                             return error.FieldCodeNotWholeArgument;
                         }
                         file_code_seen = true;
@@ -133,6 +138,7 @@ pub const Plan = struct {
 
     fn bytes(plan: *Plan, value: []const u8) !void {
         if (value.len > storage_capacity - plan.used) return error.ArgumentBytesTooLong;
+        if (std.mem.indexOfScalar(u8, value, 0) != null) return error.ArgumentContainsNul;
         @memcpy(plan.storage[plan.used..][0..value.len], value);
         plan.used += value.len;
     }
@@ -168,15 +174,34 @@ fn reserved(byte: u8) bool {
     };
 }
 
+fn validateCwd(cwd: ?[]const u8) !void {
+    if (cwd) |path| {
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.WorkingDirectoryInvalid;
+    }
+}
+
+fn validateArguments(argv: []const []const u8) !void {
+    if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
+    if (argv[0].len == 0) return error.ExecutableMissing;
+    for (argv) |argument| {
+        if (std.mem.indexOfScalar(u8, argument, 0) != null) return error.ArgumentContainsNul;
+    }
+}
+
+/// One-shot process adapter; callers exit after launching the application.
 pub const Native = struct {
     io: std.Io,
     environ_map: *const std.process.Environ.Map,
 
-    /// Starts one new process group with closed standard streams.
+    /// Starts one new process group with standard streams redirected to /dev/null.
     ///
     /// Wayspot exits immediately after success; the system process owner then
     /// adopts and reaps the application.
     pub fn spawn(native: *Native, argv: []const []const u8, cwd: ?[]const u8) !void {
+        try validateArguments(argv);
+        try validateCwd(cwd);
+        // zig-audit: acknowledge discard
+        // reason: One-shot Linux caller exits; no parent pipe handles or application wait.
         _ = try std.process.spawn(native.io, .{
             .argv = argv,
             .environ_map = native.environ_map,
@@ -196,8 +221,11 @@ pub const Detached = struct {
     io: std.Io,
     environ_map: *const std.process.Environ.Map,
 
+    /// Starts and waits for the launch helper, never the application itself.
+    /// argv and cwd are borrowed until the spawn and helper receipt complete.
     pub fn spawn(self: *Detached, argv: []const []const u8, cwd: ?[]const u8) !void {
-        if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
+        try validateArguments(argv);
+        try validateCwd(cwd);
         var args: [argument_capacity + 2][]const u8 = undefined;
         args[0] = "/proc/self/exe";
         args[1] = "--launch-plan";
@@ -214,8 +242,9 @@ pub const Detached = struct {
     }
 };
 
+/// Executes the private helper's already tokenized application arguments, then exits.
 pub fn runPlan(init: std.process.Init, argv: []const []const u8) !void {
-    if (argv.len == 0 or argv.len > argument_capacity) return error.LaunchArgumentsInvalid;
+    try validateArguments(argv);
     // The resident uses signalfd; do not export its blocked termination signals
     // to unrelated desktop applications.
     var mask = std.posix.sigemptyset();
@@ -228,6 +257,8 @@ pub fn runPlan(init: std.process.Init, argv: []const []const u8) !void {
 
 /// Starts one complete plan without keeping Wayspot attached to the application.
 pub fn spawn(
+    // zig-audit: acknowledge anytype
+    // reason: Native, Detached and the transcript share this synchronous borrowed plan.
     operations: anytype,
     app: *const apps.App,
     terminal: ?[]const u8,
@@ -283,7 +314,10 @@ test "plain and terminal plans preserve exact argv and working directory" {
         .argv = &.{ "editor path", "--name=Editor", "%" },
         .cwd = "/work",
     };
-    try std.testing.expectError(error.SpawnStopped, spawn(&plain_transcript, &plain, null, "/home/user"));
+    try std.testing.expectError(
+        error.SpawnStopped,
+        spawn(&plain_transcript, &plain, null, "/home/user"),
+    );
     try std.testing.expect(plain_transcript.called);
 
     const terminal = testApp("Monitor", "btop", null, true);
@@ -291,7 +325,10 @@ test "plain and terminal plans preserve exact argv and working directory" {
         .argv = &.{ "kitty", "--", "btop" },
         .cwd = "/home/user",
     };
-    try std.testing.expectError(error.SpawnStopped, spawn(&terminal_transcript, &terminal, "kitty", "/home/user"));
+    try std.testing.expectError(
+        error.SpawnStopped,
+        spawn(&terminal_transcript, &terminal, "kitty", "/home/user"),
+    );
     try std.testing.expect(terminal_transcript.called);
 }
 
@@ -307,7 +344,10 @@ test "detached start presents the same bounded plan without replacing the CLI" {
     var environ_map = std.process.Environ.Map.init(std.testing.allocator);
     defer environ_map.deinit();
     var native = Native{ .io = std.Io.failing, .environ_map = &environ_map };
-    try std.testing.expectError(error.OperationUnsupported, spawn(&native, &app, null, "/home/user"));
+    try std.testing.expectError(
+        error.OperationUnsupported,
+        spawn(&native, &app, null, "/home/user"),
+    );
 }
 
 test "malformed input publishes no process operation" {
@@ -336,19 +376,26 @@ test "malformed input publishes no process operation" {
 
 test "invalid launch rows are removed before picker publication" {
     const source = [_]apps.DesktopFile{
-        .{ .root = 0, .id = @constCast("good.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Good\nExec=good",
-        ) },
-        .{ .root = 0, .id = @constCast("bad.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Bad\nExec=bad %z",
-        ) },
+        .{
+            .root = 0,
+            .id = "good.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Good\nExec=good",
+        },
+        .{
+            .root = 0,
+            .id = "bad.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Bad\nExec=bad %z",
+        },
     };
     var list = try apps.load(std.testing.allocator, &source, "Hyprland");
     defer list.deinit();
     try apply(&list, null, "/home/user");
     try std.testing.expectEqual(@as(usize, 1), list.count);
     try std.testing.expectEqualStrings("Good", list.slice()[0].name);
-    try std.testing.expectEqual(@as(usize, 1), list.report.decisions[@backingInt(apps.Decision.invalid_exec)]);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        list.report.decisions[@backingInt(apps.Decision.invalid_exec)],
+    );
 }
 
 test "argument and byte bounds are exact and failure atomic" {
@@ -369,22 +416,37 @@ test "argument and byte bounds are exact and failure atomic" {
     try plan.init(&app_exact, null, "/home/user");
     try std.testing.expectEqual(storage_capacity, plan.used);
     const app_over = testApp("App", exact ++ "x", null, false);
-    try std.testing.expectError(error.ArgumentBytesTooLong, plan.init(&app_over, null, "/home/user"));
+    try std.testing.expectError(
+        error.ArgumentBytesTooLong,
+        plan.init(&app_over, null, "/home/user"),
+    );
     try std.testing.expectEqual(@as(usize, 0), plan.used);
 }
 
 test "terminal policy is explicit and native spawn failure is visible" {
     const terminal = testApp("Monitor", "btop", null, true);
     var transcript = Transcript{ .argv = &.{"never"}, .cwd = null };
-    try std.testing.expectError(error.TerminalUnavailable, spawn(&transcript, &terminal, null, "/home/user"));
-    try std.testing.expectError(error.TerminalUnsupported, spawn(&transcript, &terminal, "foot", "/home/user"));
-    try std.testing.expectError(error.HomeInvalid, spawn(&transcript, &terminal, "kitty", "relative"));
+    try std.testing.expectError(
+        error.TerminalUnavailable,
+        spawn(&transcript, &terminal, null, "/home/user"),
+    );
+    try std.testing.expectError(
+        error.TerminalUnsupported,
+        spawn(&transcript, &terminal, "foot", "/home/user"),
+    );
+    try std.testing.expectError(
+        error.HomeInvalid,
+        spawn(&transcript, &terminal, "kitty", "relative"),
+    );
 
     const plain = testApp("App", "app", null, false);
     var environ_map = std.process.Environ.Map.init(std.testing.allocator);
     defer environ_map.deinit();
     var native = Native{ .io = std.Io.failing, .environ_map = &environ_map };
-    try std.testing.expectError(error.OperationUnsupported, spawn(&native, &plain, null, "/home/user"));
+    try std.testing.expectError(
+        error.OperationUnsupported,
+        spawn(&native, &plain, null, "/home/user"),
+    );
 }
 
 test "arbitrary Exec bytes remain bounded" {
@@ -409,7 +471,7 @@ fn fuzzExec(_: void, smith: *std.testing.Smith) !void {
 
 fn testApp(name: []const u8, exec: []const u8, path: ?[]const u8, terminal: bool) apps.App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = "test.desktop",
         .name = name,
         .generic_name = null,
@@ -423,4 +485,44 @@ fn testApp(name: []const u8, exec: []const u8, path: ?[]const u8, terminal: bool
         .terminal = terminal,
         .issues = .empty,
     };
+}
+
+test "expanded arguments and working directory cannot carry embedded NUL" {
+    var plan: Plan = .{};
+    const bad_name = testApp("Name\x00suffix", "app %c", null, false);
+    try std.testing.expectError(
+        error.ArgumentContainsNul,
+        plan.init(&bad_name, null, "/home/user"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), plan.count);
+    try std.testing.expectEqual(@as(usize, 0), plan.used);
+
+    const bad_path = testApp("App", "app", "/work\x00suffix", false);
+    try std.testing.expectError(
+        error.WorkingDirectoryInvalid,
+        plan.init(&bad_path, null, "/home/user"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), plan.count);
+}
+
+test "raw launch adapters refuse nonrepresentable arguments before process creation" {
+    var environ_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer environ_map.deinit();
+    var native = Native{ .io = std.Io.failing, .environ_map = &environ_map };
+    var detached = Detached{ .io = std.Io.failing, .environ_map = &environ_map };
+    try std.testing.expectError(error.ArgumentContainsNul, native.spawn(
+        &.{ "app", "prefix\x00suffix" },
+        null,
+    ));
+    try std.testing.expectError(error.ArgumentContainsNul, detached.spawn(
+        &.{ "app", "prefix\x00suffix" },
+        null,
+    ));
+    try std.testing.expectError(error.WorkingDirectoryInvalid, detached.spawn(
+        &.{"app"},
+        "/work\x00suffix",
+    ));
+    try std.testing.expectError(error.ExecutableMissing, native.spawn(&.{""}, null));
+    try std.testing.expectError(error.LaunchArgumentsInvalid, detached.spawn(&.{}, null));
+    try std.testing.expectError(error.OperationUnsupported, detached.spawn(&.{"app"}, null));
 }

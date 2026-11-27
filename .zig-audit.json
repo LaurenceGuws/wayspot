@@ -6,6 +6,7 @@
     "build.zig",
     "src/apps/catalog.zig",
     "src/apps/desktop_files.zig",
+    "src/apps/launch.zig",
     "src/cli.zig",
     "src/cmd.zig",
     "src/control.zig",

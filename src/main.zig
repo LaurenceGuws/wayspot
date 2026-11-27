@@ -23,7 +23,9 @@ pub fn main(init: std.process.Init) !u8 {
     );
     defer argument_iterator.deinit();
     if (!argument_iterator.skip()) return error.ArgumentsInvalid;
-    var arguments: [cmd.argument_capacity + 1][]const u8 = undefined;
+    // The private helper has its own argv limit, plus the dispatch word.
+    const argument_capacity = @max(cmd.argument_capacity + 1, launch.argument_capacity + 1);
+    var arguments: [argument_capacity][]const u8 = undefined;
     var argument_count: usize = 0;
     while (argument_iterator.next()) |argument| {
         if (argument_count == arguments.len) return error.TooManyArguments;
