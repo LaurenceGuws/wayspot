@@ -2,45 +2,52 @@
 
 const std = @import("std");
 
+/// Maximum simultaneously tracked wallpaper outputs.
 pub const monitor_capacity = 16;
+/// Maximum physical pixels in one monitor buffer.
 pub const monitor_pixel_capacity = 33_177_600;
+/// Maximum physical pixels across one publication round.
 pub const round_pixel_capacity = 67_108_864;
-pub const image_path_capacity = 4095;
+const image_path_capacity = 4095;
 pub const image_file_capacity = 64 * 1024 * 1024;
-pub const catalog_file_capacity = 16 * 1024;
-pub const catalog_entry_capacity = 32 * 1024;
-pub const catalog_path_capacity = 1024;
+const catalog_file_capacity = 16 * 1024;
+const catalog_entry_capacity = 32 * 1024;
+const catalog_path_capacity = 1024;
 pub const image_side_capacity = 16_384;
 pub const image_pixel_capacity = 67_108_864;
 /// The resident attempts one automatic rotation per hour.
 pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
 
+/// Framing state of one exact rotation command.
 pub const RotationRequest = enum { incomplete, rotate, invalid };
 
+/// Classifies a prefix or complete rotation command without consuming bytes.
 pub fn classifyRotationRequest(bytes: []const u8) RotationRequest {
     if (bytes.len > "rotate\n".len) return .invalid;
     if (!std.mem.eql(u8, bytes, "rotate\n"[0..bytes.len])) return .invalid;
     return if (bytes.len == "rotate\n".len) .rotate else .incomplete;
 }
+/// Encoded formats supported by the wallpaper decoder.
 pub const ImageFormat = enum { png, jpeg };
+/// Owns the startup path catalogue and its shuffled selection order.
 pub const Catalog = struct {
     paths: std.ArrayList([]u8) = .empty,
     order: std.ArrayList(u16) = .empty,
     cursor: usize = 0,
-    last: ?u16 = null,
     published: ?u16 = null,
     allocator: std.mem.Allocator,
     prng: std.Random.DefaultPrng,
 
+    /// Retires all catalogue paths and the shuffled index allocation.
     pub fn deinit(catalog: *Catalog) void {
         for (catalog.paths.items) |path| catalog.allocator.free(path);
         catalog.paths.deinit(catalog.allocator);
         catalog.order.deinit(catalog.allocator);
     }
 
-    pub fn shuffle(catalog: *Catalog) !void {
-        catalog.order.clearRetainingCapacity();
+    fn shuffle(catalog: *Catalog) !void {
         try catalog.order.ensureTotalCapacity(catalog.allocator, catalog.paths.items.len);
+        catalog.order.clearRetainingCapacity();
         for (0..catalog.paths.items.len) |index| catalog.order.appendAssumeCapacity(@intCast(index));
         catalog.prng.random().shuffle(u16, catalog.order.items);
         if (catalog.published) |last| if (catalog.order.items.len > 1 and catalog.order.items[0] == last) {
@@ -49,16 +56,16 @@ pub const Catalog = struct {
         catalog.cursor = 0;
     }
 
-    pub fn next(catalog: *Catalog) ![]const u8 {
+    fn next(catalog: *Catalog) !u16 {
         if (catalog.paths.items.len == 0) return error.WallpaperCatalogEmpty;
         if (catalog.cursor == catalog.order.items.len) try catalog.shuffle();
         const index = catalog.order.items[catalog.cursor];
         catalog.cursor += 1;
-        catalog.last = index;
-        return catalog.paths.items[index];
+        return index;
     }
 };
 
+/// One borrowed directory entry, valid until the next discovery operation.
 pub const CatalogEntry = struct { name: []const u8, kind: std.Io.File.Kind };
 
 fn alternativeSelectionLimit(file_count: usize) usize {
@@ -66,6 +73,9 @@ fn alternativeSelectionLimit(file_count: usize) usize {
     return file_count * 2 - 1;
 }
 
+/// Collects a bounded, sorted, owned snapshot before the first shuffle.
+// zig-audit: acknowledge anytype
+// reason: Native discovery and deterministic directory transcripts share admission and cleanup.
 pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: []const u8) !Catalog {
     if (root_path.len == 0 or root_path.len > image_path_capacity or
         !std.fs.path.isAbsolute(root_path) or !std.unicode.utf8ValidateSlice(root_path) or
@@ -75,11 +85,10 @@ pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: 
     }
     try source.openRoot(root_path);
     defer source.closeRoot();
-    var paths: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (paths.items) |path| allocator.free(path);
-        paths.deinit(allocator);
-    }
+    // From the first admitted path onward, exactly one object owns all
+    // catalogue allocations, including on entropy or shuffle failure.
+    var catalog: Catalog = .{ .allocator = allocator, .prng = undefined };
+    errdefer catalog.deinit();
     var visited: usize = 0;
     while (try source.nextEntry()) |entry| {
         visited += 1;
@@ -91,25 +100,20 @@ pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: 
         }
         const kind = if (entry.kind == .unknown) try source.statEntry(entry.name) else entry.kind;
         if (kind != .file) continue;
-        _ = imageFormat(entry.name) catch continue;
-        if (paths.items.len == catalog_file_capacity) return error.WallpaperFileCapacityExceeded;
+        if (imageFormat(entry.name) == null) continue;
+        if (catalog.paths.items.len == catalog_file_capacity) return error.WallpaperFileCapacityExceeded;
         const path = try std.fs.path.join(allocator, &.{ root_path, entry.name });
         errdefer allocator.free(path);
         if (path.len > image_path_capacity) return error.ImagePathTooLong;
-        try paths.append(allocator, path);
+        try catalog.paths.append(allocator, path);
     }
-    if (paths.items.len == 0) return error.WallpaperCatalogEmpty;
-    std.mem.sort([]u8, paths.items, {}, struct {
+    if (catalog.paths.items.len == 0) return error.WallpaperCatalogEmpty;
+    std.mem.sort([]u8, catalog.paths.items, {}, struct {
         fn less(_: void, a: []u8, b: []u8) bool {
             return std.mem.order(u8, a, b) == .lt;
         }
     }.less);
-    var catalog = Catalog{
-        .paths = paths,
-        .allocator = allocator,
-        .prng = .init(try source.randomSeed()),
-    };
-    errdefer catalog.deinit();
+    catalog.prng = .init(try source.randomSeed());
     try catalog.shuffle();
     return catalog;
 }
@@ -153,12 +157,15 @@ pub const Candidate = struct {
     }
 };
 
+/// Selects a usable alternative without changing the published image identity.
+// zig-audit: acknowledge anytype
+// reason: Native image I/O and failure transcripts use the same bounded selection.
 pub fn choose(source: anytype, allocator: std.mem.Allocator, catalog: *Catalog) !Candidate {
     if (catalog.paths.items.len == 0) return error.WallpaperCatalogEmpty;
     var attempted: [catalog_file_capacity]bool = @splat(false);
     for (0..alternativeSelectionLimit(catalog.paths.items.len)) |_| {
-        const path = try catalog.next();
-        const index = catalog.last.?;
+        const index = try catalog.next();
+        const path = catalog.paths.items[index];
         if (catalog.published == index or attempted[index]) continue;
         attempted[index] = true;
         var encoded = readEncodedImage(source, allocator, path) catch |err| {
@@ -207,7 +214,7 @@ pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8
 /// Read once so the resident can survive changes to the image directory.
 pub fn readEncodedImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !EncodedImage {
     try validateImagePath(path);
-    const format = try imageFormat(path);
+    const format = imageFormat(path) orelse return error.ImageFormatUnsupported;
     try source.open(path);
     defer source.close();
     const stat = try source.stat();
@@ -232,12 +239,12 @@ pub fn decodeImage(source: anytype, allocator: std.mem.Allocator, encoded: *cons
     return image;
 }
 
-pub fn imageFormat(path: []const u8) !ImageFormat {
+fn imageFormat(path: []const u8) ?ImageFormat {
     const extension = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(extension, ".png")) return .png;
     if (std.ascii.eqlIgnoreCase(extension, ".jpg") or
         std.ascii.eqlIgnoreCase(extension, ".jpeg")) return .jpeg;
-    return error.ImageFormatUnsupported;
+    return null;
 }
 
 pub fn coverImage(
@@ -443,9 +450,9 @@ test "image task owns exact file decode and scale history" {
 }
 
 test "formats and shuffled catalog boundaries are exact" {
-    try std.testing.expectEqual(ImageFormat.png, try imageFormat("A.PNG"));
-    try std.testing.expectEqual(ImageFormat.jpeg, try imageFormat("a.JpEg"));
-    try std.testing.expectError(error.ImageFormatUnsupported, imageFormat("a.webp"));
+    try std.testing.expectEqual(@as(?ImageFormat, .png), imageFormat("A.PNG"));
+    try std.testing.expectEqual(@as(?ImageFormat, .jpeg), imageFormat("a.JpEg"));
+    try std.testing.expect(imageFormat("a.webp") == null);
     var catalog = Catalog{ .allocator = std.testing.allocator, .prng = .init(7) };
     defer catalog.deinit();
     try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "a.png"));
@@ -453,16 +460,18 @@ test "formats and shuffled catalog boundaries are exact" {
     try catalog.paths.append(std.testing.allocator, try std.testing.allocator.dupe(u8, "c.jpeg"));
     try catalog.shuffle();
     var seen: u3 = 0;
+    var prior: u16 = undefined;
     for (0..3) |_| {
-        const path = try catalog.next();
-        const index: u2 = if (path[0] == 'a') 0 else if (path[0] == 'b') 1 else 2;
-        seen |= @as(u3, 1) << index;
+        const index = try catalog.next();
+        try std.testing.expect(index < 3);
+        const bit = @as(u3, 1) << @intCast(index);
+        try std.testing.expect(seen & bit == 0);
+        seen |= bit;
+        prior = index;
     }
     try std.testing.expectEqual(@as(u3, 0b111), seen);
-    const prior = catalog.last.?;
     catalog.published = prior;
-    _ = try catalog.next();
-    try std.testing.expect(catalog.last.? != prior);
+    try std.testing.expect(try catalog.next() != prior);
 }
 
 test "alternative selection draw bound covers every cursor and skipped index" {
@@ -487,9 +496,8 @@ test "alternative selection draw bound covers every cursor and skipped index" {
         var draws: usize = 0;
         for (0..alternativeSelectionLimit(file_count)) |_| {
             if (alternatives == file_count - 1) break;
-            _ = try catalog.next();
+            const index = try catalog.next();
             draws += 1;
-            const index = catalog.last.?;
             if (index == catalog.published.? or attempted[index]) continue;
             attempted[index] = true;
             alternatives += 1;
@@ -626,7 +634,7 @@ const GeneratedCatalog = struct {
         return .{ .name = if (source.index < source.accepted) "same.png" else "ignored.txt", .kind = .file };
     }
     fn statEntry(_: *GeneratedCatalog, _: []const u8) !std.Io.File.Kind {
-        unreachable;
+        return error.UnexpectedGeneratedStat;
     }
     fn randomSeed(_: *GeneratedCatalog) !u64 {
         return 1;
@@ -718,6 +726,10 @@ test "image file failures close exactly once before decode" {
 
 test "image path dimensions crop and allocation endpoints are exact" {
     var transcript = ImageTranscript{ .steps = &.{} };
+    try std.testing.expectError(
+        error.ImageFormatUnsupported,
+        loadImage(&transcript, std.testing.allocator, "wallpaper.webp"),
+    );
     try std.testing.expectError(error.ImagePathEmpty, loadImage(&transcript, std.testing.allocator, ""));
     var path: [image_path_capacity + 1]u8 = @splat('a');
     try std.testing.expectError(error.ImagePathTooLong, loadImage(&transcript, std.testing.allocator, &path));
@@ -863,4 +875,31 @@ fn fuzzImage(_: void, smith: *std.testing.Smith) !void {
         try std.testing.expect(dimensions.width <= image_side_capacity);
         try std.testing.expect(dimensions.height <= image_side_capacity);
     } else |_| {}
+}
+
+fn catalogAllocationTest(allocator: std.mem.Allocator) !void {
+    var source: CatalogTranscript = .{
+        .entries = &.{
+            .{ .name = "z.jpg", .kind = .file },
+            .{ .name = "a.png", .kind = .unknown, .stat_kind = .file },
+            .{ .name = "ignored.txt", .kind = .file },
+        },
+    };
+    var catalog = collectCatalog(&source, allocator, "/root") catch |err| {
+        try std.testing.expect(source.opened and source.closed);
+        return err;
+    };
+    defer catalog.deinit();
+    try std.testing.expect(source.opened and source.closed);
+    try std.testing.expectEqual(@as(usize, 2), catalog.paths.items.len);
+    try std.testing.expectEqualStrings("/root/a.png", catalog.paths.items[0]);
+    try std.testing.expectEqualStrings("/root/z.jpg", catalog.paths.items[1]);
+}
+
+test "catalogue allocation failure transfers path ownership exactly once" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        catalogAllocationTest,
+        .{},
+    );
 }
