@@ -16,6 +16,7 @@
     "src/tray/host.zig",
     "src/tray/menu.zig",
     "src/tray/watcher.zig",
+    "src/ui/owner.zig",
     "src/wallpaper/outputs.zig",
     "src/wallpaper/root.zig",
     "src/wallpaper/wayland.zig",

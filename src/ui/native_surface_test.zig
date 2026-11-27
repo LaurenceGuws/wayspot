@@ -1468,6 +1468,10 @@ test "actual shared display lease survives sibling retirement and rejects failed
     defer if (picker) |surface| surface.destroy() catch {};
     const same = try owner.acquireNative(testing.allocator, testing.io);
     try testing.expect(same == f.display and owner.native_users == 2);
+    try testing.expectError(error.NativeLeaseLimit, owner.acquireNative(testing.allocator, testing.io));
+    try testing.expectEqual(@as(u8, 2), owner.native_users);
+    try testing.expectEqual(same, owner.native.?);
+
     // A rejected partial role acquisition releases only its own lease.
     try testing.expectError(error.NativeRoleAlreadyOwned, native.Surface.create(same, .picker, size, null));
     owner.releaseNative();
@@ -1508,4 +1512,25 @@ test "SDL artifact exposes only CPU rendering and refuses video initialization" 
     try testing.expect(sdl.SDL_SetRenderDrawColor(renderer, 20, 30, 40, 255));
     try testing.expect(sdl.SDL_RenderClear(renderer));
     try testing.expect(sdl.SDL_FlushRenderer(renderer));
+}
+
+test "native UI discovery wait has one deadline across interrupted poll" {
+    const Owner = @import("owner.zig");
+    var fds: [2]i32 = undefined;
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &fds)),
+    );
+    const peer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+    defer peer.close(testing.io);
+    const conn = Connection.fromFd(testing.allocator, testing.io, fds[0]) catch |err| {
+        const file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        file.close(testing.io);
+        return err;
+    };
+    const display = try native.Display.adopt(testing.allocator, conn);
+    defer display.destroy();
+    const started = std.Io.Clock.awake.now(testing.io).subDuration(.fromMilliseconds(1750));
+    try testing.expectError(error.NativeUiDeadline, Owner.readBefore(display, testing.io, started));
+    try testing.expect(!display.failed);
 }
