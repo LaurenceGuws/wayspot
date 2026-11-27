@@ -1,6 +1,7 @@
 //! Pure, bounded, 24-hour local clock label for Wayspot GUI headers.
 const std = @import("std");
 
+/// Local calendar fields, with zero-based weekday and month.
 pub const Date = struct {
     weekday: u8,
     month: u8,

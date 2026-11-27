@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const path_capacity = 1024;
+const path_capacity = 1024;
 
 const locations = [_][]const u8{
     ".local/share/icons/hicolor/48x48/apps/",
@@ -19,6 +19,7 @@ const locations = [_][]const u8{
     "/usr/share/pixmaps/",
 };
 
+/// One fresh bounded traversal of the preferred icon locations.
 pub const Paths = struct {
     home: []const u8,
     icon: []const u8,
@@ -46,6 +47,7 @@ pub const Paths = struct {
     fn write(paths: *Paths, parts: []const []const u8) ![:0]const u8 {
         var len: usize = 0;
         for (parts) |part| {
+            if (std.mem.indexOfScalar(u8, part, 0) != null) return error.InvalidIconPath;
             if (part.len > path_capacity - len) return error.IconPathTooLong;
             @memcpy(paths.bytes[len..][0..part.len], part);
             len += part.len;
@@ -75,8 +77,21 @@ test "named icons produce bounded local then system paths" {
         "/home/me/.local/share/icons/hicolor/48x48/apps/app.png",
         (try paths.next()).?,
     );
-    for (1..6) |_| _ = try paths.next();
-    try std.testing.expectEqualStrings("/usr/share/icons/hicolor/48x48/apps/app.png", (try paths.next()).?);
+    const expected = [_][]const u8{
+        "/home/me/.local/share/icons/hicolor/64x64/apps/app.png",
+        "/home/me/.local/share/icons/hicolor/128x128/apps/app.png",
+        "/home/me/.local/share/icons/hicolor/256x256/apps/app.png",
+        "/home/me/.local/share/icons/hicolor/512x512/apps/app.png",
+        "/home/me/.local/share/pixmaps/app.png",
+        "/usr/share/icons/hicolor/48x48/apps/app.png",
+        "/usr/share/icons/hicolor/64x64/apps/app.png",
+        "/usr/share/icons/hicolor/128x128/apps/app.png",
+        "/usr/share/icons/hicolor/256x256/apps/app.png",
+        "/usr/share/icons/hicolor/512x512/apps/app.png",
+        "/usr/share/pixmaps/app.png",
+    };
+    for (expected) |path| try std.testing.expectEqualStrings(path, (try paths.next()).?);
+    try std.testing.expectEqual(null, try paths.next());
 }
 
 test "invalid icon names are rejected" {
@@ -84,4 +99,16 @@ test "invalid icon names are rejected" {
     try std.testing.expectError(error.InvalidIconName, empty.next());
     var nested: Paths = .{ .home = "/home/me", .icon = "../app" };
     try std.testing.expectError(error.InvalidIconName, nested.next());
+}
+
+test "absolute icon paths refuse embedded NUL and preserve the exact byte bound" {
+    var invalid: Paths = .{ .home = "/home/me", .icon = "/icon.png\x00ignored" };
+    try std.testing.expectError(error.InvalidIconPath, invalid.next());
+    var bytes: [path_capacity + 1]u8 = @splat('a');
+    bytes[0] = '/';
+    var exact: Paths = .{ .home = "", .icon = bytes[0..path_capacity] };
+    try std.testing.expectEqualStrings(bytes[0..path_capacity], (try exact.next()).?);
+    try std.testing.expectEqual(null, try exact.next());
+    var excess: Paths = .{ .home = "", .icon = &bytes };
+    try std.testing.expectError(error.IconPathTooLong, excess.next());
 }

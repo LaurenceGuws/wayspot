@@ -6,9 +6,13 @@ const CanvasRect = wattle.Rect;
 const TextField = wattle.TextField;
 const RowLayout = wattle.RowLayout;
 
+/// Picker logical width, independent of output density.
 pub const window_width = 720;
+/// Picker logical height, independent of output density.
 pub const window_height = 520;
+/// Maximum simultaneously displayed result rows.
 pub const visible_rows = 14;
+/// Logical side length of a result icon.
 pub const icon_size = 22;
 
 /// Slots preserve the original 30-pixel hit target and 28-pixel painted row.
@@ -16,10 +20,12 @@ pub const results = RowLayout.init(.{ .x = 8, .y = 90, .w = 696, .h = 30 * visib
 
 /// The toolbar is part of the existing picker window, not a desktop layer.
 pub const toolbar = CanvasRect{ .x = 8, .y = 8, .w = 704, .h = 30 };
+/// Search field and its shared IME/pointer geometry.
 pub const query = TextField{ .bounds = .{ .x = 8, .y = 46, .w = 704, .h = 36 } };
 /// Children are toolbar-local, never independent absolute hitboxes.
 pub const clock_clip = CanvasRect{ .x = 507, .y = 1, .w = 189, .h = 28 };
 
+/// Maximum toolbar tray slots before the clock.
 pub const tray_capacity = 12;
 const tray_size: i32 = 26;
 const tray_right: i32 = 501;
@@ -36,6 +42,7 @@ pub fn traySlot(index: usize) CanvasRect {
     };
 }
 
+/// Resolves a half-open toolbar slot to an admitted tray item.
 pub fn trayAt(x: f32, y: f32, count: usize) ?usize {
     if (count > tray_capacity or !toolbar.contains(x, y)) return null;
     const local_x = x - @as(f32, @floatFromInt(toolbar.x));
@@ -45,6 +52,7 @@ pub fn trayAt(x: f32, y: f32, count: usize) ?usize {
     }
     return null;
 }
+/// Result-list scrollbar clip in window coordinates.
 pub const scrollbar_track = CanvasRect{
     .x = results.bounds.x + results.bounds.w + 4,
     .y = results.bounds.y,

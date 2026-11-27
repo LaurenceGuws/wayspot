@@ -674,7 +674,7 @@ pub const Native = struct {
         if (entry.iconText().len == 0) return null;
         var candidates: icon_path.Paths = .{ .home = native.home, .icon = entry.iconText() };
         while (candidates.next() catch return null) |filename| {
-            const bytes = std.Io.Dir.cwd().readFileAlloc(native.io, filename, native.allocator, .limited(128 * 1024)) catch continue;
+            const bytes = image.readRegular(native.io, native.allocator, filename, 128 * 1024 - 1) catch continue;
             defer native.allocator.free(bytes);
             if (image.inspect(bytes) != null) continue;
             const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse continue;
@@ -813,13 +813,21 @@ pub const Native = struct {
             native.remember(app_index, .{ .rejected = .invalid_path });
             return;
         }) |path| {
-            const bytes = std.Io.Dir.cwd().readFileAlloc(
+            const bytes = image.readRegular(
                 native.io,
-                path,
                 native.allocator,
-                .limited(image.encoded_capacity + 1),
+                path,
+                image.encoded_capacity,
             ) catch |failure| switch (failure) {
                 error.FileNotFound, error.NotDir => continue,
+                error.IconNotRegularFile, error.InvalidIconPath => {
+                    rejected = .invalid_path;
+                    continue;
+                },
+                error.IconFileChanged => {
+                    rejected = .malformed_png;
+                    continue;
+                },
                 error.StreamTooLong => {
                     rejected = .encoded_too_large;
                     continue;
@@ -829,13 +837,17 @@ pub const Native = struct {
             defer native.allocator.free(bytes);
             if (image.inspect(bytes)) |rejection| {
                 rejected = switch (rejection) {
+                    .encoded_too_large => .encoded_too_large,
                     .malformed => .malformed_png,
                     .dimensions_too_large => .dimensions_too_large,
                 };
                 continue;
             }
             const stream = sdl.SDL_IOFromConstMem(bytes.ptr, bytes.len) orelse return error.SdlIconStreamFailed;
-            const surface = sdl.SDL_LoadPNG_IO(stream, true) orelse return error.SdlIconDecodeFailed;
+            const surface = sdl.SDL_LoadPNG_IO(stream, true) orelse {
+                rejected = .malformed_png;
+                continue;
+            };
             defer sdl.SDL_DestroySurface(surface);
             if (surface.*.w > image.side_capacity or surface.*.h > image.side_capacity) {
                 return error.SdlIconDimensionsChanged;
