@@ -17,6 +17,7 @@ device: ?wp.CursorShapeDeviceV1 = null,
 surface: ?wl.Surface = null,
 pool: ?*present.BufferPool = null,
 
+/// Binds the optional shape manager and the current pointer's shape device.
 pub fn bindManager(self: *Self, conn: *Connection, registry: wl.Registry, global: u32, pointer: ?wl.Pointer) !void {
     if (self.manager != null) return;
     self.manager = try registry.bind(&conn.session, global, wp.CursorShapeManagerV1, 1);
@@ -24,30 +25,36 @@ pub fn bindManager(self: *Self, conn: *Connection, registry: wl.Registry, global
     if (pointer) |p| try self.bindPointer(conn, p);
 }
 
+/// Rejects removal of the bound shape manager; unrelated globals are harmless.
 pub fn removeManager(self: *Self, global: u32) !void {
     if (self.global == global) return error.NativeCursorManagerRemoved;
 }
 
+/// Creates at most one shape device for the selected pointer.
 pub fn bindPointer(self: *Self, conn: *Connection, pointer: wl.Pointer) !void {
     if (self.manager) |manager| {
         if (self.device == null) self.device = try manager.getPointer(&conn.session, pointer);
     }
 }
 
+/// Retires the pointer-specific shape device, retaining the immutable fallback.
 pub fn releasePointer(self: *Self, conn: *Connection) !void {
-    if (self.device) |device| try device.destroy(&conn.session);
+    const device = self.device orelse return;
     self.device = null;
+    try device.destroy(&conn.session);
 }
 
+/// Retires cursor proxies and backing storage before the display connection closes.
 pub fn deinit(self: *Self, conn: *Connection) void {
-    self.releasePointer(conn) catch {};
-    if (self.surface) |surface| surface.destroy(&conn.session) catch {};
-    if (self.pool) |pool| {
-        for (pool.buffers.items) |buffer| conn.clearListener(buffer.wl_buffer) catch {};
-        pool.destroy();
-    }
+    self.releasePointer(conn) catch |err| {
+        std.log.debug("native cursor device retirement: {s}", .{@errorName(err)});
+    };
+    if (self.surface) |surface| retireSurface(conn, surface);
+    if (self.pool) |pool| retirePool(conn, pool);
+    self.* = .{};
 }
 
+/// Sets the default cursor using the exact pointer-enter serial.
 pub fn show(self: *Self, conn: *Connection, pointer: wl.Pointer, serial: u32) !void {
     const session = &conn.session;
     if (self.device) |device| {
@@ -56,20 +63,47 @@ pub fn show(self: *Self, conn: *Connection, pointer: wl.Pointer, serial: u32) !v
     }
     // Keep the same committed cursor buffer, never paint into it again.
     // No frame callback is requested for the cursor surface.
-    if (self.surface == null) {
-        self.surface = try (self.compositor orelse return error.NativeCursorCompositor).createSurface(session);
-        try pointer.setCursor(session, serial, self.surface.?, 1, 1);
-        self.pool = try .create(conn.gpa, conn, self.shm orelse return error.NativeCursorShm, .{ .max_buffers = 1 });
-        const buffer = (try self.pool.?.acquire(side, side, .argb8888)) orelse return error.NativeCursorBuffer;
-        paint(buffer.pixels(), buffer.stride);
-        try self.surface.?.attach(session, buffer.wl_buffer, 0, 0);
-        try self.surface.?.setBufferScale(session, 2);
-        try self.surface.?.damageBuffer(session, 0, 0, side, side);
-        try self.surface.?.commit(session);
-        buffer.state = .busy;
+    if (self.surface) |surface| {
+        std.debug.assert(self.pool != null);
+        try pointer.setCursor(session, serial, surface, 1, 1);
         return;
     }
-    try pointer.setCursor(session, serial, self.surface.?, 1, 1);
+    std.debug.assert(self.pool == null);
+    const compositor = self.compositor orelse return error.NativeCursorCompositor;
+    const shm = self.shm orelse return error.NativeCursorShm;
+
+    // Prepare the complete fallback before assigning a cursor role to the
+    // surface. A failed pool or buffer acquisition cannot publish a cursor.
+    const pool = try present.BufferPool.create(conn.gpa, conn, shm, .{ .max_buffers = 1 });
+    errdefer retirePool(conn, pool);
+    const buffer = (try pool.acquire(side, side, .argb8888)) orelse return error.NativeCursorBuffer;
+    paint(buffer.pixels(), buffer.stride);
+    const surface = try compositor.createSurface(session);
+    errdefer retireSurface(conn, surface);
+    try pointer.setCursor(session, serial, surface, 1, 1);
+    try surface.attach(session, buffer.wl_buffer, 0, 0);
+    try surface.setBufferScale(session, 2);
+    try surface.damageBuffer(session, 0, 0, side, side);
+    try surface.commit(session);
+    buffer.state = .busy;
+    self.surface = surface;
+    self.pool = pool;
+}
+
+fn retireSurface(conn: *Connection, surface: wl.Surface) void {
+    surface.destroy(&conn.session) catch |err| {
+        std.log.debug("native cursor surface retirement: {s}", .{@errorName(err)});
+    };
+}
+
+fn retirePool(conn: *Connection, pool: *present.BufferPool) void {
+    // A non-live object already has no reachable callback context.
+    for (pool.buffers.items) |buffer| {
+        conn.clearListener(buffer.wl_buffer) catch |err| switch (err) {
+            error.InvalidObject => continue,
+        };
+    }
+    pool.destroy();
 }
 
 fn paint(pixels: []u8, stride: u32) void {

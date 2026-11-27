@@ -1595,3 +1595,48 @@ test "duplicate seat global is refused before binding another input device" {
     try testing.expectEqual(pointer, f.display.input.pointer.?);
     try testing.expect(f.display.input.seats[1] == null);
 }
+
+test "cursor preparation refusal does not publish a partial fallback" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const cursor = &f.display.input.cursor;
+    const conn = &f.display.conn;
+    const pointer = f.display.input.pointer.?;
+
+    const shm = cursor.shm;
+    cursor.shm = null;
+    defer cursor.shm = shm;
+    try testing.expectError(error.NativeCursorShm, cursor.show(conn, pointer, 1));
+    try testing.expect(cursor.surface == null and cursor.pool == null);
+    try f.display.flush();
+    try testing.expectEqual(@as(usize, 0), (try f.take()).len);
+    cursor.shm = shm;
+
+    // Only the pool allocation uses this allocator; the existing connection
+    // and protocol object storage retain their original allocator.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    {
+        const original = conn.gpa;
+        conn.gpa = failing.allocator();
+        defer conn.gpa = original;
+        try testing.expectError(error.OutOfMemory, cursor.show(conn, pointer, 1));
+    }
+    try testing.expect(cursor.surface == null and cursor.pool == null);
+    try f.display.flush();
+    try testing.expectEqual(@as(usize, 0), (try f.take()).len);
+
+    const picker = try native.Surface.create(f.display, .picker, size, null);
+    defer picker.destroy() catch |err| {
+        std.log.warn("cursor preparation fixture retirement: {s}", .{@errorName(err)});
+    };
+    try testing.expect((try f.take()).len > 0);
+    try pointerEnter(&f, picker, 5, 6);
+    const entered = (try nextInput(&f, picker, .pointer_enter)).value.pointer_enter;
+    try testing.expectEqual(@as(f64, 5), entered.x);
+    try testing.expect(cursor.surface != null and cursor.pool != null);
+    try testing.expectEqual(@as(usize, 1), cursor.pool.?.count());
+    const requests = try f.take();
+    try testing.expectEqual(@as(usize, 1), requests.count(pointer.id, 0));
+    try testing.expectEqual(@as(usize, 1), requests.count(cursor.surface.?.id, 6));
+}
