@@ -772,13 +772,33 @@ const Output = struct {
         // A closed role on a still-advertised output is exceptional.
         // Recover at a bounded deadline, not immediately in the callback.
         const end = self.reopen_at orelse blk: {
-            self.reopen_at = now + 5000;
+            self.reopen_at = now +| 5000;
             break :blk self.reopen_at.?;
         };
         if (now < end) return false;
         self.suspended = false;
         self.reopen_at = null;
         return true;
+    }
+
+    fn configure(self: *Output, width: u32, height: u32) void {
+        // A zero dimension means the client may choose. This fully anchored
+        // role needs a real size; retain existing content until one arrives.
+        if (wallpaper.surfacePixelCount(width, height)) |_| {
+            self.facts.logical = .{ .width = width, .height = height };
+        } else |_| {
+            self.facts.logical = null;
+        }
+    }
+
+    fn commitFacts(self: *Output) void {
+        if (self.facts.done() catch |err| {
+            std.log.warn("wallpaper output geometry refused: {s}", .{@errorName(err)});
+            return;
+        }) {
+            self.suspended = false;
+            self.reopen_at = null;
+        }
     }
 
     fn createRole(self: *Output, display: *Display) !void {
@@ -808,11 +828,55 @@ const Display = struct {
     shm: ?*wl.wl_shm = null,
     viewporter: ?*wl.wp_viewporter = null,
     shell: ?*wl.zwlr_layer_shell_v1 = null,
+    required_names: RequiredNames = .{},
+    required_removed: bool = false,
     records: [wallpaper.monitor_capacity]Output = @splat(.{}),
     ready: bool = false,
     failed: bool = false,
 
+    const RequiredNames = struct {
+        compositor: ?u32 = null,
+        shm: ?u32 = null,
+        viewporter: ?u32 = null,
+        shell: ?u32 = null,
+
+        fn contains(self: RequiredNames, id: u32) bool {
+            return self.compositor == id or self.shm == id or
+                self.viewporter == id or self.shell == id;
+        }
+    };
+
+    fn reserveOutput(self: *Display, id: u32, version: u32) !*Output {
+        if (version < 3) return error.WaylandOutputVersionUnsupported;
+        for (&self.records) |*output| {
+            if (output.id == id) return error.WaylandOutputDuplicate;
+        }
+        for (&self.records) |*output| {
+            if (output.id == null) {
+                output.* = .{ .id = id };
+                return output;
+            }
+        }
+        return error.WaylandOutputCapacityExceeded;
+    }
+
+    fn removeGlobal(self: *Display, id: u32) void {
+        // A removed global can still have a live proxy, but subsequent
+        // requests to it may be ignored. Do not advertise publication on it.
+        if (self.required_names.contains(id)) {
+            self.required_removed = true;
+            return;
+        }
+        for (&self.records) |*output| {
+            if (output.id == id) {
+                output.destroy();
+                return;
+            }
+        }
+    }
+
     fn connect(self: *Display) !void {
+        std.debug.assert(self.connection == null);
         self.connection = wl.wl_display_connect(null) orelse return error.WaylandConnectFailed;
         errdefer self.deinit();
         self.registry = wl.wl_display_get_registry(self.connection.?) orelse return error.WaylandRegistryFailed;
@@ -832,7 +896,8 @@ const Display = struct {
             if (self.shm) |shm| wl.wl_shm_destroy(shm);
             if (self.compositor) |compositor| wl.wl_compositor_destroy(compositor);
             if (self.registry) |registry| wl.wl_registry_destroy(registry);
-            _ = wl.wl_display_flush(connection);
+            if (wl.wl_display_flush(connection) < 0)
+                std.log.debug("wallpaper teardown flush incomplete", .{});
             wl.wl_display_disconnect(connection);
         }
         self.* = .{};
@@ -840,6 +905,7 @@ const Display = struct {
 
     fn dispatch(self: *Display) !void {
         if (wl.wl_display_dispatch_pending(self.connection.?) < 0) return displayError(self.connection.?);
+        if (self.required_removed) return error.WaylandGlobalMissing;
         if (self.failed) return error.WaylandOutputRegistrationFailed;
         if (self.ready and (self.compositor == null or self.shm == null or self.viewporter == null or self.shell == null)) return error.WaylandGlobalMissing;
     }
@@ -972,95 +1038,173 @@ fn displayError(connection: *wl.wl_display) error{ WaylandDisplayLost, WaylandPr
     return if (wl.wl_display_get_error(connection) == @backingInt(std.posix.E.PROTO)) error.WaylandProtocolError else error.WaylandDisplayLost;
 }
 
-const registry_listener = wl.wl_registry_listener{ .global = registryGlobal, .global_remove = registryRemove };
+const registry_listener = wl.wl_registry_listener{
+    .global = registryGlobal,
+    .global_remove = registryRemove,
+};
 const sync_listener = wl.wl_callback_listener{ .done = registryReady };
+
+// The listener installation borrows stable, correctly aligned owner storage
+// for the entire lifetime of the corresponding libwayland proxy.
+// zig-audit: acknowledge anyopaque
+// reason: libwayland listener userdata carries the stable Display owner.
+fn displayContext(data: ?*anyopaque) *Display {
+    std.debug.assert(data != null);
+    // zig-audit: acknowledge ptr_cast
+    // reason: Restore the Display pointer originally supplied to the listener.
+    // zig-audit: acknowledge align_cast
+    // reason: Listener installation passes an aligned Display allocation.
+    return @ptrCast(@alignCast(data.?));
+}
+
+// zig-audit: acknowledge anyopaque
+// reason: libwayland listener userdata carries one stable output array entry.
+fn outputContext(data: ?*anyopaque) *Output {
+    std.debug.assert(data != null);
+    // zig-audit: acknowledge ptr_cast
+    // reason: Restore the Output pointer supplied when installing its listener.
+    // zig-audit: acknowledge align_cast
+    // reason: Output records remain aligned and unmoved while proxies exist.
+    return @ptrCast(@alignCast(data.?));
+}
+
+// A single compile-time pairing of interface metadata and resulting proxy
+// type prevents binding one interface and treating it as another.
+fn bindGlobal(
+    comptime Proxy: type,
+    registry: ?*wl.wl_registry,
+    id: u32,
+    version: u32,
+) ?*Proxy {
+    const owner = registry orelse return null;
+    const interface = if (Proxy == wl.wl_output)
+        &wl.wl_output_interface
+    else if (Proxy == wl.wl_compositor)
+        &wl.wl_compositor_interface
+    else if (Proxy == wl.wl_shm)
+        &wl.wl_shm_interface
+    else if (Proxy == wl.wp_viewporter)
+        wl.wayspot_viewporter_interface()
+    else if (Proxy == wl.zwlr_layer_shell_v1)
+        wl.wayspot_layer_shell_interface()
+    else
+        @compileError("unsupported wallpaper registry interface");
+    // zig-audit: acknowledge ptr_cast
+    // reason: wl_registry_bind returns the proxy for the exact interface selected above.
+    return @ptrCast(wl.wl_registry_bind(owner, id, interface, version));
+}
+
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_callback_listener.done userdata ABI.
 fn registryReady(data: ?*anyopaque, callback: ?*wl.wl_callback, _: u32) callconv(.c) void {
-    const self: *Display = @ptrCast(@alignCast(data));
+    const self = displayContext(data);
+    std.debug.assert(callback != null and callback == self.initial_sync);
     wl.wl_callback_destroy(callback);
     self.initial_sync = null;
     self.ready = true;
 }
 
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_registry_listener.global userdata ABI.
 fn registryGlobal(data: ?*anyopaque, registry: ?*wl.wl_registry, id: u32, interface: [*c]const u8, version: u32) callconv(.c) void {
-    const self: *Display = @ptrCast(@alignCast(data));
+    const self = displayContext(data);
     const name = std.mem.span(interface);
     if (std.mem.eql(u8, name, "wl_output")) {
-        if (version < 3) {
-            self.failed = true;
-            return;
-        }
-        const output = for (&self.records) |*entry| {
-            if (entry.id == null) break entry;
-        } else {
+        const output = self.reserveOutput(id, version) catch |err| {
+            std.log.warn("wallpaper output registration refused: {s}", .{@errorName(err)});
             self.failed = true;
             return;
         };
-        output.* = .{ .id = id };
-        output.proxy = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_output_interface, @min(version, 4)));
-        if (output.proxy == null or wl.wl_output_add_listener(output.proxy.?, &output_listener, output) != 0) self.failed = true;
+        output.proxy = bindGlobal(wl.wl_output, registry, id, @min(version, 4));
+        if (output.proxy == null or wl.wl_output_add_listener(
+            output.proxy.?,
+            &output_listener,
+            output,
+        ) != 0) self.failed = true;
     } else if (std.mem.eql(u8, name, "wl_compositor") and self.compositor == null and version >= 4) {
-        self.compositor = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_compositor_interface, 4));
+        self.compositor = bindGlobal(wl.wl_compositor, registry, id, 4);
+        if (self.compositor != null) self.required_names.compositor = id;
     } else if (std.mem.eql(u8, name, "wl_shm") and self.shm == null and version >= 1) {
-        self.shm = @ptrCast(wl.wl_registry_bind(registry, id, &wl.wl_shm_interface, 1));
+        self.shm = bindGlobal(wl.wl_shm, registry, id, 1);
+        if (self.shm != null) self.required_names.shm = id;
     } else if (std.mem.eql(u8, name, "wp_viewporter") and self.viewporter == null and version >= 1) {
-        self.viewporter = @ptrCast(wl.wl_registry_bind(registry, id, wl.wayspot_viewporter_interface(), 1));
+        self.viewporter = bindGlobal(wl.wp_viewporter, registry, id, 1);
+        if (self.viewporter != null) self.required_names.viewporter = id;
     } else if (std.mem.eql(u8, name, "zwlr_layer_shell_v1") and self.shell == null and version >= 1) {
-        self.shell = @ptrCast(wl.wl_registry_bind(registry, id, wl.wayspot_layer_shell_interface(), @min(version, 3)));
+        self.shell = bindGlobal(wl.zwlr_layer_shell_v1, registry, id, @min(version, 3));
+        if (self.shell != null) self.required_names.shell = id;
     }
 }
 
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_registry_listener.global_remove userdata ABI.
 fn registryRemove(data: ?*anyopaque, _: ?*wl.wl_registry, id: u32) callconv(.c) void {
-    const self: *Display = @ptrCast(@alignCast(data));
-    for (&self.records) |*output| if (output.id == id) {
-        output.destroy();
-        return;
-    };
+    displayContext(data).removeGlobal(id);
 }
 
-const output_listener = wl.wl_output_listener{ .geometry = outputGeometry, .mode = outputMode, .done = outputDone, .scale = outputScale, .name = outputName, .description = outputDescription };
+const output_listener = wl.wl_output_listener{
+    .geometry = outputGeometry,
+    .mode = outputMode,
+    .done = outputDone,
+    .scale = outputScale,
+    .name = outputName,
+    .description = outputDescription,
+};
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_output_listener.geometry userdata ABI.
 fn outputGeometry(data: ?*anyopaque, _: ?*wl.wl_output, _: i32, _: i32, _: i32, _: i32, _: i32, _: [*c]const u8, _: [*c]const u8, transform: i32) callconv(.c) void {
-    const output: *Output = @ptrCast(@alignCast(data));
-    output.facts.transform = std.math.cast(u3, transform);
+    outputContext(data).facts.transform = std.math.cast(u3, transform);
 }
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_output_listener.mode userdata ABI.
 fn outputMode(data: ?*anyopaque, _: ?*wl.wl_output, flags: u32, width: i32, height: i32, _: i32) callconv(.c) void {
     if (flags & wl.WL_OUTPUT_MODE_CURRENT == 0) return;
-    const output: *Output = @ptrCast(@alignCast(data));
-    output.facts.mode = if (width > 0 and height > 0) .{ .width = @intCast(width), .height = @intCast(height) } else null;
+    const output = outputContext(data);
+    output.facts.mode = if (width > 0 and height > 0)
+        .{ .width = @intCast(width), .height = @intCast(height) }
+    else
+        null;
 }
+// zig-audit: acknowledge anyopaque
+// reason: Matches wl_output_listener.done userdata ABI.
 fn outputDone(data: ?*anyopaque, _: ?*wl.wl_output) callconv(.c) void {
-    const output: *Output = @ptrCast(@alignCast(data));
-    if (output.facts.done() catch |err| {
-        std.log.warn("wallpaper output geometry refused: {s}", .{@errorName(err)});
-        return;
-    }) {
-        output.suspended = false;
-        output.reopen_at = null;
-    }
+    outputContext(data).commitFacts();
 }
+// zig-audit: acknowledge anyopaque
+// reason: Required listener ABI; integer scale does not own wallpaper geometry.
 fn outputScale(_: ?*anyopaque, _: ?*wl.wl_output, _: i32) callconv(.c) void {}
+// zig-audit: acknowledge anyopaque
+// reason: Required listener ABI; output names do not own wallpaper geometry.
 fn outputName(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
+// zig-audit: acknowledge anyopaque
+// reason: Required listener ABI; output descriptions do not own wallpaper geometry.
 fn outputDescription(_: ?*anyopaque, _: ?*wl.wl_output, _: [*c]const u8) callconv(.c) void {}
 
-const layer_listener = wl.wayspot_layer_listener{ .configure = layerConfigure, .closed = layerClosed };
+const layer_listener = wl.wayspot_layer_listener{
+    .configure = layerConfigure,
+    .closed = layerClosed,
+};
+// zig-audit: acknowledge anyopaque
+// reason: Matches layer-surface configure userdata ABI.
 fn layerConfigure(data: ?*anyopaque, layer: ?*wl.zwlr_layer_surface_v1, serial: u32, width: u32, height: u32) callconv(.c) void {
-    const output: *Output = @ptrCast(@alignCast(data));
+    const output = outputContext(data);
+    std.debug.assert(layer != null and layer == output.layer);
     if (layer) |proxy| wl.wayspot_layer_surface_ack_configure(proxy, serial);
-    // A zero dimension means the client may choose. This fully anchored role
-    // needs a real output size; keep existing content until it is available.
-    _ = wallpaper.surfacePixelCount(width, height) catch {
-        output.facts.logical = null;
-        return;
-    };
-    output.facts.logical = .{ .width = width, .height = height };
+    output.configure(width, height);
 }
-fn layerClosed(data: ?*anyopaque, _: ?*wl.zwlr_layer_surface_v1) callconv(.c) void {
-    const output: *Output = @ptrCast(@alignCast(data));
+// zig-audit: acknowledge anyopaque
+// reason: Matches layer-surface closed userdata ABI.
+fn layerClosed(data: ?*anyopaque, layer: ?*wl.zwlr_layer_surface_v1) callconv(.c) void {
+    const output = outputContext(data);
+    std.debug.assert(layer != null and layer == output.layer);
     output.destroyRole();
     output.suspended = true;
     output.reopen_at = null;
     std.log.warn("wallpaper role closed on output {d}", .{output.id orelse 0});
 }
 const buffer_listener = wl.wl_buffer_listener{ .release = bufferReleased };
+// zig-audit: acknowledge anyopaque
+// reason: Required release listener ABI; immutable backing is never recycled.
 fn bufferReleased(_: ?*anyopaque, _: ?*wl.wl_buffer) callconv(.c) void {}
 
 const Ready = struct { stop: bool = false, rotate: bool = false, client: bool = false };
@@ -1390,11 +1534,11 @@ test "unrelated globals and repeated configure events do not invalidate a backgr
     output.facts.published = output.facts.geometry();
     for (1..1001) |id| {
         registryGlobal(&display, null, @intCast(id), "wl_seat", 9);
-        layerConfigure(output, null, @intCast(id), 1280, 720);
+        output.configure(1280, 720);
         try std.testing.expectEqual(@as(usize, 0), (try display.plan(false)).count);
     }
     try std.testing.expect(!display.failed and display.allReady());
-    layerConfigure(output, null, 1001, 1920, 1080);
+    output.configure(1920, 1080);
     try std.testing.expectEqual(@as(usize, 1), (try display.plan(false)).count);
 }
 
@@ -1609,4 +1753,69 @@ test "rotation send to retired peer reports failure without signal delivery" {
     defer closeFd(fds[0]);
     closeFd(fds[1]);
     try std.testing.expectError(error.RotationSocketWriteFailed, sendBytes(fds[0], "ok\n"));
+}
+
+test "output registry admits exact capacity, rejects duplicates and reuses retired slots" {
+    var display: Display = .{};
+    try std.testing.expectError(error.WaylandOutputVersionUnsupported, display.reserveOutput(1, 2));
+    const first = try display.reserveOutput(1, 4);
+    try std.testing.expectError(error.WaylandOutputDuplicate, display.reserveOutput(1, 4));
+    try std.testing.expectEqual(@as(usize, 1), display.count());
+    for (2..wallpaper.monitor_capacity + 1) |id| {
+        const output = try display.reserveOutput(@intCast(id), 3);
+        try std.testing.expectEqual(@as(?u32, @intCast(id)), output.id);
+    }
+    try std.testing.expectError(
+        error.WaylandOutputCapacityExceeded,
+        display.reserveOutput(wallpaper.monitor_capacity + 1, 4),
+    );
+    try std.testing.expectEqual(wallpaper.monitor_capacity, display.count());
+    display.removeGlobal(1);
+    const replacement = try display.reserveOutput(1, 4);
+    try std.testing.expectEqual(first, replacement);
+    try std.testing.expectEqual(wallpaper.monitor_capacity, display.count());
+    try std.testing.expect(replacement.facts.geometry() == null);
+}
+
+test "required global removal is terminal without treating unrelated removal as lost authority" {
+    for ([_]u32{ 21, 22, 23, 24 }) |id| {
+        var display: Display = .{ .required_names = .{
+            .compositor = 21,
+            .shm = 22,
+            .viewporter = 23,
+            .shell = 24,
+        } };
+        const output = try display.reserveOutput(25, 4);
+        output.facts.pixels = .{ .width = 1280, .height = 720 };
+        output.configure(1280, 720);
+        display.removeGlobal(26);
+        try std.testing.expect(!display.required_removed);
+        try std.testing.expectEqual(@as(usize, 1), display.count());
+        display.removeGlobal(id);
+        try std.testing.expect(display.required_removed);
+        try std.testing.expectEqual(@as(usize, 1), display.count());
+        display.removeGlobal(25);
+        try std.testing.expectEqual(@as(usize, 0), display.count());
+        try std.testing.expect(display.required_removed);
+    }
+}
+
+test "invalid layer extent retains published pixels until valid configure returns" {
+    var output: Output = .{ .id = 1, .facts = .{
+        .pixels = .{ .width = 1920, .height = 1080 },
+    } };
+    output.configure(1280, 720);
+    output.facts.published = output.facts.geometry();
+    const published = output.facts.published.?;
+    output.configure(0, 720);
+    try std.testing.expect(output.facts.geometry() == null);
+    try std.testing.expect(!output.facts.needsBuffer());
+    try std.testing.expectEqual(published, output.facts.published.?);
+    output.configure(8192, 8193);
+    try std.testing.expect(output.facts.geometry() == null);
+    try std.testing.expectEqual(published, output.facts.published.?);
+    output.configure(1280, 720);
+    try std.testing.expect(!output.facts.needsBuffer());
+    output.configure(1920, 1080);
+    try std.testing.expect(output.facts.needsBuffer());
 }
