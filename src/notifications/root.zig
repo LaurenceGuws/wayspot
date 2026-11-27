@@ -823,8 +823,10 @@ fn copy(storage: []u8, offset: *usize, bytes: []const u8) []u8 {
     return result;
 }
 
-/// Executes one exact temporary-write, sync, replace, and parent-sync history.
-pub fn persist(source: anytype, bytes: []const u8) !void {
+// Executes one exact temporary-write, sync, replace, and parent-sync history.
+// zig-audit: acknowledge anytype
+// reason: Native persistence and the strict failure transcript share this exact ordering.
+fn persist(source: anytype, bytes: []const u8) !void {
     try source.begin();
     source.write(bytes) catch |err| {
         source.abort() catch return error.HistoryCleanupFailed;
@@ -841,17 +843,17 @@ pub fn persist(source: anytype, bytes: []const u8) !void {
     try source.syncParent();
 }
 
-/// Native owns the private state directory and at most one PID-qualified sibling file.
-pub const Native = struct {
+// Owns the private directory and at most one exclusively created temporary sibling.
+const Native = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     directory_path: []u8,
     directory: std.Io.Dir,
-    temporary_name: [64]u8,
-    temporary_name_length: usize,
+    temporary_name: [64]u8 = undefined,
+    temporary_name_length: usize = 0,
     temporary: ?std.Io.File = null,
 
-    pub fn init(
+    fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         state_home: ?[]const u8,
@@ -865,38 +867,33 @@ pub const Native = struct {
         }) catch return error.HistoryOpenFailed;
         errdefer directory.close(io);
         directory.setPermissions(io, .fromMode(0o700)) catch return error.HistoryOpenFailed;
-        var temporary_name: [64]u8 = undefined;
-        const name = std.fmt.bufPrint(
-            &temporary_name,
-            "notifications.{d}.tmp",
-            .{std.os.linux.getpid()},
-        ) catch unreachable;
         return .{
             .allocator = allocator,
             .io = io,
             .directory_path = owned_path,
             .directory = directory,
-            .temporary_name = temporary_name,
-            .temporary_name_length = name.len,
         };
     }
 
-    pub fn deinit(native: *Native) void {
+    fn deinit(native: *Native) void {
         std.debug.assert(native.temporary == null);
         native.directory.close(native.io);
         native.allocator.free(native.directory_path);
         native.* = undefined;
     }
 
-    pub fn read(native: *Native) Error![]u8 {
-        const file = native.directory.openFile(native.io, "notifications.jsonl", .{}) catch |err| switch (err) {
-            error.FileNotFound => return native.allocator.alloc(u8, 0) catch error.OutOfMemory,
-            else => return error.HistoryOpenFailed,
-        };
+    fn read(native: *Native) Error![]u8 {
+        const file = (try openHistoryFile(native.directory, native.io)) orelse
+            return native.allocator.alloc(u8, 0) catch error.OutOfMemory;
         defer file.close(native.io);
-        file.setPermissions(native.io, .fromMode(0o600)) catch return error.HistoryOpenFailed;
-        const size = file.length(native.io) catch return error.HistoryReadFailed;
-        if (size > file_capacity) return error.HistoryTooLarge;
+        const stat = file.stat(native.io) catch return error.HistoryReadFailed;
+        if (stat.kind != .file) return error.HistoryOpenFailed;
+        if (stat.size > file_capacity) return error.HistoryTooLarge;
+        if (stat.permissions.toMode() & 0o7777 != 0o600) {
+            file.setPermissions(native.io, .fromMode(0o600)) catch
+                return error.HistoryOpenFailed;
+        }
+        const size = stat.size;
         const bytes = native.allocator.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
         errdefer native.allocator.free(bytes);
         const count = file.readPositionalAll(native.io, bytes, 0) catch return error.HistoryReadFailed;
@@ -904,30 +901,49 @@ pub const Native = struct {
         return bytes;
     }
 
-    pub fn begin(native: *Native) Error!void {
+    fn begin(native: *Native) Error!void {
         std.debug.assert(native.temporary == null);
-        const temporary_name = native.temporary_name[0..native.temporary_name_length];
-        native.directory.deleteFile(native.io, temporary_name) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return error.HistoryCleanupFailed,
-        };
-        native.temporary = native.directory.createFile(native.io, temporary_name, .{
-            .permissions = .fromMode(0o600),
-            .exclusive = true,
-        }) catch return error.HistoryOpenFailed;
+        std.debug.assert(native.temporary_name_length == 0);
+        // Only exclusively created names belong to this transaction.
+        // A collision never authorizes unlinking someone else's entry.
+        for (0..4) |_| {
+            var random: [8]u8 = undefined;
+            native.io.random(&random);
+            const name = std.fmt.bufPrint(
+                &native.temporary_name,
+                "notifications.{d}.{x}.tmp",
+                .{ std.os.linux.getpid(), std.mem.readInt(u64, &random, .little) },
+            ) catch return error.HistoryOpenFailed;
+            const temporary = native.directory.createFile(native.io, name, .{
+                .permissions = .fromMode(0o600),
+                .exclusive = true,
+            }) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return error.HistoryOpenFailed,
+            };
+            native.temporary = temporary;
+            native.temporary_name_length = name.len;
+            // The process umask may have removed owner permission bits.
+            temporary.setPermissions(native.io, .fromMode(0o600)) catch {
+                try native.abort();
+                return error.HistoryOpenFailed;
+            };
+            return;
+        }
+        return error.HistoryOpenFailed;
     }
 
-    pub fn write(native: *Native, bytes: []const u8) Error!void {
+    fn write(native: *Native, bytes: []const u8) Error!void {
         const temporary = native.temporary orelse return error.HistoryWriteFailed;
         temporary.writeStreamingAll(native.io, bytes) catch return error.HistoryWriteFailed;
     }
 
-    pub fn syncFile(native: *Native) Error!void {
+    fn syncFile(native: *Native) Error!void {
         const temporary = native.temporary orelse return error.HistorySyncFailed;
         temporary.sync(native.io) catch return error.HistorySyncFailed;
     }
 
-    pub fn adopt(native: *Native) Error!void {
+    fn adopt(native: *Native) Error!void {
         const temporary = native.temporary orelse return error.HistoryReplaceFailed;
         temporary.close(native.io);
         native.temporary = null;
@@ -937,9 +953,10 @@ pub const Native = struct {
             "notifications.jsonl",
             native.io,
         ) catch return error.HistoryReplaceFailed;
+        native.temporary_name_length = 0;
     }
 
-    pub fn syncParent(native: *Native) Error!void {
+    fn syncParent(native: *Native) Error!void {
         const parent_file = std.Io.File{
             .handle = native.directory.handle,
             .flags = .{ .nonblocking = false },
@@ -947,7 +964,8 @@ pub const Native = struct {
         parent_file.sync(native.io) catch return error.HistorySyncFailed;
     }
 
-    pub fn abort(native: *Native) Error!void {
+    fn abort(native: *Native) Error!void {
+        if (native.temporary_name_length == 0) return;
         if (native.temporary) |temporary| {
             temporary.close(native.io);
             native.temporary = null;
@@ -959,6 +977,7 @@ pub const Native = struct {
             error.FileNotFound => {},
             else => return error.HistoryCleanupFailed,
         };
+        native.temporary_name_length = 0;
     }
 };
 
@@ -977,6 +996,33 @@ fn directoryPath(
     return std.fs.path.join(allocator, &.{ path, ".local", "state", "wayspot" }) catch error.OutOfMemory;
 }
 
+// The std.Io open options cannot request O_NONBLOCK for a plain read.
+// Keep the existing regular-file symlink semantics, but never wait for a
+// FIFO peer. Both callers stat the actual opened target before using it.
+fn openHistoryFile(directory: std.Io.Dir, io: std.Io) Error!?std.Io.File {
+    const linux = std.os.linux;
+    while (true) {
+        const result = linux.openat(directory.handle, "notifications.jsonl", .{
+            .ACCMODE = .RDONLY,
+            .CLOEXEC = true,
+            .NONBLOCK = true,
+            .NOCTTY = true,
+        }, 0);
+        switch (linux.errno(result)) {
+            .SUCCESS => return .{
+                .handle = @intCast(result),
+                .flags = .{ .nonblocking = true },
+            },
+            .NOENT => return null,
+            .INTR => {
+                io.checkCancel() catch return error.HistoryOpenFailed;
+                continue;
+            },
+            else => return error.HistoryOpenFailed,
+        }
+    }
+}
+
 const ReadStat = struct {
     kind: std.Io.File.Kind,
     mode: u16,
@@ -984,6 +1030,8 @@ const ReadStat = struct {
 };
 
 /// Reads one complete retained byte snapshot and closes each opened handle once.
+// zig-audit: acknowledge anytype
+// reason: Native read-only handles and the strict read transcript share this lifetime.
 fn readRetained(source: anytype, allocator: std.mem.Allocator) Error!?[]u8 {
     if (!try source.openDirectory()) return null;
     defer source.closeDirectory();
@@ -1030,13 +1078,8 @@ const ReadNative = struct {
     fn openFile(native: *ReadNative) Error!bool {
         std.debug.assert(native.file == null);
         const directory = native.directory orelse return error.HistoryOpenFailed;
-        native.file = directory.openFile(native.io, "notifications.jsonl", .{
-            .follow_symlinks = true,
-        }) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return error.HistoryOpenFailed,
-        };
-        return true;
+        native.file = try openHistoryFile(directory, native.io);
+        return native.file != null;
     }
 
     fn statFile(native: *ReadNative) Error!ReadStat {
@@ -1052,6 +1095,8 @@ const ReadNative = struct {
     }
 
     fn closeFile(native: *ReadNative) void {
+        // zig-audit: acknowledge orelse_unreachable
+        // reason: readRetained defers this close only after a successful openFile.
         const file = native.file orelse unreachable;
         file.close(native.io);
         native.file = null;
@@ -1059,6 +1104,8 @@ const ReadNative = struct {
 
     fn closeDirectory(native: *ReadNative) void {
         std.debug.assert(native.file == null);
+        // zig-audit: acknowledge orelse_unreachable
+        // reason: readRetained defers this close only after a successful openDirectory.
         const directory = native.directory orelse unreachable;
         directory.close(native.io);
         native.directory = null;
@@ -1075,7 +1122,7 @@ fn statValue(stat: std.Io.File.Stat) ReadStat {
 
 /// Reads and prunes retained records without creating or changing filesystem state.
 ///
-/// std.Io follows path and file symlinks here. Privacy and regular-file checks
+/// Path and file symlinks are followed here. Privacy and regular-file checks
 /// apply to the opened targets, avoiding a separate path-stat race.
 pub fn inspect(
     allocator: std.mem.Allocator,
@@ -1120,7 +1167,7 @@ const Durability = struct {
     }
 };
 
-pub const Owner = struct {
+const Owner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     history: History,
@@ -1129,7 +1176,7 @@ pub const Owner = struct {
     last_id: u32 = 0,
     next_generation: Generation = 1,
 
-    pub fn init(
+    fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         state_home: ?[]const u8,
@@ -1158,7 +1205,7 @@ pub const Owner = struct {
         };
     }
 
-    pub fn deinit(owner: *Owner) void {
+    fn deinit(owner: *Owner) void {
         owner.history.deinit(owner.allocator);
         owner.native.deinit();
         owner.* = undefined;
@@ -1751,6 +1798,7 @@ const HistoryReadTranscript = struct {
     index: usize = 0,
     directory_open: bool = false,
     file_open: bool = false,
+    close_mismatch: bool = false,
 
     fn openDirectory(transcript: *HistoryReadTranscript) Error!bool {
         const result = switch (try transcript.next()) {
@@ -1827,23 +1875,30 @@ const HistoryReadTranscript = struct {
 
     fn closeFile(transcript: *HistoryReadTranscript) void {
         std.debug.assert(transcript.file_open);
-        const step = transcript.next() catch unreachable;
-        std.debug.assert(step == .close_file);
-        transcript.file_open = false;
+        defer transcript.file_open = false;
+        const step = transcript.next() catch {
+            transcript.close_mismatch = true;
+            return;
+        };
+        if (step != .close_file) transcript.close_mismatch = true;
     }
 
     fn closeDirectory(transcript: *HistoryReadTranscript) void {
         std.debug.assert(transcript.directory_open);
         std.debug.assert(!transcript.file_open);
-        const step = transcript.next() catch unreachable;
-        std.debug.assert(step == .close_directory);
-        transcript.directory_open = false;
+        defer transcript.directory_open = false;
+        const step = transcript.next() catch {
+            transcript.close_mismatch = true;
+            return;
+        };
+        if (step != .close_directory) transcript.close_mismatch = true;
     }
 
     fn done(transcript: *const HistoryReadTranscript) !void {
         try std.testing.expectEqual(transcript.steps.len, transcript.index);
         try std.testing.expect(!transcript.directory_open);
         try std.testing.expect(!transcript.file_open);
+        try std.testing.expect(!transcript.close_mismatch);
     }
 
     fn next(transcript: *HistoryReadTranscript) Error!ReadStep {
@@ -2070,7 +2125,7 @@ const Transcript = struct {
         if (std.meta.activeTag(step) != tag) return error.TranscriptMismatch;
         return switch (step) {
             .begin, .sync_file, .adopt, .sync_parent => |value| value,
-            else => unreachable,
+            else => error.TranscriptMismatch,
         };
     }
 
@@ -3089,4 +3144,79 @@ test "canonical history accepts the exact record limit and rejects excess before
     const repeated = try std.mem.concat(allocator, u8, &.{ overflow, duplicate });
     defer allocator.free(repeated);
     try std.testing.expectError(error.HistoryTooLarge, parse(allocator, repeated, 100));
+}
+
+test "native persistence never deletes an unowned legacy temporary name" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path[0..try fixture.dir.realPath(io, &path)];
+    var native = try Native.init(allocator, io, root, null);
+    defer native.deinit();
+    var legacy_name: [64]u8 = undefined;
+    const legacy = try std.fmt.bufPrint(
+        &legacy_name,
+        "notifications.{d}.tmp",
+        .{std.os.linux.getpid()},
+    );
+    try native.directory.writeFile(io, .{ .sub_path = legacy, .data = "unowned" });
+
+    try native.abort();
+    try persist(&native, "complete\n");
+    try std.testing.expect(native.temporary == null);
+    try std.testing.expectEqual(@as(usize, 0), native.temporary_name_length);
+    const old = try native.directory.readFileAlloc(io, legacy, allocator, .limited(64));
+    defer allocator.free(old);
+    try std.testing.expectEqualStrings("unowned", old);
+    const current = try native.read();
+    defer allocator.free(current);
+    try std.testing.expectEqualStrings("complete\n", current);
+    const stat = try native.directory.statFile(io, "notifications.jsonl", .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, stat.permissions.toMode() & 0o7777));
+}
+
+test "native failed adoption retires only the exclusively created sibling" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path[0..try fixture.dir.realPath(io, &path)];
+    var native = try Native.init(allocator, io, root, null);
+    defer native.deinit();
+    try native.directory.createDir(io, "notifications.jsonl", .fromMode(0o700));
+    try native.directory.writeFile(io, .{ .sub_path = "unowned", .data = "keep" });
+    try native.begin();
+    var temporary_name: [64]u8 = undefined;
+    const name = temporary_name[0..native.temporary_name_length];
+    @memcpy(name, native.temporary_name[0..native.temporary_name_length]);
+    try native.write("complete\n");
+    try native.syncFile();
+    try std.testing.expectError(error.HistoryReplaceFailed, native.adopt());
+    try std.testing.expect(native.temporary == null);
+    try native.abort();
+    try std.testing.expectEqual(@as(usize, 0), native.temporary_name_length);
+    try std.testing.expectError(error.FileNotFound, native.directory.statFile(io, name, .{}));
+    const target = try native.directory.statFile(io, "notifications.jsonl", .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, target.kind);
+    const old = try native.directory.readFileAlloc(io, "unowned", allocator, .limited(64));
+    defer allocator.free(old);
+    try std.testing.expectEqualStrings("keep", old);
+}
+
+test "history close transcript reports missing cleanup in all optimization modes" {
+    var transcript = HistoryReadTranscript{ .steps = &.{
+        .{ .open_directory = .opened },
+        .{ .stat_directory = .{ .value = private_directory } },
+        .{ .open_file = .opened },
+        .{ .stat_file = .failed },
+    } };
+    try std.testing.expectError(
+        error.HistoryReadFailed,
+        readRetained(&transcript, std.testing.allocator),
+    );
+    try std.testing.expect(transcript.close_mismatch);
+    try std.testing.expect(!transcript.file_open and !transcript.directory_open);
 }
