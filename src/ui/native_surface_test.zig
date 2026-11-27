@@ -781,6 +781,15 @@ test "local compose produces one UTF8 result and cancels on leave" {
     try testing.expect(dead.compose_consumed and dead.text_len == 0 and f.display.input.repeatDeadline() == null);
     try keyEvent(&f, 31, false);
     _ = try nextInput(&f, picker, .key);
+    // A modifier keysym is ignored by XKB compose, not consumed by it.
+    try keyEvent(&f, 42, true);
+    const shift = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqual(@as(u32, xkb.XKB_KEY_Shift_L), shift.symbol);
+    try testing.expect(!shift.compose_consumed and shift.text_len == 0);
+    try keyEvent(&f, 42, false);
+    const shift_release = (try nextInput(&f, picker, .key)).value.key;
+    try testing.expectEqual(@as(u32, 42), shift_release.code);
+    try testing.expect(!shift_release.pressed and !shift_release.compose_consumed);
     try keyEvent(&f, 30, true);
     const composed = (try nextInput(&f, picker, .key)).value.key;
     try testing.expectEqualStrings("á", composed.utf8());
@@ -1570,4 +1579,19 @@ test "recursive native paint refuses before borrowing another buffer" {
     try testing.expectEqual(native.Draw.presented, try surface.draw(&nested, Reentrant.draw));
     try testing.expectEqual(@as(usize, 1), surface.pool.?.count());
     try testing.expect(!surface.painting);
+}
+
+test "duplicate seat global is refused before binding another input device" {
+    var f = try Fixture.open();
+    defer f.close();
+    try localInput(&f);
+    const selected = f.display.input.selected.?;
+    const keyboard = f.display.input.keyboard.?;
+    const pointer = f.display.input.pointer.?;
+    try testing.expectError(error.NativeSeatDuplicate, f.global(20, "wl_seat", 8));
+    try testing.expectEqual(native.Display.Status.failed, f.display.status());
+    try testing.expectEqual(selected, f.display.input.selected.?);
+    try testing.expectEqual(keyboard, f.display.input.keyboard.?);
+    try testing.expectEqual(pointer, f.display.input.pointer.?);
+    try testing.expect(f.display.input.seats[1] == null);
 }

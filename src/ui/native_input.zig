@@ -13,9 +13,13 @@ const Self = @This();
 const max_seats = 8;
 const max_keys = 768;
 const max_keymap_bytes = 1024 * 1024;
+/// Maximum queued input transitions before refusing the connection.
 pub const max_events = 128;
+/// Pointer coordinates in logical surface-local units.
 pub const Point = struct { x: f64, y: f64 };
+/// Effective XKB modifier state sampled for a translated key.
 pub const Modifiers = struct { shift: bool = false, control: bool = false, alt: bool = false, logo: bool = false };
+/// One matched keyboard transition, including optional composed text.
 pub const Key = struct {
     code: u32,
     symbol: u32,
@@ -27,14 +31,17 @@ pub const Key = struct {
     text: [64]u8 = @splat(0),
     text_len: u8 = 0,
 
+    /// Borrows the validated text associated with this key transition.
     pub fn utf8(self: *const Key) []const u8 {
         return self.text[0..self.text_len];
     }
 };
+/// Bounded UTF-8 text owned by one IME transaction.
 pub const ImeText = struct {
     bytes: [256]u8 = undefined,
     len: u16 = 0,
 
+    /// Borrows the admitted bytes of this IME string.
     pub fn slice(self: *const ImeText) []const u8 {
         return self.bytes[0..self.len];
     }
@@ -65,12 +72,13 @@ pub const ImeBatch = struct {
     serial_matches: bool = false,
 };
 
-pub const ImeContext = struct {
+const ImeContext = struct {
     text: [256:0]u8 = @splat(0),
     len: u16 = 0,
     rect: [4]i32 = .{ 20, 52, 1, 20 },
 };
 
+/// One input transition addressed to an exact registered surface.
 pub const Event = struct {
     surface: wire.ObjectId,
     value: union(enum) {
@@ -86,7 +94,7 @@ pub const Event = struct {
         scroll: i8,
     },
 };
-const Seat = struct { global: u32, object: wl.Seat, selected: bool = false, caps: wl.Seat.Capability = .{} };
+const Seat = struct { global: u32, object: wl.Seat, caps: wl.Seat.Capability = .{} };
 const Target = struct { id: wire.ObjectId, keyboard: bool };
 const Repeat = struct { code: u32, deadline: std.Io.Timestamp, interval: std.Io.Duration };
 const Masks = struct { depressed: u32 = 0, latched: u32 = 0, locked: u32 = 0, group: u32 = 0 };
@@ -130,6 +138,7 @@ axis_highres: ?i64 = null,
 queue: [max_events]Event = undefined,
 count: usize = 0,
 
+/// Releases cursor, XKB and compose resources before the connection retires.
 pub fn deinit(self: *Self, conn: *Connection) void {
     self.cursor.deinit(conn);
     self.clearKeymap();
@@ -139,6 +148,7 @@ pub fn deinit(self: *Self, conn: *Connection) void {
     self.compose_locale = null;
 }
 
+/// Registers one role's exact surface identity and keyboard eligibility.
 pub fn register(self: *Self, slot: usize, surface: wl.Surface, keyboard: bool) void {
     std.debug.assert(slot < self.targets.len and self.targets[slot] == null);
     self.targets[slot] = .{ .id = surface.id, .keyboard = keyboard };
@@ -166,6 +176,7 @@ pub fn forget(self: *Self, conn: *Connection, slot: usize) !void {
     }
 }
 
+/// Consumes the oldest queued transition; used by the deterministic input fixture.
 pub fn pop(self: *Self) ?Event {
     if (self.count == 0) return null;
     const event = self.queue[0];
@@ -185,6 +196,7 @@ pub fn popFor(self: *Self, surface: wire.ObjectId) ?Event {
     return null;
 }
 
+/// Reports whether queued input belongs to this surface without consuming it.
 pub fn hasFor(self: *const Self, surface: wire.ObjectId) bool {
     for (self.queue[0..self.count]) |event| if (event.surface == surface) return true;
     return false;
@@ -212,12 +224,19 @@ fn target(self: *const Self, id: wire.ObjectId, keyboard: bool) bool {
     return false;
 }
 
+/// Chooses the exact local seat name before registry discovery.
 pub fn selectSessionSeat(self: *Self, desktop: ?[]const u8) void {
     std.debug.assert(self.selected == null);
     self.seat_name = if (std.mem.eql(u8, desktop orelse "", "Hyprland")) "Hyprland" else "seat0";
 }
 
+/// Binds a supported seat once, within the fixed seat capacity.
 pub fn bindSeat(self: *Self, conn: *Connection, registry: wl.Registry, global: u32, version: u32) !void {
+    for (self.seats) |slot| {
+        if (slot) |seat| {
+            if (seat.global == global) return error.NativeSeatDuplicate;
+        }
+    }
     if (version < 5) return; // release and pointer frame are required.
     for (&self.seats) |*slot| {
         if (slot.* != null) continue;
@@ -229,6 +248,7 @@ pub fn bindSeat(self: *Self, conn: *Connection, registry: wl.Registry, global: u
     return error.NativeSeatLimit;
 }
 
+/// Retires the exact seat and its selected devices, without merging other seats.
 pub fn removeSeat(self: *Self, conn: *Connection, global: u32) !void {
     if (self.ime_global == global) return error.NativeImeManagerRemoved;
     for (&self.seats) |*slot| {
@@ -265,14 +285,15 @@ fn onSeat(self: *Self, conn: *Connection, seat: wl.Seat, event: wl.Seat.Event) !
             if (!std.mem.eql(u8, name.name, self.seat_name)) return;
             if (self.selected != null and self.selected.?.id != seat.id) return error.NativeSeatAmbiguous;
             self.selected = seat;
-            slot.selected = true;
             try self.bindImeSeat(conn, seat);
         },
         .capabilities => |caps| slot.caps = caps.capabilities,
     }
-    if (slot.selected) try self.devices(conn, seat, slot.caps);
+    if (self.selected != null and self.selected.?.id == seat.id)
+        try self.devices(conn, seat, slot.caps);
 }
 
+/// Binds the optional text-input-v3 manager and selected seat once.
 pub fn bindImeManager(self: *Self, conn: *Connection, registry: wl.Registry, global: u32) !void {
     if (self.ime_manager != null) return;
     self.ime_manager = try registry.bind(&conn.session, global, zwp.TextInputManagerV3, 1);
@@ -422,7 +443,11 @@ fn clearKeymap(self: *Self) void {
 }
 
 fn loadKeymap(self: *Self, allocator: std.mem.Allocator, fd: i32, size: u32, format: wl.Keyboard.KeymapFormat) !void {
-    defer _ = linux.close(fd);
+    defer switch (linux.errno(linux.close(fd))) {
+        // Linux retires the descriptor even on EINTR. Never retry.
+        .SUCCESS, .INTR => {},
+        else => |err| std.log.err("native keymap descriptor close failed: {s}", .{@tagName(err)}),
+    };
     if (format != .xkb_v1 or size == 0 or size > max_keymap_bytes) return error.NativeKeymapFormat;
     const bytes = try allocator.alloc(u8, size);
     defer allocator.free(bytes);
@@ -451,7 +476,19 @@ fn loadKeymap(self: *Self, allocator: std.mem.Allocator, fd: i32, size: u32, for
 }
 
 fn applyMasks(self: *Self) void {
-    if (self.state) |state| _ = xkb.xkb_state_update_mask(state, self.masks.depressed, self.masks.latched, self.masks.locked, 0, 0, self.masks.group);
+    if (self.state) |state| {
+        // zig-audit: acknowledge discard
+        // reason: The compositor masks own state; XKB returns only the changed-component flags.
+        _ = xkb.xkb_state_update_mask(
+            state,
+            self.masks.depressed,
+            self.masks.latched,
+            self.masks.locked,
+            0,
+            0,
+            self.masks.group,
+        );
+    }
 }
 
 fn resetKeyboard(self: *Self) void {
@@ -546,6 +583,7 @@ pub fn repeatDeadline(self: *const Self) ?std.Io.Timestamp {
     return if (self.repeat) |held| held.deadline else null;
 }
 
+/// Emits at most one eligible repeat when due and no real input is queued.
 pub fn advanceRepeat(self: *Self, now: std.Io.Timestamp) !bool {
     const held = self.repeat orelse return false;
     if (now.nanoseconds < held.deadline.nanoseconds or self.count != 0) return false;
@@ -625,8 +663,9 @@ fn translateKey(self: *Self, raw: u32, pressed: bool, repeated: bool) Key {
     // A compositor forwards keys the input method did not consume. Do not
     // disable direct XKB text merely because a text-input global exists.
     if (!repeated and !self.ime_preedit) if (self.compose) |compose| {
-        _ = xkb.xkb_compose_state_feed(compose, key.symbol);
-        switch (xkb.xkb_compose_state_get_status(compose)) {
+        // Ignored keysyms (such as Shift) do not advance or consume the
+        // pending sequence. Its status alone cannot describe this key.
+        if (xkb.xkb_compose_state_feed(compose, key.symbol) == xkb.XKB_COMPOSE_FEED_ACCEPTED) switch (xkb.xkb_compose_state_get_status(compose)) {
             xkb.XKB_COMPOSE_COMPOSING => {
                 key.repeatable = false;
                 key.compose_consumed = true;
@@ -646,7 +685,7 @@ fn translateKey(self: *Self, raw: u32, pressed: bool, repeated: bool) Key {
                 return key;
             },
             else => {},
-        }
+        };
     };
     acceptText(&key, xkb.xkb_state_key_get_utf8(state, code, &key.text, key.text.len));
     return key;
