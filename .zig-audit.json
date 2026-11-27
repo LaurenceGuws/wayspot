@@ -5,6 +5,7 @@
   "include": [
     "build.zig",
     "src/apps/catalog.zig",
+    "src/apps/desktop_files.zig",
     "src/cli.zig",
     "src/cmd.zig",
     "src/control.zig",

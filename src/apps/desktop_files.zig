@@ -3,20 +3,26 @@
 const std = @import("std");
 const apps = @import("catalog.zig");
 
-pub const file_capacity = 512;
-pub const id_capacity = 256;
-pub const root_capacity = 16;
-pub const data_directories_capacity = root_capacity * std.Io.Dir.max_path_bytes;
-pub const path_environment_capacity = 64 * 1024;
-pub const terminal_capacity = 256;
+const file_capacity = apps.app_capacity;
+// Bound all visited entries, including non-desktop files, across the roots.
+// Depth bounds the number of simultaneously open directory handles.
+const traversal_entry_capacity = 64 * 1024;
+const traversal_depth_capacity = 32;
+const id_capacity = 256;
+const root_capacity = 16;
+const data_directories_capacity = root_capacity * std.Io.Dir.max_path_bytes;
+const path_environment_capacity = 64 * 1024;
+const terminal_capacity = 256;
 
+/// Borrows the original HOME and XDG data-directory environment for one discovery.
 pub const Environment = struct {
     home: ?[]const u8,
     data_home: ?[]const u8,
     data_dirs: ?[]const u8,
 };
 
-pub const Report = struct {
+/// Counts unavailable roots and individual desktop candidates rejected during discovery.
+const Report = struct {
     roots_unavailable: usize = 0,
     files_unreadable: usize = 0,
     files_too_long: usize = 0,
@@ -29,6 +35,7 @@ pub const Files = struct {
     items: std.ArrayListUnmanaged(apps.DesktopFile) = .empty,
     report: Report = .{},
 
+    /// Frees the owned file bytes and desktop ids, then invalidates this collection.
     pub fn deinit(files: *Files) void {
         for (files.items.items) |file| {
             files.allocator.free(file.id);
@@ -39,7 +46,9 @@ pub const Files = struct {
     }
 };
 
-/// Reads all available XDG application directories or returns no partial Files.
+/// Reads available XDG roots in precedence order, within the discovery bounds.
+/// Missing or inaccessible roots and unreadable candidates are counted.
+/// Traversal failure returns no partial collection.
 pub fn collect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -51,11 +60,9 @@ pub fn collect(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const roots = try applicationRoots(arena.allocator(), environment);
+    var entries_seen: usize = 0;
     for (roots, 0..) |root, root_index| {
-        collectRoot(&files, io, root, @intCast(root_index)) catch |failure| switch (failure) {
-            error.FileNotFound, error.NotDir, error.AccessDenied => files.report.roots_unavailable += 1,
-            else => return failure,
-        };
+        try collectRoot(&files, io, root, @intCast(root_index), &entries_seen);
     }
     std.mem.sortUnstable(apps.DesktopFile, files.items.items, {}, lessThan);
     return files;
@@ -125,53 +132,115 @@ fn executable(io: std.Io, path_environment: []const u8, name: []const u8) !bool 
 
 fn canExecute(io: std.Io, path: []const u8) !bool {
     std.Io.Dir.cwd().access(io, path, .{ .execute = true }) catch |failure| switch (failure) {
-        error.FileNotFound, error.AccessDenied, error.PermissionDenied => return false,
+        error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => {
+            return false;
+        },
         else => return failure,
     };
-    return true;
+    // X_OK alone tests directory search permission as well as file execution.
+    return regularFile(io, .cwd(), path);
 }
 
-fn collectRoot(files: *Files, io: std.Io, path: []const u8, root: u8) !void {
-    var directory = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+fn collectRoot(
+    files: *Files,
+    io: std.Io,
+    path: []const u8,
+    root: u8,
+    entries_seen: *usize,
+) !void {
+    var directory = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch |err|
+        switch (err) {
+            error.FileNotFound, error.NotDir, error.AccessDenied => {
+                files.report.roots_unavailable += 1;
+                return;
+            },
+            else => return err,
+        };
     defer directory.close(io);
 
-    var walker = try directory.walk(files.allocator);
-    defer walker.deinit();
+    var walker = try directory.walkSelectively(files.allocator);
+    defer {
+        // Zig 0.17's deinit frees walker memory, not the remaining open children.
+        // The root handle belongs to this function, not the walker.
+        while (walker.stack.items.len > 1) walker.leave(io);
+        walker.deinit();
+    }
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".desktop")) continue;
-        if (entry.path.len > id_capacity) {
-            files.report.ids_too_long += 1;
+        if (entries_seen.* == traversal_entry_capacity) return error.TooManyDiscoveryEntries;
+        entries_seen.* += 1;
+        if (entry.kind == .directory) {
+            if (entry.depth() > traversal_depth_capacity) return error.DiscoveryTooDeep;
+            try walker.enter(io, entry);
             continue;
         }
-        if (files.items.items.len == file_capacity) return error.TooManyDesktopFiles;
-
-        const bytes = entry.dir.readFileAlloc(
-            io,
-            entry.basename,
-            files.allocator,
-            .limited(apps.desktop_file_capacity + 1),
-        ) catch |failure| switch (failure) {
-            error.FileNotFound, error.NotDir, error.AccessDenied => {
-                files.report.files_unreadable += 1;
-                continue;
-            },
-            error.StreamTooLong => {
-                files.report.files_too_long += 1;
-                continue;
-            },
-            else => return failure,
-        };
-        errdefer files.allocator.free(bytes);
-        const id = try files.allocator.dupe(u8, entry.path);
-        errdefer files.allocator.free(id);
-        std.mem.replaceScalar(u8, id, '/', '-');
-        try files.items.append(files.allocator, .{
-            .root = root,
-            .id = id,
-            .bytes = bytes,
-        });
+        try collectDesktopFile(files, io, entry, root);
     }
+}
+
+fn collectDesktopFile(
+    files: *Files,
+    io: std.Io,
+    entry: std.Io.Dir.Walker.Entry,
+    root: u8,
+) !void {
+    if (entry.kind != .file and entry.kind != .sym_link) return;
+    if (!std.mem.endsWith(u8, entry.path, ".desktop")) return;
+    if (entry.path.len > id_capacity) {
+        files.report.ids_too_long += 1;
+        return;
+    }
+    if (files.items.items.len == file_capacity) return error.TooManyDesktopFiles;
+
+    // Preserve ordinary desktop-file symlinks, but never intentionally read
+    // a known directory, FIFO, device or other non-regular symlink target.
+    if (entry.kind == .sym_link and !try regularFile(io, entry.dir, entry.basename)) {
+        files.report.files_unreadable += 1;
+        return;
+    }
+    const bytes = entry.dir.readFileAlloc(
+        io,
+        entry.basename,
+        files.allocator,
+        .limited(apps.desktop_file_capacity + 1),
+    ) catch |failure| switch (failure) {
+        error.FileNotFound,
+        error.NotDir,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.SymLinkLoop,
+        => {
+            files.report.files_unreadable += 1;
+            return;
+        },
+        error.StreamTooLong => {
+            files.report.files_too_long += 1;
+            return;
+        },
+        else => return failure,
+    };
+    errdefer files.allocator.free(bytes);
+    const id = try files.allocator.dupe(u8, entry.path);
+    errdefer files.allocator.free(id);
+    std.mem.replaceScalar(u8, id, '/', '-');
+    try files.items.append(files.allocator, .{
+        .root = root,
+        .id = id,
+        .bytes = bytes,
+    });
+}
+
+fn regularFile(io: std.Io, dir: std.Io.Dir, path: []const u8) !bool {
+    const stat = dir.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound,
+        error.NotDir,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.SymLinkLoop,
+        => return false,
+        else => return err,
+    };
+    return stat.kind == .file;
 }
 
 fn lessThan(_: void, left: apps.DesktopFile, right: apps.DesktopFile) bool {
@@ -208,7 +277,11 @@ fn appendRoot(
     if (data.len > std.Io.Dir.max_path_bytes - "/applications".len) {
         return error.DataDirectoryTooLong;
     }
-    const path = try std.fmt.allocPrint(allocator, "{s}/applications", .{std.mem.trimEnd(u8, data, "/")});
+    const path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/applications",
+        .{std.mem.trimEnd(u8, data, "/")},
+    );
     for (roots.items) |existing| {
         if (std.mem.eql(u8, existing, path)) return;
     }
@@ -237,7 +310,6 @@ test "XDG roots preserve precedence defaults and reject relative paths" {
         "/second/applications",
     });
 
-    _ = arena.reset(.retain_capacity);
     const defaults = try applicationRoots(arena.allocator(), .{
         .home = "/home/user",
         .data_home = null,
@@ -270,9 +342,9 @@ test "failing Io yields no files and counts every absent root" {
 
 test "file ordering is root precedence then desktop id" {
     var items = [_]apps.DesktopFile{
-        .{ .root = 1, .id = @constCast("a.desktop"), .bytes = @constCast("") },
-        .{ .root = 0, .id = @constCast("z.desktop"), .bytes = @constCast("") },
-        .{ .root = 0, .id = @constCast("a.desktop"), .bytes = @constCast("") },
+        .{ .root = 1, .id = "a.desktop", .bytes = "" },
+        .{ .root = 0, .id = "z.desktop", .bytes = "" },
+        .{ .root = 0, .id = "a.desktop", .bytes = "" },
     };
     std.mem.sortUnstable(apps.DesktopFile, &items, {}, lessThan);
     try std.testing.expectEqual(@as(u8, 0), items[0].root);
@@ -283,12 +355,17 @@ test "file ordering is root precedence then desktop id" {
 
 test "TryExec removal commits only after bounded availability checks" {
     const source = [_]apps.DesktopFile{
-        .{ .root = 0, .id = @constCast("plain.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Plain\nExec=plain",
-        ) },
-        .{ .root = 0, .id = @constCast("checked.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Checked\nExec=checked\nTryExec=checked",
-        ) },
+        .{
+            .root = 0,
+            .id = "plain.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Plain\nExec=plain",
+        },
+        .{
+            .root = 0,
+            .id = "checked.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Checked\n" ++
+                "Exec=checked\nTryExec=checked",
+        },
     };
     var list = try apps.load(std.testing.allocator, &source, "Hyprland");
     defer list.deinit();
@@ -304,10 +381,8 @@ test "TryExec removal commits only after bounded availability checks" {
 test "terminal applications require the supported executable" {
     const source = [_]apps.DesktopFile{.{
         .root = 0,
-        .id = @constCast("terminal.desktop"),
-        .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=btop\nTerminal=true",
-        ),
+        .id = "terminal.desktop",
+        .bytes = "[Desktop Entry]\nType=Application\nName=Terminal\nExec=btop\nTerminal=true",
     }};
     var list = try apps.load(std.testing.allocator, &source, "Hyprland");
     defer list.deinit();
@@ -318,4 +393,113 @@ test "terminal applications require the supported executable" {
         @as(usize, 1),
         list.report.decisions[@backingInt(apps.Decision.unavailable_terminal)],
     );
+}
+
+fn countOpenDirectoryTest(path: []const u8) !usize {
+    const io = std.testing.io;
+    var dir = try std.Io.Dir.openDirAbsolute(io, "/proc/self/fd", .{ .iterate = true });
+    defer dir.close(io);
+    var iter = dir.iterate();
+    var count: usize = 0;
+    while (try iter.next(io)) |entry| {
+        var target: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = dir.readLink(io, entry.name, &target) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        if (std.mem.eql(u8, target[0..length], path)) count += 1;
+    }
+    return count;
+}
+
+test "execute access to a directory is not an executable file" {
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    const io = std.testing.io;
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = buffer[0..try fixture.dir.realPath(io, &buffer)];
+    try std.testing.expect(!try canExecute(io, path));
+}
+
+test "early desktop discovery failure retires nested directory handles" {
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    const io = std.testing.io;
+    try fixture.dir.createDirPath(io, "nested");
+    try fixture.dir.writeFile(io, .{ .sub_path = "nested/one.desktop", .data = "test" });
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try fixture.dir.realPath(io, &root_buffer)];
+    var nested_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&nested_buffer, "{s}/nested", .{root});
+    var files = Files{ .allocator = std.testing.allocator };
+    defer files.deinit();
+    try files.items.resize(files.allocator, file_capacity);
+    @memset(files.items.items, .{ .root = 0, .id = &.{}, .bytes = &.{} });
+    try std.testing.expectEqual(@as(usize, 0), try countOpenDirectoryTest(nested));
+    var entries_seen: usize = 0;
+    try std.testing.expectError(
+        error.TooManyDesktopFiles,
+        collectRoot(&files, io, root, 0, &entries_seen),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try countOpenDirectoryTest(nested));
+}
+
+test "discovery bounds all entries and nested directory handles" {
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    const io = std.testing.io;
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try fixture.dir.realPath(io, &root_buffer)];
+
+    var files = Files{ .allocator = std.testing.allocator };
+    defer files.deinit();
+    try fixture.dir.writeFile(io, .{ .sub_path = "ignored.txt", .data = "" });
+    var entries_seen: usize = traversal_entry_capacity;
+    try std.testing.expectError(
+        error.TooManyDiscoveryEntries,
+        collectRoot(&files, io, root, 0, &entries_seen),
+    );
+
+    var nested: [traversal_depth_capacity * 2 + 1]u8 = undefined;
+    for (0..traversal_depth_capacity) |depth| {
+        nested[depth * 2] = 'd';
+        nested[depth * 2 + 1] = '/';
+    }
+    nested[nested.len - 1] = 'd';
+    try fixture.dir.createDirPath(io, &nested);
+    entries_seen = 0;
+    try std.testing.expectError(
+        error.DiscoveryTooDeep,
+        collectRoot(&files, io, root, 0, &entries_seen),
+    );
+    var child_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const child = try std.fmt.bufPrint(&child_buffer, "{s}/d", .{root});
+    try std.testing.expectEqual(@as(usize, 0), try countOpenDirectoryTest(child));
+}
+
+test "desktop discovery follows regular links and skips missing or special targets" {
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    const io = std.testing.io;
+    const linux = std.os.linux;
+    try fixture.dir.writeFile(io, .{ .sub_path = "source", .data = "desktop bytes" });
+    try fixture.dir.symLink(io, "source", "regular.desktop", .{});
+    try fixture.dir.symLink(io, "missing", "missing.desktop", .{});
+    try fixture.dir.symLink(io, ".", "directory.desktop", .{});
+    try fixture.dir.symLink(io, "loop.desktop", "loop.desktop", .{});
+    try std.testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.mknodat(fixture.dir.handle, "fifo", linux.S.IFIFO | 0o600, 0)),
+    );
+    try fixture.dir.symLink(io, "fifo", "pipe.desktop", .{});
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try fixture.dir.realPath(io, &root_buffer)];
+    var files = Files{ .allocator = std.testing.allocator };
+    defer files.deinit();
+    var entries_seen: usize = 0;
+    try collectRoot(&files, io, root, 0, &entries_seen);
+    try std.testing.expectEqual(@as(usize, 1), files.items.items.len);
+    try std.testing.expectEqualStrings("regular.desktop", files.items.items[0].id);
+    try std.testing.expectEqualStrings("desktop bytes", files.items.items[0].bytes);
+    try std.testing.expectEqual(@as(usize, 4), files.report.files_unreadable);
 }
