@@ -6,8 +6,11 @@ const apps = @import("../apps/catalog.zig");
 const notification = @import("../notifications/root.zig");
 const navigator = @import("navigator.zig");
 
+/// Maximum committed query bytes, excluding the terminating zero.
 pub const query_capacity = apps.query_capacity;
+/// Maximum result rows borrowed by one visible frame.
 pub const visible_row_capacity = 14;
+/// Maximum events admitted to one input turn.
 pub const event_capacity = 64;
 const events_before_draw_capacity = 1024;
 
@@ -19,12 +22,14 @@ pub const Table = enum {
     notifications,
 };
 
+/// Borrows one window and its independently established desktop application identity.
 pub const WindowRow = struct {
     window: *const navigator.Window,
     app_index: ?u16,
     workspace_position: ?navigator.WorkspacePosition,
 };
 
+/// One borrowed row from the current table owner.
 pub const Row = union(enum) {
     table: Table,
     app: u16,
@@ -119,7 +124,7 @@ const Rows = union(Table) {
                 const window = &window_rows.snapshot.windows[window_index];
                 return .{ .window = .{
                     .window = window,
-                    .app_index = windowApplication(window_rows.applications, window.app_id.slice()),
+                    .app_index = if (window.app_id_truncated) null else windowApplication(window_rows.applications, window.app_id.slice()),
                     .workspace_position = window_rows.snapshot.workspacePosition(window_index),
                 } };
             },
@@ -136,6 +141,7 @@ const root_rows = [2]Row{
     .{ .table = .notifications },
 };
 
+/// Returns the stable label and slash-route name for a table.
 pub fn tableName(table: Table) [:0]const u8 {
     return switch (table) {
         .root => "/",
@@ -173,11 +179,12 @@ comptime {
     std.debug.assert(root_rows[1].table == .notifications);
 }
 
-/// Text owns one bounded SDL text event after the native event returns.
+/// Text owns bounded event bytes; the query owner validates their contents.
 pub const Text = struct {
     bytes: [query_capacity]u8 = undefined,
     len: usize,
 
+    /// Copies one bounded input payload without borrowing the producer.
     pub fn init(input: []const u8) !Text {
         if (input.len > query_capacity) return error.TextTooLong;
         var text: Text = .{ .len = input.len };
@@ -185,12 +192,13 @@ pub const Text = struct {
         return text;
     }
 
+    /// Borrows the owned input payload.
     pub fn slice(text: *const Text) []const u8 {
         return text.bytes[0..text.len];
     }
 };
 
-/// Event is the complete SDL input vocabulary understood by the current picker.
+/// Event is the native input and readiness vocabulary understood by the picker.
 pub const Event = union(enum) {
     quit,
     escape,
@@ -210,21 +218,25 @@ pub const Event = union(enum) {
     ignored,
 };
 
+/// Bounded input batch with an explicit remaining-work flag.
 pub const Events = struct {
     items: [event_capacity]Event = undefined,
     count: usize = 0,
     more: bool = false,
 
+    /// Borrows only the admitted events.
     pub fn slice(events: *const Events) []const Event {
         return events.items[0..events.count];
     }
 };
 
+/// Current application or window search authority.
 pub const Finder = enum {
     applications,
     windows,
 };
 
+/// Availability of the last explicit window discovery.
 pub const WindowStatus = enum {
     dormant,
     ready,
@@ -232,6 +244,7 @@ pub const WindowStatus = enum {
     unavailable,
 };
 
+/// Borrows the current model until the next successful state mutation.
 pub const Frame = struct {
     table: Table = .apps,
     query: [:0]const u8,
@@ -247,6 +260,7 @@ pub const Frame = struct {
     /// Specific backend error, retained while the window finder is unavailable.
     window_error: ?[]const u8 = null,
 
+    /// Borrows the populated visible rows.
     pub fn rowSlice(frame: *const Frame) []const Row {
         return frame.rows[0..frame.row_count];
     }
@@ -257,7 +271,7 @@ const Query = struct {
     len: usize = 0,
 
     fn append(query: *Query, input: []const u8) !void {
-        if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidText;
+        if (!validText(input)) return error.InvalidText;
         if (input.len > query_capacity - query.len) return error.QueryTooLong;
         @memcpy(query.bytes[query.len..][0..input.len], input);
         query.len += input.len;
@@ -276,6 +290,10 @@ const Query = struct {
     }
 };
 
+fn validText(bytes: []const u8) bool {
+    return std.unicode.utf8ValidateSlice(bytes) and std.mem.indexOfScalar(u8, bytes, 0) == null;
+}
+
 fn textContinuation(byte: u8) bool {
     return byte & 0b1100_0000 == 0b1000_0000;
 }
@@ -289,8 +307,14 @@ fn textContinuation(byte: u8) bool {
 /// final process state; window destruction and SDL quit still run.
 /// History reads only on /notifications.
 pub fn run(
+    // zig-audit: acknowledge anytype
+    // reason: The standalone native view and deterministic transcript implement the same lifetime operations.
     operations: anytype,
+    // zig-audit: acknowledge anytype
+    // reason: Native history loading and deterministic history owners use the same scoped read contract.
     history_reader: anytype,
+    // zig-audit: acknowledge anytype
+    // reason: Native compositor calls and the strict transcript share the exact command boundary.
     navigator_operations: anytype,
     window_backend: ?navigator.Backend,
     allocator: std.mem.Allocator,
@@ -328,7 +352,7 @@ pub fn run(
             try navigator.focus(navigator_operations, allocator, window_backend, id.slice());
             return null;
         },
-        else => unreachable,
+        .wait, .draw => return error.PickerActionNotTerminal,
     }
 }
 
@@ -362,36 +386,46 @@ pub const State = struct {
     events_since_draw: usize = 0,
     changed_since_draw: bool = false,
 
+    /// Initializes the application table before the first frame.
     pub fn begin(state: *State) !void {
-        state.rows = try Rows.initApps(state.applications, "");
+        try state.enterApplications();
     }
 
+    /// Retires the current table and invalidates the model owner.
     pub fn deinit(state: *State) void {
         state.rows.deinit(state.allocator);
         state.* = undefined;
     }
 
-    pub fn frame(state: *const State) Frame {
+    /// Projects checked visible rows without transferring ownership.
+    pub fn frame(state: *const State) !Frame {
         return makeFrame(state);
     }
 
     /// Process a bounded portion of the input stream, without waiting or
     /// drawing. Coalesce queued input but force publication at the draw bound.
-    pub fn advance(state: *State, history_reader: anytype, navigator_operations: anytype, events: *const Events) !Action {
-        std.debug.assert(events.count <= events.items.len);
+    pub fn advance(
+        state: *State,
+        // zig-audit: acknowledge anytype
+        // reason: A concrete history owner is called only on a requested route transition.
+        history_reader: anytype,
+        // zig-audit: acknowledge anytype
+        // reason: Native and deterministic command owners share on-demand window discovery.
+        navigator_operations: anytype,
+        events: *const Events,
+    ) !Action {
+        if (events.count > events.items.len) return error.PickerEventLimit;
         for (events.slice()) |event| {
             switch (event) {
                 .quit, .escape => return .dismiss,
                 .tab => {
-                    state.preedit.len = 0;
                     if (state.finder == .windows) {
-                        try state.enterApplications(history_reader);
+                        try state.enterApplications();
                     } else {
                         try state.enterWindows(navigator_operations);
                     }
                 },
                 .backspace => {
-                    state.preedit.len = 0;
                     var query = state.query;
                     query.delete();
                     try state.setQuery(history_reader, query);
@@ -408,9 +442,12 @@ pub const State = struct {
                     if (try state.acceptSelection(history_reader)) |action| return action;
                 },
                 .text => |text| {
-                    state.preedit.len = 0;
+                    if (text.len > text.bytes.len) return error.TextTooLong;
                     var query = state.query;
-                    try query.append(text.slice());
+                    query.append(text.slice()) catch |err| switch (err) {
+                        error.QueryTooLong => continue,
+                        else => return err,
+                    };
                     try state.setQuery(history_reader, query);
                 },
                 .edit => |edit| {
@@ -420,7 +457,8 @@ pub const State = struct {
                     var query = state.query;
                     const end = query.len - edit.delete_before;
                     if (end < query.len and textContinuation(query.bytes[end])) continue;
-                    if (edit.commit.len > query_capacity - end or !std.unicode.utf8ValidateSlice(edit.commit.slice()) or !std.unicode.utf8ValidateSlice(edit.preedit.slice())) continue;
+                    if (edit.commit.len > query_capacity - end or edit.preedit.len > edit.preedit.bytes.len) continue;
+                    if (!validText(edit.commit.slice()) or !validText(edit.preedit.slice())) continue;
                     if (!(edit.cursor_begin == -1 and edit.cursor_end == -1)) {
                         const valid = for ([_]i32{ edit.cursor_begin, edit.cursor_end }) |offset| {
                             if (offset < 0 or offset > edit.preedit.len or (offset < edit.preedit.len and textContinuation(edit.preedit.bytes[@intCast(offset)]))) break false;
@@ -435,14 +473,17 @@ pub const State = struct {
                     state.preedit_cursor = .{ edit.cursor_begin, edit.cursor_end };
                     state.query_from_ime = true;
                 },
-                .cancel_preedit => state.preedit.len = 0,
+                .cancel_preedit => state.clearPreedit(),
                 .hover => |row| {
                     if (visibleSelection(state, row, state.rows.count())) |selected| {
                         state.selected = selected;
                     }
                 },
                 .click => |row| {
-                    state.selected = visibleSelection(state, row, state.rows.count()) orelse continue;
+                    const selected = visibleSelection(state, row, state.rows.count()) orelse continue;
+                    const previous = state.selected;
+                    state.selected = selected;
+                    errdefer state.selected = previous;
                     if (try state.acceptSelection(history_reader)) |action| return action;
                 },
                 .scroll => |rows| scroll(state, state.rows.count(), rows),
@@ -459,6 +500,8 @@ pub const State = struct {
         return .draw;
     }
 
+    // zig-audit: acknowledge anytype
+    // reason: Selection may open history through the caller's concrete history owner.
     fn acceptSelection(state: *State, history_reader: anytype) !?Action {
         if (state.finder == .windows) {
             // Native layers exclusively own keyboard focus on both
@@ -473,6 +516,8 @@ pub const State = struct {
         return null;
     }
 
+    // zig-audit: acknowledge anytype
+    // reason: Only the notification route invokes the concrete history reader.
     fn setQuery(state: *State, history_reader: anytype, query: Query) !void {
         const text = query.text();
         const rows = if (state.finder == .windows)
@@ -487,14 +532,26 @@ pub const State = struct {
             Rows{ .notifications = try history_reader.readHistory() }
         else
             Rows.initRoot(text[1..]);
+        state.publishRows(rows, query);
+    }
+
+    fn clearPreedit(state: *State) void {
+        state.preedit.len = 0;
+        state.preedit_cursor = .{ -1, -1 };
+    }
+
+    fn publishRows(state: *State, rows: Rows, query: Query) void {
         state.rows.deinit(state.allocator);
         state.query = query;
+        state.clearPreedit();
         state.query_from_ime = false;
         state.rows = rows;
         state.selected = 0;
         state.first = 0;
     }
 
+    // zig-audit: acknowledge anytype
+    // reason: Selecting a slash route reuses the caller's history contract.
     fn selectApplicationRow(state: *State, history_reader: anytype) !?usize {
         const selected = state.rows.row(state.selected) orelse return null;
         return switch (selected) {
@@ -512,68 +569,75 @@ pub const State = struct {
         };
     }
 
-    fn enterApplications(state: *State, history_reader: anytype) !void {
+    fn enterApplications(state: *State) !void {
+        const rows = try Rows.initApps(state.applications, "");
+        state.publishRows(rows, .{});
         state.finder = .applications;
+        // Retain the last discovery status for the existing frame contract;
+        // only entering window mode performs a new native observation.
         state.window_error = null;
-        const query: Query = .{};
-        try state.setQuery(history_reader, query);
     }
 
+    // zig-audit: acknowledge anytype
+    // reason: The concrete discovery owner is native or the deterministic transcript.
     fn enterWindows(state: *State, operations: anytype) !void {
-        state.finder = .windows;
-        state.window_snapshot = .{};
-        state.window_status = .dormant;
-        state.window_error = null;
-        const snapshot = navigator.load(operations, state.allocator, state.window_backend, state.self_pid) catch |failure| switch (failure) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                state.window_error = @errorName(failure);
-                if (!@import("builtin").is_test) std.log.warn("wayspot window discovery failed: {s}", .{state.window_error.?});
-                state.window_status = .unavailable;
-                const query: Query = .{};
-                try state.setQueryNoHistory(query);
-                return;
-            },
+        var failure_name: ?[]const u8 = null;
+        const snapshot = navigator.load(
+            operations,
+            state.allocator,
+            state.window_backend,
+            state.self_pid,
+        ) catch |failure| blk: {
+            if (failure == error.OutOfMemory or failure == error.Canceled) return failure;
+            failure_name = @errorName(failure);
+            break :blk navigator.Snapshot{};
         };
+        const matches = try navigator.Matches.init(&snapshot, "");
+        state.publishRows(.{ .windows = .{
+            .applications = state.applications,
+            .snapshot = &state.window_snapshot,
+            .matches = matches,
+        } }, .{});
         state.window_snapshot = snapshot;
-        state.window_status = if (snapshot.count == 0) .empty else .ready;
-        const query: Query = .{};
-        try state.setQueryNoHistory(query);
-        if (!builtin.is_test) std.log.info("window finder discovered {d} windows", .{snapshot.count});
-    }
-
-    fn setQueryNoHistory(state: *State, query: Query) !void {
-        std.debug.assert(state.finder == .windows);
-        const rows = try Rows.initWindows(state.applications, &state.window_snapshot, query.text());
-        state.rows.deinit(state.allocator);
-        state.query = query;
-        state.query_from_ime = false;
-        state.rows = rows;
-        state.selected = 0;
-        state.first = 0;
+        state.finder = .windows;
+        state.window_error = failure_name;
+        state.window_status = if (failure_name != null) .unavailable else if (snapshot.count == 0) .empty else .ready;
+        if (!builtin.is_test) {
+            if (failure_name) |name| {
+                std.log.warn("wayspot window discovery failed: {s}", .{name});
+            } else {
+                std.log.info("window finder discovered {d} windows", .{snapshot.count});
+            }
+        }
     }
 };
 
 fn eventLoop(
+    // zig-audit: acknowledge anytype
+    // reason: The standalone native view and deterministic transcript implement the same lifetime operations.
     operations: anytype,
+    // zig-audit: acknowledge anytype
+    // reason: Native history loading and deterministic history owners use the same scoped read contract.
     history_reader: anytype,
+    // zig-audit: acknowledge anytype
+    // reason: Native compositor calls and the strict transcript share the exact command boundary.
     navigator_operations: anytype,
     state: *State,
 ) !Action {
     try state.begin();
-    try operations.draw(&state.frame());
+    try operations.draw(&(try state.frame()));
     while (true) {
         const events = try operations.read();
         const action = try state.advance(history_reader, navigator_operations, &events);
         switch (action) {
             .wait => {},
-            .draw => try operations.draw(&state.frame()),
+            .draw => try operations.draw(&(try state.frame())),
             .dismiss, .launch, .focus => return action,
         }
     }
 }
 
-fn makeFrame(state: *const State) Frame {
+fn makeFrame(state: *const State) !Frame {
     const total = state.rows.count();
     var frame = Frame{
         .table = std.meta.activeTag(state.rows),
@@ -588,12 +652,12 @@ fn makeFrame(state: *const State) Frame {
     };
     while (frame.first + frame.row_count < frame.total_count) {
         if (frame.row_count == visible_row_capacity) break;
-        frame.rows[frame.row_count] = state.rows.row(frame.first + frame.row_count) orelse unreachable;
+        frame.rows[frame.row_count] = state.rows.row(frame.first + frame.row_count) orelse return error.PickerRowInvalid;
         frame.row_count += 1;
     }
     if (frame.row_count > 0) {
-        std.debug.assert(state.selected >= frame.first);
-        std.debug.assert(state.selected < frame.total_count);
+        if (state.selected < frame.first or state.selected - frame.first >= frame.row_count)
+            return error.PickerSelectionInvalid;
         frame.selected_row = state.selected - frame.first;
     }
     return frame;
@@ -946,7 +1010,7 @@ fn testApp(name: []const u8, generic_name: ?[]const u8, keywords: ?[]const u8) a
 
 fn testAppId(id: []const u8, name: []const u8) apps.App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = id,
         .name = name,
         .generic_name = null,
@@ -964,6 +1028,7 @@ fn testAppId(id: []const u8, name: []const u8) apps.App {
 
 test "IME edits update the append-only query atomically and keep preedit out of matching" {
     const History = struct {
+        /// Supplies an empty history to this editor-only fixture.
         pub fn readHistory(_: @This()) !notification.History {
             return .{};
         }
@@ -975,21 +1040,179 @@ test "IME edits update the append-only query atomically and keep preedit out of 
     var events: Events = .{};
     events.count = 1;
     events.items[0] = .{ .text = try Text.init("aé") };
-    _ = try state.advance(History{}, nav, &events);
+    try std.testing.expectEqual(Action.draw, try state.advance(History{}, nav, &events));
     events.items[0] = .{ .edit = .{ .commit = try Text.init("漢"), .preedit = try Text.init("字"), .delete_before = 1, .delete_after = 0 } };
     try std.testing.expectEqual(Action.wait, try state.advance(History{}, nav, &events));
-    try std.testing.expectEqualStrings("aé", state.frame().query);
+    try std.testing.expectEqualStrings("aé", (try state.frame()).query);
     events.items[0].edit.delete_before = 2;
     events.items[0].edit.cursor_begin = 3;
     events.items[0].edit.cursor_end = 3;
     try std.testing.expectEqual(Action.draw, try state.advance(History{}, nav, &events));
-    const frame = state.frame();
+    const frame = try state.frame();
     try std.testing.expectEqualStrings("a漢", frame.query);
     try std.testing.expectEqualStrings("字", frame.preedit);
     try std.testing.expectEqual([2]i32{ 3, 3 }, frame.preedit_cursor);
     try std.testing.expect(frame.query_from_ime);
     events.items[0] = .cancel_preedit;
-    _ = try state.advance(History{}, nav, &events);
-    try std.testing.expectEqualStrings("a漢", state.frame().query);
-    try std.testing.expectEqualStrings("", state.frame().preedit);
+    try std.testing.expectEqual(Action.draw, try state.advance(History{}, nav, &events));
+    try std.testing.expectEqualStrings("a漢", (try state.frame()).query);
+    try std.testing.expectEqualStrings("", (try state.frame()).preedit);
+    try std.testing.expectEqual([2]i32{ -1, -1 }, (try state.frame()).preedit_cursor);
+}
+
+test "picker query overflow refuses only the excess edit" {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{ .allocator = std.testing.allocator, .applications = &applications };
+    defer state.deinit();
+    try state.begin();
+    var history: TestHistoryReader = .{};
+    const nav = navigator.Native{ .io = std.testing.io, .environ_map = null };
+    const full: [query_capacity]u8 = @splat('a');
+    var events: Events = .{ .count = 1 };
+    events.items[0] = .{ .text = try Text.init(&full) };
+    try std.testing.expectEqual(Action.draw, try state.advance(&history, nav, &events));
+    events.items[0] = .{ .text = try Text.init("b") };
+    try std.testing.expectEqual(Action.wait, try state.advance(&history, nav, &events));
+    try std.testing.expectEqualStrings(&full, state.query.text());
+    events.items[0] = .backspace;
+    try std.testing.expectEqual(Action.draw, try state.advance(&history, nav, &events));
+    try std.testing.expectEqualStrings(full[0 .. full.len - 1], state.query.text());
+    try std.testing.expectEqual(@as(usize, 0), history.reads);
+}
+
+const DiscoveryFailure = struct {
+    failure: error{ OutOfMemory, Canceled },
+    calls: usize = 0,
+
+    /// Refuses the exact discovery request without spawning a process.
+    pub fn run(self: *DiscoveryFailure, _: std.mem.Allocator, argv: []const []const u8, max_stdout: usize) !navigator.ProcessResult {
+        self.calls += 1;
+        try std.testing.expectEqual(@as(usize, 3), argv.len);
+        try std.testing.expectEqualStrings("hyprctl", argv[0]);
+        try std.testing.expectEqualStrings("-j", argv[1]);
+        try std.testing.expectEqualStrings("clients", argv[2]);
+        try std.testing.expectEqual(@as(usize, 256 * 1024), max_stdout);
+        return self.failure;
+    }
+};
+
+fn failedFinderTransition(failure: error{ OutOfMemory, Canceled }) !void {
+    const applications = [_]apps.App{ testApp("Alpha", null, null), testApp("Alpine", null, null) };
+    var state: State = .{
+        .allocator = std.testing.allocator,
+        .applications = &applications,
+        .window_backend = .hyprland,
+    };
+    defer state.deinit();
+    try state.begin();
+    var history: TestHistoryReader = .{};
+    var query: Query = .{};
+    try query.append("Al");
+    try state.setQuery(&history, query);
+    state.selected = 1;
+    state.preedit = try Text.init("λ");
+    state.preedit_cursor = .{ 2, 2 };
+    var nav: DiscoveryFailure = .{ .failure = failure };
+    var events: Events = .{ .count = 1 };
+    events.items[0] = .tab;
+    try std.testing.expectError(failure, state.advance(&history, &nav, &events));
+    try std.testing.expectEqual(Finder.applications, state.finder);
+    try std.testing.expectEqual(Table.apps, std.meta.activeTag(state.rows));
+    try std.testing.expectEqualStrings("Al", state.query.text());
+    try std.testing.expectEqualStrings("λ", state.preedit.slice());
+    try std.testing.expectEqual([2]i32{ 2, 2 }, state.preedit_cursor);
+    try std.testing.expectEqual(@as(usize, 1), state.selected);
+    try std.testing.expectEqual(@as(usize, 2), state.rows.count());
+    try std.testing.expectEqual(@as(usize, 1), nav.calls);
+    try std.testing.expectEqual(@as(usize, 0), history.reads);
+}
+
+test "finder allocation failure preserves the previous complete model" {
+    try failedFinderTransition(error.OutOfMemory);
+}
+
+test "finder cancellation does not publish an unavailable window table" {
+    try failedFinderTransition(error.Canceled);
+}
+
+test "truncated window application identity cannot borrow a different desktop icon" {
+    const a = std.testing.allocator;
+    const original: [193]u8 = @splat('a');
+    const prefix: [189]u8 = @splat('a');
+    const label = prefix ++ "…";
+    const desktop_id = label ++ ".desktop";
+    const payload = try std.fmt.allocPrint(a, "[{{\"address\":\"0x1\",\"class\":\"{s}\",\"title\":\"Example\",\"mapped\":true,\"at\":[0,0],\"size\":[100,100],\"workspace\":{{\"id\":1}},\"monitor\":0,\"floating\":false,\"fullscreen\":0}}]", .{&original});
+    defer a.free(payload);
+    const snapshot = try navigator.parseDesktop(a, payload, 99);
+    const applications = [_]apps.App{testAppId(desktop_id, "Wrong application")};
+    const rows = try Rows.initWindows(&applications, &snapshot, "");
+    const row = rows.row(0).?.window;
+    try std.testing.expectEqualStrings(label, row.window.app_id.slice());
+    try std.testing.expectEqual(@as(?u16, null), row.app_index);
+}
+
+test "failed history click preserves the previous route and selection" {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{ .allocator = std.testing.allocator, .applications = &applications };
+    defer state.deinit();
+    try state.begin();
+    var history: TestHistoryReader = .{};
+    const nav = navigator.Native{ .io = std.testing.io, .environ_map = null };
+    var events: Events = .{ .count = 1 };
+    events.items[0] = .{ .text = try Text.init("/") };
+    try std.testing.expectEqual(Action.draw, try state.advance(&history, nav, &events));
+    history.failure = error.HistoryOpenFailed;
+    state.preedit = try Text.init("λ");
+    state.preedit_cursor = .{ 2, 2 };
+    events.items[0] = .{ .click = 1 };
+    try std.testing.expectError(error.HistoryOpenFailed, state.advance(&history, nav, &events));
+    const frame = try state.frame();
+    try std.testing.expectEqual(Table.root, frame.table);
+    try std.testing.expectEqualStrings("/", frame.query);
+    try std.testing.expectEqualStrings("λ", frame.preedit);
+    try std.testing.expectEqual(@as(usize, 0), frame.selected_row);
+    try std.testing.expectEqual(@as(usize, 2), frame.row_count);
+    try std.testing.expectEqual(@as(usize, 1), history.reads);
+}
+
+test "picker query and IME refuse embedded NUL without changing the prior text" {
+    var state: State = .{ .allocator = std.testing.allocator, .applications = &.{} };
+    defer state.deinit();
+    try state.begin();
+    var history: TestHistoryReader = .{};
+    const nav = navigator.Native{ .io = std.testing.io, .environ_map = null };
+    var events: Events = .{ .count = 1 };
+    events.items[0] = .{ .text = try Text.init("a") };
+    try std.testing.expectEqual(Action.draw, try state.advance(&history, nav, &events));
+    events.items[0] = .{ .text = try Text.init("b\x00c") };
+    try std.testing.expectError(error.InvalidText, state.advance(&history, nav, &events));
+    try std.testing.expectEqualStrings("a", state.query.text());
+    events.items[0] = .{ .edit = .{
+        .commit = try Text.init("b\x00c"),
+        .preedit = try Text.init(""),
+        .delete_before = 0,
+        .delete_after = 0,
+    } };
+    try std.testing.expectEqual(Action.wait, try state.advance(&history, nav, &events));
+    try std.testing.expectEqualStrings("a", state.query.text());
+    try std.testing.expectEqual(@as(usize, 0), history.reads);
+}
+
+test "picker frame refuses invalid row or selection before publication" {
+    const applications = [_]apps.App{testApp("Alpha", null, null)};
+    var state: State = .{ .allocator = std.testing.allocator, .applications = &applications };
+    defer state.deinit();
+    try state.begin();
+    state.selected = 1;
+    try std.testing.expectError(error.PickerSelectionInvalid, state.frame());
+    state.selected = 0;
+    state.rows.apps.matches.indexes[0] = 1;
+    try std.testing.expectError(error.PickerRowInvalid, state.frame());
+    state.rows.apps.matches.indexes[0] = 0;
+    const frame = try state.frame();
+    try std.testing.expectEqual(Row{ .app = 0 }, frame.rows[0]);
+    var history: TestHistoryReader = .{};
+    const nav = navigator.Native{ .io = std.testing.io, .environ_map = null };
+    const events: Events = .{ .count = event_capacity + 1 };
+    try std.testing.expectError(error.PickerEventLimit, state.advance(&history, nav, &events));
 }

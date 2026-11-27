@@ -100,7 +100,7 @@ pub fn readHistory(self: *Self) !notification.History {
 
 /// Publishes the current borrowed frame and refreshes the visible wake deadline.
 pub fn draw(self: *Self) !void {
-    try self.view.draw(&self.state.frame());
+    try self.view.draw(&(try self.state.frame()));
     self.refreshDeadline();
 }
 

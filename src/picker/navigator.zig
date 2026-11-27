@@ -62,6 +62,7 @@ pub const Edges = struct { left: bool = false, right: bool = false, top: bool = 
 pub const Window = struct {
     stable_id: StableId,
     app_id: AppId,
+    app_id_truncated: bool = false,
     title: Title,
     workspace_id: ?WorkspaceId,
     monitor_id: ?MonitorId,
@@ -405,9 +406,11 @@ pub fn parseSnowman(allocator: Allocator, windows: []const u8, seat: []const u8)
             view.geometry.width < 0 or view.geometry.height < 0) return error.GeometryInvalid;
         const id = try numericText(StableId, @backingInt(view.id));
         for (snapshot.slice()) |existing| if (std.mem.eql(u8, existing.stable_id.slice(), id.slice())) return error.DuplicateStableId;
+        const app_id = try AppId.display(view.app_id);
         snapshot.windows[snapshot.count] = .{
             .stable_id = id,
-            .app_id = try AppId.display(view.app_id),
+            .app_id = app_id,
+            .app_id_truncated = app_id.len != view.app_id.len,
             .title = try Title.display(view.title),
             .workspace_id = try numericText(WorkspaceId, @backingInt(view.workspace_id)),
             .monitor_id = if (view.output_id) |output| try numericText(MonitorId, @backingInt(output)) else null,
@@ -569,9 +572,11 @@ pub fn parseDesktop(allocator: Allocator, bytes: []const u8, self_pid: i64) !Sna
             try std.fmt.bufPrint(&ws, "{d}", .{id})
         else
             client.workspace.address orelse return error.CompositorFieldMissing;
+        const app_id = try AppId.display(client.class);
         const window: Window = .{
             .stable_id = try StableId.exact(client.address),
-            .app_id = try AppId.display(client.class),
+            .app_id = app_id,
+            .app_id_truncated = app_id.len != client.class.len,
             .title = try Title.display(client.title),
             .workspace_id = try WorkspaceId.exact(workspace),
             .monitor_id = if (client.monitor < 0) null else try MonitorId.exact(try std.fmt.bufPrint(&monitor, "{d}", .{client.monitor})),

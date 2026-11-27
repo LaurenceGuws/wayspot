@@ -17,6 +17,7 @@
     "src/picker/icon.zig",
     "src/picker/image.zig",
     "src/picker/navigator.zig",
+    "src/picker/root.zig",
     "src/picker/session.zig",
     "src/stop.zig",
     "src/tray/host.zig",
