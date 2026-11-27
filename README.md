@@ -367,9 +367,10 @@ zig build check
 
 It checks Zig formatting and runs the full tests (including the standalone
 wallpaper-catalog tool and Bash completion). `zig build audit` is a separate
-ruleset-3 gate for build logic and maintenance Zig tooling. Application source
-still needs its own reviewed shared-audit migration; this gate deliberately
-does not claim to audit the product's `src/` files yet.
+ruleset-3 gate enforced by `check`. During the application-source migration,
+`.zig-audit.json` defines the exact reviewed scope. Remaining owned source
+must be reviewed individually before admission; a passing gate does not yet
+claim full product coverage.
 
 ## Scope
 

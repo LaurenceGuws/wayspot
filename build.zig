@@ -3,9 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = optimizeOption(b);
-    // The non-product Zig build/tooling source is fully covered here.
-    // Application source has its own pending review, not a blanket baseline.
-    const audit = b.step("audit", "Audit build and maintenance Zig source");
+    // Expand the configured source scope as each ownership boundary is reviewed.
+    const audit = b.step("audit", "Audit reviewed Wayspot Zig source");
     const audit_command = b.addSystemCommand(&.{ "zig-audit", "check" });
     audit_command.setCwd(b.path("."));
     audit.dependOn(&audit_command.step);
@@ -235,7 +234,7 @@ pub fn build(b: *std.Build) void {
         },
         .check = true,
     });
-    const check = b.step("check", "Check formatting, audit build tools, and run regression tests");
+    const check = b.step("check", "Check formatting, audit reviewed source, and run regression tests");
     check.dependOn(&formatting.step);
     check.dependOn(audit);
     check.dependOn(test_step);

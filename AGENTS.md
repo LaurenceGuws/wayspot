@@ -64,7 +64,9 @@ updating its exact commit and content hash.
 Implement the smallest complete useful change, exercise the real path, run the
 relevant deterministic tests, and stop when the requested problem is solved.
 Use `zig build check` for repository formatting and the full regression graph.
-The shared `zig build audit` currently covers build logic and maintenance tools,
-not `src/`; a future source audit migration must review the product's findings
-individually rather than silently baselining them.
+The shared `zig build audit` enforces the reviewed scope in `.zig-audit.json`.
+Expand it by completed ownership boundary during the source migration. Review
+each finding individually; do not silently baseline or blanket-acknowledge
+findings. Keep the gate green and do not claim full coverage until all owned
+Zig source is admitted.
 Keep reviewer checkpoints small. Do not commit without operator authority.
