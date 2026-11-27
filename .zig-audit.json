@@ -4,7 +4,10 @@
   "minimum_ruleset": 3,
   "include": [
     "build.zig",
+    "src/cli.zig",
+    "src/cmd.zig",
     "src/control.zig",
+    "src/main.zig",
     "src/stop.zig",
     "tools/wallpaper_catalog.zig",
     "tools/tray_canary.zig"

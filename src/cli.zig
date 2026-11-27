@@ -4,6 +4,7 @@ const std = @import("std");
 const apps = @import("apps/catalog.zig");
 const cmd = @import("cmd.zig");
 
+/// Public usage text printed when exact application resolution fails.
 pub const help =
     \\usage:
     \\  wayspot
@@ -11,6 +12,7 @@ pub const help =
     \\  wayspot resident status
     \\  wayspot picker [dismiss]
     \\  wayspot tray
+    \\  wayspot notifications [history]
     \\  wayspot wallpaper ROOT
     \\  wayspot wallpaper rotate
     \\  wayspot apps [terms...]
@@ -19,7 +21,13 @@ pub const help =
     \\
 ;
 
-pub fn writeApps(output: anytype, applications: []const apps.App, query: []const u8) !void {
+/// Writes matched application names in rank order, one per line, to the borrowed writer.
+/// Applications and query must satisfy the catalog bounds; the caller owns flushing.
+pub fn writeApps(
+    output: *std.Io.Writer,
+    applications: []const apps.App,
+    query: []const u8,
+) std.Io.Writer.Error!void {
     const found = apps.Matches.init(applications, query);
     for (found.slice()) |index| {
         const name = applications[index].name;
@@ -29,7 +37,8 @@ pub fn writeApps(output: anytype, applications: []const apps.App, query: []const
     }
 }
 
-pub fn writeBash(output: anytype) !void {
+/// Writes the Bash completion definition without shell evaluation or flushing.
+pub fn writeBash(output: *std.Io.Writer) std.Io.Writer.Error!void {
     try output.writeAll(
         \\_wayspot_completion() {
         \\    COMPREPLY=()
@@ -85,63 +94,50 @@ pub fn writeBash(output: anytype) !void {
     );
 }
 
-fn writeWords(output: anytype, words: []const []const u8) !void {
+fn writeWords(output: *std.Io.Writer, words: []const []const u8) std.Io.Writer.Error!void {
     for (words, 0..) |word, index| {
         if (index > 0) try output.writeAll(" ");
         try output.writeAll(word);
     }
 }
 
-const Transcript = struct {
-    expected: []const u8,
-    used: usize = 0,
-    fail_at: ?usize = null,
-
-    fn writeAll(transcript: *Transcript, bytes: []const u8) !void {
-        if (transcript.fail_at) |limit| {
-            if (transcript.used + bytes.len > limit) return error.WriteFailed;
-        }
-        if (bytes.len > transcript.expected.len - transcript.used) return error.TranscriptMismatch;
-        if (!std.mem.eql(u8, transcript.expected[transcript.used..][0..bytes.len], bytes)) {
-            return error.TranscriptMismatch;
-        }
-        transcript.used += bytes.len;
-    }
-
-    fn done(transcript: *const Transcript) bool {
-        return transcript.used == transcript.expected.len;
-    }
-};
-
 test "apps output is bounded and byte exact" {
     const applications = [_]apps.App{
         testApp("alpha.desktop", "Alpha"),
         testApp("beta.desktop", "Beta"),
     };
-    var output = Transcript{ .expected = "Alpha\nBeta\n" };
+    var buffer: [32]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buffer);
     try writeApps(&output, &applications, "");
-    try std.testing.expect(output.done());
+    try std.testing.expectEqualStrings("Alpha\nBeta\n", output.buffered());
 
-    var filtered = Transcript{ .expected = "Beta\n" };
-    try writeApps(&filtered, &applications, "bet");
-    try std.testing.expect(filtered.done());
+    output = .fixed(&buffer);
+    try writeApps(&output, &applications, "bet");
+    try std.testing.expectEqualStrings("Beta\n", output.buffered());
+
+    output = .fixed(&buffer);
+    try writeApps(&output, &applications, "unmatched");
+    try std.testing.expectEqualStrings("", output.buffered());
 }
 
 test "typo output remains a suggestion" {
     const ghostty = testApp("ghostty.desktop", "Ghostty");
-    var listed = Transcript{ .expected = "Ghostty\n" };
+    var buffer: [16]u8 = undefined;
+    var listed = std.Io.Writer.fixed(&buffer);
     try writeApps(&listed, &.{ghostty}, "ghsotty");
-    try std.testing.expect(listed.done());
+    try std.testing.expectEqualStrings("Ghostty\n", listed.buffered());
 }
 
 test "help and output failures are exact" {
     const app = testApp("alpha.desktop", "Alpha");
-    var failed = Transcript{ .expected = "Alpha\n", .fail_at = 5 };
+    var buffer: [5]u8 = undefined;
+    var failed = std.Io.Writer.fixed(&buffer);
     try std.testing.expectError(error.WriteFailed, writeApps(&failed, &.{app}, ""));
+    try std.testing.expectEqualStrings("Alpha", failed.buffered());
 
-    var usage = Transcript{ .expected = help };
-    try usage.writeAll(help);
-    try std.testing.expect(usage.done());
+    var unavailable: std.Io.Writer = .failing;
+    try std.testing.expectError(error.WriteFailed, writeBash(&unavailable));
+    try std.testing.expect(std.mem.indexOf(u8, help, "wayspot notifications [history]") != null);
 }
 
 test "Bash definition uses current Cmd words without exposing an engine command" {
@@ -186,16 +182,17 @@ test "Bash definition uses current Cmd words without exposing an engine command"
         \\complete -F _wayspot_completion wayspot
         \\
     ;
-    var output = Transcript{ .expected = expected };
+    var buffer: [expected.len]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buffer);
     try writeBash(&output);
-    try std.testing.expect(output.done());
+    try std.testing.expectEqualStrings(expected, output.buffered());
     try std.testing.expect(std.mem.indexOf(u8, expected, "complete bash") == null);
     try std.testing.expect(std.mem.indexOf(u8, expected, "eval") == null);
 }
 
 fn testApp(id: []const u8, name: []const u8) apps.App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = id,
         .name = name,
         .generic_name = null,

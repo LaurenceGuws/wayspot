@@ -1,15 +1,23 @@
-//! Owns bounded Cmd resolution.
+//! Resolves bounded command arguments before invoking desktop capabilities.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const apps = @import("apps/catalog.zig");
 
+/// Maximum public command arguments, excluding the executable name.
 pub const argument_capacity = 64;
-pub const query_capacity = apps.query_capacity;
-pub const modes = [_][]const u8{ "apps", "notifications", "wallpaper", "tray", "resident", "picker" };
+const query_capacity = apps.query_capacity;
+/// Top-level words offered by Bash completion; hidden helpers are not included.
+pub const modes = [_][]const u8{
+    "apps", "notifications", "wallpaper", "tray", "resident", "picker",
+};
+/// Notification subcommands offered by Bash completion.
 pub const notification_operations = [_][]const u8{"history"};
+/// Wallpaper subcommands offered alongside directory completion.
 pub const wallpaper_operations = [_][]const u8{"rotate"};
 
+/// Resolved commands for the shared capability dispatcher.
+/// Paths and queries borrow caller storage; application indexes refer to the supplied list.
 pub const Cmd = union(enum) {
     completion: enum { bash },
     wallpaper: union(enum) { run: []const u8, rotate },
@@ -32,12 +40,14 @@ comptime {
     std.debug.assert(apps.app_capacity <= std.math.maxInt(u16) + 1);
 }
 
+/// Returns null outside completion mode; rejects anything except completion bash.
 pub fn resolveCompletion(argv: []const []const u8) !?Cmd {
     if (argv.len == 0 or !std.mem.eql(u8, argv[0], "completion")) return null;
     if (argv.len == 2 and std.mem.eql(u8, argv[1], "bash")) return .{ .completion = .bash };
     return error.CompletionArgumentsInvalid;
 }
 
+/// Returns null outside wallpaper mode; borrows one root or selects exact rotate.
 pub fn resolveWallpaper(argv: []const []const u8) !?Cmd {
     if (argv.len == 0 or !std.mem.eql(u8, argv[0], "wallpaper")) return null;
     if (argv.len != 2) return error.WallpaperArgumentsInvalid;
@@ -45,6 +55,7 @@ pub fn resolveWallpaper(argv: []const []const u8) !?Cmd {
     return .{ .wallpaper = .{ .run = argv[1] } };
 }
 
+/// Returns null outside notification mode; admits only run and history.
 pub fn resolveNotifications(argv: []const []const u8) !?Cmd {
     if (argv.len > argument_capacity) return error.TooManyArguments;
     if (argv.len == 0 or !std.mem.eql(u8, argv[0], "notifications")) return null;
@@ -55,6 +66,9 @@ pub fn resolveNotifications(argv: []const []const u8) !?Cmd {
     return error.NotificationArgumentsInvalid;
 }
 
+/// Joins valid arguments into the bounded caller buffer, then resolves list or exact launch.
+/// Invalid UTF-8, argument count and query length leave the buffer unchanged.
+/// A list borrows the buffer; an exact launch returns an index into applications.
 pub fn resolveApps(
     argv: []const []const u8,
     applications: []const apps.App,
@@ -118,7 +132,10 @@ test "wallpaper borrows one root or resolves exact rotate before applications ex
     const meaning = (try resolveWallpaper(&.{ "wallpaper", path })).?;
     try std.testing.expectEqualStrings(path, meaning.wallpaper.run);
     try std.testing.expectEqual(@intFromPtr(path.ptr), @intFromPtr(meaning.wallpaper.run.ptr));
-    try std.testing.expectEqual(.rotate, (try resolveWallpaper(&.{ "wallpaper", "rotate" })).?.wallpaper);
+    try std.testing.expectEqual(
+        .rotate,
+        (try resolveWallpaper(&.{ "wallpaper", "rotate" })).?.wallpaper,
+    );
     try std.testing.expectEqual(@as(?Cmd, null), try resolveWallpaper(&.{"apps"}));
     try std.testing.expectEqual(@as(?Cmd, null), try resolveWallpaper(&.{"notifications"}));
     try std.testing.expectError(error.WallpaperArgumentsInvalid, resolveWallpaper(&.{"wallpaper"}));
@@ -243,7 +260,7 @@ fn expectOpen(command: Cmd, expected: u16) !void {
 
 fn testApp(id: []const u8, name: []const u8) apps.App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = id,
         .name = name,
         .generic_name = null,

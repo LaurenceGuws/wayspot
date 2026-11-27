@@ -15,10 +15,14 @@ const UiOwner = @import("ui/owner.zig");
 const wallpaper = @import("wallpaper/wayland.zig");
 const resident = @import("resident.zig");
 
+/// Dispatches one foreground desktop capability or the default application picker.
 pub fn main(init: std.process.Init) !u8 {
-    var argument_iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    var argument_iterator = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        init.gpa,
+    );
     defer argument_iterator.deinit();
-    std.debug.assert(argument_iterator.skip());
+    if (!argument_iterator.skip()) return error.ArgumentsInvalid;
     var arguments: [cmd.argument_capacity + 1][]const u8 = undefined;
     var argument_count: usize = 0;
     while (argument_iterator.next()) |argument| {
@@ -43,7 +47,11 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argument_count > 0 and std.mem.eql(u8, argv[0], "picker")) {
-        if (argument_count == 1) try resident.request(init, .summon) else if (argument_count == 2 and std.mem.eql(u8, argv[1], "dismiss")) try resident.request(init, .dismiss) else return 2;
+        if (argument_count == 1) {
+            try resident.request(init, .summon);
+        } else if (argument_count == 2 and std.mem.eql(u8, argv[1], "dismiss")) {
+            try resident.request(init, .dismiss);
+        } else return 2;
         return 0;
     }
     if (argument_count > 0) {
@@ -63,6 +71,10 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
+    return runApplications(init, argv);
+}
+
+fn runApplications(init: std.process.Init, argv: []const []const u8) !u8 {
     var files = try desktop_files.collect(init.gpa, init.io, .{
         .home = init.environ_map.get("HOME"),
         .data_home = init.environ_map.get("XDG_DATA_HOME"),
@@ -86,8 +98,8 @@ pub fn main(init: std.process.Init) !u8 {
     const home = init.environ_map.get("HOME") orelse return error.HomeMissing;
     try launch.apply(&applications, terminal, home);
 
-    if (argument_count > 0) {
-        var query_bytes: [cmd.query_capacity]u8 = undefined;
+    if (argv.len > 0) {
+        var query_bytes: [apps.query_capacity]u8 = undefined;
         const meaning = cmd.resolveApps(argv, applications.slice(), &query_bytes) catch |err| {
             return switch (err) {
                 error.ArgumentsInvalid,
@@ -109,7 +121,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     runPicker(init, &files, &applications, terminal, home) catch |failure| {
-        if (navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP")) != .snowman) return failure;
+        if (navigator.backendForSession(init.environ_map.get("XDG_SESSION_DESKTOP")) != .snowman) {
+            return failure;
+        }
         navigator.reportFailure(init, failure);
         return 4;
     };
@@ -159,6 +173,8 @@ const HistoryReader = struct {
     process: *const std.process.Init,
     home: []const u8,
 
+    /// Returns an owned history snapshot using the original process state path.
+    /// The caller releases it with History.deinit and the process allocator.
     pub fn readHistory(reader: *HistoryReader) !notification.History {
         return notification.inspect(
             reader.process.gpa,
@@ -186,11 +202,16 @@ fn perform(
         .wallpaper => |wallpaper_command| switch (wallpaper_command) {
             .run => |root| try runWallpaper(init, root),
             .rotate => {
-                if (resident.request(init, .rotate)) |_| return 0 else |err| if (err != error.ResidentUnavailable) return err;
-                const identifier = try wallpaper.sessionIdentifier(
-                    init.environ_map.get("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryMissing,
-                    init.environ_map.get("WAYLAND_DISPLAY") orelse return error.WaylandDisplayMissing,
-                );
+                if (resident.request(init, .rotate)) |_| {
+                    return 0;
+                } else |err| {
+                    if (err != error.ResidentUnavailable) return err;
+                }
+                const runtime = init.environ_map.get("XDG_RUNTIME_DIR") orelse
+                    return error.RuntimeDirectoryMissing;
+                const display = init.environ_map.get("WAYLAND_DISPLAY") orelse
+                    return error.WaylandDisplayMissing;
+                const identifier = try wallpaper.sessionIdentifier(runtime, display);
                 try wallpaper.requestRotation(init.io, &identifier);
             },
         },
@@ -221,7 +242,13 @@ fn runWallpaper(init: std.process.Init, root: []const u8) !void {
 }
 
 fn runNotifications(init: std.process.Init) !void {
-    try notification.run(init.gpa, init.io, init.environ_map.get("XDG_STATE_HOME"), init.environ_map.get("HOME"), init.environ_map);
+    try notification.run(
+        init.gpa,
+        init.io,
+        init.environ_map.get("XDG_STATE_HOME"),
+        init.environ_map.get("HOME"),
+        init.environ_map,
+    );
 }
 
 fn printNotificationHistory(init: std.process.Init) !void {
@@ -242,7 +269,8 @@ fn printNotificationHistory(init: std.process.Init) !void {
 
 fn logApplications(files: *const desktop_files.Files, applications: *const apps.List) void {
     std.log.info(
-        "desktop files={d} apps={d} malformed={d} duplicates={d} unavailable_roots={d} unreadable={d} oversized={d}",
+        "desktop files={d} apps={d} malformed={d} duplicates={d} " ++
+            "unavailable_roots={d} unreadable={d} oversized={d}",
         .{
             files.items.items.len,
             applications.count,
@@ -255,7 +283,9 @@ fn logApplications(files: *const desktop_files.Files, applications: *const apps.
     );
     for (std.enums.values(apps.Decision)) |decision| {
         const count = applications.report.decisions[@backingInt(decision)];
-        if (count > 0) std.log.info("desktop decision={s} count={d}", .{ @tagName(decision), count });
+        if (count > 0) {
+            std.log.info("desktop decision={s} count={d}", .{ @tagName(decision), count });
+        }
     }
     for (std.enums.values(apps.Issue)) |issue| {
         const count = applications.report.issues[@backingInt(issue)];
