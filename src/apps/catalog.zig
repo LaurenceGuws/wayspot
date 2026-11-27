@@ -3,16 +3,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Maximum encoded bytes admitted from one desktop file.
 pub const desktop_file_capacity = 64 * 1024;
-pub const type_capacity = 32;
+const type_capacity = 32;
+/// Maximum encoded application name bytes; decoding never increases this size.
 pub const name_capacity = 256;
-pub const generic_name_capacity = 256;
-pub const keywords_capacity = 1024;
-pub const icon_capacity = 256;
+const generic_name_capacity = 256;
+const keywords_capacity = 1024;
+const icon_capacity = 256;
+/// Maximum encoded Exec bytes admitted before bounded launch-plan construction.
 pub const exec_capacity = 4096;
-pub const try_exec_capacity = 1024;
+const try_exec_capacity = 1024;
+/// Maximum encoded path bytes admitted for an application or launch home.
 pub const path_capacity = 4096;
-pub const desktop_list_capacity = 1024;
+const desktop_list_capacity = 1024;
+/// Maximum bytes in an application search query.
 pub const query_capacity = 256;
 
 const Effect = enum {
@@ -75,6 +80,7 @@ comptime {
     }
 }
 
+/// Nonfatal parse observations retained in application and catalogue diagnostics.
 pub const Issue = enum {
     localized_field_deferred,
     unknown_standard_field,
@@ -86,6 +92,7 @@ pub const Issue = enum {
     recognized_field_deferred,
 };
 
+/// One publication or rejection decision per successfully parsed, unique desktop id.
 pub const Decision = enum {
     publish,
     missing_type,
@@ -100,14 +107,16 @@ pub const Decision = enum {
     invalid_exec,
 };
 
+/// Read-only desktop-file input in XDG root precedence order.
+/// The filesystem owner retains the allocations; load borrows them only during the call.
 pub const DesktopFile = struct {
     root: u8,
-    id: []u8,
-    bytes: []u8,
+    id: []const u8,
+    bytes: []const u8,
 };
 
 /// Entry borrows every retained value from the parsed desktop-file bytes.
-pub const Entry = struct {
+const Entry = struct {
     type: ?[]const u8 = null,
     name: ?[]const u8 = null,
     generic_name: ?[]const u8 = null,
@@ -124,7 +133,7 @@ pub const Entry = struct {
     terminal: bool = false,
     issues: std.EnumSet(Issue) = .empty,
 
-    pub fn decide(entry: *const Entry, current_desktop: ?[]const u8) Decision {
+    fn decide(entry: *const Entry, current_desktop: ?[]const u8) Decision {
         const entry_type = entry.type orelse return .missing_type;
         if (!std.mem.eql(u8, entry_type, "Application")) return .not_application;
         if (entry.hidden) return .hidden;
@@ -146,6 +155,8 @@ pub const Entry = struct {
     }
 };
 
+/// Published application; fields borrow its single owned storage allocation.
+/// A List owns and releases storage for every application it publishes.
 pub const App = struct {
     storage: []u8,
     id: []const u8,
@@ -162,16 +173,17 @@ pub const App = struct {
     issues: std.EnumSet(Issue),
 };
 
+/// Maximum input desktop files and published applications in one catalogue.
 pub const app_capacity = 512;
 
 /// Match states why one application is reachable from a bounded query.
-pub const Match = struct {
+const Match = struct {
     kind: Kind,
     edits: u8 = 0,
     start: u16 = 0,
     span: u16 = 0,
 
-    pub const Kind = enum {
+    const Kind = enum {
         exact,
         prefix,
         substring,
@@ -186,15 +198,24 @@ pub const Matches = struct {
     ranks: [app_capacity]Match = undefined,
     count: usize = 0,
 
+    /// Ranks bounded published applications for a bounded query without allocation.
+    /// Returned indexes refer to the supplied application slice.
     pub fn init(applications: []const App, query: []const u8) Matches {
         std.debug.assert(applications.len <= app_capacity);
         var matches: Matches = .{};
         for (applications, 0..) |app, index| {
             const rank = find(app, query) orelse continue;
             var at = matches.count;
-            while (at > 0 and before(app, rank, applications[matches.indexes[at - 1]], matches.ranks[at - 1])) {
-                matches.indexes[at] = matches.indexes[at - 1];
-                matches.ranks[at] = matches.ranks[at - 1];
+            while (at > 0) {
+                const previous = at - 1;
+                if (!before(
+                    app,
+                    rank,
+                    applications[matches.indexes[previous]],
+                    matches.ranks[previous],
+                )) break;
+                matches.indexes[at] = matches.indexes[previous];
+                matches.ranks[at] = matches.ranks[previous];
                 at -= 1;
             }
             matches.indexes[at] = index;
@@ -204,13 +225,14 @@ pub const Matches = struct {
         return matches;
     }
 
+    /// Borrows the populated ranked index prefix until this value changes.
     pub fn slice(matches: *const Matches) []const usize {
         return matches.indexes[0..matches.count];
     }
 };
 
 /// Finds one bounded match for the GUI and CLI.
-pub fn find(app: App, query: []const u8) ?Match {
+fn find(app: App, query: []const u8) ?Match {
     std.debug.assert(query.len <= query_capacity);
     if (query.len == 0) return .{ .kind = .exact };
     var best = fieldMatch(app.name, query, true);
@@ -220,24 +242,22 @@ pub fn find(app: App, query: []const u8) ?Match {
     return best;
 }
 
-/// Resolves one exact current desktop id or unique application name.
+/// Resolves an exact desktop id before considering a unique exact application name.
+/// Published ids are unique; ambiguous names never select an arbitrary application.
 pub fn exact(applications: []const App, value: []const u8) !usize {
     var found: ?usize = null;
+    var ambiguous = false;
     for (applications, 0..) |app, index| {
         if (std.mem.eql(u8, app.id, value)) return index;
         if (!std.mem.eql(u8, app.name, value)) continue;
-        if (found != null) return error.ApplicationAmbiguous;
-        found = index;
+        if (found == null) {
+            found = index;
+        } else {
+            ambiguous = true;
+        }
     }
+    if (ambiguous) return error.ApplicationAmbiguous;
     return found orelse error.ApplicationNotFound;
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    for (0..haystack.len - needle.len + 1) |index| {
-        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
-    }
-    return false;
 }
 
 fn fieldMatch(value: []const u8, query: []const u8, relaxed: bool) ?Match {
@@ -341,7 +361,10 @@ fn distance(left: []const u8, right: []const u8, limit: u8) ?u8 {
                 std.ascii.toLower(left_byte) == std.ascii.toLower(right[right_index - 1]) and
                 std.ascii.toLower(left[left_index - 1]) == std.ascii.toLower(right_byte))
             {
-                current[right_index + 1] = @min(current[right_index + 1], older[right_index - 1] + 1);
+                current[right_index + 1] = @min(
+                    current[right_index + 1],
+                    older[right_index - 1] + 1,
+                );
             }
         }
         older = previous;
@@ -375,7 +398,8 @@ fn choose(best: *?Match, found: ?Match) void {
     if (best.* == null or matchBefore(candidate, best.*.?)) best.* = candidate;
 }
 
-pub const LoadReport = struct {
+/// Counts malformed files, duplicate ids, publication decisions and nonfatal issues.
+const LoadReport = struct {
     malformed: usize = 0,
     duplicates: usize = 0,
     decisions: [std.meta.fieldNames(Decision).len]usize = @splat(0),
@@ -410,7 +434,7 @@ fn lookupApp(
     keywords: ?[]const u8,
 ) App {
     return .{
-        .storage = @constCast(""),
+        .storage = &.{},
         .id = id,
         .name = name,
         .generic_name = generic_name,
@@ -433,11 +457,13 @@ pub const List = struct {
     count: usize = 0,
     report: LoadReport = .{},
 
+    /// Releases every published allocation exactly once and invalidates the list.
     pub fn deinit(list: *List) void {
         for (list.items[0..list.count]) |app| list.allocator.free(app.storage);
         list.* = undefined;
     }
 
+    /// Borrows the populated application prefix until list mutation or retirement.
     pub fn slice(list: *const List) []const App {
         return list.items[0..list.count];
     }
@@ -466,13 +492,19 @@ pub const List = struct {
         std.debug.assert(decision != .publish);
         list.allocator.free(list.items[index].storage);
         list.count -= 1;
-        std.mem.copyForwards(App, list.items[index..list.count], list.items[index + 1 ..][0 .. list.count - index]);
+        std.mem.copyForwards(
+            App,
+            list.items[index..list.count],
+            list.items[index + 1 ..][0 .. list.count - index],
+        );
         list.report.decisions[@backingInt(Decision.publish)] -= 1;
         list.report.decisions[@backingInt(decision)] += 1;
     }
 };
 
 /// Loads a deterministic, duplicate-free app list or returns no partial list.
+/// Files must be ordered by XDG root precedence; first id wins even if rejected.
+/// The returned list owns its copies, independently of the borrowed file inputs.
 pub fn load(
     allocator: std.mem.Allocator,
     files: []const DesktopFile,
@@ -572,15 +604,10 @@ fn decode(storage: []u8, cursor: *usize, value: []const u8, list: bool) []const 
             storage[cursor.*] = value[input];
         } else {
             input += 1;
-            storage[cursor.*] = switch (value[input]) {
-                's' => ' ',
-                'n' => '\n',
-                't' => '\t',
-                'r' => '\r',
-                '\\' => '\\',
-                ';' => if (list) ';' else unreachable,
-                else => unreachable,
-            };
+            std.debug.assert(input < value.len);
+            // zig-audit: acknowledge orelse_unreachable
+            // reason: Retained fields pass the same escape grammar before decoding.
+            storage[cursor.*] = escapeByte(value[input], list) orelse unreachable;
         }
         cursor.* += 1;
     }
@@ -623,7 +650,7 @@ fn decodedEquals(encoded: []const u8, expected: []const u8) bool {
 }
 
 /// Parses the Desktop Entry group and rejects malformed structural or control data.
-pub fn parse(bytes: []const u8) !Entry {
+fn parse(bytes: []const u8) !Entry {
     if (bytes.len > desktop_file_capacity) return error.DesktopFileTooLong;
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
 
@@ -722,10 +749,24 @@ fn apply(entry: *Entry, effect: Effect, value: []const u8) !void {
             .generic_name_invalid,
             &entry.generic_name,
         ),
-        .keywords => optional(entry, value, keywords_capacity, true, .keywords_invalid, &entry.keywords),
+        .keywords => optional(
+            entry,
+            value,
+            keywords_capacity,
+            true,
+            .keywords_invalid,
+            &entry.keywords,
+        ),
         .icon => optional(entry, value, icon_capacity, false, .icon_invalid, &entry.icon),
         .exec => entry.exec = try requiredOrNull(value, exec_capacity),
-        .try_exec => optional(entry, value, try_exec_capacity, false, .try_exec_invalid, &entry.try_exec),
+        .try_exec => optional(
+            entry,
+            value,
+            try_exec_capacity,
+            false,
+            .try_exec_invalid,
+            &entry.try_exec,
+        ),
         .hidden => entry.hidden = try boolean(value),
         .no_display => entry.no_display = try boolean(value),
         .only_show_in => entry.only_show_in = try required(value, desktop_list_capacity, true),
@@ -776,12 +817,21 @@ fn validateEscapes(value: []const u8, list: bool) !void {
         if (value[index] != '\\') continue;
         index += 1;
         if (index == value.len) return error.InvalidEscape;
-        switch (value[index]) {
-            's', 'n', 't', 'r', '\\' => {},
-            ';' => if (!list) return error.InvalidEscape,
-            else => return error.InvalidEscape,
-        }
+        if (escapeByte(value[index], list) == null) return error.InvalidEscape;
     }
+}
+
+// One grammar for both admission and decoding. List fields additionally escape ';'.
+fn escapeByte(byte: u8, list: bool) ?u8 {
+    return switch (byte) {
+        's' => ' ',
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '\\' => '\\',
+        ';' => if (list) ';' else null,
+        else => null,
+    };
 }
 
 fn boolean(value: []const u8) !bool {
@@ -890,7 +940,10 @@ test "every non-publish decision has one explicit reason" {
         .{ "[Desktop Entry]\nType=Application\nName=\nExec=app", Decision.missing_name },
         .{ "[Desktop Entry]\nType=Application\nName=No Exec", Decision.missing_exec },
         .{ "[Desktop Entry]\nType=Application\nName=Empty Exec\nExec=", Decision.missing_exec },
-        .{ "[Desktop Entry]\nType=Application\nName=DBus\nExec=app\nDBusActivatable=true", Decision.publish },
+        .{
+            "[Desktop Entry]\nType=Application\nName=DBus\nExec=app\nDBusActivatable=true",
+            Decision.publish,
+        },
     };
     inline for (cases) |case| {
         const entry = try parse(case[0]);
@@ -994,11 +1047,9 @@ test "required and optional fields prove exact bounds" {
 test "published strings decode only their specified escapes" {
     const files = [_]DesktopFile{.{
         .root = 0,
-        .id = @constCast("escaped.desktop"),
-        .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Two\\sWords\n" ++
-                "Keywords=first\\;part;second;\nIcon=some\\\\icon\nExec=app\\s--flag",
-        ),
+        .id = "escaped.desktop",
+        .bytes = "[Desktop Entry]\nType=Application\nName=Two\\sWords\n" ++
+            "Keywords=first\\;part;second;\nIcon=some\\\\icon\nExec=app\\s--flag",
     }};
     var list = try load(std.testing.allocator, &files, "Hyprland");
     defer list.deinit();
@@ -1028,16 +1079,26 @@ test "arbitrary desktop bytes remain bounded" {
 
 test "load preserves precedence and counts every non-published reason" {
     const files = [_]DesktopFile{
-        .{ .root = 0, .id = @constCast("same.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nHidden=true",
-        ) },
-        .{ .root = 1, .id = @constCast("same.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Wrong\nExec=wrong",
-        ) },
-        .{ .root = 1, .id = @constCast("good.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Good\nExec=good\nIcon=good",
-        ) },
-        .{ .root = 1, .id = @constCast("broken.desktop"), .bytes = @constCast("broken") },
+        .{
+            .root = 0,
+            .id = "same.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nHidden=true",
+        },
+        .{
+            .root = 1,
+            .id = "same.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Wrong\nExec=wrong",
+        },
+        .{
+            .root = 1,
+            .id = "good.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Good\nExec=good\nIcon=good",
+        },
+        .{
+            .root = 1,
+            .id = "broken.desktop",
+            .bytes = "broken",
+        },
     };
     var list = try load(std.testing.allocator, &files, "Hyprland");
     defer list.deinit();
@@ -1051,15 +1112,21 @@ test "load preserves precedence and counts every non-published reason" {
 
 test "load orders published apps by name then desktop id" {
     const files = [_]DesktopFile{
-        .{ .root = 0, .id = @constCast("z.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=beta\nExec=beta",
-        ) },
-        .{ .root = 0, .id = @constCast("b.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Alpha\nExec=alpha-b",
-        ) },
-        .{ .root = 0, .id = @constCast("a.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=alpha\nExec=alpha-a",
-        ) },
+        .{
+            .root = 0,
+            .id = "z.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=beta\nExec=beta",
+        },
+        .{
+            .root = 0,
+            .id = "b.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Alpha\nExec=alpha-b",
+        },
+        .{
+            .root = 0,
+            .id = "a.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=alpha\nExec=alpha-a",
+        },
     };
     var list = try load(std.testing.allocator, &files, "Hyprland");
     defer list.deinit();
@@ -1074,12 +1141,16 @@ test "load handles every allocation failure without leaks" {
 
 fn loadAllocationTest(allocator: std.mem.Allocator) !void {
     const files = [_]DesktopFile{
-        .{ .root = 0, .id = @constCast("one.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=One\nExec=one",
-        ) },
-        .{ .root = 0, .id = @constCast("two.desktop"), .bytes = @constCast(
-            "[Desktop Entry]\nType=Application\nName=Two\nExec=two",
-        ) },
+        .{
+            .root = 0,
+            .id = "one.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=One\nExec=one",
+        },
+        .{
+            .root = 0,
+            .id = "two.desktop",
+            .bytes = "[Desktop Entry]\nType=Application\nName=Two\nExec=two",
+        },
     };
     var list = try load(allocator, &files, "Hyprland");
     defer list.deinit();
@@ -1092,7 +1163,76 @@ fn fuzzDesktopEntry(_: void, smith: *std.testing.Smith) !void {
     inline for (.{ entry.type, entry.name, entry.icon, entry.exec, entry.path }) |value| {
         if (value) |slice| {
             try std.testing.expect(@intFromPtr(slice.ptr) >= @intFromPtr(bytes.ptr));
-            try std.testing.expect(@intFromPtr(slice.ptr) + slice.len <= @intFromPtr(bytes.ptr) + bytes.len);
+            try std.testing.expect(
+                @intFromPtr(slice.ptr) + slice.len <= @intFromPtr(bytes.ptr) + bytes.len,
+            );
         }
     }
+}
+
+test "desktop id outranks ambiguous names regardless of catalog order" {
+    const first = lookupApp("one.desktop", "target.desktop", null, null);
+    const second = lookupApp("two.desktop", "target.desktop", null, null);
+    const target = lookupApp("target.desktop", "Z target", null, null);
+    const orders = [_][3]App{
+        .{ first, second, target },
+        .{ second, first, target },
+        .{ first, target, second },
+        .{ second, target, first },
+        .{ target, first, second },
+        .{ target, second, first },
+    };
+    for (orders) |order| {
+        const index = try exact(&order, "target.desktop");
+        try std.testing.expectEqualStrings("target.desktop", order[index].id);
+    }
+    try std.testing.expectError(error.ApplicationAmbiguous, exact(
+        &.{ first, second },
+        "target.desktop",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), try exact(&.{first}, "target.desktop"));
+}
+
+test "escape grammar admits exactly the supported bytes and decodes them" {
+    const spellings = "sntr\\";
+    const decoded = " \n\t\r\\";
+    for ([_]bool{ false, true }) |list| {
+        try std.testing.expectError(error.InvalidEscape, validateEscapes("\\", list));
+        for (0..256) |code| {
+            const byte: u8 = @intCast(code);
+            const input = [_]u8{ '\\', byte };
+            const expected: ?u8 = if (std.mem.indexOfScalar(u8, spellings, byte)) |index|
+                decoded[index]
+            else if (list and byte == ';')
+                ';'
+            else
+                null;
+            if (expected) |value| {
+                try validateEscapes(&input, list);
+                var output: [2]u8 = undefined;
+                var cursor: usize = 0;
+                try std.testing.expectEqualStrings(
+                    &.{value},
+                    decode(&output, &cursor, &input, list),
+                );
+                try std.testing.expectEqual(@as(usize, 1), cursor);
+            } else {
+                try std.testing.expectError(error.InvalidEscape, validateEscapes(&input, list));
+            }
+        }
+    }
+}
+
+test "published applications own copies independent of the borrowed files" {
+    var id = "owned.desktop".*;
+    var bytes = "[Desktop Entry]\nType=Application\nName=Two\\sWords\nExec=app".*;
+    const files = [_]DesktopFile{.{ .root = 0, .id = &id, .bytes = &bytes }};
+    var list = try load(std.testing.allocator, &files, null);
+    defer list.deinit();
+    @memset(&id, 'x');
+    @memset(&bytes, 'y');
+    try std.testing.expectEqual(@as(usize, 1), list.count);
+    try std.testing.expectEqualStrings("owned.desktop", list.slice()[0].id);
+    try std.testing.expectEqualStrings("Two Words", list.slice()[0].name);
+    try std.testing.expectEqualStrings("app", list.slice()[0].exec);
 }

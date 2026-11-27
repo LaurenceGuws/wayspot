@@ -4,6 +4,7 @@
   "minimum_ruleset": 3,
   "include": [
     "build.zig",
+    "src/apps/catalog.zig",
     "src/cli.zig",
     "src/cmd.zig",
     "src/control.zig",
