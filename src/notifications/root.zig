@@ -2511,7 +2511,7 @@ pub const Service = struct {
             try self.dbus_owner.replyError(switch (err) {
                 error.OutOfMemory => .out_of_memory,
                 error.InvalidUtf8 => .invalid_utf8,
-                error.FieldTooLong => .field_too_long,
+                error.FieldTooLong, error.LineTooLong => .field_too_long,
                 error.IdExhausted, error.GenerationExhausted, error.HistoryIdExhausted => .id_exhausted,
                 else => return err,
             });
@@ -2563,9 +2563,15 @@ pub const Service = struct {
 
 // Return to the common event loop after a bounded portion of bus traffic,
 // even if the socket still has more queued messages.
+// zig-audit: acknowledge anytype
+// reason: Native bus and bounded test transcript share exact message ownership.
+// zig-audit: acknowledge anytype
+// reason: Native service and test dispatch transcript share the same intake loop.
 fn intake(bus: anytype, service: anytype) !bool {
     for (0..intake_batch_max) |_| {
-        switch (try bus.next()) {
+        defer bus.releaseMessage();
+        const event = try bus.next();
+        switch (event) {
             .method => |method| try service.dispatch(method),
             .reject => |err| try bus.replyError(err),
             .ignored => {},
@@ -2583,8 +2589,12 @@ test "bounded real intake yields after 64 messages, then drains the remainder" {
         dispatched: usize = 0,
         rejected: usize = 0,
         ignored_first: bool = true,
+        open_turn: bool = false,
+        released: usize = 0,
 
         fn next(self: *@This()) !Event {
+            try std.testing.expect(!self.open_turn);
+            self.open_turn = true;
             if (self.ignored_first) {
                 self.ignored_first = false;
                 return .ignored;
@@ -2593,11 +2603,18 @@ test "bounded real intake yields after 64 messages, then drains the remainder" {
             self.remaining -= 1;
             return if (self.remaining == 1) .{ .reject = .invalid_signature } else .{ .method = .get_capabilities };
         }
+        fn releaseMessage(self: *@This()) void {
+            std.debug.assert(self.open_turn);
+            self.open_turn = false;
+            self.released += 1;
+        }
         fn dispatch(self: *@This(), method: Method) !void {
+            try std.testing.expect(self.open_turn);
             try std.testing.expect(method == .get_capabilities);
             self.dispatched += 1;
         }
         fn replyError(self: *@This(), err: ReplyError) !void {
+            try std.testing.expect(self.open_turn);
             try std.testing.expectEqual(ReplyError.invalid_signature, err);
             self.rejected += 1;
         }
@@ -2606,10 +2623,14 @@ test "bounded real intake yields after 64 messages, then drains the remainder" {
     try std.testing.expect(try intake(&bus, &bus));
     try std.testing.expectEqual(@as(usize, 63), bus.dispatched);
     try std.testing.expectEqual(@as(usize, 2), bus.remaining);
+    try std.testing.expectEqual(@as(usize, 64), bus.released);
+    try std.testing.expect(!bus.open_turn);
     try std.testing.expect(!try intake(&bus, &bus));
     try std.testing.expectEqual(@as(usize, 64), bus.dispatched);
     try std.testing.expectEqual(@as(usize, 1), bus.rejected);
     try std.testing.expectEqual(@as(usize, 0), bus.remaining);
+    try std.testing.expectEqual(@as(usize, 67), bus.released);
+    try std.testing.expect(!bus.open_turn);
 }
 
 // zig-audit: acknowledge anyerror
@@ -2690,7 +2711,7 @@ const Dbus = struct {
     connection: ?*dbus.DBusConnection = null,
     message: ?*dbus.DBusMessage = null,
 
-    pub fn open(native: *Dbus) !void {
+    fn open(native: *Dbus) !void {
         std.debug.assert(native.connection == null);
         std.debug.assert(native.message == null);
 
@@ -2705,7 +2726,7 @@ const Dbus = struct {
         std.debug.assert(dbus.dbus_connection_get_max_message_unix_fds(connection) == 0);
     }
 
-    pub fn own(native: *Dbus) !void {
+    fn own(native: *Dbus) !void {
         const connection = native.connection orelse return error.ConnectionMissing;
         const result = dbus.dbus_bus_request_name(
             connection,
@@ -2720,7 +2741,7 @@ const Dbus = struct {
         }
     }
 
-    pub fn next(native: *Dbus) !Event {
+    fn next(native: *Dbus) !Event {
         std.debug.assert(native.connection != null);
         std.debug.assert(native.message == null);
 
@@ -2729,19 +2750,20 @@ const Dbus = struct {
         const message = dbus.dbus_connection_pop_message(connection) orelse return .idle;
         native.message = message;
 
+        return classifyMessage(message);
+    }
+
+    fn classifyMessage(message: *dbus.DBusMessage) Event {
         if (dbus.dbus_message_is_signal(message, dbus.DBUS_INTERFACE_DBUS, "NameLost") != 0) {
-            const lost = readOneString(message) orelse {
-                native.releaseMessage();
-                return .ignored;
-            };
-            if (std.mem.eql(u8, lost, dbus_name)) return .name_lost;
-            native.releaseMessage();
-            return .ignored;
+            // Directed signals need not satisfy a match rule. Only the bus
+            // daemon's own ownership notification can revoke our bus name.
+            if (dbus.dbus_message_has_sender(message, dbus.DBUS_SERVICE_DBUS) == 0 or
+                dbus.dbus_message_has_path(message, dbus.DBUS_PATH_DBUS) == 0) return .ignored;
+            const lost = readOneString(message) orelse return .ignored;
+            return if (std.mem.eql(u8, lost, dbus_name)) .name_lost else .ignored;
         }
-        if (dbus.dbus_message_get_type(message) != dbus.DBUS_MESSAGE_TYPE_METHOD_CALL) {
-            native.releaseMessage();
+        if (dbus.dbus_message_get_type(message) != dbus.DBUS_MESSAGE_TYPE_METHOD_CALL)
             return .ignored;
-        }
         if (dbus.dbus_message_has_path(message, dbus_path) == 0 or
             dbus.dbus_message_has_interface(message, dbus_interface) == 0)
         {
@@ -2763,27 +2785,24 @@ const Dbus = struct {
         return .{ .reject = .unknown_method };
     }
 
-    pub fn replyCapabilities(native: *Dbus) !void {
-        const reply = dbus.dbus_message_new_method_return(native.message orelse return error.MessageMissing) orelse {
+    fn replyCapabilities(native: *Dbus) !void {
+        const request = native.message orelse return error.MessageMissing;
+        if (dbus.dbus_message_get_no_reply(request) != 0) return;
+        const reply = dbus.dbus_message_new_method_return(request) orelse {
             return error.OutOfMemory;
         };
         defer dbus.dbus_message_unref(reply);
         var root: dbus.DBusMessageIter = undefined;
-        var array: dbus.DBusMessageIter = undefined;
         dbus.dbus_message_iter_init_append(reply, &root);
-        if (dbus.dbus_message_iter_open_container(&root, dbus.DBUS_TYPE_ARRAY, "s", &array) == 0) {
-            return error.OutOfMemory;
-        }
-        if (dbus.dbus_message_iter_close_container(&root, &array) == 0) {
-            dbus.dbus_message_iter_abandon_container(&root, &array);
-            return error.OutOfMemory;
-        }
-        try native.sendReply(reply);
+        try appendEmptyCapabilities(&root);
+        try native.send(reply);
     }
 
-    pub fn replyNotify(native: *Dbus, id: u32) !void {
+    fn replyNotify(native: *Dbus, id: u32) !void {
+        const request = native.message orelse return error.MessageMissing;
+        if (dbus.dbus_message_get_no_reply(request) != 0) return;
         std.debug.assert(id != 0);
-        const reply = dbus.dbus_message_new_method_return(native.message orelse return error.MessageMissing) orelse {
+        const reply = dbus.dbus_message_new_method_return(request) orelse {
             return error.OutOfMemory;
         };
         defer dbus.dbus_message_unref(reply);
@@ -2793,10 +2812,10 @@ const Dbus = struct {
         if (dbus.dbus_message_iter_append_basic(&iter, dbus.DBUS_TYPE_UINT32, &value) == 0) {
             return error.OutOfMemory;
         }
-        try native.sendReply(reply);
+        try native.send(reply);
     }
 
-    pub fn signalClosed(native: *Dbus, id: u32, reason: CloseReason) !void {
+    fn signalClosed(native: *Dbus, id: u32, reason: CloseReason) !void {
         std.debug.assert(id != 0);
         const signal = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "NotificationClosed") orelse {
             return error.OutOfMemory;
@@ -2814,32 +2833,33 @@ const Dbus = struct {
         try native.send(signal);
     }
 
-    pub fn replyClose(native: *Dbus) !void {
-        const reply = dbus.dbus_message_new_method_return(native.message orelse return error.MessageMissing) orelse {
+    fn replyClose(native: *Dbus) !void {
+        const request = native.message orelse return error.MessageMissing;
+        if (dbus.dbus_message_get_no_reply(request) != 0) return;
+        const reply = dbus.dbus_message_new_method_return(request) orelse {
             return error.OutOfMemory;
         };
         defer dbus.dbus_message_unref(reply);
-        try native.sendReply(reply);
+        try native.send(reply);
     }
 
-    pub fn replyServerInformation(native: *Dbus) !void {
-        const reply = dbus.dbus_message_new_method_return(native.message orelse return error.MessageMissing) orelse {
+    fn replyServerInformation(native: *Dbus) !void {
+        const request = native.message orelse return error.MessageMissing;
+        if (dbus.dbus_message_get_no_reply(request) != 0) return;
+        const reply = dbus.dbus_message_new_method_return(request) orelse {
             return error.OutOfMemory;
         };
         defer dbus.dbus_message_unref(reply);
         var iter: dbus.DBusMessageIter = undefined;
         dbus.dbus_message_iter_init_append(reply, &iter);
         const values = [_][*:0]const u8{ "wayspot", "wayspot", "0.1.0", "1.3" };
-        for (values) |value| {
-            var pointer = value;
-            if (dbus.dbus_message_iter_append_basic(&iter, dbus.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0) {
-                return error.OutOfMemory;
-            }
-        }
-        try native.sendReply(reply);
+        for (values) |value| try appendString(&iter, value);
+        try native.send(reply);
     }
 
-    pub fn replyError(native: *Dbus, err: ReplyError) !void {
+    fn replyError(native: *Dbus, err: ReplyError) !void {
+        const request = native.message orelse return error.MessageMissing;
+        if (dbus.dbus_message_get_no_reply(request) != 0) return;
         const error_name: [*:0]const u8, const message: [*:0]const u8 = switch (err) {
             .unknown_method => .{ "org.freedesktop.DBus.Error.UnknownMethod", "Unknown method" },
             .invalid_signature => .{ "org.freedesktop.DBus.Error.InvalidArgs", "Invalid arguments" },
@@ -2847,26 +2867,21 @@ const Dbus = struct {
             else => .{ "org.freedesktop.DBus.Error.LimitsExceeded", "Notification exceeds Wayspot bounds" },
         };
         const reply = dbus.dbus_message_new_error(
-            native.message orelse return error.MessageMissing,
+            request,
             error_name,
             message,
         ) orelse return error.OutOfMemory;
         defer dbus.dbus_message_unref(reply);
-        try native.sendReply(reply);
+        try native.send(reply);
     }
 
-    pub fn close(native: *Dbus) void {
+    fn close(native: *Dbus) void {
         native.releaseMessage();
         if (native.connection) |connection| {
             dbus.dbus_connection_close(connection);
             dbus.dbus_connection_unref(connection);
             native.connection = null;
         }
-    }
-
-    fn sendReply(native: *Dbus, reply: *dbus.DBusMessage) !void {
-        defer native.releaseMessage();
-        try native.send(reply);
     }
 
     fn send(native: *Dbus, message: *dbus.DBusMessage) !void {
@@ -2876,7 +2891,8 @@ const Dbus = struct {
             if (dbus.dbus_connection_has_messages_to_send(connection) == 0) return;
             if (dbus.dbus_connection_read_write(connection, send_wait_milliseconds) == 0) return error.BusLost;
         }
-        return error.SendTimedOut;
+        if (dbus.dbus_connection_has_messages_to_send(connection) != 0)
+            return error.SendTimedOut;
     }
 
     fn releaseMessage(native: *Dbus) void {
@@ -2887,6 +2903,35 @@ const Dbus = struct {
     }
 };
 
+// Construction helpers end before the message is queued or locked.
+fn openContainer(
+    iter: *dbus.DBusMessageIter,
+    kind: c_int,
+    signature: ?[*:0]const u8,
+) !dbus.DBusMessageIter {
+    var child: dbus.DBusMessageIter = undefined;
+    if (dbus.dbus_message_iter_open_container(iter, kind, signature, &child) == 0)
+        return error.OutOfMemory;
+    return child;
+}
+
+fn closeContainer(iter: *dbus.DBusMessageIter, child: *dbus.DBusMessageIter) !void {
+    if (dbus.dbus_message_iter_close_container(iter, child) == 0) return error.OutOfMemory;
+}
+
+fn appendString(iter: *dbus.DBusMessageIter, value: [*:0]const u8) !void {
+    // zig-audit: acknowledge ptr_cast
+    // reason: libdbus copies a C string from the address of its pointer value.
+    if (dbus.dbus_message_iter_append_basic(iter, dbus.DBUS_TYPE_STRING, @ptrCast(&value)) == 0)
+        return error.OutOfMemory;
+}
+
+fn appendEmptyCapabilities(root: *dbus.DBusMessageIter) !void {
+    var array = try openContainer(root, dbus.DBUS_TYPE_ARRAY, "s");
+    errdefer dbus.dbus_message_iter_abandon_container_if_open(root, &array);
+    try closeContainer(root, &array);
+}
+
 fn noArguments(message: *dbus.DBusMessage, method: Method) Event {
     if (dbus.dbus_message_has_signature(message, "") == 0) return .{ .reject = .invalid_signature };
     return .{ .method = method };
@@ -2896,28 +2941,31 @@ fn parseClose(message: *dbus.DBusMessage) Event {
     if (dbus.dbus_message_has_signature(message, "u") == 0) return .{ .reject = .invalid_signature };
     var iter: dbus.DBusMessageIter = undefined;
     if (dbus.dbus_message_iter_init(message, &iter) == 0) return .{ .reject = .invalid_signature };
-    var id: dbus.dbus_uint32_t = 0;
-    dbus.dbus_message_iter_get_basic(&iter, &id);
+    const id = readU32(&iter) orelse return .{ .reject = .invalid_signature };
     return .{ .method = .{ .close = id } };
 }
 
 fn parseNotify(message: *dbus.DBusMessage) Event {
-    if (dbus.dbus_message_has_signature(message, "susssasa{sv}i") == 0) {
-        return .{ .reject = .invalid_signature };
-    }
+    const invalid: Event = .{ .reject = .invalid_signature };
+    if (dbus.dbus_message_has_signature(message, "susssasa{sv}i") == 0) return invalid;
     var iter: dbus.DBusMessageIter = undefined;
-    if (dbus.dbus_message_iter_init(message, &iter) == 0) return .{ .reject = .invalid_signature };
-
-    const app_name = readString(&iter);
-    const replaces_id = readU32(&iter);
-    const app_icon = readString(&iter);
-    const summary = readString(&iter);
-    const body = readString(&iter);
-    const action_error = countActions(&iter);
-    if (action_error) |err| return .{ .reject = err };
-    const hint_error = countHints(&iter);
-    if (hint_error) |err| return .{ .reject = err };
-    const expire_timeout = readI32(&iter);
+    if (dbus.dbus_message_iter_init(message, &iter) == 0) return invalid;
+    const app_name = readString(&iter) orelse return invalid;
+    if (!advanceArg(&iter)) return invalid;
+    const replaces_id = readU32(&iter) orelse return invalid;
+    if (!advanceArg(&iter)) return invalid;
+    const app_icon = readString(&iter) orelse return invalid;
+    if (!advanceArg(&iter)) return invalid;
+    const summary = readString(&iter) orelse return invalid;
+    if (!advanceArg(&iter)) return invalid;
+    const body = readString(&iter) orelse return invalid;
+    if (!advanceArg(&iter)) return invalid;
+    if (countActions(&iter)) |err| return .{ .reject = err };
+    if (!advanceArg(&iter)) return invalid;
+    if (countHints(&iter)) |err| return .{ .reject = err };
+    if (!advanceArg(&iter)) return invalid;
+    const expire_timeout = readI32(&iter) orelse return invalid;
+    if (dbus.dbus_message_iter_has_next(&iter) != 0) return invalid;
     return .{ .method = .{ .notify = .{
         .replaces_id = replaces_id,
         .app_name = app_name,
@@ -2935,62 +2983,77 @@ fn readOneString(message: *dbus.DBusMessage) ?[]const u8 {
     return readString(&iter);
 }
 
-fn readString(iter: *dbus.DBusMessageIter) []const u8 {
-    std.debug.assert(dbus.dbus_message_iter_get_arg_type(iter) == dbus.DBUS_TYPE_STRING);
-    var pointer: [*:0]const u8 = undefined;
+// Scalar reads borrow the current argument. The caller owns advancement.
+fn readString(iter: *dbus.DBusMessageIter) ?[]const u8 {
+    if (dbus.dbus_message_iter_get_arg_type(iter) != dbus.DBUS_TYPE_STRING) return null;
+    var pointer: [*c]const u8 = null;
+    // zig-audit: acknowledge ptr_cast
+    // reason: The checked string argument returns a borrowed C string pointer.
     dbus.dbus_message_iter_get_basic(iter, @ptrCast(&pointer));
-    _ = dbus.dbus_message_iter_next(iter);
-    return std.mem.span(pointer);
+    return if (pointer == null) null else std.mem.span(pointer);
 }
 
-fn readU32(iter: *dbus.DBusMessageIter) u32 {
-    std.debug.assert(dbus.dbus_message_iter_get_arg_type(iter) == dbus.DBUS_TYPE_UINT32);
+fn readU32(iter: *dbus.DBusMessageIter) ?u32 {
+    if (dbus.dbus_message_iter_get_arg_type(iter) != dbus.DBUS_TYPE_UINT32) return null;
     var value: dbus.dbus_uint32_t = 0;
     dbus.dbus_message_iter_get_basic(iter, &value);
-    _ = dbus.dbus_message_iter_next(iter);
     return value;
 }
 
-fn readI32(iter: *dbus.DBusMessageIter) i32 {
-    std.debug.assert(dbus.dbus_message_iter_get_arg_type(iter) == dbus.DBUS_TYPE_INT32);
+fn readI32(iter: *dbus.DBusMessageIter) ?i32 {
+    if (dbus.dbus_message_iter_get_arg_type(iter) != dbus.DBUS_TYPE_INT32) return null;
     var value: dbus.dbus_int32_t = 0;
     dbus.dbus_message_iter_get_basic(iter, &value);
-    _ = dbus.dbus_message_iter_next(iter);
     return value;
+}
+
+fn advanceArg(iter: *dbus.DBusMessageIter) bool {
+    return dbus.dbus_message_iter_next(iter) != 0;
 }
 
 fn countActions(iter: *dbus.DBusMessageIter) ?ReplyError {
-    std.debug.assert(dbus.dbus_message_iter_get_arg_type(iter) == dbus.DBUS_TYPE_ARRAY);
+    if (dbus.dbus_message_iter_get_arg_type(iter) != dbus.DBUS_TYPE_ARRAY or
+        dbus.dbus_message_iter_get_element_type(iter) != dbus.DBUS_TYPE_STRING)
+        return .invalid_signature;
     var actions: dbus.DBusMessageIter = undefined;
     dbus.dbus_message_iter_recurse(iter, &actions);
     var count: usize = 0;
-    while (dbus.dbus_message_iter_get_arg_type(&actions) != dbus.DBUS_TYPE_INVALID) {
-        if (count == 64) return .too_many_actions;
-        const action = readString(&actions);
+    for (0..64) |_| {
+        if (dbus.dbus_message_iter_get_arg_type(&actions) == dbus.DBUS_TYPE_INVALID)
+            break;
+        const action = readString(&actions) orelse return .invalid_signature;
         if (action.len > 256) return .too_many_actions;
         count += 1;
+        if (!advanceArg(&actions)) break;
     }
-    _ = dbus.dbus_message_iter_next(iter);
-    if (count % 2 != 0) return .invalid_signature;
-    return null;
+    if (dbus.dbus_message_iter_get_arg_type(&actions) != dbus.DBUS_TYPE_INVALID)
+        return .too_many_actions;
+    return if (count % 2 != 0) .invalid_signature else null;
 }
 
 fn countHints(iter: *dbus.DBusMessageIter) ?ReplyError {
-    std.debug.assert(dbus.dbus_message_iter_get_arg_type(iter) == dbus.DBUS_TYPE_ARRAY);
+    if (dbus.dbus_message_iter_get_arg_type(iter) != dbus.DBUS_TYPE_ARRAY or
+        dbus.dbus_message_iter_get_element_type(iter) != dbus.DBUS_TYPE_DICT_ENTRY)
+        return .invalid_signature;
     var hints: dbus.DBusMessageIter = undefined;
     dbus.dbus_message_iter_recurse(iter, &hints);
-    var count: usize = 0;
-    while (dbus.dbus_message_iter_get_arg_type(&hints) != dbus.DBUS_TYPE_INVALID) {
-        if (count == 64) return .too_many_hints;
+    for (0..64) |_| {
+        const kind = dbus.dbus_message_iter_get_arg_type(&hints);
+        if (kind == dbus.DBUS_TYPE_INVALID) return null;
+        if (kind != dbus.DBUS_TYPE_DICT_ENTRY) return .invalid_signature;
         var entry: dbus.DBusMessageIter = undefined;
         dbus.dbus_message_iter_recurse(&hints, &entry);
-        const key = readString(&entry);
+        const key = readString(&entry) orelse return .invalid_signature;
         if (key.len > 256) return .too_many_hints;
-        count += 1;
-        _ = dbus.dbus_message_iter_next(&hints);
+        if (!advanceArg(&entry) or
+            dbus.dbus_message_iter_get_arg_type(&entry) != dbus.DBUS_TYPE_VARIANT or
+            dbus.dbus_message_iter_has_next(&entry) != 0) return .invalid_signature;
+        if (!advanceArg(&hints)) return null;
     }
-    _ = dbus.dbus_message_iter_next(iter);
-    return null;
+    return if (dbus.dbus_message_iter_get_arg_type(&hints) == dbus.DBUS_TYPE_INVALID)
+        null
+    else
+        .too_many_hints;
 }
 
 test "action arrays require bounded key label pairs" {
@@ -3029,7 +3092,7 @@ fn fuzzCollections(_: void, smith: *std.testing.Smith) !void {
     for (values[0..count]) |*value| value.* = bytes[0..length];
 
     const actions = try actionError(values[0..count]);
-    if (count > 64 or length > 256) {
+    if (count > 64 or (count != 0 and length > 256)) {
         try std.testing.expectEqual(ReplyError.too_many_actions, actions);
     } else if (count % 2 != 0) {
         try std.testing.expectEqual(ReplyError.invalid_signature, actions);
@@ -3038,7 +3101,7 @@ fn fuzzCollections(_: void, smith: *std.testing.Smith) !void {
     }
 
     const hints = try hintError(values[0..count]);
-    if (count > 64 or length > 256) {
+    if (count > 64 or (count != 0 and length > 256)) {
         try std.testing.expectEqual(ReplyError.too_many_hints, hints);
     } else {
         try std.testing.expectEqual(null, hints);
@@ -3046,74 +3109,60 @@ fn fuzzCollections(_: void, smith: *std.testing.Smith) !void {
 }
 
 fn actionError(actions: []const []const u8) !?ReplyError {
-    const message = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "Test") orelse return error.OutOfMemory;
+    const message = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "Test") orelse
+        return error.OutOfMemory;
     defer dbus.dbus_message_unref(message);
     var root: dbus.DBusMessageIter = undefined;
-    var array: dbus.DBusMessageIter = undefined;
     dbus.dbus_message_iter_init_append(message, &root);
-    if (dbus.dbus_message_iter_open_container(&root, dbus.DBUS_TYPE_ARRAY, "s", &array) == 0) {
-        return error.OutOfMemory;
-    }
-    for (actions) |action| {
-        const terminated = try std.testing.allocator.dupeSentinel(u8, action, 0);
-        defer std.testing.allocator.free(terminated);
-        var pointer: [*:0]const u8 = terminated;
-        if (dbus.dbus_message_iter_append_basic(&array, dbus.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0) {
-            dbus.dbus_message_iter_abandon_container(&root, &array);
-            return error.OutOfMemory;
-        }
-    }
-    if (dbus.dbus_message_iter_close_container(&root, &array) == 0) {
-        dbus.dbus_message_iter_abandon_container(&root, &array);
-        return error.OutOfMemory;
-    }
+    try appendActionsTest(&root, actions);
     var read: dbus.DBusMessageIter = undefined;
-    std.debug.assert(dbus.dbus_message_iter_init(message, &read) != 0);
+    try std.testing.expect(dbus.dbus_message_iter_init(message, &read) != 0);
     return countActions(&read);
 }
 
+fn appendActionsTest(root: *dbus.DBusMessageIter, actions: []const []const u8) !void {
+    var array = try openContainer(root, dbus.DBUS_TYPE_ARRAY, "s");
+    errdefer dbus.dbus_message_iter_abandon_container_if_open(root, &array);
+    for (actions) |action| {
+        const terminated = try std.testing.allocator.dupeSentinel(u8, action, 0);
+        defer std.testing.allocator.free(terminated);
+        try appendString(&array, terminated.ptr);
+    }
+    try closeContainer(root, &array);
+}
+
 fn hintError(keys: []const []const u8) !?ReplyError {
-    const message = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "Test") orelse return error.OutOfMemory;
+    const message = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "Test") orelse
+        return error.OutOfMemory;
     defer dbus.dbus_message_unref(message);
     var root: dbus.DBusMessageIter = undefined;
-    var array: dbus.DBusMessageIter = undefined;
     dbus.dbus_message_iter_init_append(message, &root);
-    if (dbus.dbus_message_iter_open_container(&root, dbus.DBUS_TYPE_ARRAY, "{sv}", &array) == 0) {
-        return error.OutOfMemory;
-    }
-    for (keys) |key| try appendHint(&array, key);
-    if (dbus.dbus_message_iter_close_container(&root, &array) == 0) {
-        dbus.dbus_message_iter_abandon_container(&root, &array);
-        return error.OutOfMemory;
-    }
+    try appendHintsTest(&root, keys);
     var read: dbus.DBusMessageIter = undefined;
-    std.debug.assert(dbus.dbus_message_iter_init(message, &read) != 0);
+    try std.testing.expect(dbus.dbus_message_iter_init(message, &read) != 0);
     return countHints(&read);
+}
+
+fn appendHintsTest(root: *dbus.DBusMessageIter, keys: []const []const u8) !void {
+    var array = try openContainer(root, dbus.DBUS_TYPE_ARRAY, "{sv}");
+    errdefer dbus.dbus_message_iter_abandon_container_if_open(root, &array);
+    for (keys) |key| try appendHint(&array, key);
+    try closeContainer(root, &array);
 }
 
 fn appendHint(array: *dbus.DBusMessageIter, key: []const u8) !void {
     const terminated = try std.testing.allocator.dupeSentinel(u8, key, 0);
     defer std.testing.allocator.free(terminated);
-    var pointer: [*:0]const u8 = terminated;
-    var entry: dbus.DBusMessageIter = undefined;
-    var variant: dbus.DBusMessageIter = undefined;
-    if (dbus.dbus_message_iter_open_container(array, dbus.DBUS_TYPE_DICT_ENTRY, null, &entry) == 0) {
-        return error.OutOfMemory;
-    }
-    if (dbus.dbus_message_iter_append_basic(&entry, dbus.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0 or
-        dbus.dbus_message_iter_open_container(&entry, dbus.DBUS_TYPE_VARIANT, "s", &variant) == 0)
+    var entry = try openContainer(array, dbus.DBUS_TYPE_DICT_ENTRY, null);
+    errdefer dbus.dbus_message_iter_abandon_container_if_open(array, &entry);
+    try appendString(&entry, terminated.ptr);
     {
-        dbus.dbus_message_iter_abandon_container(array, &entry);
-        return error.OutOfMemory;
+        var variant = try openContainer(&entry, dbus.DBUS_TYPE_VARIANT, "s");
+        errdefer dbus.dbus_message_iter_abandon_container_if_open(&entry, &variant);
+        try appendString(&variant, terminated.ptr);
+        try closeContainer(&entry, &variant);
     }
-    if (dbus.dbus_message_iter_append_basic(&variant, dbus.DBUS_TYPE_STRING, @ptrCast(&pointer)) == 0 or
-        dbus.dbus_message_iter_close_container(&entry, &variant) == 0 or
-        dbus.dbus_message_iter_close_container(array, &entry) == 0)
-    {
-        dbus.dbus_message_iter_abandon_container_if_open(&entry, &variant);
-        dbus.dbus_message_iter_abandon_container_if_open(array, &entry);
-        return error.OutOfMemory;
-    }
+    try closeContainer(array, &entry);
 }
 
 fn filledHistoryForTest(allocator: std.mem.Allocator, now: i64) !History {
@@ -3379,4 +3428,177 @@ test "failed history acquisition does not retain the directory lease" {
     defer directory.unlock(io);
     try std.testing.expect(!first.durability.dirty);
     try std.testing.expectEqual(@as(usize, 0), first.history.count);
+}
+
+test "bounded intake retires incoming requests on every exit path" {
+    const Bus = struct {
+        event: Event,
+        fail_next: bool = false,
+        retained: bool = false,
+        releases: usize = 0,
+
+        fn next(self: *@This()) !Event {
+            try std.testing.expect(!self.retained);
+            self.retained = true;
+            if (self.fail_next) return error.ReceiveFailed;
+            return self.event;
+        }
+
+        fn dispatch(self: *@This(), _: Method) !void {
+            try std.testing.expect(self.retained);
+            return error.DispatchFailed;
+        }
+
+        fn replyError(self: *@This(), _: ReplyError) !void {
+            try std.testing.expect(self.retained);
+            return error.ReplyFailed;
+        }
+
+        fn releaseMessage(self: *@This()) void {
+            std.debug.assert(self.retained);
+            self.retained = false;
+            self.releases += 1;
+        }
+    };
+    var receive: Bus = .{ .event = .idle, .fail_next = true };
+    try std.testing.expectError(error.ReceiveFailed, intake(&receive, &receive));
+    try std.testing.expectEqual(@as(usize, 1), receive.releases);
+    try std.testing.expect(!receive.retained);
+    var dispatch: Bus = .{ .event = .{ .method = .get_capabilities } };
+    try std.testing.expectError(error.DispatchFailed, intake(&dispatch, &dispatch));
+    try std.testing.expectEqual(@as(usize, 1), dispatch.releases);
+    try std.testing.expect(!dispatch.retained);
+    var reject: Bus = .{ .event = .{ .reject = .invalid_signature } };
+    try std.testing.expectError(error.ReplyFailed, intake(&reject, &reject));
+    try std.testing.expectEqual(@as(usize, 1), reject.releases);
+    try std.testing.expect(!reject.retained);
+    var lost: Bus = .{ .event = .name_lost };
+    try std.testing.expectError(error.NameLost, intake(&lost, &lost));
+    try std.testing.expectEqual(@as(usize, 1), lost.releases);
+    try std.testing.expect(!lost.retained);
+    var disconnected: Bus = .{ .event = .bus_lost };
+    try std.testing.expectError(error.BusLost, intake(&disconnected, &disconnected));
+    try std.testing.expectEqual(@as(usize, 1), disconnected.releases);
+    try std.testing.expect(!disconnected.retained);
+}
+
+fn nameLostTest(
+    sender: [*:0]const u8,
+    path: [*:0]const u8,
+    name: [*:0]const u8,
+) !*dbus.DBusMessage {
+    const message = dbus.dbus_message_new_signal(
+        path,
+        dbus.DBUS_INTERFACE_DBUS,
+        "NameLost",
+    ) orelse return error.OutOfMemory;
+    errdefer dbus.dbus_message_unref(message);
+    if (dbus.dbus_message_set_sender(message, sender) == 0) return error.OutOfMemory;
+    var iter: dbus.DBusMessageIter = undefined;
+    dbus.dbus_message_iter_init_append(message, &iter);
+    try appendString(&iter, name);
+    return message;
+}
+
+test "only the bus daemon can report loss of the exact notification name" {
+    const cases = [_]struct {
+        sender: [*:0]const u8,
+        path: [*:0]const u8,
+        name: [*:0]const u8,
+        expected: std.meta.Tag(Event),
+    }{
+        .{ .sender = ":1.4", .path = dbus.DBUS_PATH_DBUS, .name = dbus_name, .expected = .ignored },
+        .{
+            .sender = dbus.DBUS_SERVICE_DBUS,
+            .path = "/Other",
+            .name = dbus_name,
+            .expected = .ignored,
+        },
+        .{
+            .sender = dbus.DBUS_SERVICE_DBUS,
+            .path = dbus.DBUS_PATH_DBUS,
+            .name = "org.example.Other",
+            .expected = .ignored,
+        },
+        .{
+            .sender = dbus.DBUS_SERVICE_DBUS,
+            .path = dbus.DBUS_PATH_DBUS,
+            .name = dbus_name,
+            .expected = .name_lost,
+        },
+    };
+    for (cases) |case| {
+        const message = try nameLostTest(case.sender, case.path, case.name);
+        defer dbus.dbus_message_unref(message);
+        try std.testing.expectEqual(case.expected, std.meta.activeTag(Dbus.classifyMessage(message)));
+    }
+}
+
+test "no reply expected keeps request ownership until the intake turn retires it" {
+    const message = dbus.dbus_message_new_method_call(
+        dbus_name,
+        dbus_path,
+        dbus_interface,
+        "Notify",
+    ) orelse return error.OutOfMemory;
+    var bus: Dbus = .{ .message = message };
+    defer bus.close();
+    dbus.dbus_message_set_no_reply(message, 1);
+    // With no connection, any attempted transport would fail. All five
+    // reply constructors must honor the flag without consuming the request.
+    try bus.replyCapabilities();
+    try bus.replyServerInformation();
+    try bus.replyNotify(1);
+    try bus.replyClose();
+    try bus.replyError(.invalid_signature);
+    try std.testing.expectEqual(message, bus.message.?);
+    bus.releaseMessage();
+    try std.testing.expect(bus.message == null);
+}
+
+test "escaped line overflow rejects admission without displacing the active generation" {
+    const allocator = std.testing.allocator;
+    var owner = testOwner(allocator);
+    defer owner.history.deinit(allocator);
+    var first = try owner.acceptAt(sampleRequestValue(0, "first"), 1);
+    defer first.presentation.deinit(allocator);
+    owner.durability.dirty = false;
+    const old_active = owner.history.active;
+    const old_next = owner.next_generation;
+    var quotes: [body_capacity]u8 = @splat('"');
+    var request = sampleRequestValue(first.presentation.id, "too much encoded text");
+    request.body = &quotes;
+    try std.testing.expectError(error.LineTooLong, owner.acceptAt(request, 2));
+    try std.testing.expectEqual(old_active, owner.history.active);
+    try std.testing.expectEqual(old_next, owner.next_generation);
+    try std.testing.expectEqual(@as(usize, 1), owner.history.count);
+    try std.testing.expectEqualStrings("first", owner.history.records[0].?.summary);
+    try std.testing.expect(!owner.durability.dirty);
+}
+
+test "typed collection decoders accept exact limits and reject wrong element shapes" {
+    var long: [256]u8 = @splat('x');
+    var values: [64][]const u8 = @splat(&long);
+    try std.testing.expectEqual(null, try actionError(&values));
+    try std.testing.expectEqual(null, try hintError(&values));
+    try std.testing.expectEqual(null, try actionError(&.{}));
+    try std.testing.expectEqual(null, try hintError(&.{}));
+
+    const message = dbus.dbus_message_new_signal(dbus_path, dbus_interface, "Test") orelse
+        return error.OutOfMemory;
+    defer dbus.dbus_message_unref(message);
+    var root: dbus.DBusMessageIter = undefined;
+    dbus.dbus_message_iter_init_append(message, &root);
+    {
+        var array = try openContainer(&root, dbus.DBUS_TYPE_ARRAY, "u");
+        errdefer dbus.dbus_message_iter_abandon_container_if_open(&root, &array);
+        try closeContainer(&root, &array);
+    }
+    var iter: dbus.DBusMessageIter = undefined;
+    try std.testing.expect(dbus.dbus_message_iter_init(message, &iter) != 0);
+    try std.testing.expectEqual(ReplyError.invalid_signature, countActions(&iter));
+    try std.testing.expectEqual(ReplyError.invalid_signature, countHints(&iter));
+    try std.testing.expectEqual(@as(?[]const u8, null), readString(&iter));
+    try std.testing.expectEqual(@as(?u32, null), readU32(&iter));
+    try std.testing.expectEqual(@as(?i32, null), readI32(&iter));
 }
