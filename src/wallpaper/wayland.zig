@@ -63,10 +63,21 @@ const Source = struct {
     rotate_length: u8 = 0,
     pub fn open(source: *Source, path: []const u8) !void {
         std.debug.assert(source.file == null);
-        source.file = if (std.fs.path.isAbsolute(path))
-            try std.Io.Dir.openFileAbsolute(source.io, path, .{})
-        else
-            try std.Io.Dir.cwd().openFile(source.io, path, .{});
+        // A catalogue path can change after discovery. Refuse known special
+        // files and symlinks before opening, then use a nonblocking, nofollow
+        // open so replacement with a FIFO cannot wait for a writer.
+        const cwd = std.Io.Dir.cwd();
+        const known = try cwd.statFile(source.io, path, .{ .follow_symlinks = false });
+        if (known.kind != .file) return error.ImageNotRegularFile;
+        const fd = try std.posix.openat(cwd.handle, path, .{
+            .ACCMODE = .RDONLY,
+            .CLOEXEC = true,
+            .NONBLOCK = true,
+            .NOFOLLOW = true,
+            .NOCTTY = true,
+        }, 0);
+        // readEncodedImage stats this actual descriptor before reading.
+        source.file = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     }
 
     pub fn stat(source: *Source) !struct { kind: std.Io.File.Kind, size: u64 } {
@@ -230,7 +241,7 @@ const Source = struct {
             @intCast(image.width),
             @intCast(image.height),
             sdl.SDL_PIXELFORMAT_XRGB8888,
-            @constCast(image.pixels.ptr),
+            image.pixels.ptr,
             @intCast(image.pitch),
         ) orelse return error.ImageSurfaceFailed;
         defer sdl.SDL_DestroySurface(source);
@@ -412,7 +423,7 @@ fn decodeJpeg(allocator: std.mem.Allocator, bytes: []const u8) !wallpaper.Image 
         &height,
     ) orelse return error.ImageDecodeFailed;
     defer wayspot_jpeg_free(decoded);
-    const count = @as(usize, width) * height;
+    const count = try wallpaper.surfacePixelCount(width, height);
     const pixels = try allocator.alloc(u32, count);
     errdefer allocator.free(pixels);
     const rgba = decoded[0 .. count * 4];
@@ -453,7 +464,8 @@ test "source PNG decode and linear cover scaling" {
         "\x00\x00\x00\x0dIDAT\x78\x9c\x63\xf8\xcf\xc0\xd0\x00\x00\x04\x81\x01\x80\x2c\x55\xce\xb0" ++
         "\x00\x00\x00\x00IEND\xae\x42\x60\x82";
     var source = Source{ .io = std.testing.io };
-    var image = try source.decode(std.testing.allocator, .png, png);
+    const encoded: wallpaper.EncodedImage = .{ .format = .png, .bytes = png };
+    var image = try wallpaper.decodeImage(&source, std.testing.allocator, &encoded);
     defer image.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
@@ -467,13 +479,18 @@ test "source PNG decode and linear cover scaling" {
 test "source malformed PNG publishes no image" {
     var png: [24]u8 = @splat(0);
     @memcpy(png[0..8], "\x89PNG\r\n\x1a\n");
+    std.mem.writeInt(u32, png[8..12], 13, .big);
     @memcpy(png[12..16], "IHDR");
     std.mem.writeInt(u32, png[16..20], 1, .big);
     std.mem.writeInt(u32, png[20..24], 1, .big);
     var source = Source{ .io = std.testing.io };
     try std.testing.expectError(
         error.ImageDecodeFailed,
-        source.decode(std.testing.allocator, .png, &png),
+        wallpaper.decodeImage(
+            &source,
+            std.testing.allocator,
+            &.{ .format = .png, .bytes = &png },
+        ),
     );
 }
 
@@ -487,7 +504,8 @@ test "source JPEG memory boundary decodes and frees one bounded image" {
     var bytes: [285]u8 = undefined;
     try std.base64.standard.Decoder.decode(&bytes, encoded);
     var source = Source{ .io = std.testing.io };
-    var image = try source.decode(std.testing.allocator, .jpeg, &bytes);
+    const image_bytes: wallpaper.EncodedImage = .{ .format = .jpeg, .bytes = &bytes };
+    var image = try wallpaper.decodeImage(&source, std.testing.allocator, &image_bytes);
     defer image.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
@@ -614,7 +632,8 @@ fn fuzzImage(format: wallpaper.ImageFormat, smith: *std.testing.Smith) !void {
     var bytes: [4096]u8 = undefined;
     const input = bytes[0..smith.slice(&bytes)];
     var source = Source{ .io = std.Io.failing };
-    if (source.decode(std.testing.allocator, format, input)) |value| {
+    const encoded: wallpaper.EncodedImage = .{ .format = format, .bytes = input };
+    if (wallpaper.decodeImage(&source, std.testing.allocator, &encoded)) |value| {
         var image = value;
         defer image.deinit(std.testing.allocator);
         try std.testing.expect(image.width > 0 and image.width <= wallpaper.image_side_capacity);
@@ -1398,4 +1417,48 @@ test "all buffer preparation precedes every commit and failures discard only can
     try publishBuffers(usize, &success, &source, std.testing.allocator, &image, plan);
     try std.testing.expectEqual(@as(usize, 3), success.committed);
     try std.testing.expectEqual(@as(usize, 0), success.discarded);
+}
+
+test "native image open rejects paths replaced after catalogue discovery" {
+    const io = std.testing.io;
+    var fixture = std.testing.tmpDir(.{});
+    defer fixture.cleanup();
+    const linux = std.os.linux;
+    var root_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fixture.dir.realPath(io, &root_buf)];
+    try fixture.dir.writeFile(io, .{ .sub_path = "first.png", .data = "fixture" });
+    try fixture.dir.writeFile(io, .{ .sub_path = "second.png", .data = "second" });
+    var catalog = try discoverCatalog(io, std.testing.allocator, root);
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(usize, 2), catalog.paths.items.len);
+    const path = catalog.paths.items[1];
+    var source: Source = .{ .io = io };
+
+    try fixture.dir.deleteFile(io, "second.png");
+    try std.testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.mknodat(fixture.dir.handle, "second.png", linux.S.IFIFO | 0o600, 0)),
+    );
+    try std.testing.expectError(error.ImageNotRegularFile, source.open(path));
+    try std.testing.expect(source.file == null);
+    try fixture.dir.deleteFile(io, "second.png");
+    try fixture.dir.symLink(io, "first.png", "second.png", .{});
+    try std.testing.expectError(error.ImageNotRegularFile, source.open(path));
+    try std.testing.expect(source.file == null);
+    try fixture.dir.deleteFile(io, "second.png");
+    try fixture.dir.writeFile(io, .{ .sub_path = "second.png", .data = "replacement" });
+    try source.open(path);
+    defer source.close();
+    const stat = try source.stat();
+    try std.testing.expectEqual(std.Io.File.Kind.file, stat.kind);
+    var data: [11]u8 = undefined;
+    try std.testing.expectEqual(data.len, try source.read(&data));
+    try std.testing.expectEqualStrings("replacement", &data);
+
+    var failing: Source = .{ .io = std.Io.failing };
+    if (failing.open(path)) |_| {
+        failing.close();
+        return error.ExpectedOpenFailure;
+    } else |_| {}
+    try std.testing.expect(failing.file == null);
 }

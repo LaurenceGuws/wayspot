@@ -9,11 +9,13 @@ pub const monitor_pixel_capacity = 33_177_600;
 /// Maximum physical pixels across one publication round.
 pub const round_pixel_capacity = 67_108_864;
 const image_path_capacity = 4095;
-pub const image_file_capacity = 64 * 1024 * 1024;
+const image_file_capacity = 64 * 1024 * 1024;
 const catalog_file_capacity = 16 * 1024;
 const catalog_entry_capacity = 32 * 1024;
 const catalog_path_capacity = 1024;
+/// Maximum width or height admitted by the native image decoders.
 pub const image_side_capacity = 16_384;
+/// Maximum decoded pixels before a cover buffer is constructed.
 pub const image_pixel_capacity = 67_108_864;
 /// The resident attempts one automatic rotation per hour.
 pub const rotation_interval_milliseconds: u64 = 60 * 60 * 1000;
@@ -118,12 +120,14 @@ pub fn collectCatalog(source: anytype, allocator: std.mem.Allocator, root_path: 
     return catalog;
 }
 
+/// Owns a tightly pitched XRGB8888 pixel allocation.
 pub const Image = struct {
     width: u32,
     height: u32,
     pitch: u32,
     pixels: []u32,
 
+    /// Retires pixels with the allocator that supplied the image.
     pub fn deinit(image: *Image, allocator: std.mem.Allocator) void {
         allocator.free(image.pixels);
         image.* = undefined;
@@ -135,14 +139,16 @@ pub const Image = struct {
 /// Decode only for a publication; retain the encoded bytes between rotations.
 pub const EncodedImage = struct {
     format: ImageFormat,
-    bytes: []u8,
+    bytes: []const u8,
 
+    /// Retires the owned encoded bytes with their original allocator.
     pub fn deinit(image: *EncodedImage, allocator: std.mem.Allocator) void {
         allocator.free(image.bytes);
         image.* = undefined;
     }
 };
 
+/// Centered source rectangle in physical pixels, before scaling.
 pub const Crop = struct { x: u32, y: u32, width: u32, height: u32 };
 
 /// A candidate has independent ownership until all requested buffers are prepared.
@@ -150,11 +156,6 @@ pub const Candidate = struct {
     encoded: EncodedImage,
     image: Image,
     index: u16,
-
-    pub fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
-        self.image.deinit(allocator);
-        self.encoded.deinit(allocator);
-    }
 };
 
 /// Selects a usable alternative without changing the published image identity.
@@ -169,12 +170,12 @@ pub fn choose(source: anytype, allocator: std.mem.Allocator, catalog: *Catalog) 
         if (catalog.published == index or attempted[index]) continue;
         attempted[index] = true;
         var encoded = readEncodedImage(source, allocator, path) catch |err| {
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or err == error.Canceled) return err;
             continue;
         };
         const image = decodeImage(source, allocator, &encoded) catch |err| {
             encoded.deinit(allocator);
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or err == error.Canceled) return err;
             continue;
         };
         return .{ .encoded = encoded, .image = image, .index = index };
@@ -187,32 +188,38 @@ pub fn choose(source: anytype, allocator: std.mem.Allocator, catalog: *Catalog) 
 pub const Schedule = struct {
     deadline: ?u64 = null,
 
+    /// Establishes one checked monotonic hourly deadline from now.
     pub fn advance(self: *Schedule, now: u64) !void {
         self.deadline = try std.math.add(u64, now, rotation_interval_milliseconds);
     }
 
+    /// Success or an automatic attempt advances the deadline; direct refusal does not.
     pub fn attempted(self: *Schedule, now: u64, direct: bool, success: bool) !void {
         if (success or !direct) try self.advance(now);
     }
 
+    /// Whether an admitted output set has reached the scheduled deadline.
     pub fn due(self: Schedule, now: u64, ready: bool) bool {
         return ready and if (self.deadline) |end| now >= end else false;
     }
 
+    /// Remaining milliseconds until rotation, or null without ready outputs.
     pub fn wake(self: Schedule, now: u64, ready: bool) ?u64 {
         if (!ready) return null;
         return if (self.deadline) |end| end -| now else null;
     }
 };
 
-pub fn loadImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !Image {
+fn loadImage(source: *ImageTranscript, allocator: std.mem.Allocator, path: []const u8) !Image {
     var encoded = try readEncodedImage(source, allocator, path);
     defer encoded.deinit(allocator);
     return decodeImage(source, allocator, &encoded);
 }
 
-/// Read once so the resident can survive changes to the image directory.
-pub fn readEncodedImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !EncodedImage {
+// Read once so the resident can survive changes to the image directory.
+// zig-audit: acknowledge anytype
+// reason: Native file I/O and strict image transcripts share exact open/read/close ownership.
+fn readEncodedImage(source: anytype, allocator: std.mem.Allocator, path: []const u8) !EncodedImage {
     try validateImagePath(path);
     const format = imageFormat(path) orelse return error.ImageFormatUnsupported;
     try source.open(path);
@@ -228,7 +235,10 @@ pub fn readEncodedImage(source: anytype, allocator: std.mem.Allocator, path: []c
 
 /// Decode only while constructing surfaces; validate decoded dimensions against
 /// the PNG header and our bounded image contract before exposing any pixels.
+// zig-audit: acknowledge anytype
+// reason: Native decode and deterministic decoder failures share validation and ownership.
 pub fn decodeImage(source: anytype, allocator: std.mem.Allocator, encoded: *const EncodedImage) !Image {
+    if (encoded.bytes.len > image_file_capacity) return error.ImageFileTooLarge;
     const dimensions = if (encoded.format == .png) try inspectPng(encoded.bytes) else null;
     var image = try source.decode(allocator, encoded.format, encoded.bytes);
     errdefer image.deinit(allocator);
@@ -247,7 +257,10 @@ fn imageFormat(path: []const u8) ?ImageFormat {
     return null;
 }
 
+/// Constructs one owned, centered cover buffer, leaving source pixels unchanged.
 pub fn coverImage(
+    // zig-audit: acknowledge anytype
+    // reason: Native scaler and failure transcript share bounded allocation and crop policy.
     source: anytype,
     allocator: std.mem.Allocator,
     image: *const Image,
@@ -255,17 +268,22 @@ pub fn coverImage(
     height: u32,
 ) !Image {
     try validateImage(image);
-    const crop = try coverCrop(image.width, image.height, width, height);
     const count = try surfacePixelCount(width, height);
+    const crop = cropForExtents(image.width, image.height, width, height);
     const pixels = try allocator.alloc(u32, count);
     errdefer allocator.free(pixels);
     try source.scale(image, crop, width, height, pixels);
     return .{ .width = width, .height = height, .pitch = width * 4, .pixels = pixels };
 }
 
-pub fn coverCrop(source_width: u32, source_height: u32, width: u32, height: u32) !Crop {
-    _ = try surfacePixelCount(source_width, source_height);
-    _ = try surfacePixelCount(width, height);
+fn coverCrop(source_width: u32, source_height: u32, width: u32, height: u32) !Crop {
+    try validateDimensions(source_width, source_height);
+    try validateDimensions(width, height);
+    return cropForExtents(source_width, source_height, width, height);
+}
+
+fn cropForExtents(source_width: u32, source_height: u32, width: u32, height: u32) Crop {
+    std.debug.assert(source_width > 0 and source_height > 0 and width > 0 and height > 0);
     var crop_width = source_width;
     var crop_height = source_height;
     const source_ratio = @as(u64, source_width) * height;
@@ -297,23 +315,29 @@ fn validateImage(image: *const Image) !void {
     if (image.pixels.len != count) return error.ImagePixelsInvalid;
 }
 
+/// Validates the shared image extent bounds and returns its exact pixel count.
 pub fn surfacePixelCount(width: u32, height: u32) !usize {
+    try validateDimensions(width, height);
+    return @intCast(@as(u64, width) * height);
+}
+
+fn validateDimensions(width: u32, height: u32) !void {
     if (width == 0 or height == 0) return error.ImageDimensionsZero;
     if (width > image_side_capacity or height > image_side_capacity) return error.ImageDimensionsTooLarge;
     const count = @as(u64, width) * height;
     if (count > image_pixel_capacity) return error.ImagePixelsTooMany;
-    return @intCast(count);
 }
 
 fn inspectPng(bytes: []const u8) !struct { width: u32, height: u32 } {
     if (bytes.len < 24 or !std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") or
+        std.mem.readInt(u32, bytes[8..12], .big) != 13 or
         !std.mem.eql(u8, bytes[12..16], "IHDR"))
     {
         return error.ImagePngInvalid;
     }
     const width = std.mem.readInt(u32, bytes[16..20], .big);
     const height = std.mem.readInt(u32, bytes[20..24], .big);
-    _ = try surfacePixelCount(width, height);
+    try validateDimensions(width, height);
     return .{ .width = width, .height = height };
 }
 
@@ -321,6 +345,7 @@ const FileStat = struct { kind: std.Io.File.Kind, size: u64 };
 
 const ImageStep = union(enum) {
     open: bool,
+    open_canceled,
     stat: ?FileStat,
     read: enum { complete, short, fail },
     close,
@@ -330,6 +355,7 @@ const ImageStep = union(enum) {
         dimensions_failed,
         format_failed,
         convert_failed,
+        canceled,
     },
     scale: bool,
 };
@@ -338,10 +364,12 @@ const ImageTranscript = struct {
     steps: []const ImageStep,
     index: usize = 0,
     opened: bool = false,
+    close_mismatch: bool = false,
 
     fn open(transcript: *ImageTranscript, _: []const u8) !void {
         const success = switch (try transcript.next()) {
             .open => |value| value,
+            .open_canceled => return error.Canceled,
             else => return error.ImageTranscriptMismatch,
         };
         if (!success) return error.ImageOpenFailed;
@@ -364,7 +392,7 @@ const ImageTranscript = struct {
                     pngHeader(bytes, 4, 3);
                     break :blk bytes.len;
                 },
-                .short => bytes.len - 1,
+                .short => bytes.len -| 1,
                 .fail => error.ImageReadFailed,
             },
             else => error.ImageTranscriptMismatch,
@@ -372,9 +400,16 @@ const ImageTranscript = struct {
     }
 
     fn close(transcript: *ImageTranscript) void {
-        std.debug.assert(transcript.opened);
-        std.debug.assert((transcript.next() catch unreachable) == .close);
-        transcript.opened = false;
+        defer transcript.opened = false;
+        if (!transcript.opened) {
+            transcript.close_mismatch = true;
+            return;
+        }
+        const step = transcript.next() catch {
+            transcript.close_mismatch = true;
+            return;
+        };
+        if (step != .close) transcript.close_mismatch = true;
     }
 
     fn decode(transcript: *ImageTranscript, allocator: std.mem.Allocator, _: ImageFormat, _: []const u8) !Image {
@@ -386,6 +421,7 @@ const ImageTranscript = struct {
                 .dimensions_failed => return error.ImageDimensionsTooLarge,
                 .format_failed => return error.ImageFormatInvalid,
                 .convert_failed => return error.ImageConvertFailed,
+                .canceled => return error.Canceled,
             },
             else => return error.ImageTranscriptMismatch,
         };
@@ -421,6 +457,7 @@ const ImageTranscript = struct {
     fn done(transcript: *const ImageTranscript) !void {
         try std.testing.expectEqual(transcript.steps.len, transcript.index);
         try std.testing.expect(!transcript.opened);
+        try std.testing.expect(!transcript.close_mismatch);
     }
 
     fn next(transcript: *ImageTranscript) !ImageStep {
@@ -670,7 +707,18 @@ test "catalog exact entry file and path bounds accept then reject without partia
 }
 
 test "image file failures close exactly once before decode" {
-    const histories = [_]struct { expected: anyerror, steps: []const ImageStep }{
+    const histories = [_]struct {
+        expected: error{
+            ImageOpenFailed,
+            ImageStatFailed,
+            ImageNotRegularFile,
+            ImageFileTooLarge,
+            ImageReadIncomplete,
+            ImageReadFailed,
+            ImageDecodeFailed,
+        },
+        steps: []const ImageStep,
+    }{
         .{ .expected = error.ImageOpenFailed, .steps = &.{.{ .open = false }} },
         .{ .expected = error.ImageStatFailed, .steps = &.{ .{ .open = true }, .{ .stat = null }, .close } },
         .{
@@ -772,7 +820,15 @@ test "image path dimensions crop and allocation endpoints are exact" {
 }
 
 test "decode dimension format convert and scale failures publish no pixels" {
-    const failures = [_]struct { expected: anyerror, result: ImageStep }{
+    const failures = [_]struct {
+        expected: error{
+            ImageDecodeFailed,
+            ImageDimensionsTooLarge,
+            ImageFormatInvalid,
+            ImageConvertFailed,
+        },
+        result: ImageStep,
+    }{
         .{ .expected = error.ImageDecodeFailed, .result = .{ .decode = .failed } },
         .{ .expected = error.ImageDimensionsTooLarge, .result = .{ .decode = .dimensions_failed } },
         .{ .expected = error.ImageFormatInvalid, .result = .{ .decode = .format_failed } },
@@ -854,6 +910,7 @@ test "Smith crop arithmetic and PNG headers remain bounded" {
 fn pngHeader(bytes: []u8, width: u32, height: u32) void {
     @memset(bytes, 0);
     @memcpy(bytes[0..8], "\x89PNG\r\n\x1a\n");
+    std.mem.writeInt(u32, bytes[8..12], 13, .big);
     @memcpy(bytes[12..16], "IHDR");
     std.mem.writeInt(u32, bytes[16..20], width, .big);
     std.mem.writeInt(u32, bytes[20..24], height, .big);
@@ -902,4 +959,90 @@ test "catalogue allocation failure transfers path ownership exactly once" {
         catalogAllocationTest,
         .{},
     );
+}
+
+test "canceled image selection does not try another candidate or change publication" {
+    var catalog: Catalog = .{ .allocator = std.testing.allocator, .prng = .init(7) };
+    defer catalog.deinit();
+    for ([_][]const u8{ "/first.png", "/second.png", "/third.png" }) |path| {
+        const owned = try catalog.allocator.dupe(u8, path);
+        errdefer catalog.allocator.free(owned);
+        try catalog.paths.append(catalog.allocator, owned);
+    }
+    try catalog.order.appendSlice(catalog.allocator, &.{ 0, 1, 2 });
+    catalog.published = 0;
+    var open_cancel: ImageTranscript = .{ .steps = &.{.open_canceled} };
+    try std.testing.expectError(
+        error.Canceled,
+        choose(&open_cancel, std.testing.allocator, &catalog),
+    );
+    try open_cancel.done();
+    try std.testing.expectEqual(@as(?u16, 0), catalog.published);
+    try std.testing.expectEqual(@as(usize, 2), catalog.cursor);
+
+    var decode_cancel: ImageTranscript = .{ .steps = &.{
+        .{ .open = true },
+        .{ .stat = .{ .kind = .file, .size = 24 } },
+        .{ .read = .complete },
+        .close,
+        .{ .decode = .canceled },
+    } };
+    try std.testing.expectError(
+        error.Canceled,
+        choose(&decode_cancel, std.testing.allocator, &catalog),
+    );
+    try decode_cancel.done();
+    try std.testing.expectEqual(@as(?u16, 0), catalog.published);
+    try std.testing.expectEqual(@as(usize, 3), catalog.cursor);
+}
+
+test "image transcript detects missing cleanup even with safety disabled" {
+    var transcript: ImageTranscript = .{ .steps = &.{
+        .{ .open = true },
+        .{ .stat = null },
+    } };
+    try std.testing.expectError(
+        error.ImageStatFailed,
+        loadImage(&transcript, std.testing.allocator, "wallpaper.png"),
+    );
+    try std.testing.expect(!transcript.opened);
+    try std.testing.expect(transcript.close_mismatch);
+}
+
+test "PNG preflight rejects invalid header and oversized dimensions before decode" {
+    var bytes: [24]u8 = undefined;
+    pngHeader(&bytes, 4, 3);
+    const encoded: EncodedImage = .{ .format = .png, .bytes = &bytes };
+    var transcript: ImageTranscript = .{ .steps = &.{} };
+    std.mem.writeInt(u32, bytes[8..12], 0, .big);
+    try std.testing.expectError(
+        error.ImagePngInvalid,
+        decodeImage(&transcript, std.testing.allocator, &encoded),
+    );
+    pngHeader(&bytes, image_side_capacity + 1, 1);
+    try std.testing.expectError(
+        error.ImageDimensionsTooLarge,
+        decodeImage(&transcript, std.testing.allocator, &encoded),
+    );
+    pngHeader(&bytes, 8192, 8193);
+    try std.testing.expectError(
+        error.ImagePixelsTooMany,
+        decodeImage(&transcript, std.testing.allocator, &encoded),
+    );
+    try transcript.done();
+}
+
+test "encoded byte cap is checked before either native decoder" {
+    const allocator = std.testing.allocator;
+    const bytes = try allocator.alloc(u8, image_file_capacity + 1);
+    defer allocator.free(bytes);
+    var transcript: ImageTranscript = .{ .steps = &.{} };
+    for ([_]ImageFormat{ .png, .jpeg }) |format| {
+        const encoded: EncodedImage = .{ .format = format, .bytes = bytes };
+        try std.testing.expectError(
+            error.ImageFileTooLarge,
+            decodeImage(&transcript, allocator, &encoded),
+        );
+    }
+    try transcript.done();
 }
