@@ -631,7 +631,7 @@ test "abstract rotation endpoint is exact single-instance kernel state" {
     try std.testing.expectError(error.RotationNameInUse, duplicate.openRotation(&signature));
     var requester = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, &signature });
     while (true) {
-        const ready = try wait(&resident, null, -1, 100);
+        const ready = try waitRotationTest(&resident, -1, 100);
         if (ready.rotate and try resident.receiveRotation()) break;
     }
     resident.replyRotation(true);
@@ -650,14 +650,14 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
     defer closeFd(client);
     const file: std.Io.File = .{ .handle = client, .flags = .{ .nonblocking = true } };
     try file.writeStreamingAll(std.testing.io, "rot");
-    while (!(try wait(&resident, null, -1, 100)).rotate) {}
+    while (!(try waitRotationTest(&resident, -1, 100)).rotate) {}
     try std.testing.expect(!try resident.receiveRotation());
     try file.writeStreamingAll(std.testing.io, "ate\n");
-    while (!(try wait(&resident, null, -1, 100)).rotate) {}
+    while (!(try waitRotationTest(&resident, -1, 100)).rotate) {}
     try std.testing.expect(try resident.receiveRotation());
 
     var busy = try std.testing.io.concurrent(requestRotation, .{ std.testing.io, signature });
-    while (!(try wait(&resident, null, -1, 100)).rotate) {}
+    while (!(try waitRotationTest(&resident, -1, 100)).rotate) {}
     resident.rejectBusy();
     if (busy.await(std.testing.io)) |_| return error.BusyRequestAccepted else |err| {
         try std.testing.expect(err == error.RotationRejected or err == error.RotationSocketFailed);
@@ -666,10 +666,10 @@ test "partial request client HUP busy peer and closed fd ownership are exact" {
 
     const disconnected = try connectRotationTest(signature);
     closeFd(disconnected);
-    while (!(try wait(&resident, null, -1, 100)).rotate) {}
+    while (!(try waitRotationTest(&resident, -1, 100)).rotate) {}
     try std.testing.expectError(error.RotationRequestIncomplete, resident.receiveRotation());
     resident.replyRotation(false);
-    const ready = try wait(&resident, null, -1, 0);
+    const ready = try waitRotationTest(&resident, -1, 0);
     try std.testing.expect(!ready.rotate);
 }
 
@@ -965,7 +965,7 @@ const Display = struct {
     }
 
     fn publish(self: *Display, source: *Source, allocator: std.mem.Allocator, image: *const wallpaper.Image, pending: Plan, stop_fd: std.posix.fd_t) !void {
-        try publishBuffers(*wl.wl_buffer, self, source, allocator, image, pending);
+        try publishBuffers(*wl.wl_buffer, self, source, allocator, image, pending, stop_fd);
         try flush(source, self.connection.?, stop_fd);
         if (pending.count != 0) std.log.info("wallpaper published {d} output surfaces", .{self.publishedCount()});
     }
@@ -998,12 +998,8 @@ const Display = struct {
 
     fn createBuffer(self: *Display, io: std.Io, pixels: *const wallpaper.Image) !*wl.wl_buffer {
         const length = pixels.pixels.len * @sizeOf(u32);
-        const fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
-        defer _ = std.posix.system.close(fd);
-        try (std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } }).setLength(io, length);
-        const mapping = try std.posix.mmap(null, length, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
-        defer std.posix.munmap(mapping);
-        @memcpy(mapping[0..length], std.mem.sliceAsBytes(pixels.pixels));
+        const fd = try createBacking(io, std.mem.sliceAsBytes(pixels.pixels));
+        defer closeFd(fd);
         const pool = wl.wl_shm_create_pool(self.shm.?, fd, @intCast(length)) orelse return error.SurfacePoolFailed;
         defer wl.wl_shm_pool_destroy(pool);
         const buffer = wl.wl_shm_pool_create_buffer(pool, 0, @intCast(pixels.width), @intCast(pixels.height), @intCast(pixels.pitch), wl.WL_SHM_FORMAT_XRGB8888) orelse return error.SurfaceBufferFailed;
@@ -1013,20 +1009,63 @@ const Display = struct {
     }
 };
 
+// Write through the descriptor rather than faulting a sparse shared mapping.
+// The kernel reports backing allocation failure as an ordinary write error;
+// no writable mapping or partially populated buffer escapes this owner.
+fn createBacking(io: std.Io, bytes: []const u8) !std.posix.fd_t {
+    std.debug.assert(bytes.len > 0);
+    const fd = try std.posix.memfd_create("wayspot-wallpaper", std.os.linux.MFD.CLOEXEC);
+    errdefer closeFd(fd);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try writeBacking(file, io, bytes);
+    return fd;
+}
+
+fn writeBacking(file: std.Io.File, io: std.Io, bytes: []const u8) !void {
+    var written: usize = 0;
+    // Positive progress bounds the number of writes by the byte extent.
+    while (written < bytes.len) {
+        const count = try file.writePositional(io, &.{bytes[written..]}, written);
+        if (count == 0) return error.SurfaceBackingWriteIncomplete;
+        std.debug.assert(count <= bytes.len - written);
+        written += count;
+    }
+}
+
 // Prepare every required immutable buffer before touching any displayed
 // content. Failed allocation/scale/buffer creation retires only candidates.
 // The same bounded transaction is exercised by the failure-injection test.
-fn publishBuffers(comptime Buffer: type, destination: anytype, source: anytype, allocator: std.mem.Allocator, image: *const wallpaper.Image, plan: Display.Plan) !void {
+fn publishBuffers(
+    comptime Buffer: type,
+    // zig-audit: acknowledge anytype
+    // reason: Native proxy owner and deterministic buffer target share preparation and commit.
+    destination: anytype,
+    source: *Source,
+    allocator: std.mem.Allocator,
+    image: *const wallpaper.Image,
+    plan: Display.Plan,
+    stop_fd: std.posix.fd_t,
+) !void {
     var buffers: [wallpaper.monitor_capacity]?Buffer = @splat(null);
     errdefer for (&buffers) |*buffer| {
         if (buffer.*) |value| destination.discardBuffer(value);
     };
     for (plan.targets, 0..) |target, index| {
         const geometry = target orelse continue;
-        var pixels = try wallpaper.coverImage(source, allocator, image, geometry.pixels.width, geometry.pixels.height);
+        try checkStop(source.io, stop_fd);
+        var pixels = try wallpaper.coverImage(
+            source,
+            allocator,
+            image,
+            geometry.pixels.width,
+            geometry.pixels.height,
+        );
         defer pixels.deinit(allocator);
         buffers[index] = try destination.createBuffer(source.io, &pixels);
     }
+    // Do not split an admitted commit batch on a later stop. Until this point
+    // every prepared buffer still belongs exclusively to the transaction.
+    try checkStop(source.io, stop_fd);
     for (plan.targets, 0..) |target, index| {
         const geometry = target orelse continue;
         destination.commitBuffer(index, geometry, buffers[index].?);
@@ -1207,47 +1246,55 @@ const buffer_listener = wl.wl_buffer_listener{ .release = bufferReleased };
 // reason: Required release listener ABI; immutable backing is never recycled.
 fn bufferReleased(_: ?*anyopaque, _: ?*wl.wl_buffer) callconv(.c) void {}
 
-const Ready = struct { stop: bool = false, rotate: bool = false, client: bool = false };
+const Ready = struct { stop: bool = false, rotate: bool = false };
 const poll_failure = std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL;
 
-// One blocking wait over real readiness. No frame callback or periodic poll.
-fn wait(source: *Source, connection: ?*wl.wl_display, stop_fd: std.posix.fd_t, timeout: ?u64) !Ready {
-    var prepared = false;
-    defer if (prepared) wl.wl_display_cancel_read(connection.?);
-    var events: i16 = std.posix.POLL.IN;
-    if (connection) |display| {
-        if (wl.wl_display_prepare_read(display) != 0) return .{};
-        prepared = true;
-        const result = wl.wl_display_flush(display);
-        if (result < 0) {
-            if (std.posix.errno(result) != .AGAIN) return displayError(display);
-            events |= std.posix.POLL.OUT;
-        }
+// An interruption ends this poll turn so the owner recomputes its deadline.
+fn pollOnce(io: std.Io, fds: []std.posix.pollfd, timeout: i32) !usize {
+    const linux = std.os.linux;
+    const result = linux.poll(fds.ptr, @intCast(fds.len), timeout);
+    switch (linux.errno(result)) {
+        .SUCCESS => return result,
+        .INTR => {
+            try io.checkCancel();
+            return 0;
+        },
+        else => |err| {
+            std.log.err("wallpaper poll failed: {s}", .{@tagName(err)});
+            return error.WallpaperPollFailed;
+        },
     }
+}
+
+fn checkStop(io: std.Io, stop_fd: std.posix.fd_t) !void {
+    if (stop_fd < 0) return;
+    var fds = [_]std.posix.pollfd{.{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try pollOnce(io, &fds, 0) == 0) return;
+    if (fds[0].revents != 0) {
+        try Stop.consume(io, stop_fd);
+        return error.Stopped;
+    }
+}
+
+// Real socket readiness witness used by the focused transport tests.
+fn waitRotationTest(source: *Source, stop_fd: std.posix.fd_t, timeout: i32) !Ready {
     var fds = [_]std.posix.pollfd{
         .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = if (connection) |display| wl.wl_display_get_fd(display) else -1, .events = events, .revents = 0 },
         .{ .fd = source.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = source.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
     };
-    _ = try std.posix.poll(&fds, if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1);
+    if (try pollOnce(source.io, &fds, timeout) == 0) return .{};
     if (fds[0].revents != 0) {
         try Stop.consume(source.io, stop_fd);
         return .{ .stop = true };
     }
-    if (connection) |display| {
-        if (fds[1].revents & std.posix.POLL.IN != 0) {
-            prepared = false;
-            if (wl.wl_display_read_events(display) < 0) return displayError(display);
-        } else if (fds[1].revents & poll_failure != 0) return displayError(display);
-    }
-    if (fds[2].revents & poll_failure != 0) return error.RotationListenerLost;
-    return .{ .rotate = fds[2].revents != 0 or fds[3].revents != 0, .client = fds[3].revents != 0 };
+    if (fds[1].revents & poll_failure != 0) return error.RotationListenerLost;
+    return .{ .rotate = fds[1].revents != 0 or fds[2].revents != 0 };
 }
 
 // Receipt means the commit requests were written, not a frame was displayed.
 fn flush(source: *Source, connection: *wl.wl_display, stop_fd: std.posix.fd_t) !void {
-    const deadline = source.now() + 1000;
+    const deadline = source.now() +| 1000;
     while (true) {
         const result = wl.wl_display_flush(connection);
         if (result >= 0) return;
@@ -1258,7 +1305,7 @@ fn flush(source: *Source, connection: *wl.wl_display, stop_fd: std.posix.fd_t) !
             .{ .fd = stop_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = wl.wl_display_get_fd(connection), .events = std.posix.POLL.OUT, .revents = 0 },
         };
-        if (try std.posix.poll(&fds, @intCast(remaining)) == 0) return error.WaylandDisplayLost;
+        if (try pollOnce(source.io, &fds, @intCast(remaining)) == 0) continue;
         if (fds[0].revents != 0) {
             try Stop.consume(source.io, stop_fd);
             return error.Stopped;
@@ -1282,6 +1329,7 @@ pub const Service = struct {
     write_pending: bool = false,
     rotation_result: ?bool = null,
 
+    /// Owns the startup catalogue and one admitted encoded image, without a display connection.
     pub fn init(init_process: std.process.Init, root_path: []const u8) !Service {
         var catalog = try discoverCatalog(init_process.io, init_process.gpa, root_path);
         errdefer catalog.deinit();
@@ -1292,6 +1340,7 @@ pub const Service = struct {
         return .{ .allocator = init_process.gpa, .source = source, .catalog = catalog, .selected = first.encoded };
     }
 
+    /// Retires display resources, retained image, catalogue and legacy endpoint.
     pub fn deinit(self: *Service) void {
         self.display.deinit();
         self.selected.deinit(self.allocator);
@@ -1305,27 +1354,31 @@ pub const Service = struct {
         try self.source.bindRotation(identity, false);
     }
 
+    /// Admits one direct rotation and its bounded readiness deadline.
     pub fn request(self: *Service) !void {
         if (self.direct or self.rotation_result != null) return error.RotationBusy;
         if (self.display.connection == null) return error.WallpaperResidentUnavailable;
         self.direct = true;
-        self.request_deadline = self.source.now() + 2000;
+        self.request_deadline = self.source.now() +| 2000;
         for (&self.display.records) |*output| {
             output.suspended = false;
             output.reopen_at = null;
         }
     }
 
+    /// Consumes the exact pending direct rotation result once.
     pub fn takeResult(self: *Service) ?bool {
         const value = self.rotation_result;
         self.rotation_result = null;
         return value;
     }
 
+    /// Returns the number of locally committed output geometries.
     pub fn count(self: *const Service) usize {
         return self.display.publishedCount();
     }
 
+    /// Borrows the current Wayland descriptor and required readiness mask.
     pub fn pollFd(self: *const Service) std.posix.pollfd {
         return .{
             .fd = if (self.display.connection) |connection| wl.wl_display_get_fd(connection) else -1,
@@ -1334,6 +1387,7 @@ pub const Service = struct {
         };
     }
 
+    /// Returns milliseconds to the earliest owned deadline, or null when idle.
     pub fn wake(self: *const Service, now: u64) ?u64 {
         if (self.display.connection == null) return self.reconnect_at -| now;
         var timeout = self.schedule.wake(now, self.display.allReady());
@@ -1344,7 +1398,9 @@ pub const Service = struct {
         return timeout;
     }
 
+    /// Advances one display turn or schedules ordinary transport recovery.
     pub fn advance(self: *Service, stop_fd: std.posix.fd_t) !void {
+        try checkStop(self.source.io, stop_fd);
         if (self.display.connection == null) {
             if (self.source.now() < self.reconnect_at) return;
             self.display.connect() catch |err| return self.recover(err);
@@ -1352,20 +1408,26 @@ pub const Service = struct {
         self.turn(stop_fd) catch |err| return self.recover(err);
     }
 
+    // zig-audit: acknowledge anyerror
+    // reason: Preserve exact native and allocation errors; only transport loss reconnects.
     fn recover(self: *Service, err: anyerror) !void {
         switch (err) {
             error.WaylandDisplayLost, error.WaylandConnectFailed => {
                 self.display.deinit();
-                if (self.direct) self.rotation_result = false;
-                self.direct = false;
-                self.request_deadline = null;
+                self.finishRequest(false);
                 self.retry_at = null;
                 self.write_pending = false;
-                self.reconnect_at = self.source.now() + 1000;
+                self.reconnect_at = self.source.now() +| 1000;
                 std.log.warn("wallpaper connection unavailable: {s}", .{@errorName(err)});
             },
             else => return err,
         }
+    }
+
+    fn finishRequest(self: *Service, success: bool) void {
+        if (self.direct) self.rotation_result = success;
+        self.direct = false;
+        self.request_deadline = null;
     }
 
     fn turn(self: *Service, stop_fd: std.posix.fd_t) !void {
@@ -1381,15 +1443,15 @@ pub const Service = struct {
         const connection = display.connection.?;
         if (wl.wl_display_prepare_read(connection) == 0) {
             var descriptor = [_]std.posix.pollfd{.{ .fd = wl.wl_display_get_fd(connection), .events = std.posix.POLL.IN, .revents = 0 }};
-            _ = std.posix.poll(&descriptor, 0) catch |err| {
-                wl.wl_display_cancel_read(connection);
-                return err;
-            };
-            if (descriptor[0].revents & std.posix.POLL.IN != 0) {
-                if (wl.wl_display_read_events(connection) < 0) return displayError(connection);
-            } else {
-                wl.wl_display_cancel_read(connection);
-                if (descriptor[0].revents & poll_failure != 0) return displayError(connection);
+            var prepared = true;
+            defer if (prepared) wl.wl_display_cancel_read(connection);
+            if (try pollOnce(source.io, &descriptor, 0) != 0) {
+                if (descriptor[0].revents & std.posix.POLL.IN != 0) {
+                    prepared = false;
+                    if (wl.wl_display_read_events(connection) < 0) return displayError(connection);
+                } else if (descriptor[0].revents & poll_failure != 0) {
+                    return displayError(connection);
+                }
             }
         }
         try display.dispatch();
@@ -1397,50 +1459,46 @@ pub const Service = struct {
         try display.ensureRoles(now);
         if (self.request_deadline) |end| {
             if (now >= end or (self.direct and display.ready and display.count() == 0)) {
-                self.rotation_result = false;
-                self.direct = false;
-                self.request_deadline = null;
+                self.finishRequest(false);
             }
         }
         // A direct request may expedite recovery of a closed background role.
         if (self.direct or schedule.due(now, display.allReady())) {
             if (display.allReady()) {
                 const success = rotate(display, source, allocator, catalog, selected, stop_fd) catch |err| switch (err) {
-                    error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
+                    error.Stopped, error.Canceled, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
                     else => blk: {
                         std.log.warn("wallpaper rotation refused: {s}", .{@errorName(err)});
                         break :blk false;
                     },
                 };
                 try schedule.attempted(source.now(), self.direct, success);
-                if (self.direct) {
-                    self.rotation_result = success;
-                    self.direct = false;
-                    self.request_deadline = null;
-                }
+                self.finishRequest(success);
             }
         }
         if (self.retry_at == null or now >= self.retry_at.?) {
             self.retry_at = null;
-            const pending = display.plan(false) catch |err| {
+            if (display.plan(false)) |pending| {
+                if (pending.count != 0) {
+                    const result = result: {
+                        var image = wallpaper.decodeImage(source, allocator, selected) catch |err|
+                            break :result err;
+                        defer image.deinit(allocator);
+                        break :result display.publish(source, allocator, &image, pending, stop_fd);
+                    };
+                    result catch |err| switch (err) {
+                        error.Stopped, error.Canceled, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
+                        else => {
+                            std.log.warn("wallpaper publication refused: {s}", .{@errorName(err)});
+                            self.retry_at = source.now() +| 1000;
+                        },
+                    };
+                    if (self.retry_at == null and schedule.deadline == null)
+                        try schedule.advance(source.now());
+                }
+            } else |err| {
                 std.log.warn("wallpaper geometry refused: {s}", .{@errorName(err)});
-                self.retry_at = now + 1000;
-                return;
-            };
-            if (pending.count != 0) {
-                const result = result: {
-                    var image = wallpaper.decodeImage(source, allocator, selected) catch |err| break :result err;
-                    defer image.deinit(allocator);
-                    break :result display.publish(source, allocator, &image, pending, stop_fd);
-                };
-                result catch |err| switch (err) {
-                    error.Stopped, error.WaylandDisplayLost, error.WaylandProtocolError => return err,
-                    else => {
-                        std.log.warn("wallpaper publication refused: {s}", .{@errorName(err)});
-                        self.retry_at = source.now() + 1000;
-                    },
-                };
-                if (self.retry_at == null and schedule.deadline == null) try schedule.advance(source.now());
+                self.retry_at = now +| 1000;
             }
         }
 
@@ -1450,6 +1508,7 @@ pub const Service = struct {
     }
 };
 
+/// Runs the standalone wallpaper owner until stop or a terminal failure.
 pub fn run(init_process: std.process.Init, root_path: []const u8) !void {
     const stop = try Stop.open();
     defer stop.close();
@@ -1482,7 +1541,8 @@ pub fn run(init_process: std.process.Init, root_path: []const u8) !void {
             .{ .fd = service.source.rotate_listener, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = service.source.rotate_client, .events = std.posix.POLL.IN, .revents = 0 },
         };
-        _ = try std.posix.poll(&fds, if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1);
+        const delay: i32 = if (timeout) |ms| @intCast(@min(ms, std.math.maxInt(i32))) else -1;
+        if (try pollOnce(init_process.io, &fds, delay) == 0) continue;
         if (fds[0].revents != 0) {
             try Stop.consume(init_process.io, stop.fd);
             return;
@@ -1503,7 +1563,7 @@ pub fn run(init_process: std.process.Init, root_path: []const u8) !void {
                     service.source.replyRotation(false);
                     break :blk false;
                 };
-                if (service.source.rotate_client >= 0 and partial_deadline == null) partial_deadline = service.source.now() + 2000;
+                if (service.source.rotate_client >= 0 and partial_deadline == null) partial_deadline = service.source.now() +| 2000;
                 if (complete) service.request() catch {
                     service.source.replyRotation(false);
                     partial_deadline = null;
@@ -1516,6 +1576,7 @@ pub fn run(init_process: std.process.Init, root_path: []const u8) !void {
 
 fn rotate(display: *Display, source: *Source, allocator: std.mem.Allocator, catalog: *wallpaper.Catalog, selected: *wallpaper.EncodedImage, stop_fd: std.posix.fd_t) !bool {
     std.debug.assert(display.allReady());
+    try checkStop(source.io, stop_fd);
     const pending = try display.plan(true);
     var candidate = try wallpaper.choose(source, allocator, catalog);
     defer candidate.image.deinit(allocator);
@@ -1602,7 +1663,7 @@ test "stop readiness takes priority over rotation" {
     defer source.closeRotation();
     const client = try connectRotationTest("wallpaper-stop-priority-test");
     defer closeFd(client);
-    const ready = try wait(&source, null, fds[0], 100);
+    const ready = try waitRotationTest(&source, fds[0], 100);
     try std.testing.expect(ready.stop and !ready.rotate);
 }
 
@@ -1612,19 +1673,28 @@ test "all buffer preparation precedes every commit and failures discard only can
         committed: usize = 0,
         discarded: usize = 0,
         fail_at: ?usize = null,
+        stop_after: ?usize = null,
+        stop: ?std.Io.File = null,
+        invalid: bool = false,
+        retired: [3]bool = @splat(false),
 
         fn createBuffer(self: *@This(), _: std.Io, _: *const wallpaper.Image) !usize {
             if (self.fail_at == self.created) return error.SurfaceBufferFailed;
             self.created += 1;
+            if (self.stop_after == self.created)
+                try self.stop.?.writeStreamingAll(std.testing.io, &(@as([128]u8, @splat(0))));
             return self.created;
         }
         fn discardBuffer(self: *@This(), buffer: usize) void {
-            std.debug.assert(buffer > 0 and buffer <= self.created);
+            if (buffer == 0 or buffer > self.created or self.retired[buffer - 1])
+                self.invalid = true
+            else
+                self.retired[buffer - 1] = true;
             self.discarded += 1;
         }
         fn commitBuffer(self: *@This(), _: usize, _: outputs.Geometry, buffer: usize) void {
-            std.debug.assert(self.created == 3 and self.discarded == 0);
-            std.debug.assert(buffer == self.committed + 1);
+            if (self.created != 3 or self.discarded != 0 or buffer != self.committed + 1)
+                self.invalid = true;
             self.committed += 1;
         }
     };
@@ -1638,20 +1708,46 @@ test "all buffer preparation precedes every commit and failures discard only can
     plan.targets[5] = geometry;
     for (0..3) |failure| {
         var target: Target = .{ .fail_at = failure };
-        try std.testing.expectError(error.SurfaceBufferFailed, publishBuffers(usize, &target, &source, std.testing.allocator, &image, plan));
+        try std.testing.expectError(error.SurfaceBufferFailed, publishBuffers(usize, &target, &source, std.testing.allocator, &image, plan, -1));
         try std.testing.expectEqual(failure, target.created);
         try std.testing.expectEqual(failure, target.discarded);
         try std.testing.expectEqual(@as(usize, 0), target.committed);
+        try std.testing.expect(!target.invalid);
         target = .{};
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure });
-        try std.testing.expectError(error.OutOfMemory, publishBuffers(usize, &target, &source, failing.allocator(), &image, plan));
+        try std.testing.expectError(error.OutOfMemory, publishBuffers(usize, &target, &source, failing.allocator(), &image, plan, -1));
         try std.testing.expectEqual(failure, target.discarded);
         try std.testing.expectEqual(@as(usize, 0), target.committed);
+        try std.testing.expect(!target.invalid);
+    }
+    const linux = std.os.linux;
+    for (1..4) |prepared| {
+        var fds: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(
+            &fds,
+            .{ .CLOEXEC = true, .NONBLOCK = true },
+        )));
+        defer closeFd(fds[0]);
+        defer closeFd(fds[1]);
+        var target: Target = .{
+            .stop_after = prepared,
+            .stop = .{ .handle = fds[1], .flags = .{ .nonblocking = true } },
+        };
+        try std.testing.expectError(
+            error.Stopped,
+            publishBuffers(usize, &target, &source, std.testing.allocator, &image, plan, fds[0]),
+        );
+        try std.testing.expectEqual(prepared, target.created);
+        try std.testing.expectEqual(prepared, target.discarded);
+        try std.testing.expectEqual(@as(usize, 0), target.committed);
+        try std.testing.expect(!target.invalid);
+        for (target.retired[0..prepared]) |retired| try std.testing.expect(retired);
     }
     var success: Target = .{};
-    try publishBuffers(usize, &success, &source, std.testing.allocator, &image, plan);
+    try publishBuffers(usize, &success, &source, std.testing.allocator, &image, plan, -1);
     try std.testing.expectEqual(@as(usize, 3), success.committed);
     try std.testing.expectEqual(@as(usize, 0), success.discarded);
+    try std.testing.expect(!success.invalid);
 }
 
 test "native image open rejects paths replaced after catalogue discovery" {
@@ -1818,4 +1914,46 @@ test "invalid layer extent retains published pixels until valid configure return
     try std.testing.expect(!output.facts.needsBuffer());
     output.configure(1920, 1080);
     try std.testing.expect(output.facts.needsBuffer());
+}
+
+test "immutable backing is populated exactly and write failure is an ordinary error" {
+    const io = std.testing.io;
+    const bytes = "wallpaper backing";
+    const fd = try createBacking(io, bytes);
+    defer closeFd(fd);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const stat = try file.stat(io);
+    try std.testing.expectEqual(@as(u64, bytes.len), stat.size);
+    var actual: [bytes.len]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, &actual, 0));
+    try std.testing.expectEqualStrings(bytes, &actual);
+
+    const full = try std.Io.Dir.openFileAbsolute(io, "/dev/full", .{ .mode = .write_only });
+    defer full.close(io);
+    try std.testing.expectError(error.NoSpaceLeft, writeBacking(full, io, bytes));
+}
+
+test "ready termination wins before a disconnected service can open a display" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const linux = std.os.linux;
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(
+        &fds,
+        .{ .CLOEXEC = true, .NONBLOCK = true },
+    )));
+    defer closeFd(fds[0]);
+    defer closeFd(fds[1]);
+    const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    try writer.writeStreamingAll(io, &(@as([128]u8, @splat(0))));
+    var service: Service = .{
+        .allocator = allocator,
+        .source = .{ .io = io },
+        .catalog = .{ .allocator = allocator, .prng = .init(0) },
+        .selected = .{ .format = .png, .bytes = &.{} },
+        .reconnect_at = std.math.maxInt(u64),
+    };
+    try std.testing.expectError(error.Stopped, service.advance(fds[0]));
+    try std.testing.expect(service.display.connection == null);
+    try std.testing.expect(service.rotation_result == null);
 }

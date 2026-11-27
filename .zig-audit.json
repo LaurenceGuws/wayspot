@@ -18,6 +18,7 @@
     "src/tray/watcher.zig",
     "src/wallpaper/outputs.zig",
     "src/wallpaper/root.zig",
+    "src/wallpaper/wayland.zig",
     "tools/wallpaper_catalog.zig",
     "tools/tray_canary.zig",
     "tools/zig_spawn_regression.zig",
